@@ -14,6 +14,9 @@ import org.openpnp.util.MovableUtils;
 
 /** {@link DotImager} using the down-looking camera and the vision contract. */
 public class OpenPnpDotImager implements DotImager {
+    /** The largest blob {@link #inspectAll} keeps (a string or two dots joined by a thread), mm. */
+    static final double INSPECT_ALL_MAX_DIAMETER_MM = 3.0;
+
     private final Camera camera;
     private final DotInspectorSettings settings;
 
@@ -50,5 +53,31 @@ public class OpenPnpDotImager implements DotImager {
     @Override
     public List<Dot> inspect(Frame before, Frame after) throws Exception {
         return new DotInspector(settings).inspect(before.image, after.image, after.mmPerPxX, after.mmPerPxY);
+    }
+
+    /** Every blob up to 3 mm, any circularity (strings and threads are the calibration's to classify). */
+    @Override
+    public List<Dot> inspectAll(Frame before, Frame after) throws Exception {
+        DotInspectorSettings all = settings.copy();
+        all.minCircularity = 0;
+        all.maxDiameterMm = Math.max(all.maxDiameterMm, INSPECT_ALL_MAX_DIAMETER_MM);
+        return new DotInspector(all).inspect(before.image, after.image, after.mmPerPxX, after.mmPerPxY);
+    }
+
+    /** The camera's frame in mm (its size in pixels times its units per pixel), or null when it cannot say. */
+    @Override
+    public double[] fieldOfViewMm() {
+        try {
+            Location upp = camera.getUnitsPerPixel().convertToUnits(LengthUnit.Millimeters);
+            int w = camera.getWidth();
+            int h = camera.getHeight();
+            if (w <= 0 || h <= 0 || !(upp.getX() > 0) || !(upp.getY() > 0)) {
+                return null;
+            }
+            return new double[] {w * upp.getX(), h * upp.getY()};
+        }
+        catch (Exception e) {
+            return null;
+        }
     }
 }

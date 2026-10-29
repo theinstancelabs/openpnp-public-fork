@@ -187,49 +187,14 @@ public final class PadInstances {
     }
 
     /**
-     * The fresh dose records of the current setup (§1.7) per dose, as the check reads them between pad
-     * calibrations: the newest fresh weighing (confirmed when a second fresh reading agrees with it,
-     * §7.5) and the newest fresh camera record's dot size. A dose passes the camera only if every fresh
-     * camera record of it passed (a later pass does not erase an earlier failure).
+     * The fresh dose records of the current setup (§1.7) per dose, pooled as the pad calibration pools
+     * them ({@link DoseRecords#evidence}): the camera statistics recomputed on every fresh record's dots
+     * (a later pass does not erase an earlier failure) and a mass confirmed by any two fresh readings
+     * that agree (§7.5).
      */
     public static Map<Integer, DoseEvidence> evidence(List<DoseRecord> records, DispenseConfig cfg,
             DoseRecord.Epochs epochs, long nowMs) {
-        Map<Long, DoseRecord> fresh = new LinkedHashMap<>();
-        for (DoseRecord r : records) {
-            if (r.isFresh(nowMs, cfg, epochs)) {
-                fresh.put(r.id, r);
-            }
-        }
-        Map<Integer, DoseEvidence> m = new TreeMap<>();
-        for (DoseRecord r : fresh.values()) {
-            if (DoseRecord.OPTICAL.equals(r.kind)) {
-                DoseEvidence e = m.computeIfAbsent(r.steps, DoseEvidence::new);
-                e.opticalPass = (e.opticalFresh ? e.opticalPass : true) && Boolean.TRUE.equals(r.pass);
-                e.opticalFresh = true;
-                if (!Boolean.TRUE.equals(r.pass) && r.why != null) {
-                    e.failures.add(r.why);
-                }
-                e.n += r.n;
-                e.misses += r.misses == null ? 0 : r.misses;
-                e.hops += r.hops == null ? 0 : r.hops;
-                e.threads += r.threads == null ? 0 : r.threads;
-                e.dMeanMm = r.diameterMeanMm;
-                e.dCv = r.diameterCv;
-                e.d95Mm = r.diameterP95Mm;
-                e.residCv = r.residCv;
-                e.driftPct = r.drift;
-                e.landingMeanMm = r.landingMeanMm;
-                e.landingSdMm = r.landingSdMm;
-            }
-            else if (r.hasReading()) {
-                DoseEvidence e = m.computeIfAbsent(r.steps, DoseEvidence::new);
-                e.massReadings++;
-                e.mgPerStep = r.mgPerStep;
-                e.mgPerDot = r.mgPerDot;
-                e.massConfirmed |= r.confirmedBy != null && fresh.containsKey(r.confirmedBy);
-            }
-        }
-        return m;
+        return DoseRecords.evidence(records, cfg, epochs, nowMs);
     }
 
     /**

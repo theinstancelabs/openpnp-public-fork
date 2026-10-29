@@ -134,6 +134,8 @@ final class DispenseEndpoints {
         pressure.put("engineRunActive", svc != null && svc.isBusy());
         out.put("pressure", pressure);
         out.put("run", ctx.tracker.snapshot());
+        PadCalibrationJob pcal = ctx.padCalJobs.current();
+        out.put("padCalibration", pcal == null || svc == null ? null : pcal.view());
         if (svc == null) {
             d.put("running", false);
             d.put("available", false);

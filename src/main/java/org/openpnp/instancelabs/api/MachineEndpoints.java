@@ -79,6 +79,8 @@ final class MachineEndpoints {
         String reason = "STOP pressed in the web UI";
         DispenseService svc = ctx.svcOrNull();
         boolean engineWasBusy = svc != null && svc.isBusy();
+        // a pad calibration first: it queues no further engine step once its stop flag is set (§7.8)
+        ctx.padCalJobs.stop(reason);
         if (svc != null) {
             svc.abort(reason);
             actions.add(engineWasBusy

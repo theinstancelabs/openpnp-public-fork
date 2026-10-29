@@ -61,7 +61,7 @@ final class PadProfileEndpoints {
     // ------------------------------------------------------------------------------------------
 
     /** A check and what it was made of: a plan entry, or a listed board file before planning (board at the origin). */
-    private static final class Checked {
+    static final class Checked {
         PlanStore.Entry entry;
         String boardFile;
         String boardName;
@@ -76,7 +76,7 @@ final class PadProfileEndpoints {
         }
     }
 
-    private Checked checked(DispenseService svc, String planId, String boardFile) throws Exception {
+    Checked checked(DispenseService svc, String planId, String boardFile) throws Exception {
         if ((planId == null) == (boardFile == null)) {
             throw ApiException.badRequest("give 'planId' (a plan) or 'boardFile' (a board file OpenPnP lists)");
         }
@@ -142,7 +142,13 @@ final class PadProfileEndpoints {
         }
         Checked c = checked(svc, Json.str(b, "planId", null), Json.str(b, "boardFile", null));
         List<ProfileCheck.Group> chosen = chosen(c, b.get("groups"), choice);
-        Map<String, String> ids = suggestionIds(b);
+        requireCurrent(c, chosen, suggestionIds(b));
+        return write(svc, c, chosen, choice, Json.str(b, "operator", null));
+    }
+
+    /** 409 suggestion-stale (with the new check) unless every chosen group's suggestion id is the one shown. */
+    static void requireCurrent(Checked c, List<ProfileCheck.Group> chosen, Map<String, String> ids)
+            throws ApiException {
         for (ProfileCheck.Group g : chosen) {
             String want = ids.get(g.group);
             if (want == null || g.suggestion == null || !want.equals(g.suggestion.id)) {
@@ -151,9 +157,16 @@ final class PadProfileEndpoints {
                         .with("profileCheck", c.view());
             }
         }
+    }
+
+    /**
+     * Writes the chosen groups' suggestions (their ids are current) and plans a plan source again: apply's
+     * writes, and the pad calibration's step 0 (§7.2: the suggestions saved as provisional types first).
+     */
+    Map<String, Object> write(DispenseService svc, Checked c, List<ProfileCheck.Group> chosen, String choice,
+            String operator) throws Exception {
         DispenseConfig cfg = svc.getConfig();
         DispenseDb db = svc.getDb();
-        String operator = Json.str(b, "operator", null);
         List<Change> changes = new ArrayList<>();
         List<Map<String, Object>> skipped = new ArrayList<>();
         for (ProfileCheck.Group g : chosen) {
@@ -290,7 +303,7 @@ final class PadProfileEndpoints {
     }
 
     /** The chosen groups: a list of ids (unknown ones: stale), or "all" (every group with something to apply). */
-    private static List<ProfileCheck.Group> chosen(Checked c, JsonElement groups, String choice) throws ApiException {
+    static List<ProfileCheck.Group> chosen(Checked c, JsonElement groups, String choice) throws ApiException {
         List<ProfileCheck.Group> l = new ArrayList<>();
         if (groups != null && groups.isJsonPrimitive() && "all".equals(groups.getAsString())) {
             for (ProfileCheck.Group g : c.result.groups) {
@@ -317,7 +330,7 @@ final class PadProfileEndpoints {
         return l;
     }
 
-    private static Map<String, String> suggestionIds(JsonObject b) throws ApiException {
+    static Map<String, String> suggestionIds(JsonObject b) throws ApiException {
         Map<String, String> m = new LinkedHashMap<>();
         JsonElement e = b.get("suggestionIds");
         if (e == null || e.isJsonNull()) {

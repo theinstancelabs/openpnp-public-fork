@@ -44,6 +44,23 @@ public interface DotImager {
     List<Dot> inspect(Frame before, Frame after) throws Exception;
 
     /**
+     * As {@link #inspect} with every new blob kept, round or not, up to 3 mm (the pad calibration's
+     * ladder, design §7.3): strings and big dots are classified by the statistics, not dropped by the
+     * inspector. Imagers without such a mode give {@link #inspect}.
+     */
+    default List<Dot> inspectAll(Frame before, Frame after) throws Exception {
+        return inspect(before, after);
+    }
+
+    /**
+     * The frame size {width, height} in mm at the camera's scale, or null when unknown: the pad
+     * calibration then takes one frame per dot instead of tiles.
+     */
+    default double[] fieldOfViewMm() {
+        return null;
+    }
+
+    /**
      * Clean-pad guard (I10): share of bright pixels in the box at the frame centre (the camera was
      * centred on the target).
      */

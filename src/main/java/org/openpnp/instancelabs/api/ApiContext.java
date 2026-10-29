@@ -22,6 +22,8 @@ final class ApiContext {
     final RunTracker tracker = new RunTracker();
     final PlanStore plans = new PlanStore();
     final PressureHold pressure;
+    /** The pad calibrations (PROFILE_CALIBRATION_DESIGN.md §7): one at a time, its lock on the other tasks. */
+    final PadCalibrationJobs padCalJobs = new PadCalibrationJobs(this);
     private DispenseService listened;
 
     ApiContext(Configuration configuration) {
@@ -86,7 +88,12 @@ final class ApiContext {
         }
     }
 
+    /** No engine task runs, and no pad calibration is between its engine steps (§7.1). */
     void requireEngineIdle(DispenseService s) throws ApiException {
+        String job = padCalJobs.lockReason();
+        if (job != null) {
+            throw ApiException.refused(job);
+        }
         if (s.isBusy()) {
             throw ApiException.refused("a dispense task is already running; wait for it or press STOP");
         }
@@ -154,6 +161,7 @@ final class ApiContext {
     }
 
     void shutdown() {
+        padCalJobs.shutdown();
         pressure.shutdown();
         synchronized (this) {
             if (listened != null) {

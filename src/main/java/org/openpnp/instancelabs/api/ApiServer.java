@@ -116,7 +116,10 @@ public final class ApiServer {
         dispense.registration.register(this);
         new CalibrationEndpoints(context, dispense).register(this);
         new PadTypeEndpoints(context).register(this);
-        new PadProfileEndpoints(context, dispense).register(this);
+        PadProfileEndpoints padProfile = new PadProfileEndpoints(context, dispense);
+        padProfile.register(this);
+        new PadCalibrationEndpoints(context, dispense, padProfile).register(this);
+        new SimEndpoints(context).register(this);
         new BoardImportEndpoints(context, dispense).register(this);
         server.setExecutor(executor);
         server.createContext("/", this::handle);
