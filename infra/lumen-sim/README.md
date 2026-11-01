@@ -226,11 +226,61 @@ python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
   - After a power cycle the board answers again, in the boot state with the B count lost.
 - **STOP during homing, il-safety.** The abort lines, the report, two oks, and the board answers.
 
+## OpenPnP in front of it, end to end
+
+openpnp-uinav's `--controller pty` (branch `infra/pty-controller`, its README) starts lumen-sim in the session
+directory and keeps OpenPnP's GcodeDriver on serial, with `port-name` set to the session's link. It removes the USB
+identity from the config copy and refuses to start Java unless every `port-name` resolves to `/dev/pts/N`.
+jSerialComm is the real one: only the camera stubs stay on the classpath.
+
+`e2e/test_openpnp_pty.py` drives this fork's jar on that set-up through the web API. The config is `~/.openpnp2`
+(read only) with machine.xml from `tools/instancelabs/make_machine_patch.py`, and visual homing off. It is skipped
+unless `LUMEN_SIM_E2E=1` and `LUMEN_SIM_E2E_JAR` are set. From the repository root:
+
+```sh
+LUMEN_SIM_E2E=1 LUMEN_SIM_E2E_JAR=target/openpnp-gui-0.0.1-alpha-SNAPSHOT.jar \
+UINAV_DIR=/home/lumen/instancelabs/wt/uinav-pty LUMEN_SIM_E2E_OUT=/tmp/lumen-e2e \
+    python3 infra/lumen-sim/e2e/test_openpnp_pty.py -v
+```
+
+Three tests in two OpenPnP sessions, one after the other, about 2.5 min. The 60 s is OpenPnP's own G28 timeout. Two
+runs on 10-31 after the test's last fix passed all three:
+
+| Check | Through | Result |
+|---|---|---|
+| (a) enable + home | `POST /api/machine/enable`, `/api/machine/home {"wait":true}` | homed in 24 s. OpenPnP's X/Y (Top camera), Z, A (N1), B (N2) equal lumen-sim's logical position within 0.01. The JVM holds only lumen-sim's `/dev/pts/N`. |
+| (b) STOP 4 s into a home, head parked at 300, 300 | `POST /api/stop` | The STOP lands in `X_APPROACH`. OpenPnP logs `timeout waiting for response to M410`. The other five Stop lines are never sent. The home fails after 63 s (`homing failed: machine disabled: User requested stop.`). lumen-sim is halted (`Homing Failed`) and silent. A reconnect fails with `timeout waiting for response to G21`. After `uinav controller power-cycle` it connects, and M114 shows the boot position (B 720, count 3197). |
+| (c) 30-turn prime at 180 rpm | the engine's needle touch-off (`POST /api/calibrations/touch-off {"primeAtWaste":true}`, `primeRotationDeg` 10800, the profile's `dwellMs` 250) | run ERROR `GcodeDriver:…/ttyLUMEN timeout waiting for response to G4 P250`. 20 lines. `G1 B10809.9099 F64800`, then `G4 P250` answered only by busy lines. The engine's M410 comes 10.0 s later. The late `ok` (11.25 s) is credited to M410, and later oks shift by one, as in RESEARCH.md section 6a. |
+
+SimGuard reports `simulatorConfirmed: false` on this set-up. That refuses nothing in (a) to (c): the touch-off's
+prime fails before any camera is needed.
+
+The backend's SIM acceptance runs unchanged on lumen-sim. Point `UINAV_DIR` at the uinav branch and set
+`UINAV_SIM_CONTROLLER=pty` and `LUMEN_SIM_DIR`; uinav then puts every session on lumen-sim. Results on 10-31:
+
+- **`load`**: every check passes except two of `saved_config_keeps_patch`, `usb-serial-number` and
+  `usb-description`. The pty mode removes the real board's USB identity on purpose, so those two can only pass with
+  GcodeServer.
+- **`stop`**: hold/web, hold/Swing and run/web pass. **run/Swing fails, 2 runs of 2.**
+  - After the Swing Stop, OpenPnP's DISABLE_COMMAND thread and the engine's abort send on the one GcodeDriver at
+    the same time.
+  - Each `sendCommand` clears the shared confirmation queue. With the board's M410 timing (acts on read, ok after
+    1 s) one `ok` goes to the wrong waiter, although lumen-sim answered every line.
+  - The engine's recovery `M400` then waits OpenPnP's full 60 s (`position read-back after stop failed: … timeout
+    waiting for response to M400`).
+  - The scenario's 60 s wait for the engine to go idle runs out about 40 ms before that.
+  - GcodeServer acks M410 at once and hides this. It is the race RESEARCH.md section 2 describes, and a backend
+    matter.
+
 ## Known gaps
 
-- **SimGuard decision, open.** SimGuard treats only loopback TCP with `FIRMWARE_NAME:GcodeServer` as a simulator.
-  OpenPnP on this pty therefore runs as a real machine, with the SIM cameras, balance and endpoints off. The uinav
-  harness stubs jSerialComm. RESEARCH.md section 0.3 describes both.
+- **SimGuard.** SimGuard treats only loopback TCP with `FIRMWARE_NAME:GcodeServer` as a simulator.
+  - On this pty OpenPnP runs as a real machine: the SIM top camera (SimBoardCamera refuses to open: "simulation-only
+    camera on a non-simulated machine"), the SIM bottom camera, the SIM balance and the `/api/sim` endpoints are
+    off.
+  - SIM-only settings (shortened calibration statistics, fast probe timings) are refused.
+  - Scenarios that need those (register, padcal, tips) cannot run here until the backend recognises lumen-sim.
+    Proposed: a sim-only M115 field, see the backend request.
 - Not modelled:
   - stepper idle timeout and current;
   - TMC drivers (`M122` prints nothing);
