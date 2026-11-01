@@ -31,7 +31,7 @@ Scenarios (plan §4.4, §4.5, §8.1; bench recipe 2026-10-28):
               Test_Strip (the script is the operator: coupons on the SIM balance, wiped, weighed again, the readings
               typed); both characterized with the SIM's 2.30 mg per turn; the plan made at the end run with the WSON
               skipped (per-pad paste, dose blocks and the M114 Count lines of the controller); a reconnect then
-              refuses the quarter-turn block (I11). nano: the Arduino Nano's upload and top-side split (40 tip, 15
+              is not a reset (BR-02: no I11, the quarter-turn records stay fresh). nano: the Arduino Nano's upload and top-side split (40 tip, 15
               with a plan, 5 partial), Calibrate automatically for its two groups (SW_SPST characterized, the
               LED_0805 stays provisional: no allowed dose is within -25 %/+10 % of its amount), its next plan run.
               controls: §11.7's other negative controls, each ending with its reason. --padcal-parts runs some parts
@@ -1883,26 +1883,29 @@ def padcal_main(a):
         res["run"] = padcal_run(s, nxt, cfg)
         ok["run"] = res["run"]["ok"]
 
-        # §11.7 reconnect: the quarter-turn camera records are stale, the weighings are not; the run refuses the
-        # 400 block (I11) until the start angle is confirmed
+        # §11.7 reconnect (BR-02): STOP and Start with the controller powered all along is not a reset: the position
+        # is known, I11 does not ask for the start angle again and the quarter-turn camera records stay fresh. The
+        # reset half (I11 refuses the 400 block, the quarter records stale, the weighings not) needs the simulator's
+        # power-cycle fault (docs/infra-requests.md INF-08); PadCalibrationSimTest checks it on the backend's fake
+        # controller meanwhile.
         s.api("POST", "/api/stop", {})
         s.wait_status(lambda x: not x["machine"]["enabled"], 30, "disabled")
         s.api("POST", "/api/machine/enable")
         s.wait_status(lambda x: x["machine"]["enabled"], 30, "enabled")
         s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
-        wiped(s)
-        refused = s.api("POST", "/api/run", {"planId": nxt["planId"]}, ok=(409,))
+        mach = s.api("GET", "/api/machine")
         recs = s.api("GET", "/api/dose-records")
         quarter = [r for r in recs if r["steps"] == 400 and r["kind"] in ("optical", "coupon")]
-        s.api("POST", "/api/screw/start-angle", {"note": "sim padcal: the controller was not power-cycled"})
         after = s.api("GET", "/api/plan/" + nxt["planId"])["interlocks"]
-        res["reconnect"] = {"run": refused.get("reason"), "quarter_records": [(r["kind"], r["whyStale"]) for r in quarter],
+        res["reconnect"] = {"positionKnown": mach.get("positionKnown"), "powerCycle": mach.get("powerCycle"),
+                            "quarter_records": [(r["kind"], r["whyStale"]) for r in quarter],
                             "mass_fresh": [r["fresh"] for r in recs if r["kind"] == "mass"],
-                            "after_confirm": [v["code"] for v in after.get("violations") or []]}
-        ok["reconnect"] = ("I11: the controller (re)connected after the screw start angle was set" in refused.get(
-            "reason", "") and bool(quarter) and all(r["whyStale"] == "made before the controller last connected: the "
-                                                    "screw angle may have moved" for r in quarter)
-            and res["reconnect"]["mass_fresh"] == [True, True] and "I11" not in res["reconnect"]["after_confirm"])
+                            "violations": [v["code"] for v in after.get("violations") or []],
+                            "power_cycle": "not run: needs the simulator's power-cycle fault (INF-08)"}
+        ok["reconnect"] = (mach.get("positionKnown") is True and not (mach.get("powerCycle") or {}).get("detected")
+                           and bool(quarter) and all("reset" not in (r["whyStale"] or "") for r in quarter)
+                           and res["reconnect"]["mass_fresh"] == [True, True]
+                           and "I11" not in res["reconnect"]["violations"])
     except Exception:
         res["error"] = traceback.format_exc()
         log("padcal main:", res["error"])

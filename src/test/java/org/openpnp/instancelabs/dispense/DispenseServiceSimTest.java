@@ -348,7 +348,7 @@ public class DispenseServiceSimTest {
         infinity.setAccessible(true);
         infinity.setInt(sim.driver, 4000); // a G28 whose answer was cut off ends here (60 s otherwise)
         sim.server.mark();
-        Future<Object> home = sim.machine.submit(() -> svc.homeSafely()); // as POST /api/machine/home
+        Future<Object> home = sim.machine.submit(() -> svc.homeSafely(false)); // as POST /api/machine/home
         long t0 = System.currentTimeMillis();
         while (sim.server.sinceMark().stream().noneMatch(l -> l.startsWith("G28"))) {
             assertTrue(System.currentTimeMillis() - t0 < 10000, "the home sends G28");
