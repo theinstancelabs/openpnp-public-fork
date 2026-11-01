@@ -21,7 +21,7 @@ permissions:
 env:
   JAR: target/openpnp-gui-0.0.1-alpha-SNAPSHOT.jar
   PLAYWRIGHT_VERSION: 1.64.1
-  UINAV_REF: e33cab3155c5451c546bf6ce362b85b8892b76e4
+  UINAV_REF: 711b0a6cbe185b31819443b5c0c976ba1ca8d904
 
 jobs:
   build:
