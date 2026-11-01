@@ -11,10 +11,11 @@ on:
     branches: [il/integration]
   workflow_dispatch:
 
-# Push and manual (workflow_dispatch) runs of one branch in separate groups: a newer run cancels a pending one of its
-# group, and only push runs release, so a manual re-check must never replace the head's pending push run.
+# A PR's newer run cancels its older one. Push and manual runs never share a group: GitHub keeps one pending run per
+# group and cancels the older pending one, which would drop an il/integration merge's gate and release. The deployer
+# orders releases by run number and accepts ancestors, so parallel push runs are safe.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.event_name, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -28,7 +29,7 @@ env:
 jobs:
   build:
     name: Build (checkstyle, compile, package)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -50,7 +51,7 @@ jobs:
 
   infra:
     name: Infra self-tests (CI helpers, deploy, lumen-sim)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -66,7 +67,7 @@ jobs:
 
   maven:
     name: Unit + simulated-machine integration (mvn test)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -75,6 +76,11 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: maven
+      - name: Lab layout from infra/fixtures
+        # LiveBoardPlanTest reads ~/Desktop/ftp.board.xml and ~/.openpnp2 and is skipped without them (BR-40).
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" /home/lumen
+          python3 infra/ci/lab_layout.py
       - name: mvn test
         # No DISPLAY on the runner, so AWT runs headless; the suite needs no X server.
         run: mvn -B -T1 test
@@ -92,7 +98,7 @@ jobs:
   deploy-e2e:
     name: Deploy dry run (real OpenPnP + lumen-sim, deploy and rollback)
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -127,7 +133,7 @@ jobs:
   controller-e2e:
     name: Simulated controller behind OpenPnP (home, STOP in G28, long prime)
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -157,7 +163,7 @@ jobs:
   ui-e2e:
     name: UI end-to-end (webui-sim, board-import, pad-profile, tip-setups)
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@v7
@@ -184,7 +190,7 @@ jobs:
   ui-boardview:
     name: UI end-to-end (boardview)
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -211,7 +217,7 @@ jobs:
   acceptance:
     name: SIM acceptance (${{ matrix.shard }})
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -250,7 +256,7 @@ jobs:
     name: gate
     if: always()
     needs: [build, infra, maven, deploy-e2e, controller-e2e, ui-e2e, ui-boardview, acceptance]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Every job passed
         env:
@@ -263,27 +269,50 @@ jobs:
     name: Release (versioned build for the deployer)
     needs: [gate]
     if: github.event_name == 'push' && github.ref == 'refs/heads/il/integration' && needs.gate.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: openpnp-build
           path: target
-      - name: Package and publish
+      - name: Package
+        run: |
+          set -euo pipefail
+          TAG="il-build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          python3 infra/ci/make_release.py --jar "$JAR" --lib target/lib --tag "$TAG" --sha "$GITHUB_SHA" \
+            --branch "${GITHUB_REF_NAME}" --run-id "$GITHUB_RUN_ID" --run-number "$GITHUB_RUN_NUMBER" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --out "$RUNNER_TEMP/rel"
+      - name: Attest (binds the tarball's bytes to this workflow, ref and commit)
+        # The deployer runs 'gh attestation verify' with --signer-workflow ci.yml, --source-ref il/integration and
+        # --source-digest <sha>: a release published by anything else (another workflow, a hand upload) is refused.
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ runner.temp }}/rel/openpnp-il-*.tar.gz
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHA="$GITHUB_SHA"; SHA7="${SHA:0:7}"
-          TAG="il-build-${GITHUB_RUN_NUMBER}-${SHA7}"
-          python3 infra/ci/make_release.py --jar "$JAR" --lib target/lib --tag "$TAG" --sha "$SHA" \
-            --branch "${GITHUB_REF_NAME}" --run-id "$GITHUB_RUN_ID" --run-number "$GITHUB_RUN_NUMBER" \
-            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --out "$RUNNER_TEMP/rel"
-          gh release create "$TAG" --target "$SHA" --prerelease --latest=false --title "$TAG" \
-            --notes "Green build of il/integration at $SHA (CI run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). Installed on the lab computer by infra/deploy when the machine is idle." \
+          SHA7="${GITHUB_SHA:0:7}"
+          # A re-run of a green run finds its release already there: fine if it is complete and at this commit.
+          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+            target="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .target_commitish)"
+            assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | sort | join(" ")')"
+            want="BUILD-INFO.json openpnp-il-$SHA7.tar.gz openpnp-il-$SHA7.tar.gz.sha256"
+            if [ "$target" = "$GITHUB_SHA" ] && [ "$assets" = "$want" ]; then
+              echo "release $TAG already published by an earlier attempt of this run"; exit 0
+            fi
+            echo "::error::release $TAG exists but is incomplete or at another commit (target $target, assets: $assets)"
+            exit 1
+          fi
+          gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false --title "$TAG" \
+            --notes "Green build of il/integration at $GITHUB_SHA (CI run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). Installed on the lab computer by infra/deploy when the machine is idle." \
             "$RUNNER_TEMP/rel/openpnp-il-$SHA7.tar.gz" "$RUNNER_TEMP/rel/openpnp-il-$SHA7.tar.gz.sha256" \
             "$RUNNER_TEMP/rel/BUILD-INFO.json"
