@@ -87,6 +87,19 @@ class LinkAndPower(unittest.TestCase):
         self.assertIsNone(b.send("M115", timeout=3.0).ok_at)
         self.assertTrue(b.sim.state(b.t)["halted"])
 
+    def test_halt_answers_nothing_at_all_until_a_power_cycle(self):
+        """BR-09's dead link: no ok, no busy line, no report for any line, however long the host waits."""
+        b = Bench()
+        b.send("G28")
+        fault(b, fault="halt")
+        said = len(b.rx)
+        for line in ("M105", "M114", "M115", "M503", "G4 P10", "M400", "G1 X10 F6000", "M410", "M112"):
+            b.write(line + "\n")
+        b.run(10.0)
+        self.assertEqual(b.rx[said:], [])
+        b.sim.power_cycle(b.t)
+        self.assertEqual(b.send("M105").lines, ["ok T:0"])
+
     def test_transport_faults_are_handed_to_the_transport(self):
         b = Bench()
         fault(b, fault="disconnect", down_s=0.5)
@@ -106,6 +119,21 @@ class LinkAndPower(unittest.TestCase):
         self.assertEqual(b.send("M114").lines[0],
                          "X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197")
         self.assertEqual(b.sim.state(b.t)["fans"], [0, 0, 0, 0])
+
+    def test_power_cycle_resets_every_position_and_count(self):
+        """BR-02: X 0, Y 0, Z 0 with B 720 and the counts of a boot, whatever came before."""
+        b = Bench(park=(100.0, 50.0, 31.5))
+        b.send("G28")
+        b.send("G1 X120 Y80 Z20 A30 F12000")
+        b.send("G92 B0")
+        b.send("G1 B1800 F360000")
+        b.send("M400")
+        self.assertEqual(b.send("M114").lines[0],
+                         "X:120.00 Y:80.00 Z:20.00 A:30.00 B:1800.00 Count X:38400 Y:25600 Z:800 A:133 B:11189")
+        b.sim.power_cycle(b.t)
+        self.assertEqual(b.send("M114").lines[0],
+                         "X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197")
+        self.assertEqual(b.sim.state(b.t)["homed"], {"X": False, "Y": False, "Z": False})
 
     def test_plain_state_survives_without_power_cycle(self):
         b = Bench()

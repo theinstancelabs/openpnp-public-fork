@@ -87,6 +87,37 @@ class PtyTransport(unittest.TestCase):
             self.cmd(fd, "G92 X0")
             os.close(fd)
 
+    def test_reopen_keeps_every_position_and_count(self):
+        """BR-02's plain reconnect: the host closes and reopens the port; the controller is not reset."""
+        fd = open_raw(self.sim.link)
+        try:
+            self.cmd(fd, "G1 X12.5 Z5 B800 F60000")
+            self.cmd(fd, "M400")
+            before = self.cmd(fd, "M114")
+            self.assertEqual(before[0], "X:12.50 Y:0.00 Z:5.00 A:720.00 B:800.00 "
+                                        "Count X:4000 Y:0 Z:200 A:3197 B:3552")
+        finally:
+            os.close(fd)
+        time.sleep(0.1)
+        fd = open_raw(self.sim.link)
+        try:
+            self.assertEqual(self.cmd(fd, "M114"), before)
+        finally:
+            self.cmd(fd, "G1 X0 Z0 B720 F60000")
+            self.cmd(fd, "M400")
+            os.close(fd)
+
+    def test_physical_faults_and_the_head_through_the_socket(self):
+        before = self.sim.ctl({"cmd": "state"})["state"]["head"]
+        self.assertTrue(self.sim.ctl({"cmd": "fault", "fault": "lost_steps", "x": 0.3})["ok"])
+        try:
+            head = self.sim.ctl({"cmd": "state"})["state"]["head"]
+            self.assertEqual(head["logical"], before["logical"])
+            self.assertAlmostEqual(head["physical"]["X"] - before["physical"]["X"], 0.3, places=6)
+            self.assertAlmostEqual(head["offset"]["X"] - before["offset"]["X"], 0.3, places=6)
+        finally:
+            self.assertTrue(self.sim.ctl({"cmd": "fault", "fault": "lost_steps", "x": -0.3})["ok"])
+
     def test_io_log_format(self):
         fd = open_raw(self.sim.link)
         try:

@@ -83,17 +83,29 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 - Homed flags for X, Y and Z. A and B have no switch and are never homed.
 - Soft endstops 0..433 / 0..487 / 0..63 clamp homed axes only, silently. `M211` reports them in logical coordinates.
 - Fans P0-P3 with a timestamped history, LED, I2C mux and register, stepper enable flags.
+- Idle timeout (`DEFAULT_STEPPER_TIMEOUT_SEC` 3600, `DISABLE_IDLE_X/Y/Z/I/J`): once the planner has been empty that
+  long, counted from the end of the last block, a `G28` or an `M18`/`M84 S`, every axis is released, silently. Once
+  only, until a block is queued again (`M17` alone does not re-arm it). It also runs inside waits such as `G4`.
 - Boot state: X=Y=Z=0, A=B=720.00 (counts 3197), nothing homed, outputs off. Settings are the firmware defaults; there
   is no EEPROM.
 
 **The physical head.**
-- It is tracked apart from Marlin's belief. The X/Y/Z min switches trigger at physical 0.
-- A power cycle resets the belief and the counts; the head stays where it is.
+- It is tracked apart from Marlin's belief, in the machine's true frame: X/Y/Z 0 is where a correct home puts it.
+- The X/Y/Z min switches trigger at physical 0, or where a `home_offset` or `z_shift` fault has moved them.
+- A power cycle resets the belief and the counts; the head stays where it is (a released Z drops, below).
+- Releasing an energised Z (`M18`/`M84` with Z or no axis, the idle timeout, `M112`, a power cycle) moves the head
+  by the `z_drop` fault's distance (default 0). It stays there: the next block with Z steps re-energises Z (at once
+  when planned: `Z_LATE_ENABLE` is off, planner.cpp), as does `M17`. A move with no Z steps leaves Z released.
+- The control state's `head` gives X/Y/Z `physical`, `logical` (the step counts now, in G92 coordinates; M114 prints
+  the planned end) and `offset` = physical - logical: what the controller does not know. At boot the offset is the
+  park position; after a true home and no faults it is 0. Values are rounded to 1e-6 mm.
 - `M119` reads the switches.
 
 **Commands.**
 - Motion and waits: `G0 G1` (`G2 G3` move straight to the end point), `G4`, `G28`, `G90 G91 G92`, `M400`.
-- Steppers: `M17`, `M18`/`M84` (wait for motion, then disable; `S` is accepted and ignored).
+- Steppers: `M17`, `M18`/`M84` (wait for motion, then release the axes given, or all). `M18 S<s>`/`M84 S<s>` sets the
+  idle timeout only, with no wait and nothing released; `S0` means never. It is `stepper_timeout_s` in the state,
+  and a power cycle restores 3600.
 - Reports: `M105` (`ok T:0`), `M114`, `M115`, `M119`, `M211`, `M503` (from the current settings, as in the log),
   `M113`, `M220`.
 - Settings: `M92`, `M201`, `M203`, `M204`, `M205`, `M502`, `M906`.
@@ -161,11 +173,15 @@ through the control channel.
 
 Connect to `--control` and send one JSON object per line; each gets one JSON reply line with `"ok": true|false`.
 A malformed request (bad JSON, a bad regex, a `count` that is not an integer >= 1, a non-finite or negative time, a
-link that is not `ttyLUMEN*` or has no directory) gets `"ok": false` with an `error` and changes nothing.
+link that is not `ttyLUMEN*` or has no directory, a physical fault with no axis key, another key, or a non-finite
+value) gets `"ok": false` with an `error` and changes nothing.
+
+The physical faults (`home_offset`, `lost_steps`, `z_shift`, `z_drop`) are the machine's, not the controller's: they
+outlive a power cycle and are not listed in `faults`. All values are signed mm along the axis.
 
 | Request | Effect |
 |---|---|
-| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down. |
+| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down. |
 | `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. |
 | `{"cmd": "fault", "fault": "delay_ok", "s": 0.5, ...}` | Extra delay before that `ok`; `"random": [lo, hi]` for a seeded random delay. Later output queues behind it. |
 | `{"cmd": "fault", "fault": "dup_ok", ...}` | The `ok` is sent twice. |
@@ -177,8 +193,22 @@ link that is not `ttyLUMEN*` or has no directory) gets `"ok": false` with an `er
 | `{"cmd": "fault", "fault": "frozen", "on": true}` | Stop reading the port. The host's writes block once the pty buffer fills. |
 | `{"cmd": "power_cycle", "link": null, "down_s": 0}` | Close the master, boot state, new pty behind the link. The head stays put. `"link"` publishes it at a new path instead and removes the old link (the board's ttyACM0 becoming ttyACM1; here e.g. ttyLUMEN0 to ttyLUMEN1). `"down_s": 2` keeps the port absent for 2 s first, as while the board resets and USB re-enumerates (the board is reset at once; default 0). |
 | `{"cmd": "set", "kill_messages": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234}` | Knobs. |
-| `{"cmd": "clear"}` | Drop all ok faults and pending injections, unfreeze. |
+| `{"cmd": "fault", "fault": "home_offset", "x": 0.5, "y": -0.2}` | The X/Y switches now trigger at these physical positions (mm), so every later home of that axis lands that far off while M114 says 0. Nothing moves until a home. A new value replaces the old one per axis. |
+| `{"cmd": "fault", "fault": "lost_steps", "x": 0.3, "y": 0}` | The head moves by this much now, with no command, also mid-move. M114 and the counts do not change. Calls add up; a home removes it. |
+| `{"cmd": "fault", "fault": "z_shift", "z": 0.1}` | The whole Z frame shifts: the head moves by z now and the Z switch moves with it, so later homes keep the shift. Calls add up. |
+| `{"cmd": "fault", "fault": "z_drop", "z": -0.4}` | From now on, each release of an energised Z moves the head by z (above). `0` turns it off. |
+| `{"cmd": "clear"}` | Drop all ok faults and pending injections, unfreeze. Switches back to 0 and no Z drop; the head stays where it is until the next home. |
 | `{"cmd": "stop"}` | Exit. |
+
+**The backend's acceptance checks (INF-08).** In a uinav pty session the same requests go through
+`uinav controller fault '{"fault": "home_offset", "x": 0.5}'` (uinav passes the JSON on as it is).
+
+| Check | In lumen-sim |
+|---|---|
+| BR-02 power cycle vs reconnect | `power_cycle`: M114 then reads `X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197` with nothing homed, and the head stays where it was (`head.offset`). A host close and reopen, or a `disconnect` fault, keeps every position and count. |
+| BR-09 controller reads | `M503` prints the board's lines and `M115` its capabilities (goldens `m503.txt`, `m115.txt`). Dead link: `halt` (no reply to anything, reopening does not help, a power cycle does), or `frozen` (the port is not read). |
+| BR-10 home faults | `home_offset` (a G28 that lands off), `lost_steps` (after a home), `z_shift`. The homing fiducial in the top camera is INF-05 (not built yet), to be drawn from `head.physical`. |
+| BR-12 Z release | `z_drop`, then `M18 Z`; `M84 S0` sets `stepper_timeout_s` to 0 and the line is in the I/O log. |
 
 **Model errors.** The board answers whatever the values; the simulator must not die on one stray line either.
 - A line the model cannot run (for example `M203 X0` then `G1 X10`, a division by zero) is acked as the board would
@@ -219,10 +249,11 @@ From the repository root:
 python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```
 
-- 125 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 10 s left).
+- 164 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 10 s left).
 - Most tests run on the fake clock and finish in milliseconds. The pty tests start a `lumen_sim` process each and
   take a few seconds.
 - `tests/golden/` holds excerpts of `runs/serial.log`; see its README.
+- `tests/test_physical.py` covers INF-08: the physical faults, the Z release and drop, and the idle timeout.
 - The golden tests compare reply text exactly and timing within 3 %.
 
 | Golden | Board | lumen-sim |
@@ -303,9 +334,11 @@ The backend's SIM acceptance runs unchanged on lumen-sim. Point `UINAV_DIR` at t
   - Scenarios that need those (register, padcal, tips) cannot run here until the backend recognises lumen-sim.
     Proposed: a sim-only M115 field, see the backend request.
 - Not modelled:
-  - stepper idle timeout and current;
+  - stepper current;
   - TMC drivers (`M122` prints nothing);
-  - lost steps or crashes at the far ends (the head goes where the steps say);
+  - crashes at the far ends: the head goes where the steps say, and loses steps only through `lost_steps`;
+  - how a released Z moves: the `z_drop` is instant and fixed, with no slow sag and no snap to a full step when
+    re-energised;
   - USB identity: a pty has none;
   - the boot banner, which is lost on USB CDC anyway;
   - `N` line numbers and checksums;

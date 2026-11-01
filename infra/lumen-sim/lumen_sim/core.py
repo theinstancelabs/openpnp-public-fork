@@ -14,6 +14,15 @@ from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, Machine
 from .marlin import AXES, Firmware, f32
 
 INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": 'echo:Unknown command: "M999999"'}
+# Faults of the physical machine (INF-08): fault -> the axis keys it takes (mm, signed; at least one)
+PHYSICAL_FAULTS = {"home_offset": ("x", "y"), "lost_steps": ("x", "y"), "z_shift": ("z",), "z_drop": ("z",)}
+
+
+def mm(value, name):
+    """A finite number (JSON allows NaN and Infinity; a bool is not a number here), else ValueError."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("%s must be a finite number of mm, not %r" % (name, value))
+    return float(value)
 
 
 class Simulator:
@@ -98,10 +107,13 @@ class Simulator:
 
     # ------------------------------------------------------------------ power
     def power_cycle(self, t):
-        """Controller reset: boot state, outputs off, step counts lost; the head stays where it physically is."""
+        """Controller reset: boot state, outputs off, step counts lost; the head stays where it physically is, except
+        that an energised Z lets go and drops by the machine's z_drop."""
         self.run_until(t)
         self.fw.halt("power off", t)
         self.fw.stepper.update(t)  # settle the old stepper so the physical position is where it stopped
+        for axis in AXES:          # power off: every driver lets go (a released Z drops)
+            self.fw.release(axis)
         self.out.clear()
         self._timed = []
         self._last_release = -math.inf
@@ -125,6 +137,7 @@ class Simulator:
             return self._fault(req, t)
         if cmd == "clear":
             self.faults.clear()
+            self.machine.clear_faults()
             self._timed = []
             self._actions.append({"action": "clear"})
             return {"ok": True}
@@ -172,9 +185,31 @@ class Simulator:
             self._actions.append({"action": "disconnect", "down_s": None if down is None else seconds(down, "down_s")})
         elif kind == "frozen":
             self._actions.append({"action": "frozen", "on": bool(req.get("on", True))})
+        elif kind in PHYSICAL_FAULTS:
+            self._physical_fault(kind, {k: v for k, v in spec.items() if k != "fault"})
         else:
             return {"ok": False, "error": "unknown fault %r" % kind}
         return {"ok": True}
+
+    def _physical_fault(self, kind, values):
+        """The machine moves under the controller; M114 and the step counts never change."""
+        keys = PHYSICAL_FAULTS[kind]
+        if not values or not set(values) <= set(keys):
+            raise ValueError("%s takes %s (mm), not %r" % (kind, " and/or ".join(keys), sorted(values)))
+        v = {k: mm(values[k], k) for k in values}
+        m = self.machine
+        if kind == "home_offset":    # the switches trigger here from now on: every later home lands off
+            for i, k in enumerate("xy"):
+                if k in v:
+                    m.switches[i] = v[k]
+        elif kind == "lost_steps":   # the head moves now, with no command
+            for i, k in enumerate("xy"):
+                m.physical[i] += v.get(k, 0.0)
+        elif kind == "z_shift":      # the whole Z frame: the head now, and the switch for every later home
+            m.physical[2] += v["z"]
+            m.switches[2] += v["z"]
+        else:                        # z_drop: how far the head moves each time the Z driver lets go
+            m.z_drop = v["z"]
 
     def _set(self, req):
         def integer(key):
@@ -214,6 +249,10 @@ class Simulator:
             "counts": named(fw.position),
             "stepper_counts": named(st.realtime_counts(t)),
             "physical": st.realtime_physical(t),
+            "head": self._head(t),
+            "switches": {a: v for a, v in zip("XYZ", self.machine.switches)},
+            "z_drop": self.machine.z_drop,
+            "stepper_timeout_s": fw.stepper_timeout_ms / 1000.0,
             "homed": {"X": fw.homed[0], "Y": fw.homed[1], "Z": fw.homed[2]},
             "homing_phase": fw.homing_phase,
             "moving": st.moving(t),
@@ -236,4 +275,19 @@ class Simulator:
             "faults": self.faults.describe(),
             "lines_read": self.seq,
             "sim_errors": list(self.sim_errors),
+        }
+
+    def _head(self, t):
+        """X/Y/Z: where the head is (physical, the machine's true frame), where the controller believes it is now
+        (logical: its step counts in G92 coordinates; M114 prints the planned end), and physical - logical, the
+        error the controller does not know about. Rounded to 1 nm."""
+        fw, st = self.fw, self.fw.stepper
+        counts = st.realtime_counts(t)
+        phys = st.realtime_physical(t)[:3]
+        logical = [counts[i] / fw.steps[i] + fw.ws[i] for i in range(3)]
+        r = lambda v: round(v, 6) + 0.0  # noqa: E731  (+ 0.0: no -0.0)
+        return {
+            "physical": {a: r(p) for a, p in zip("XYZ", phys)},
+            "logical": {a: r(lg) for a, lg in zip("XYZ", logical)},
+            "offset": {a: r(p - lg) for a, p, lg in zip("XYZ", phys, logical)},
         }

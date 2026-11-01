@@ -91,10 +91,12 @@ class Block:
 class Stepper:
     """The planner queue as the stepper ISR consumes it, evaluated lazily at any later time."""
 
-    def __init__(self, counts, physical, steps_per_unit):
+    def __init__(self, counts, physical, steps_per_unit, switches=(0.0, 0.0, 0.0)):
         self.counts = list(counts)          # stepper position of the last finished step
-        self.physical = physical            # Machine.physical, mm/deg; endstops sit at physical 0
+        self.physical = physical            # Machine.physical, mm/deg
+        self.switches = switches            # Machine.switches: physical X/Y/Z at which the min endstops trigger
         self.steps = steps_per_unit         # live list owned by the firmware (M92 edits it)
+        self.last_end = -math.inf           # when the planner last ran out of blocks (end or quick-stop)
         self.blocks = deque()
         self.deliver_at = None              # first block's start when it was queued into an empty planner
         self.cleaning_until = -math.inf
@@ -125,6 +127,7 @@ class Stepper:
                 return
             self._finish(b)
             self.blocks.popleft()
+            self.last_end = b.t_end
             if self.blocks:
                 self._start(self.blocks[0], b.t_end)
 
@@ -188,6 +191,8 @@ class Stepper:
         if self.blocks and self.blocks[0].t_start is not None:
             b = self.blocks[0]
             self._move_to(b.counts_after(int(b.profile.steps_at(now - b.t_start) + 1e-9)))
+        if self.blocks:
+            self.last_end = now
         self.blocks.clear()
         self.deliver_at = None
 
@@ -200,7 +205,7 @@ class Stepper:
                 d = b.delta[axis]
                 if d >= 0:
                     continue
-                k_axis = max(0, math.ceil(self.physical[axis] * self.steps[axis] - 1e-6))
+                k_axis = max(0, math.ceil((self.physical[axis] - self.switches[axis]) * self.steps[axis] - 1e-6))
                 if k_axis > abs(d):
                     continue
                 events = 0 if k_axis == 0 else math.ceil(k_axis * b.n / abs(d))
