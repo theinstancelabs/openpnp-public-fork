@@ -618,6 +618,62 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     check('(9) From K is locked after the mount: Both tips, "K was measured with the needle before the change at …"',
       c9b.kLocked && c9b.both && /^K was measured with the needle before the change at \d\d:\d\d: record the needle frame with both tips touching the same spot\.$/.test(c9b.why || ''), c9b);
 
+    // ---- (9) values of the needle before the change never reach the new one (review 10-31: setup.js:570/589, calibrate.js:537)
+    // the frame's contact heights are the old needle's: the fields stay empty, and Record needle frame posts nothing
+    const nd9 = (await status(page)).dispense.needle;
+    const f9 = await page.evaluate(() => ({ n1: document.getElementById('anchor-n1').value, n2: document.getElementById('anchor-n2').value }));
+    check('(9) after the change the needle frame fields are empty, not the old frame\'s contacts', !!nd9.anchor && !nd9.anchored && f9.n1 === '' && f9.n2 === '',
+      { f9, anchor: nd9.anchor, anchored: nd9.anchored });
+    let anchorPosts = 0;
+    await page.route('**/api/needle/anchor', (route) => { anchorPosts++; return route.continue(); });
+    await page.click('#btn-anchor');
+    await sleep(1500);
+    await page.unroute('**/api/needle/anchor');
+    const st9 = (await status(page)).dispense.needle;
+    check('(9) Record needle frame with nothing captured posts nothing: the old frame is not recorded for the new needle', anchorPosts === 0 && !st9.anchored, { anchorPosts, anchored: st9.anchored });
+    // a touch-off: its era comes from the server's times, not from when this page first saw the row
+    const tok9 = nd9.changedAtMs;
+    const toRow = (id, at, z, method) => ({ id, created_at: at, method, z_offset_mm: z, previous_offset_mm: -2.59, operator: null,
+      details: JSON.stringify({ analysis: { gapsMm: [0.1, 0.05, 0], diametersMm: [1.05, 1.4, null], dotStates: ['dot', 'dot', 'none'], contactGapMm: 0.075,
+        bracketHighMm: 0.1, bracketLowMm: 0.05, referenceDiameterMm: 1.05, reason: 'dot squashed between 0.100 and 0.050 mm' }, pitchMm: 1.6, blank: 'blank' }) });
+    async function withTouchOff(row) {
+      await page.unroute('**/api/calibrations').catch(() => {});
+      await page.route('**/api/calibrations', async (route) => {
+        try {
+          const res = await route.fetch();
+          const body = await res.json();
+          body.touchOffs = [row].concat(body.touchOffs || []);
+          await route.fulfill({ response: res, json: body });
+        } catch (e) { /* unrouted while it was being answered */ }
+      });
+      await page.evaluate(() => IL.pcr.loadCalibrations());
+      // the box shows this row (its render key starts with the row id)
+      await page.waitForFunction((id) => { const h = document.getElementById('to-result'); try { return !!h.dataset.key && JSON.parse(h.dataset.key)[0] === id; } catch (e) { return false; } },
+        row.id, { timeout: 15000 });
+      await sleep(400);
+      return page.evaluate(() => ({ use: !!document.getElementById('to-use'), inUse: /In use as the needle offset/.test(document.getElementById('to-sum').textContent),
+        era: document.getElementById('to-era') ? document.getElementById('to-era').textContent.trim() : null }));
+    }
+    await page.evaluate(() => IL.go('#calibrate/touch-off'));
+    await page.waitForSelector('#to-result', { timeout: 15000 });
+    const before9 = await withTouchOff(toRow(990101, tok9 - 60000, -2.61, 'dot-ladder-touch-off (not applied)'));
+    check('(9) a touch-off from before the needle change: no "Use for the needle offset", "Touched off before the needle change at hh:mm: touch off again."',
+      !before9.use && !before9.inUse && /^Touched off before the needle change at \d\d:\d\d: touch off again\.$/.test(before9.era || ''), before9);
+    const inUse9 = await withTouchOff(toRow(990102, tok9 - 30000, nd9.zOffsetMm, 'dot-ladder-touch-off'));
+    check('(9) a touch-off from before the change with today\'s offset is not "In use as the needle offset"', !inUse9.use && !inUse9.inUse && !!inUse9.era, inUse9);
+    const after9 = await withTouchOff(toRow(990103, tok9 + 1000, -2.61, 'dot-ladder-touch-off (not applied)'));
+    let offsetBody = null;
+    await page.route('**/api/needle/offset', (route) => { offsetBody = route.request().postDataJSON(); return route.fulfill({ status: 200, json: { needle: nd9 } }); });
+    if (after9.use) await page.click('#to-use');
+    await sleep(1000);
+    await page.unroute('**/api/needle/offset');
+    check('(9) a touch-off of this needle: "Use for the needle offset" posts it with today\'s needle token', after9.use && !after9.era && !!offsetBody
+      && offsetBody.needleChangedAtMs === tok9 && Math.abs(offsetBody.offsetMm - -2.61) < 1e-9, { after9, offsetBody, tok9 });
+    await page.unroute('**/api/calibrations');
+    await page.evaluate(() => IL.pcr.loadCalibrations());
+    await page.evaluate(() => IL.go('#setup/needle'));
+    await page.waitForSelector('#btn-anchor', { state: 'visible', timeout: 15000 });
+
     // ---- (10) the 25G on the head, the 22G mounted --------------------------------------------------------------------
     scene('--physical-tip', k25);
     await page.fill('#anchor-n1', String(bzMid));
@@ -626,6 +682,18 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     await page.waitForFunction(() => IL.S.status.dispense.needle.anchored, null, { timeout: 15000 });
     await page.click('#btn-needle-offset');
     await page.waitForFunction(() => IL.S.status.dispense.needle.touchedOff, null, { timeout: 15000 });
+    // the new frame: a touch-off between the needle change and this frame is the old frame's; one after it is this frame's
+    const nd10 = (await status(page)).dispense.needle;
+    await page.evaluate(() => IL.go('#calibrate/touch-off'));
+    await page.waitForSelector('#to-result', { timeout: 15000 });
+    const mid10 = nd10.anchor.setAtMs > nd10.changedAtMs + 1 ? await withTouchOff(toRow(990104, nd10.anchor.setAtMs - 1, -2.61, 'dot-ladder-touch-off (not applied)')) : null;
+    check('(10) a touch-off from after the needle change but before the needle Z frame: no Use, "Touched off before the needle Z frame at hh:mm: touch off again."',
+      !!mid10 && !mid10.use && !mid10.inUse && /^Touched off before the needle Z frame at \d\d:\d\d: touch off again\.$/.test(mid10.era || ''), { mid10, nd10 });
+    const new10 = await withTouchOff(toRow(990105, nd10.anchor.setAtMs + 1000, -2.61, 'dot-ladder-touch-off (not applied)'));
+    check('(10) a touch-off after the needle Z frame: "Use for the needle offset"', new10.use && !new10.era, new10);
+    await page.unroute('**/api/calibrations');
+    await page.evaluate(() => IL.pcr.loadCalibrations());
+    await page.evaluate(() => IL.go('#setup/needle'));
     await ticks(page);
     await wipeBlank(page);
     await page.evaluate(() => IL.runFix('landing-check', null));

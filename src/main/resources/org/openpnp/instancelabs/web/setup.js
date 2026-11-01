@@ -676,10 +676,13 @@
     IL.setText(c.anchorState, !a ? 'Frame not set: nothing can be dispensed until N1 and the needle touched the same surface (or the frame is recorded from K).'
       : (nd.anchored ? 'Frame recorded ' : 'Frame OUT OF DATE (needle changed): recorded ') + tm(a.setAtMs) + ': N1 contact ' + fmt(a.surfaceZMm, 3) + ' mm, needle contact '
         + fmt(a.needleContactZMm, 3) + ' mm' + (isNum(a.rawSumMm) ? ' (from K = ' + fmt(a.rawSumMm, 2) + ')' : '') + '.');
-    // fields (server values)
-    sync(F.n1, a ? a.surfaceZMm : null);
+    // fields (server values). After a needle change the frame's contacts are the old needle's (§22.3): the fields stay
+    // empty until N1 and the new needle are captured (or typed), so one press cannot record the old frame again. K stays
+    // shown: the engine refuses it after a change (nd.kRefusal) and the card says why.
+    const frameOk = !!a && nd.anchored;
+    sync(F.n1, frameOk ? a.surfaceZMm : null);
     sync(F.k, a && isNum(a.rawSumMm) ? a.rawSumMm : bench || !known ? 65.59 : null);
-    sync(F.n2, a ? a.needleContactZMm : null);
+    sync(F.n2, frameOk ? a.needleContactZMm : null);
     sync(F.off, nd.zOffsetMm);
     // derived needle contact from K: needle contact = N1 + C − K, C from the frame recorded with K (OpenPnP's see-saw map)
     const seesaw = a && isNum(a.rawSumMm) ? a.needleContactZMm - a.surfaceZMm + a.rawSumMm : null;
