@@ -1,0 +1,82 @@
+"""Personality il-safety (il/safety d973aef69): M990 watchdog, forced on/off right outputs, settings (fake clock)."""
+import unittest
+
+from lumen_sim.bench import Bench
+
+
+def il():
+    return Bench(personality="il-safety")
+
+
+class Watchdog(unittest.TestCase):
+    def test_m990_arguments(self):
+        b = il()
+        self.assertEqual(b.send("M990").lines, ["echo:Host watchdog: off", "ok"])
+        self.assertEqual(b.send("M990 S50").lines, ["Error:M990 S must be 0 or 100..3600000", "ok"])
+        self.assertEqual(b.send("M990 S3600001").lines, ["Error:M990 S must be 0 or 100..3600000", "ok"])
+        self.assertEqual(b.send("M990 S100").lines, ["echo:Host watchdog: armed S100", "ok"])
+        self.assertEqual(b.send("M990 S0").lines, ["echo:Host watchdog: off", "ok"])
+
+    def test_silence_trips_outputs_off_and_auger_disabled(self):
+        b = il()
+        b.send("G1 Z1 F600")  # energises Z
+        b.send("M106 P0 S255")
+        b.send("M106 P2 S255")
+        b.send("M106 P3 S255")
+        b.send("M990 S500")
+        t0 = b.t
+        b.run(2.0)
+        self.assertEqual([(round(t - t0, 3), l) for t, l in b.rx if t > t0], [(0.5, "Error:host watchdog")])
+        st = b.sim.state(b.t)
+        self.assertEqual(st["fans"], [0, 0, 0, 0])
+        self.assertFalse(st["enabled"]["B"])
+        self.assertTrue(st["enabled"]["Z"])
+        self.assertEqual(b.send("M990").lines, ["echo:Host watchdog: off tripped", "ok"])
+        self.assertEqual(b.send("M990 S2000").lines, ["echo:Host watchdog: armed S2000", "ok"])
+
+    def test_lines_and_busy_commands_hold_the_watchdog(self):
+        b = il()
+        b.send("M990 S500")
+        for _ in range(5):
+            b.run(0.4)
+            b.send("M400")
+        r = b.send("G4 P2000")
+        self.assertEqual(r.lines, ["echo:busy: processing", "ok"])
+        t0 = b.t
+        b.run(1.0)
+        self.assertEqual([(round(t - t0, 3), l) for t, l in b.rx if t > t0], [(0.5, "Error:host watchdog")])
+
+    def test_stock_has_no_m990(self):
+        self.assertEqual(Bench().send("M990 S3000").lines, ['echo:Unknown command: "M990 S3000"', "ok"])
+
+
+class Settings(unittest.TestCase):
+    def test_right_outputs_are_on_off(self):
+        b = il()
+        b.send("M106 P2 S100")
+        b.send("M106 P3 S1")
+        b.send("M106 P1 S100")
+        self.assertEqual(b.sim.state(b.t)["fans"], [0, 100, 255, 255])
+
+    def test_m503_shows_the_il_numbers(self):
+        lines = il().send("M503").lines
+        self.assertIn("echo:  M92 X320.00 Y320.00 Z160.00 A4.44 B4.44", lines)
+        self.assertIn("echo:  M201 X10000.00 Y10000.00 Z10000.00 A10000 B20000", lines)
+        self.assertIn("echo:  M906 X800 Y1000 Z800 A200 B540", lines)
+
+    def test_m997_drops_the_port_until_a_power_cycle(self):
+        b = il()
+        b.write("M997\n")
+        b.run(0.1)
+        self.assertEqual(b.sim.state(b.t)["halt_reason"], "DFU")
+        self.assertEqual(b.sim.take_transport_actions(), [{"action": "disconnect", "down_s": None}])
+        self.assertEqual(Bench().send("M997").lines, ['echo:Unknown command: "M997"', "ok"])
+
+    def test_boot_report_with_160_steps_on_z(self):
+        b = il()
+        b.send("G1 Z10 F600")
+        self.assertIn("Count X:0 Y:0 Z:1600 ", b.send("M114").lines[0])
+
+
+if __name__ == "__main__":
+    unittest.main()
