@@ -52,7 +52,9 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
    - **Health check:**
      1. `/api/status` answers 200 and `server.version` ends with `.<sha7>`; `simulated` is false; the dispense
         engine runs and is available (`dispense.running` and `dispense.available`: OpenPnP keeps running when
-        the engine fails to start, e.g. on a failed config migration).
+        the engine fails to start, e.g. on a failed config migration). OpenPnP starts its web API and the engine
+        in no fixed order, so a 200 without the engine is waited out up to `--status-timeout` (120 s); an engine
+        that never starts fails the check then.
      2. Enable.
      3. The log shows `Serial port: connecting ... S/N 387932683335`.
      4. Controller axes are read, and they must not be the power-cycle signature (X/Y/Z 0, B 720). If they
@@ -186,11 +188,80 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
 - `tests/fake_openpnp.py` is a fake OpenPnP API with configurable failures: version, enable, reset, no S/N,
   home, slow home, stop, busy, run (with its phase), pressure, crash, engine (not started), unavailable,
   machine-500, and failures for one build only. Its status has the real shape: `run.finishedAtMs`,
-  `lastRun.endedAtMs`, `padCalibration.endedAtMs`, and the pressure hold's start value.
+  `lastRun.endedAtMs`, `padCalibration.endedAtMs`, and the pressure hold's start value. `engine_start_s`
+  models the real start-up, where the API answers before the dispense engine runs.
 - `tests/fakes.py` has a fake GitHub with a real commit graph, so the compare direction is tested; CI-style
-  release tarballs; and a throwaway lab (root, STATE.md, lock, device, activity file).
+  release tarballs, or exactly what `infra/ci/make_release.py` writes (`Lab.ci_release`, published by
+  `FakeGitHub.add_release_dir` as `gh release create` does); and a throwaway lab (root, STATE.md, lock,
+  device, activity file). `Lab.start_service` starts the fake OpenPnP and waits for its API: a deploy over an
+  OpenPnP still starting is "not idle", which made the acceptance test fail about 1 run in 10.
 - `tests/test_acceptance.py` is INF-02's CI acceptance: a deploy dry run into a test directory, a second
   deploy over a running OpenPnP, and a rollback to the previous version.
+- `tests/test_release_contract.py`: make_release.py's output is staged, deployed and rolled back, also two
+  builds of one jar under one sha7 (what the end-to-end test publishes).
 - `tests/test_stop.py` covers when a STOP is sent (stubs with a fake clock, and the fake mid-home).
+- `tests/test_service.py`: the subprocess service manager (tests and CI) runs while any process of its group
+  does, and `stop` waits for all of them, as systemd does for the unit's cgroup. flock dies on SIGTERM at once;
+  the java it runs holds the serial lock and the API port for a second or two longer.
 - `test_units.py` runs `systemd-analyze --user verify` on the rendered units when it is installed. It only
   verifies; it never installs.
+
+## End to end with the real OpenPnP (`e2e/`)
+`e2e/test_deploy_openpnp.py` runs the deploy flow with the real jar instead of the fake OpenPnP, in front of
+lumen-sim (`../lumen-sim`), the simulated controller on a pty. OpenPnP connects through its real serial stack.
+It needs no openpnp-uinav, so it runs on a stock GitHub runner. About 2 minutes (124 s on the lab computer,
+10-31: deploy 31 s, deploy over a running OpenPnP 31 s, rollback 30 s, the refused deploy 13 s).
+- **Releases:** `infra/ci/make_release.py` twice from the one jar, with CI's command line. The jar's build sha7
+  (manifest `Implementation-Version`; OpenPnP ends `server.version` with it) starts both fake commits' shas,
+  so the production version check runs unchanged. The fake GitHub of the unit tests serves them.
+- **Config:** `init --seed-from` the fixture lab config (`infra/fixtures/lab-config`, boards.xml empty) plus the
+  fixture engine config. machine.xml is `tools/instancelabs/make_machine_patch.py`'s output, rewritten for
+  lumen-sim:
+  - `port-name` = the lumen-sim link (`ttyLUMEN0`);
+  - `usb-serial-number` and `usb-description` removed;
+  - visual homing off;
+  - the OpenPnpCaptureCameras become an ImageCamera and a SimulatedUpCamera.
+
+  Java starts only if every port-name resolves to lumen-sim's `/dev/pts/N` and no USB identity or capture camera
+  is left. With no camera device, OpenPnP would start with the capture cameras too: `open()` only logs "No camera
+  found with ID" (OpenPnpCaptureCamera.java:174), and the native library needs only libstdc++ and libc. But the
+  fixture's unique-ids name the lab's real cameras, so the swap keeps the test camera-free on every host.
+- **Run:** lumen-sim, Xvfb on a free display in `:60`-`:69`, the API on a free port in 18930-18949. il_deploy
+  runs in-process (`main(argv, deps)`: only GitHub is faked) with `--service-manager subprocess` and the
+  production OpenPnP command (flock, java, the unit's flags), with a temp root, STATE.md, lock and activity
+  file. `--device` is the lumen-sim link and `--usb-sn ''` (a pty has no USB identity). lumen-sim gets `G92 B0`
+  first: Marlin's boot position is the power-cycle signature, which is never homed.
+- **test_1:** poll and deploy; OpenPnP started; `run` (poll and deploy of the newer build over the running
+  OpenPnP); rollback. Checked: exit codes, links, deployed.json, bad.json, the `server.version` each health
+  check saw, STATE.md's Deployed line and Holder, deploy.jsonl. In lumen-sim's I/O log: one G28 per health check,
+  each answered before any M410, and the DISABLE_COMMAND lines after each home.
+- **test_2:** lumen-sim power-cycled, a third build: `run` exits 5 after reading X/Y/Z 0, B 720. Nothing moves
+  (no G0/G1/G28), the previous build runs again unchecked, the new build is not marked bad, and the hold is set
+  until `resume`.
+
+From the repo root, with the build in `target/`:
+```
+IL_DEPLOY_E2E=1 IL_DEPLOY_E2E_JAR=target/openpnp-gui-0.0.1-alpha-SNAPSHOT.jar IL_DEPLOY_E2E_LIB=target/lib \
+  IL_DEPLOY_E2E_OUT="$RUNNER_TEMP/deploy-e2e" python3 infra/deploy/e2e/test_deploy_openpnp.py -v
+```
+- Without `IL_DEPLOY_E2E=1` (or without the jar or lib) the test skips. Run as a script with
+  `IL_DEPLOY_E2E=1`, a skip exits 1, so a miswired CI job cannot pass by skipping.
+- `IL_DEPLOY_E2E_OUT` keeps deploy.jsonl, OpenPnP's log and output, lumen-sim's I/O log, STATE.md and
+  results.json (timings).
+
+CI job (`needs: build`; ubuntu-latest): `actions/checkout`, `actions/setup-java` (temurin 17),
+`actions/download-artifact` of `openpnp-build` into `target`, then the command above. Upload
+`$RUNNER_TEMP/deploy-e2e` with `if: always()`.
+- Beyond ubuntu-latest's defaults it needs only `xvfb`:
+  `command -v Xvfb >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q xvfb; }`, as in
+  `.github/actions/sim-env`.
+- Python 3.12 and util-linux `flock` are on the image already.
+- `timeout-minutes: 15`.
+
+Found by it on 10-31, fixed test-first:
+- The health check took the first 200 from `/api/status` as final. OpenPnP starts its API and the dispense
+  engine on `configurationComplete`, in no fixed order (its listeners are a HashSet). So the first deploy failed
+  with "the dispense engine is not usable" and marked a good build bad (`test_health`,
+  `test_deploy_flow`: `engine_start_s`).
+- The subprocess manager's `stop` returned as soon as flock exited, while java still held the serial lock: the
+  next start failed with exit 75 (`test_service`).

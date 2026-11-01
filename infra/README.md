@@ -39,3 +39,9 @@ python3 -m unittest discover -s infra/ci/tests -t infra/ci
 python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
 python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```
+
+End-to-end tests with the real OpenPnP build start Java and need the jar (`mvn -DskipTests package`); they skip
+without their env:
+- `deploy/e2e/test_deploy_openpnp.py`: il_deploy with lumen-sim, no uinav, about 2 min. The CI command is in
+  `deploy/README.md` "End to end"; the job is not wired into `ci.yml` yet.
+- `lumen-sim/e2e/test_openpnp_pty.py`: OpenPnP on lumen-sim through openpnp-uinav's `--controller pty`.
