@@ -19,20 +19,22 @@ Usage (common flags go after the subcommand):
   il_deploy.py poll                         stage the newest eligible release
   il_deploy.py deploy [--version TAG]       deploy the newest staged, not-bad release when idle;
                                             --version picks one and overrides the bad list
-  il_deploy.py rollback                     one step back to previous, with its pre-deploy snapshot
+  il_deploy.py rollback [--discard-config-changes]
+                                            one step back to previous, with its pre-deploy config
+                                            snapshot; refused if the config changed since the deploy
   il_deploy.py run                          poll, then deploy if newer (what the timer calls)
   il_deploy.py health [--sha7 X] [--no-claim]  the health check alone; JSON report
   il_deploy.py status                       versions, last deploy, idle verdict (JSON)
   il_deploy.py init --seed-from DIR         create state/config once from an existing config
   il_deploy.py units --out DIR [--script P] render the systemd user units (never installs them)
-  il_deploy.py resume                       clear the hold latch after a person checked the machine
-  il_deploy.py stop-openpnp                 POST /api/stop, wait until disabled (the unit's ExecStop)
+  il_deploy.py resume                       a person checked the machine: clear the hold, hand back the Holder
+  il_deploy.py stop-openpnp                 POST /api/stop unless homing, wait until disabled (the ExecStop)
   il_deploy.py check-device                 exit 1 if a process has the serial device open
 Common flags: --root --state-md --lock --device --activity FILE (repeatable) --quiet-min --api-port
   --usb-sn --expect-simulated --repo --branch --service --service-manager systemd|subprocess
   --openpnp-cmd CMD ({python} {root} {config} {port} {lock} {prefs} placeholders; subprocess only)
 Exit codes: 0 done or nothing to do; 1 error; 2 refused; 3 not idle; 4 deploy failed and rolled back;
-  5 failed and a person must check (OpenPnP stopped, or left alone mid-home; hold set).
+  5 failed and a person must check (hold set; the Holder stays 'Infra (...): a person must check').
 """
 import argparse
 import contextlib
@@ -70,6 +72,7 @@ REPO = "theinstancelabs/openpnp"
 BRANCH = "il/integration"
 UNIT = "il-openpnp.service"
 LOCK_CONFLICT = 75  # flock -E: the serial lock was taken by someone else when OpenPnP started
+UNIT_HOME_WAIT, UNIT_STOP_TIMEOUT = 300, 10  # the unit's ExecStop: a whole home, then the STOP
 # GitHub compare <branch head>...<build sha>: the build is the head ("identical") or an ancestor ("behind")
 ELIGIBLE_COMPARE = ("identical", "behind")
 TAG_RE = re.compile(r"^il-build-(\d+)-([0-9a-f]{7})$")
@@ -144,25 +147,34 @@ def find_entries(lines, label):
     return out
 
 
+def _value_end(lines, i, j):
+    """End of the value of the entry lines[i:j]: its first line plus wrapped lines up to the first sub-bullet.
+    lines[end:j] are notes under it."""
+    k = i + 1
+    while k < j and not re.match(r"^[-*+][ \t]", lines[k].strip()):
+        k += 1
+    return k
+
+
 def parse_holder(text):
-    """Fail closed: idle only with exactly one Holder bullet whose value starts with 'nobody' and no
-    one waiting ('wants') in its entry."""
+    """Fail closed: idle only with exactly one Holder bullet whose value starts with 'nobody', no one waiting
+    ('wants') and no notes (sub-bullets) under it: a note is for the next taker to read first."""
     lines = text.splitlines()
     found = find_entries(lines, "Holder")
     if len(found) != 1:
         return Holder(None, False, "STATE.md has %s '- **Holder:**' line" % ("no" if not found else
                                                                              f"{len(found)} a"))
     i, j, m = found[0]
-    parts, bullets = [m.group("value")], []
-    for line in lines[i + 1:j]:
-        s = line.strip()
-        (bullets if re.match(r"^[-*+][ \t]", s) else parts).append(s)
-    value = " ".join(p for p in parts if p)
+    k = _value_end(lines, i, j)
+    value = " ".join(p for p in [m.group("value")] + [l.strip() for l in lines[i + 1:k]] if p)
+    notes = " ".join(l.strip() for l in lines[k:j])
     if not _NOBODY.match(value):
         return Holder(value, False, f"STATE.md Holder: {value or '(empty)'}")
-    entry = " ".join([value] + bullets)
+    entry = " ".join(p for p in (value, notes) if p)
     if _WANTS.search(entry):
         return Holder(value, False, f"STATE.md Holder is nobody but someone is waiting: {entry}")
+    if notes:
+        return Holder(value, False, f"STATE.md Holder is nobody but has notes under it (read them first): {notes}")
     return Holder(value, True, "STATE.md Holder: " + value)
 
 
@@ -245,15 +257,21 @@ def edit_state_file(path, fn, before_rename=None):
 
 
 def claim_holder(path, claim, before_rename=None):
-    """Write claim as the Holder if it is nobody now; returns the previous value. NotIdle otherwise."""
+    """Write claim as the Holder if it is nobody now. Returns the previous value as it stood in the file (wrapped
+    lines included), so it can be put back exactly or carried into the release. NotIdle otherwise."""
     prev = {}
 
     def fn(text):
         h = parse_holder(text)
         if not h.idle:
             raise NotIdle(h.reason)
-        prev["value"] = h.value
-        return replace_entry(text, "Holder", claim)
+        lines = text.splitlines(keepends=True)
+        (i, j, m), = find_entries(lines, "Holder")
+        k = _value_end(lines, i, j)
+        start = m.start("value")
+        prev["value"] = "".join([lines[i][start:]] + lines[i + 1:k]).rstrip("\r\n")
+        prefix = lines[i][:start] if lines[i][:start].endswith((" ", "\t")) else lines[i][:start] + " "
+        return "".join(lines[:i] + [prefix + claim + _newline(lines[k - 1], text)] + lines[k:])
 
     try:
         edit_state_file(path, fn, before_rename)
@@ -276,8 +294,8 @@ def _swap_claim(text, claim, value):
 
 
 def release_holder(path, claim, value, tries=5, before_rename=None):
-    """Hand the Holder back (value) if its line still starts with our claim; someone else's Holder is left
-    alone. Retries on concurrent edits. True if written."""
+    """Hand the Holder back (value) if its line still starts with our claim: True. Someone else's Holder is left
+    alone: False. Retries on concurrent edits; raises StateFileConflict or OSError if it cannot write."""
     for attempt in range(tries):
         ours = {}
 
@@ -290,15 +308,32 @@ def release_holder(path, claim, value, tries=5, before_rename=None):
             edit_state_file(path, fn, before_rename)
             return ours["yes"]
         except StateFileConflict:
+            if attempt == tries - 1:
+                raise
             time.sleep(0.2 * (attempt + 1))
-        except (OSError, ValueError):
-            return False
-    return False
 
 
 def _safe_note(note):
-    note = re.sub(r"\s+", " ", str(note)).replace("?", "")
+    """One line, no '?' or 'wants' (they would hold the machine), brackets instead of parentheses (the note sits
+    inside the release stamp's)."""
+    note = re.sub(r"\s+", " ", str(note)).replace("?", "").replace("(", "[").replace(")", "]")
     return _WANTS.sub("needs", note)[:300]
+
+
+_INFRA_STAMP = re.compile(r"^nobody \(released by Infra [^()]*\)(?:; earlier: )?")
+
+
+def released_value(action, hhmm, note=None, prev=None):
+    """'nobody (released by Infra <action> at HH:MM[; note])', then what the previous idle Holder said after its
+    'nobody', so a claim never loses it (an earlier Infra stamp is replaced, not nested)."""
+    base = f"nobody (released by Infra {action} at {hhmm}"
+    text = base + (f"; {_safe_note(note)})" if note else ")")
+    rest = " ".join((prev or "").split())
+    m = _INFRA_STAMP.match(rest)
+    rest = rest[m.end():] if m else _NOBODY.sub("", rest, count=1).strip(" ;,.:-")
+    if rest:
+        text += "; earlier: " + rest
+    return text if parse_holder("- **Holder:** " + text).idle else base + ")"
 
 
 # ------------------------------------------------------------------------------------------------
@@ -736,7 +771,8 @@ def make_service(cfg):
     api, root = Api(cfg.api_port), cfg.root
     return SubprocessService(openpnp_command(cfg), os.path.join(root, "current"), dict(os.environ, **openpnp_env(cfg)),
                              os.path.join(root, "run"), os.path.join(root, "log"), name=cfg.service.rsplit(".", 1)[0],
-                             pre_stop=lambda: api_stop_and_wait(api, cfg.stop_timeout))
+                             pre_stop=lambda: stop_sequence(api, cfg.home_busy_wait, cfg.stop_timeout,
+                                                            cfg.poll_interval, Clock()))
 
 
 def api_stop_and_wait(api, timeout, poll=0.2):
@@ -757,6 +793,70 @@ def api_stop_and_wait(api, timeout, poll=0.2):
             if code == 200 and m.get("enabled") is False:
                 return True, "machine disabled"
     return False, f"the machine is still enabled {timeout:g} s after POST /api/stop"
+
+
+def stop_sequence(api, wait_s, stop_timeout, poll, clock):
+    """STOP OpenPnP's machine before OpenPnP is stopped or left alone. (ok, detail): ok = stopped, or nothing to
+    stop (the API is gone). A STOP inside G28 hangs the controller until a power cycle, so:
+    - the pressure held, or an engine run past its home (phase not 'home: ...'): STOP at once, outputs may be on
+      (homes refuse while the pressure is held);
+    - otherwise wait while the machine is busy or its state is unknown (no answer in time, HTTP != 200), up to
+      wait_s, then STOP. Still busy then: no STOP (after SIGTERM, Marlin finishes the home on its own)."""
+    end = clock.monotonic() + wait_s
+    while True:
+        try:
+            code, st = api.get("/api/status", timeout=5)
+        except ApiTimeout as e:
+            why = f"OpenPnP did not answer in time ({e})"
+        except ApiDown as e:
+            return True, f"OpenPnP's API does not answer ({e}); nothing to stop"
+        else:
+            if code != 200:
+                why = f"/api/status answered HTTP {code}"
+            else:
+                m, run, p = (st.get(k) if isinstance(st.get(k), dict) else {} for k in ("machine", "run", "pressure"))
+                pressure = bool(p.get("on")) or p.get("state") not in (None, "off")
+                running = run.get("running") is True
+                run_homing = running and str(run.get("phase") or "").startswith("home")
+                if pressure or (running and not run_homing) or (not running and m.get("busy") is False):
+                    return api_stop_and_wait(api, stop_timeout, poll)
+                why = "the machine is busy (homing?)"
+        if clock.monotonic() >= end:
+            return False, f"STOP not sent: {why} for {wait_s:g} s"
+        clock.sleep(poll)
+
+
+def config_manifest(config_dir):
+    """{path relative to config_dir: sha256}, to spot config changes since a deploy. Skipped: log/ and SQLite
+    -shm files (an index that changes on reads; the db and its -wal hold the data)."""
+    out = {}
+    for d, dirs, files in os.walk(config_dir):
+        rel = os.path.relpath(d, config_dir)
+        if rel == ".":
+            dirs[:] = [x for x in dirs if x != "log"]
+        for n in files:
+            if n.endswith("-shm"):
+                continue
+            try:
+                out[os.path.normpath(os.path.join(rel, n))] = sha256_file(os.path.join(d, n))
+            except OSError:
+                out[os.path.normpath(os.path.join(rel, n))] = None
+    return out
+
+
+def manifest_changes(old, new):
+    return ([f"{k} changed" for k in sorted(old.keys() & new.keys()) if old[k] != new[k]]
+            + [f"{k} added" for k in sorted(new.keys() - old.keys())]
+            + [f"{k} removed" for k in sorted(old.keys() - new.keys())])
+
+
+def _record_for(dep, tag):
+    """deployed.json's record of tag (as current or previous), or None."""
+    for k in ("current", "previous"):
+        r = (dep or {}).get(k)
+        if tag and isinstance(r, dict) and r.get("tag") == tag:
+            return r
+    return None
 
 
 class Clock:
@@ -807,7 +907,8 @@ class Deployer:
         self._gh = deps.github
         self.api = Api(cfg.api_port)
         self.out = sys.stdout
-        self.held = False
+        self.held = False  # a person must check the machine (set during this claim)
+        self.switched = False  # current/previous were switched during this claim
         r = cfg.root
         self.releases = os.path.join(r, "releases")
         self.snapshots = os.path.join(r, "snapshots")
@@ -837,9 +938,12 @@ class Deployer:
         return time.strftime(fmt, time.localtime(self.clock.now()))
 
     def record(self, event, **kw):
-        os.makedirs(self.logdir, exist_ok=True)
-        with open(self.journal, "a") as f:
-            f.write(json.dumps(dict(ts=self.iso(), event=event, **kw), default=str) + "\n")
+        try:
+            os.makedirs(self.logdir, exist_ok=True)
+            with open(self.journal, "a") as f:
+                f.write(json.dumps(dict(ts=self.iso(), event=event, **kw), default=str) + "\n")
+        except OSError as e:  # a full disk must not stop a deploy halfway
+            print(f"il_deploy: cannot write {self.journal}: {e}", file=sys.stderr, flush=True)
 
     def refuse(self, msg):
         print("refused: " + msg, flush=True)
@@ -902,6 +1006,7 @@ class Deployer:
         os.replace(tmp, path)
 
     def set_links(self, current, previous):
+        self.switched = True
         self._set_link("previous", previous)
         self._set_link("current", current)
         self.record("switch", current=current and os.path.basename(current),
@@ -1020,56 +1125,106 @@ class Deployer:
         return out
 
     def _api_quiet_reasons(self, st):
-        now_ms, quiet_ms, out = self.clock.now() * 1000, self.cfg.quiet_min * 60000, []
-        last = st.get("lastRun") if isinstance(st.get("lastRun"), dict) else {}
-        p = st.get("pressure") if isinstance(st.get("pressure"), dict) else {}
-        for what, ms in (("a run ended", last.get("finishedAtMs")), ("a pressure event", p.get("lastEventAtMs"))):
-            if isinstance(ms, (int, float)) and now_ms - ms < quiet_ms:
-                out.append(f"{what} {int((now_ms - ms) / 1000)} s ago in OpenPnP "
-                           f"(quiet period {int(quiet_ms / 1000)} s)")
-        return out
+        """Activity in OpenPnP within the quiet period: run.finishedAtMs (RunTracker), lastRun.endedAtMs
+        (Views.run), padCalibration.endedAtMs, pressure.lastEventAtMs. The pressure hold's first value, 'pressure
+        off' stamped when the API starts (PressureHold.java:77-78), is not an event."""
+        now_ms, quiet_ms = self.clock.now() * 1000, self.cfg.quiet_min * 60000
+        run, last, pad, p = (st.get(k) if isinstance(st.get(k), dict) else {}
+                             for k in ("run", "lastRun", "padCalibration", "pressure"))
+        latest = {}
+        for what, ms in (("a run ended", run.get("finishedAtMs")), ("a run ended", last.get("endedAtMs")),
+                         ("a pad calibration ended", pad.get("endedAtMs")),
+                         ("a pressure event", None if p.get("lastEvent") == "pressure off" else p.get("lastEventAtMs"))):
+            if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+                latest[what] = max(ms, latest.get(what, ms))
+        return [f"{what} {int((now_ms - ms) / 1000)} s ago in OpenPnP (quiet period {int(quiet_ms / 1000)} s)"
+                for what, ms in latest.items() if now_ms - ms < quiet_ms]
 
     # --- claiming --------------------------------------------------------------------------------
-    def release_text(self, action, note=None):
-        base = f"nobody (released by Infra {action} at {self.stamp('%H:%M')}"
-        text = base + (f"; {_safe_note(note)})" if note else ")")
-        return text if parse_holder("- **Holder:** " + text).idle else base + ")"
+    def held_text(self, action, subject, note):
+        """The Holder while the hold is set: it must not read as free to other roles."""
+        who = f"Infra ({action}{' ' + subject if subject else ''})"
+        return (f"{who}: a person must check the machine (hold set at {self.stamp('%H:%M')}"
+                + (f": {_safe_note(note)}" if note else "") + "); after the check run `il_deploy.py resume`")
 
     def with_claim(self, action, subject, fn, scope="deploy"):
-        """Claim the Holder, re-check idle, run fn(claim) -> (rc, note), and release the Holder whatever
-        happens. An unexpected exception leaves the machine stopped and sets the hold latch."""
+        """Claim the Holder, re-check idle, run fn(claim) -> (rc, note), and hand the Holder back whatever happens:
+        'nobody (...)' if all is well, a held Holder if a person must check the machine (the hold is set). An
+        unexpected exception (SIGTERM included) stops the machine if it safely can and sets the hold."""
         claim = f"Infra ({action}{' ' + subject if subject else ''}) since {self.stamp()}"
+        _defer_term(True)
         try:
             prev = claim_holder(self.cfg.state_md, claim)
         except (NotIdle, StateFileConflict, OSError, ValueError) as e:
+            _defer_term(False)
             return self.not_idle([f"could not claim the Holder: {e}"])
-        self.record("claim", holder=claim, previous=prev)
-        self.held = False
+        except BaseException:
+            _defer_term(False)
+            raise
+        self.held = self.switched = False
         rc, note = 1, None
         try:
+            _defer_term(False)  # a SIGTERM during the claim is raised here, inside the try
+            self.record("claim", holder=claim, previous=prev)
             reasons = self.idle_reasons(our_claim=claim, scope=scope)
             if reasons:
-                back = release_holder(self.cfg.state_md, claim, prev)
-                self.record("unclaim", restored=back, holder=prev)
+                if self._hand_back(action, claim, prev, prev) is None:
+                    return 1
                 return self.not_idle(reasons)
             rc, note = fn(claim)
         except BaseException as e:
-            rc = 1
-            note = f"{action} failed unexpectedly ({type(e).__name__}: {e}); machine stopped through /api/stop"
-            self.record("exception", error=f"{type(e).__name__}: {e}", traceback=traceback.format_exc())
-            self.say(f"{action}: unexpected {type(e).__name__}: {e}")
-            try:
-                ok, detail = self.stop_machine()
-                self.record("stop", ok=ok, detail=detail)
-            except BaseException as e2:
-                self.record("stop", ok=False, detail=f"{type(e2).__name__}: {e2}")
-            self.set_hold(note)
-        text = self.release_text(action, note)
-        self.record("release", ok=release_holder(self.cfg.state_md, claim, text), holder=text)
-        self.record("result", action=action, subject=subject, rc=rc, note=note)
-        if note:
-            self.say(note)
+            rc, note = 1, self._after_exception(action, e)
+        _defer_term(True)
+        try:
+            if self.held:
+                text = self.held_text(action, subject, note)
+                write_json(self.hold_path, dict(self.read_hold() or {}, holder=text, previous=prev))
+            else:
+                text = released_value(action, self.stamp("%H:%M"), note, prev)
+            if self._hand_back(action, claim, text, prev) is None:
+                rc = rc or 1
+            self.record("result", action=action, subject=subject, rc=rc, note=note)
+            if note:
+                self.say(note)
+        finally:
+            _TERM.update(defer=False, pending=None)  # done: a SIGTERM now just ends the process as planned
         return rc
+
+    def _hand_back(self, action, claim, text, prev):
+        """Swap our claim for text. True, False (someone else's Holder now), or None: it could not be written,
+        which is said on stderr and sets the hold."""
+        try:
+            ok = release_holder(self.cfg.state_md, claim, text)
+            self.record("release", ok=ok, holder=text)
+            return ok
+        except (StateFileConflict, OSError) as e:
+            msg = (f"could not hand the Holder back in {self.cfg.state_md} ({e}): it still says '{claim}'; "
+                   "a person must set it")
+            print(f"{action}: {msg}", file=sys.stderr, flush=True)
+            self.record("release", ok=False, error=str(e), holder=text)
+            self.set_hold(msg)
+            write_json(self.hold_path, dict(self.read_hold() or {}, holder=claim, previous=prev))
+            return None
+
+    def _after_exception(self, action, e):
+        self.record("exception", error=f"{type(e).__name__}: {e}", traceback=traceback.format_exc())
+        self.say(f"{action}: unexpected {type(e).__name__}: {e}")
+        try:
+            ok, detail = self.stop_machine()
+        except BaseException as e2:
+            ok, detail = False, f"STOP not sent: {type(e2).__name__}: {e2}"
+        self.record("stop", ok=ok, detail=detail)
+        note = (f"{action} failed unexpectedly ({type(e).__name__}: {e}); "
+                + ("machine stopped through /api/stop" if ok and detail == "machine disabled" else detail))
+        self.set_hold(note)
+        if self.switched:
+            cur = self.current_tag()
+            rec = (self.read_deployed() or {}).get("current") or {}
+            then = ("`il_deploy.py health` (verifies it) or `il_deploy.py rollback`"
+                    if rec.get("pending") and rec.get("tag") == cur else "`il_deploy.py health`")
+            self.state_line(f"{cur} installed but NOT verified: the {action} stopped unexpectedly "
+                            f"({type(e).__name__}: {e}); a person must check the machine, then {then}.")
+        return note
 
     # --- stopping and starting OpenPnP -----------------------------------------------------------
     def _wait_not_busy(self, seconds):
@@ -1085,17 +1240,10 @@ class Deployer:
                 return False
             self.clock.sleep(self.cfg.poll_interval)
 
-    def stop_machine(self, stop_if_still_busy=False):
-        """STOP and wait until disabled; first wait while the machine is busy, since a STOP during homing
-        hangs the controller. (ok, detail); a busy machine is left alone unless stop_if_still_busy."""
-        try:
-            code, m = self.api.get("/api/machine", timeout=10)
-        except ApiDown as e:
-            return True, f"API not answering ({e}); nothing to stop"
-        if code == 200 and m.get("busy") is not False:
-            if not self._wait_not_busy(self.cfg.home_busy_wait) and not stop_if_still_busy:
-                return False, "the machine stayed busy (homing?); STOP not sent"
-        return api_stop_and_wait(self.api, self.cfg.stop_timeout, self.cfg.poll_interval)
+    def stop_machine(self):
+        """STOP and wait until disabled, never during a home (stop_sequence). (ok, detail)."""
+        return stop_sequence(self.api, self.cfg.home_busy_wait, self.cfg.stop_timeout, self.cfg.poll_interval,
+                             self.clock)
 
     def stop_service(self):
         """Stop the running service gracefully. None if stopped, else (rc, note) for the caller to return."""
@@ -1120,9 +1268,11 @@ class Deployer:
             self.clock.sleep(self.cfg.poll_interval)
 
     def stop_after_failure(self):
+        """STOP, then stop the service. False, with OpenPnP left running, unless the STOP was confirmed or the API
+        is gone: SIGTERM sends no STOP and leaves the outputs as they are."""
         ok, detail = self.stop_machine()
         self.record("stop", ok=ok, detail=detail)
-        if not ok and "busy" in detail:
+        if not ok:
             return False
         self.svc.stop()
         self.record("service-stop")
@@ -1211,7 +1361,12 @@ class Deployer:
             return fail("status", f"server.version {version!r} is not build {expect_sha7}", stop=False)
         if sim is not cfg.expect_simulated:
             return fail("status", f"server.simulated is {sim}, expected {cfg.expect_simulated}", stop=False)
-        step("status", f"version {version}, simulated {sim}")
+        d = st.get("dispense") if isinstance(st.get("dispense"), dict) else {}
+        if d.get("running") is not True or d.get("available") is not True:
+            # DispenseService.install only logs a failed start: OpenPnP runs on, without its engine
+            return fail("status", f"the dispense engine is not usable (dispense.running {d.get('running')}, "
+                                  f"available {d.get('available')}: {d.get('unavailableReason')})", stop=False)
+        step("status", f"version {version}, simulated {sim}, dispense engine available")
 
         try:
             code, m = self.api.get("/api/machine", timeout=10)
@@ -1261,7 +1416,9 @@ class Deployer:
         except ApiDown as e:
             return fail("home", str(e))
         if code != 200 or body.get("homed") is not True:
-            return fail("home", f"HTTP {code}: {body.get('reason', body)}")
+            reason = str(body.get("reason", body))
+            # a failed home (fiducial covered, endstop, obstruction) is the machine's: no second home unwatched
+            return fail("home", f"HTTP {code}: {reason}", "machine" if "homing failed" in reason else "build")
 
         self._wait_not_busy(min(10.0, cfg.home_busy_wait))  # the task may end a moment after the reply
         try:
@@ -1269,7 +1426,8 @@ class Deployer:
         except ApiDown as e:
             return fail("homed", str(e))
         if m.get("homed") is not True or m.get("busy") is not False:
-            return fail("home" if late else "homed", f"homed {m.get('homed')}, busy {m.get('busy')}")
+            return fail("home" if late else "homed", f"homed {m.get('homed')}, busy {m.get('busy')}",
+                        "machine" if late else "build")
         step("home", "homed" + (" (ended after the request timed out)" if late else ""))
         step("homed", {"homed": True, "busy": False, "positions": m.get("positions")})
 
@@ -1453,12 +1611,43 @@ class Deployer:
         self._check_tree(d, tag, info)
         return info
 
+    def verify_on_github(self, tag, info):
+        """The staged folder must be the GitHub release's build: its BUILD-INFO from the release, compared by sha
+        and jar_sha256 (a folder copied in by hand agrees only with itself)."""
+        try:
+            rel = self.gh.get_json(f"repos/{self.cfg.repo}/releases/tags/{tag}")
+        except GitHubError as e:
+            if e.status == 404:
+                raise Refused(f"there is no GitHub release {tag} in {self.cfg.repo}: a folder placed by hand?")
+            raise
+        asset = next((a for a in rel.get("assets") or [] if a.get("name") == "BUILD-INFO.json"), None)
+        if asset is None:
+            raise Refused(f"the GitHub release {tag} has no BUILD-INFO.json")
+        os.makedirs(self.releases, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".verify-", dir=self.releases) as d:
+            self.gh.download(asset, os.path.join(d, "BUILD-INFO.json"))
+            remote = read_json(os.path.join(d, "BUILD-INFO.json")) or {}
+        for k in ("sha", "jar_sha256"):
+            if remote.get(k) != info.get(k):
+                raise Refused(f"the staged folder is not the GitHub release's build: its {k} "
+                              f"{str(info.get(k))[:12]} differs from {str(remote.get(k))[:12]}")
+
     def deploy(self, version=None):
         cur = self.current_tag()
+        rec = (self.read_deployed() or {}).get("current") or {}
+        if rec.get("pending") and rec.get("tag") == cur:
+            return self.refuse(f"the current {cur} is not verified (its deploy was cut short at "
+                               f"{rec.get('switched_at')}): after checking the machine, `il_deploy.py health` "
+                               "verifies it, or `il_deploy.py rollback` goes back")
         if version:
             tag = version
             if not os.path.isdir(os.path.join(self.releases, tag)):
                 return self.refuse(f"{tag} is not staged (run poll first)")
+            t, c = parse_tag(tag), parse_tag(cur)
+            if t and c and t[0] < c[0]:
+                return self.refuse(f"{tag} is older than the current {cur}, whose start migrated the config one "
+                                   "way: an older build must not run on it. `il_deploy.py rollback` goes back one "
+                                   "step with the matching config snapshot")
         else:
             tag = self.pick_target(cur)
             if tag is None:
@@ -1475,7 +1664,10 @@ class Deployer:
         if reasons:
             return self.not_idle(reasons)
         try:
+            self.verify_on_github(tag, info)
             ok, why = self.commit_eligible(info["sha"])
+        except Refused as e:
+            return self.refuse(f"{tag}: {e}")
         except GitHubError as e:
             return self.refuse(f"{tag}: cannot verify it on GitHub: {e}")
         if not ok:
@@ -1492,41 +1684,58 @@ class Deployer:
             if r:
                 return r
         snap = self.snapshot(f"pre-{tag}")
+        # written before the switch, so that rollback finds an unverified build whatever stops this run
+        rec = {"tag": tag, "sha": info["sha"], "run_url": info.get("run_url"), "pre_snapshot": snap, "previous": cur,
+               "switched_at": self.iso(), "pending": "installed; its health check has not passed"}
+        write_json(self.deployed_path, {"current": rec, "previous": _record_for(before["deployed"], cur)})
         self.set_links(os.path.join(self.releases, tag), before["current"])
         rep = self.start_and_check(info["sha"][:7])
         if not rep["ok"]:
             return self._recover(tag, rep, before, snap, was_running)
-        prev_rec = (before["deployed"] or {}).get("current")
-        write_json(self.deployed_path, {
-            "current": {"tag": tag, "sha": info["sha"], "run_url": info.get("run_url"), "deployed_at": self.iso(),
-                        "since": self.stamp(), "pre_snapshot": snap, "previous": cur},
-            "previous": prev_rec})
+        self.restore_running(was_running)
+        self._verified(rec)
         if forced:
             self.unbad(tag)
         self.state_line(f"{self.describe(tag)} since {self.stamp()}, deployed by Infra (il_deploy.py)"
                         + (f"; previous {cur}" if cur else "") + f". Config state: {self.config}.")
-        self.restore_running(was_running)
         self.record("deployed", tag=tag, previous=cur)
         self.prune()
         self.say(f"deployed {tag}" + (f" (previous {cur})" if cur else ""))
         return 0, None
 
+    def _verified(self, rec):
+        """The current build passed its health check: drop 'pending' and keep the config's manifest, the baseline
+        a later rollback compares with."""
+        rec = {k: v for k, v in rec.items() if k != "pending"}
+        rec.update(deployed_at=self.iso(), since=self.stamp(), post_manifest=config_manifest(self.config))
+        write_json(self.deployed_path, dict(self.read_deployed() or {}, current=rec))
+
+    def _start_unchecked(self):
+        try:
+            self.svc.start()
+        except (ServiceError, OSError, subprocess.SubprocessError) as e:
+            self.record("start", ok=False, error=str(e))
+            return f"; OpenPnP ran before but did not start again ({e})"
+        self.record("start", ok=True, checked=False)
+        return "; OpenPnP runs again, machine not enabled"
+
     def _recover(self, tag, rep, before, snap, was_running):
-        """The new build failed its health check: roll back to the state before the deploy."""
+        """The new build failed its health check. A machine problem puts the previous build back with its config
+        but unchecked, so nothing moves before a person looks. Otherwise the previous build is started and
+        checked; the new one goes on the bad list only if the previous one passes (else the machine is suspect)."""
         failure, kind = rep["failure"], rep["kind"]
+        prev = os.path.basename(before["current"]) if before["current"] else None
+        back = f"; `il_deploy.py rollback` returns to {prev} with its config" if prev else ""
         if kind == "home-stuck":
             note = f"{tag} health check: {failure}"
             self.set_hold(note)
-            self.state_line(f"{tag} is installed but its health check did not finish ({failure}); OpenPnP left "
-                            "running, a person must check the machine.")
+            self.state_line(f"{tag} installed but NOT verified: its health check did not finish ({failure}); "
+                            f"OpenPnP left running, a person must check the machine{back}.")
             return 5, note
-        if kind == "build":
-            self.add_bad(tag, failure)
-        else:
-            self.set_hold(f"{tag}: {failure}")
         if not self.stop_after_failure():
-            note = f"{tag} failed its health check ({failure}) and OpenPnP stayed busy; left alone"
+            note = f"{tag} failed its health check ({failure}) and OpenPnP could not be stopped safely; left alone"
             self.set_hold(note)
+            self.state_line(f"{tag} installed but NOT verified: {note}; a person must check the machine{back}.")
             return 5, note
         self.restore_snapshot(snap, f"abandoned-{tag}")
         self.set_links(before["current"], before["previous"])
@@ -1535,29 +1744,43 @@ class Deployer:
                 os.unlink(self.deployed_path)
         else:
             write_json(self.deployed_path, before["deployed"])
-        prev = os.path.basename(before["current"]) if before["current"] else None
         if prev is None:
             self.record("rolled-back", tag=tag, to=None)
+            if kind == "build":
+                self.add_bad(tag, failure)
+            else:
+                self.set_hold(f"{tag}: {failure}")
             return (5 if self.held else 4), f"{tag} failed its health check ({failure}); nothing deployed before it"
+        if kind != "build":
+            note = f"{tag}'s health check hit a machine problem: {failure}"
+            self.set_hold(note)
+            started = self._start_unchecked() if was_running else ""
+            self.state_line(f"{self.describe(prev)} reinstalled with its config, not checked: at {self.stamp()} "
+                            f"{tag}'s health check hit a machine problem ({failure}); a person must check the "
+                            f"machine{started}.")
+            self.record("rolled-back", tag=tag, to=prev, checked=False)
+            return 5, note
         rep2 = self.start_and_check((self.build_info(prev).get("sha") or "")[:7])
         if rep2["ok"]:
+            self.add_bad(tag, failure)
             self.restore_running(was_running)
             since = ((before["deployed"] or {}).get("current") or {}).get("since", "?")
             self.state_line(f"{self.describe(prev)} since {since}; at {self.stamp()} {tag} failed its health check "
                             f"({failure}) and was rolled back automatically.")
             self.record("rolled-back", tag=tag, to=prev)
             return (5 if self.held else 4), f"{tag} failed its health check, rolled back to {prev}"
-        left = "OpenPnP left alone mid-home" if rep2["kind"] == "home-stuck" else "OpenPnP stopped"
-        if rep2["kind"] != "home-stuck":
-            self.stop_after_failure()
-        note = (f"{tag} failed its health check ({failure}) and the rollback to {prev} failed too "
-                f"({rep2['failure']}); {left}, a person must check the machine")
+        if rep2["kind"] == "home-stuck":
+            left = "OpenPnP left alone mid-home"
+        else:
+            left = "OpenPnP stopped" if self.stop_after_failure() else "OpenPnP could not be stopped safely, left alone"
+        note = (f"{tag} failed its health check ({failure}) and so did {prev} ({rep2['failure']}): the machine is "
+                f"suspect, {tag} is not marked bad; {left}, a person must check the machine")
         self.set_hold(note)
-        self.state_line(f"{prev} installed but NOT running: {note} (log: {self.journal}).")
+        self.state_line(f"{prev} installed but NOT verified: {note} (log: {self.journal}).")
         self.record("rollback-failed", tag=tag, to=prev)
         return 5, note
 
-    def rollback(self):
+    def rollback(self, discard=False):
         cur, prev, dep = self.current_tag(), self.previous_tag(), self.read_deployed() or {}
         rec = dep.get("current") or {}
         if not prev or rec.get("tag") != cur:
@@ -1565,38 +1788,55 @@ class Deployer:
         snap = rec.get("pre_snapshot")
         if not snap or not os.path.isdir(os.path.join(self.cfg.root, snap)):
             return self.refuse(f"the pre-deploy snapshot of {cur} ({snap}) is missing")
+        base = rec.get("post_manifest")
+        changes = None if base is None else manifest_changes(base, config_manifest(self.config))
+        if changes != [] and not discard:
+            why = (f"{cur} never passed its health check, so nothing shows what changed in {self.config} since it "
+                   f"was installed ({rec.get('switched_at')})" if changes is None else
+                   f"{self.config} changed since {cur} was deployed: {', '.join(changes)}")
+            return self.refuse(f"{why}. A rollback puts back the config from before {cur} ({snap}) and would undo "
+                               "that (the current one is kept under snapshots/). To go ahead: il_deploy.py rollback "
+                               "--discard-config-changes")
         reasons = self.idle_reasons()
         if reasons:
             return self.not_idle(reasons)
-        return self.with_claim("rollback", f"to {prev}", lambda claim: self._rollback(cur, prev, dep, snap))
+        return self.with_claim("rollback", f"to {prev}", lambda claim: self._rollback(cur, prev, dep, snap, changes))
 
-    def _rollback(self, cur, prev, dep, snap):
+    def _rollback(self, cur, prev, dep, snap, changes):
         was_running = self.svc.is_active()
-        self.record("begin", action="rollback", tag=cur, to=prev, was_running=was_running)
+        self.record("begin", action="rollback", tag=cur, to=prev, was_running=was_running, discarded=changes)
         if was_running:
             r = self.stop_service()
             if r:
                 return r
-        self.restore_snapshot(snap, f"abandoned-{cur}")
+        abandoned = self.restore_snapshot(snap, f"abandoned-{cur}")
         self.set_links(os.path.join(self.releases, prev), None)
-        prev_rec = dict(dep.get("previous") or {"tag": prev, "sha": self.build_info(prev).get("sha")},
-                        deployed_at=self.iso(), since=self.stamp(), rolled_back_from=cur)
+        prev_rec = {k: v for k, v in (_record_for(dep, prev) or {"tag": prev, "sha": self.build_info(prev).get("sha")})
+                    .items() if k != "post_manifest"}
+        prev_rec.update(deployed_at=self.iso(), since=self.stamp(), rolled_back_from=cur)
         write_json(self.deployed_path, {"current": prev_rec, "previous": None})
         self.add_bad(cur, "rolled back by 'il_deploy.py rollback'")
         rep = self.start_and_check((self.build_info(prev).get("sha") or "")[:7])
         if rep["ok"]:
             self.restore_running(was_running)
+            lost = ("no config change since the deploy was lost" if changes == [] else
+                    "config changes since the deploy discarded: " + ", ".join(changes) if changes else
+                    f"config changes since {cur} was installed discarded (not compared: it was never verified)")
             self.state_line(f"{self.describe(prev)} since {self.stamp()}, rolled back from {cur} by Infra "
-                            "(il_deploy.py rollback).")
+                            f"(il_deploy.py rollback): config back to its state before {cur}, {lost}; {cur}'s "
+                            f"config is kept in {abandoned}.")
             self.record("rolled-back", tag=cur, to=prev)
             self.say(f"rolled back from {cur} to {prev}")
-            return 0, None
-        if rep["kind"] != "home-stuck":
-            self.stop_after_failure()
-        note = (f"the rollback from {cur} to {prev} failed its health check ({rep['failure']}); a person must check "
-                "the machine")
+            return 0, (None if changes == [] else
+                       f"discarded config changes kept in {abandoned}: " + ", ".join(changes or ["not compared"]))
+        if rep["kind"] == "home-stuck":
+            left = "OpenPnP left alone mid-home"
+        else:
+            left = "OpenPnP stopped" if self.stop_after_failure() else "OpenPnP could not be stopped safely, left alone"
+        note = (f"the rollback from {cur} to {prev} failed its health check ({rep['failure']}); {left}, a person must "
+                "check the machine")
         self.set_hold(note)
-        self.state_line(f"{prev} installed but NOT running: {note} (log: {self.journal}).")
+        self.state_line(f"{prev} installed but NOT verified: {note} (log: {self.journal}).")
         return 5, note
 
     # --- state snapshots -------------------------------------------------------------------------
@@ -1627,13 +1867,16 @@ class Deployer:
         abandoned = os.path.join(self.snapshots, self._snapname(label))
         os.rename(self.config, abandoned)
         os.rename(tmp, self.config)
-        self.record("restore", snapshot=snap_rel, abandoned=os.path.relpath(abandoned, self.cfg.root))
+        rel = os.path.relpath(abandoned, self.cfg.root)
+        self.record("restore", snapshot=snap_rel, abandoned=rel)
+        return rel
 
     def prune(self):
         dep = self.read_deployed() or {}
         keep = {os.path.basename((dep.get(k) or {}).get("pre_snapshot") or "") for k in ("current", "previous")}
         with contextlib.suppress(OSError):
-            snaps = sorted(n for n in os.listdir(self.snapshots) if not n.startswith("."))
+            # an abandoned config may hold a day's calibration: a person deletes it, never this
+            snaps = sorted(n for n in os.listdir(self.snapshots) if not n.startswith(".") and "-abandoned-" not in n)
             for n in snaps[:-self.cfg.keep_snapshots]:
                 if n not in keep:
                     shutil.rmtree(os.path.join(self.snapshots, n), ignore_errors=True)
@@ -1664,6 +1907,7 @@ class Deployer:
             if reasons:
                 return self.not_idle(reasons)
             rep = self.health_check(sha7)
+            self._settle_pending(rep)
             print(json.dumps(rep, indent=1, default=str))
             return 0 if rep["ok"] else 1
         reasons = self.idle_reasons(scope="health")
@@ -1675,6 +1919,7 @@ class Deployer:
             rep = out["rep"] = self.health_check(sha7)
             self.record("health", ok=rep["ok"], kind=rep["kind"], failure=rep["failure"], report=rep)
             if rep["ok"]:
+                self._settle_pending(rep)
                 return 0, None
             if rep["kind"] in ("machine", "home-stuck"):
                 self.set_hold(f"health check: {rep['failure']}")
@@ -1684,6 +1929,21 @@ class Deployer:
         if "rep" in out:
             print(json.dumps(out["rep"], indent=1, default=str))
         return rc
+
+    def _settle_pending(self, rep):
+        """A passed health check of a current build whose deploy was cut short verifies it."""
+        cur = self.current_tag()
+        rec = (self.read_deployed() or {}).get("current") or {}
+        sha7 = (rec.get("sha") or "")[:7]
+        if not (rep["ok"] and rec.get("pending") and rec.get("tag") == cur and sha7
+                and str(rep.get("version", "")).endswith("." + sha7)):
+            return
+        self._verified(rec)
+        prev = rec.get("previous")
+        self.state_line(f"{self.describe(cur)} since {self.stamp()}, deployed by Infra (il_deploy.py), verified by a "
+                        "health check after its deploy was cut short" + (f"; previous {prev}" if prev else "")
+                        + f". Config state: {self.config}.")
+        self.record("verified", tag=cur)
 
     def status(self):
         def info(tag):
@@ -1731,27 +1991,29 @@ class Deployer:
         return 0
 
     def resume(self):
+        """A person checked the machine: clear the hold and hand back the Holder the hold left."""
         hold = self.read_hold()
         if not hold:
             self.say("no hold set")
             return 0
+        if hold.get("holder"):
+            text = released_value("resume", self.stamp("%H:%M"), None, hold.get("previous"))
+            try:
+                ok = release_holder(self.cfg.state_md, hold["holder"], text)
+            except (StateFileConflict, OSError) as e:
+                print(f"resume: could not hand the Holder back in {self.cfg.state_md} ({e}); the hold stays",
+                      file=sys.stderr, flush=True)
+                return 1
+            self.say(f"Holder: {text}" if ok else "the Holder no longer shows the hold; left as it is")
         os.unlink(self.hold_path)
         self.record("resume", hold=hold)
         self.say(f"hold cleared (was: {hold.get('reason')})")
         return 0
 
     def stop_openpnp(self):
-        """The unit's ExecStop: an engine run is stopped at once; an OpenPnP task of its own (a home) gets
-        --home-busy-wait to finish; then STOP regardless, since outputs keep their state after SIGTERM."""
-        try:
-            code, st = self.api.get("/api/status", timeout=5)
-        except ApiDown:
-            self.say("OpenPnP's API does not answer; nothing to stop")
-            return 0
-        engine = bool(api_busy_reasons(dict(st, machine={"busy": False})))
-        if not engine and (st.get("machine") or {}).get("busy"):
-            self._wait_not_busy(self.cfg.home_busy_wait)
-        ok, detail = api_stop_and_wait(self.api, self.cfg.stop_timeout, self.cfg.poll_interval)
+        """The unit's ExecStop (outputs keep their state after SIGTERM): STOP at once while the pressure is held
+        or an engine run dispenses; wait up to --home-busy-wait while busy (a home); never STOP during a home."""
+        ok, detail = self.stop_machine()
         self.say(f"stop-openpnp: {detail}")
         return 0
 
@@ -1804,11 +2066,13 @@ def render_units(cfg, script, python):
         # bench tools refuse while OpenPnP holds the serial lock; refuse to start if the port is open
         "ExecStartPre=" + sd_join(me + ["check-device", "--device", cfg.device]),
         "ExecStart=" + sd_join(openpnp_command(cfg, use_override=False)),
-        # STOP sequence first: SIGTERM saves nothing and leaves the outputs as they are
-        "ExecStop=" + sd_join(me + ["stop-openpnp", "--api-port", str(port), "--home-busy-wait", "20",
-                                    "--stop-timeout", "5"]),
+        # STOP sequence first: SIGTERM saves nothing and leaves the outputs as they are. Never during a home:
+        # wait out a whole one (API homes 21-23 s, up to 5 min); still busy then, no STOP: SIGTERM closes the
+        # port and Marlin finishes the home. TimeoutStopSec covers the wait plus the STOP itself.
+        "ExecStop=" + sd_join(me + ["stop-openpnp", "--api-port", str(port), "--home-busy-wait",
+                                    str(UNIT_HOME_WAIT), "--stop-timeout", str(UNIT_STOP_TIMEOUT)]),
         "KillMode=mixed",
-        "TimeoutStopSec=30",
+        f"TimeoutStopSec={UNIT_HOME_WAIT + 60}",
         "Restart=no",
         "CPUWeight=1000",
         "IOWeight=1000",
@@ -1825,6 +2089,8 @@ def render_units(cfg, script, python):
     deploy = "\n".join([
         "[Unit]",
         "Description=Instance Labs auto-deploy: stage green il/integration builds, deploy when the machine is idle",
+        # at shutdown a unit ordered After= stops first: il_deploy finishes a home and STOPs before ExecStop runs
+        "After=il-openpnp.service",
         "",
         "[Service]",
         "Type=oneshot",
@@ -1889,8 +2155,11 @@ def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=__doc__.split("\n\n", 1)[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("poll", "rollback", "run", "status", "resume", "stop-openpnp", "check-device"):
+    for name in ("poll", "run", "status", "resume", "stop-openpnp", "check-device"):
         sub.add_parser(name, parents=[common])
+    sub.add_parser("rollback", parents=[common]).add_argument(
+        "--discard-config-changes", action="store_true",
+        help="go back even though the config changed since the deploy (those changes are kept in snapshots/)")
     sub.add_parser("deploy", parents=[common]).add_argument("--version", help="a staged tag (overrides the bad list)")
     p = sub.add_parser("health", parents=[common])
     p.add_argument("--sha7", help="expected build (default: the current release's)")
@@ -1964,7 +2233,7 @@ def main(argv=None, deps=None):
         if cmd == "deploy":
             return d.deploy(cfg.version)
         if cmd == "rollback":
-            return d.rollback()
+            return d.rollback(cfg.discard_config_changes)
         if cmd == "run":
             return d.run()
         if cmd == "health":
@@ -1976,8 +2245,23 @@ def main(argv=None, deps=None):
     return 2
 
 
+_TERM = {"defer": False, "pending": None}
+
+
 def _terminate(signum, frame):
+    if _TERM["defer"]:
+        _TERM["pending"] = signum
+        return
     raise Terminated(f"signal {signum}")
+
+
+def _defer_term(on):
+    """While on, SIGTERM waits (a Holder claim or release must not be cut in half); turning it off raises a SIGTERM
+    that came meanwhile."""
+    _TERM["defer"] = on
+    if not on and _TERM["pending"] is not None:
+        signum, _TERM["pending"] = _TERM["pending"], None
+        raise Terminated(f"signal {signum}")
 
 
 if __name__ == "__main__":

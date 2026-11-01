@@ -1,8 +1,11 @@
 """init: one-time seeding of <root>/state/config."""
 import os
+import sys
 import unittest
 
-from fakes import Lab
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from fakes import Lab  # noqa: E402
 
 
 class Init(unittest.TestCase):

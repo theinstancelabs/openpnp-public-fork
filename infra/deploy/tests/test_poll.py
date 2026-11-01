@@ -1,10 +1,13 @@
 """poll: only green il/integration builds whose sha is on il/integration are staged, verified and atomic."""
 import json
 import os
+import sys
 import unittest
 
-import il_deploy
-from fakes import Lab
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import il_deploy  # noqa: E402
+from fakes import Lab  # noqa: E402
 
 
 class Poll(unittest.TestCase):

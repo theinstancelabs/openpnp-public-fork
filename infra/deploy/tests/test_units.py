@@ -4,10 +4,13 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import unittest
 
-import il_deploy
-from fakes import Lab
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import il_deploy  # noqa: E402
+from fakes import Lab  # noqa: E402
 
 
 class Units(unittest.TestCase):
@@ -48,12 +51,27 @@ class Units(unittest.TestCase):
         stop = [l for l in u.splitlines() if l.startswith("ExecStop=")][0]
         self.assertIn("il_deploy.py stop-openpnp", stop)
         self.assertIn(f"--api-port {self.lab.port}", stop)
-        for line in ("KillMode=mixed", "TimeoutStopSec=30", "Restart=no", "Requires=il-openpnp-xvfb.service",
+        for line in ("KillMode=mixed", "Restart=no", "Requires=il-openpnp-xvfb.service",
                      "After=il-openpnp-xvfb.service"):
             self.assertIn(line + "\n", u)
         self.assertRegex(u, r"CPUWeight=\d{3,}")
         self.assertRegex(u, r"MemoryLow=\d+[MG]")
         self.assertIn("ExecStartPre=", u)
+
+    def test_exec_stop_never_stops_a_home_and_fits_its_timeout(self):
+        u = self.read("il-openpnp.service")
+        stop = [l for l in u.splitlines() if l.startswith("ExecStop=")][0].split()
+        wait = float(stop[stop.index("--home-busy-wait") + 1])
+        stop_timeout = float(stop[stop.index("--stop-timeout") + 1])
+        limit = float([l for l in u.splitlines() if l.startswith("TimeoutStopSec=")][0].split("=")[1])
+        # API homes take 21-23 s and up to 5 min (RESEARCH.md §2): wait out a whole home before any STOP
+        self.assertGreaterEqual(wait, 300)
+        # worst case: the wait, one slow status read (5 s), POST /api/stop (10 s), the disable wait, a margin
+        self.assertGreaterEqual(limit, wait + 5 + 10 + stop_timeout + 15)
+
+    def test_deploy_stops_before_openpnp_at_shutdown(self):
+        # units ordered After= stop first: il_deploy's own handler finishes a home before ExecStop runs
+        self.assertIn("After=il-openpnp.service\n", self.read("il-deploy.service"))
 
     def test_xvfb(self):
         u = self.read("il-openpnp-xvfb.service")

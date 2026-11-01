@@ -2,12 +2,15 @@
 import fcntl
 import os
 import subprocess
+import sys
 import time
 import unittest
 
-import il_deploy
-from fake_openpnp import FakeOpenPnP
-from fakes import Lab
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import il_deploy  # noqa: E402
+from fake_openpnp import FakeOpenPnP  # noqa: E402
+from fakes import Lab  # noqa: E402
 
 
 class FakeService:
@@ -126,6 +129,29 @@ class Idle(unittest.TestCase):
     def test_api_idle(self):
         self.start_fake()
         self.assertEqual(self.reasons(), [])
+
+    def test_pressure_initial_value_is_not_activity(self):
+        # PressureHold sets lastEventAtMs when OpenPnP starts ("pressure off"): not machine activity
+        self.start_fake()
+        self.assertEqual(self.reasons(), [])
+
+    def test_recent_activity_in_openpnp(self):
+        for key, word in (("last_run_ended_s_ago", "run"), ("run_finished_s_ago", "run"),
+                          ("pad_cal_ended_s_ago", "pad calibration"), ("pressure_event_s_ago", "pressure")):
+            with self.subTest(key=key, s_ago=60):
+                self.start_fake(**{key: 60})
+                try:
+                    r = self.reasons()
+                    self.assertTrue(any(word in x and "ago" in x for x in r), r)
+                finally:
+                    self.fake.shutdown()
+            with self.subTest(key=key, s_ago=20 * 60):
+                self.start_fake(**{key: 20 * 60})
+                try:
+                    self.assertEqual(self.reasons(), [])
+                finally:
+                    self.fake.shutdown()
+                    self.fake = None
 
     def test_api_busy_states(self):
         for fail, word in (("busy", "busy"), ("run", "run"), ("pressure", "pressure")):

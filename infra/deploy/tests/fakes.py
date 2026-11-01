@@ -14,7 +14,9 @@ import tarfile
 import tempfile
 import time
 
-import il_deploy
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import il_deploy  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE_OPENPNP = os.path.join(HERE, "fake_openpnp.py")
@@ -126,6 +128,12 @@ class FakeGitHub:
         repo = re.escape(self.repo)
         if re.fullmatch(rf"repos/{repo}/releases(\?.*)?", path):
             return list(self.releases)
+        m = re.fullmatch(rf"repos/{repo}/releases/tags/(.+)", path)
+        if m:
+            for r in self.releases:
+                if r["tag_name"] == m.group(1):
+                    return r
+            raise il_deploy.GitHubError("Not Found", status=404)
         m = re.fullmatch(rf"repos/{repo}/git/ref/heads/(.+)", path)
         if m:
             if m.group(1) != self.branch or not self.head:

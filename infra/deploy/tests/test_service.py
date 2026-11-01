@@ -7,7 +7,9 @@ import tempfile
 import time
 import unittest
 
-import il_deploy
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import il_deploy  # noqa: E402
 
 
 class Recorder:

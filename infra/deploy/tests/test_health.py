@@ -1,11 +1,14 @@
 """The health check against a fake OpenPnP: each failure mode, and never a STOP during a home."""
 import json
 import os
+import sys
 import unittest
 
-import il_deploy
-from fake_openpnp import FakeOpenPnP
-from fakes import Lab, sha_of
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import il_deploy  # noqa: E402
+from fake_openpnp import FakeOpenPnP  # noqa: E402
+from fakes import Lab, sha_of  # noqa: E402
 
 SHA = sha_of("c")
 
@@ -141,11 +144,27 @@ class Health(unittest.TestCase):
         self.assertTrue(rep["ok"], rep)
         self.assertNotIn("serial", [s["step"] for s in rep["steps"]])
 
+    def test_dispense_engine_must_run(self):
+        for fail in ("engine", "unavailable"):
+            with self.subTest(fail=fail):
+                self.start(jar_fail=[fail])
+                try:
+                    rep = self.check()
+                    self.assertFalse(rep["ok"])
+                    self.assertEqual(rep["kind"], "build")
+                    self.assertEqual(rep["steps"][-1]["step"], "status")
+                    self.assertIn("dispense", rep["failure"])
+                    self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
+                finally:
+                    self.fake.shutdown()
+                    self.fake = None
+
     def test_home_fails(self):
         self.start(jar_fail=["home"])
         rep = self.check()
         self.assertFalse(rep["ok"])
         self.assertIn("hom", rep["failure"])
+        self.assertEqual(rep["kind"], "machine", "a failed home is the machine's, not the build's")
         self.assertEqual(self.paths()[-1], ("POST", "/api/stop"))
         self.assertEqual(self.violations(), [])
 
@@ -178,13 +197,24 @@ class Health(unittest.TestCase):
         self.assertTrue(self.lab.holder().idle)
 
     def test_health_cli_claims_and_releases(self):
-        self.start(jar_fail=["home"])
+        self.start(jar_fail=["enable"])
         rc = self.lab.main("health", "--sha7", SHA[:7])
         self.assertEqual(rc, 1)
         self.assertFalse(json.loads(self.lab.last_out)["ok"])
         h = self.lab.holder()
         self.assertTrue(h.idle, h.value)
         self.assertIn("released by Infra health", h.value)
+
+    def test_health_cli_machine_problem_keeps_the_holder(self):
+        self.start(jar_fail=["home"])
+        self.assertEqual(self.lab.main("health", "--sha7", SHA[:7]), 1)
+        h = self.lab.holder()
+        self.assertFalse(h.idle, h.value)
+        self.assertIn("a person must check the machine", h.value)
+        self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
+        h = self.lab.holder()
+        self.assertTrue(h.idle, h.value)
+        self.assertIn("released by Infra resume", h.value)
 
     def test_health_cli_refuses_when_busy(self):
         self.start(fail=["run"])

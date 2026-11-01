@@ -13,10 +13,16 @@ Behaviour comes from two places:
   "schema" emulates a config migration: <config>/instancelabs/dispense-config.json gets that schema
   at start, and the db WAL gets a line, so a rollback can be checked to restore the snapshot.
 - <config>/fake-machine.json (machine-level, survives a version change): {"fail": [...],
-  "usb_sn": "387932683335", "simulated": false, "home_s": 0.05}.
+  "usb_sn": "387932683335", "simulated": false, "home_s": 0.05, "fail_for": {sha7: [...]} (failures for
+  one build only), "run_phase": "dots" (the engine run's phase with fail "run"), and activity N s before
+  the request: "last_run_ended_s_ago" (lastRun.endedAtMs), "run_finished_s_ago" (run.finishedAtMs),
+  "pad_cal_ended_s_ago" (padCalibration.endedAtMs), "pressure_event_s_ago" (pressure.lastEventAtMs)}.
 Failures (either list): version (wrong sha7 in server.version), crash (exit 1 at start), enable,
 reset (axes X/Y/Z 0 and B 720 after enable), no-sn (no serial log line), home, stop (machine stays
-enabled), busy, run, pressure.
+enabled), busy, run, pressure, engine (the dispense engine did not start), unavailable (engine without
+its nozzle), machine-500 (GET /api/status and /api/machine answer 500).
+As in the real API (PressureHold.java:77-78), pressure.lastEvent is "pressure off" with lastEventAtMs at the
+start until a real pressure event.
 
 Every request is appended to --requests (default <config>/fake-requests.jsonl). A STOP while homing is recorded as
 {"violation": "stop-during-home"}; SIGTERM while the machine is enabled as
@@ -44,7 +50,10 @@ class FakeOpenPnP:
         if machine is None:
             machine = self._read_json(os.path.join(config_dir, "fake-machine.json")) or {}
         self.machine = machine
-        self.fail = set(self.jar.get("fail", [])) | set(machine.get("fail", []))
+        sha7 = str(self.jar.get("sha", ""))[:7]
+        self.fail = (set(self.jar.get("fail", [])) | set(machine.get("fail", []))
+                     | set((machine.get("fail_for") or {}).get(sha7, [])))
+        self.started_ms = int(time.time() * 1000)
         self.lock = threading.Lock()
         self.enabled = False
         self.homed = False
@@ -104,20 +113,52 @@ class FakeOpenPnP:
                     "busy": busy, "drivers": [{"name": "GcodeDriver", "class": "GcodeDriver", "connection": "fake"}],
                     "positions": [], "axes": axes}
 
+    def ago_ms(self, key):
+        s = self.machine.get(key)
+        return None if s is None else int((time.time() - float(s)) * 1000)
+
+    def run_phase(self):
+        return str(self.machine.get("run_phase", "dots"))
+
     def status(self):
         sim = bool(self.machine.get("simulated", False))
         pressure_on = "pressure" in self.fail
-        return {
+        event_ms = self.ago_ms("pressure_event_s_ago")
+        pressure = {"state": "on" if pressure_on else "off", "on": pressure_on, "lastEvent": "pressure off",
+                    "lastEventAtMs": self.started_ms}
+        if event_ms is not None:
+            pressure.update(lastEvent="pressure off (valve, then pump): API request", lastEventAtMs=event_ms)
+        run = None
+        if "run" in self.fail:
+            run = {"runId": "r2", "kind": "board", "running": True, "status": "RUNNING", "phase": self.run_phase(),
+                   "startedAtMs": self.started_ms, "finishedAtMs": None}
+        elif self.ago_ms("run_finished_s_ago") is not None:
+            run = {"runId": "r1", "kind": "camera", "running": False, "status": "DONE", "phase": "finished: DONE",
+                   "startedAtMs": self.started_ms, "finishedAtMs": self.ago_ms("run_finished_s_ago")}
+        pad = None
+        if self.ago_ms("pad_cal_ended_s_ago") is not None:
+            pad = {"state": "done", "endedAtMs": self.ago_ms("pad_cal_ended_s_ago")}
+        out = {
             "server": {"version": self.version(), "timeMs": int(time.time() * 1000), "port": self.port,
                        "lanAccess": False, "simulated": sim, "simulatorConfirmed": sim},
             "machine": self.machine_status(),
-            "dispense": {"running": True, "available": True, "busy": False},
-            "pressure": {"state": "on" if pressure_on else "off", "on": pressure_on, "lastEventAtMs": None},
-            "run": {"running": True, "status": "RUNNING", "kind": "board"} if "run" in self.fail else None,
-            "padCalibration": None,
+            "dispense": {"running": True, "available": "unavailable" not in self.fail, "busy": "run" in self.fail},
+            "pressure": pressure,
+            "run": run,
+            "padCalibration": pad,
             "boardImport": {"reading": False},
-            "lastRun": None,
         }
+        if "engine" in self.fail:
+            # DispenseEndpoints.status: no engine, so no lastRun either
+            out["dispense"] = {"running": False, "available": False,
+                               "unavailableReason": "the dispense engine is not running"}
+            return out
+        last = None
+        if self.ago_ms("last_run_ended_s_ago") is not None:
+            last = {"runId": "r1", "kind": "board", "status": "DONE", "startedAtMs": self.started_ms,
+                    "endedAtMs": self.ago_ms("last_run_ended_s_ago")}
+        out["lastRun"] = last
+        return out
 
     # --- endpoints -----------------------------------------------------------------------------
     def enable(self):
@@ -163,7 +204,7 @@ class FakeOpenPnP:
 
     def stop(self):
         with self.lock:
-            if self.homing:
+            if self.homing or ("run" in self.fail and self.run_phase().startswith("home")):
                 self.record({"violation": "stop-during-home"})
             if "stop" not in self.fail:
                 self.enabled = False
@@ -172,6 +213,8 @@ class FakeOpenPnP:
 
     def handle(self, method, path, body):
         self.record({"method": method, "path": path})
+        if method == "GET" and path in ("/api/status", "/api/machine") and "machine-500" in self.fail:
+            return 500, {"error": "internal", "reason": "NullPointerException in machineStatus"}
         if method == "GET" and path == "/api/status":
             return 200, self.status()
         if method == "GET" and path == "/api/machine":

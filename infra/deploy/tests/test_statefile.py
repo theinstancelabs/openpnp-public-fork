@@ -1,11 +1,14 @@
 """STATE.md: Holder parsing (fail closed), atomic edits, claim/release, the Deployed line."""
 import os
 import stat
+import sys
 import tempfile
 import unittest
 
-import il_deploy
-from fakes import STATE_MD
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import il_deploy  # noqa: E402
+from fakes import STATE_MD  # noqa: E402
 
 
 def holder(body):
@@ -45,6 +48,9 @@ class HolderParsing(unittest.TestCase):
         "- **Holder:** nobody (Backend wants the machine at 20:00)",
         "- **Holder:** nobody\n  Backend wants ~10 min for a Z check",
         "- **Holder:** nobody\n  - UI wants 5 min",
+        "- **Holder:** nobody (released by Process at 19:40)\n  - board 3 is still on the bed with wet paste; do not "
+        "home over it\n  - nozzle N2 removed for cleaning",
+        "- **Holder:** nobody\n  - re-home before any run",
         "- **Holder:** Infra (deploy il-build-3-abc1234) since 2026-10-31 20:15",
     ]
 
@@ -217,6 +223,46 @@ class AtomicEdit(unittest.TestCase):
         self.assertTrue(il_deploy.release_holder(self.path, claim, "nobody (released by Infra deploy at 20:20)"))
         self.assertEqual(il_deploy.parse_holder(self.read()).value,
                          "nobody (released by Infra deploy at 20:20); UI wants it next")
+
+    def test_claim_keeps_the_previous_text_and_unclaim_restores_it_exactly(self):
+        il_deploy.edit_state_file(self.path, lambda t: il_deploy.replace_entry(
+            t, "Holder", "nobody (released by Process at 18:00,\n  valve off, needle parked)"))
+        before = self.read()
+        claim = "Infra (deploy t) since 2026-10-31 20:15"
+        prev = il_deploy.claim_holder(self.path, claim)
+        self.assertEqual(prev, "nobody (released by Process at 18:00,\n  valve off, needle parked)")
+        self.assertIn(f"- **Holder:** {claim}\n- **Air:**", self.read())
+        self.assertTrue(il_deploy.release_holder(self.path, claim, prev))
+        self.assertEqual(self.read(), before)
+
+    def test_released_value_carries_the_previous_text(self):
+        prev = "nobody (released by Process at 18:00,\n  valve off, needle parked)"
+        v = il_deploy.released_value("deploy", "20:20", None, prev)
+        self.assertEqual(v, "nobody (released by Infra deploy at 20:20); earlier: (released by Process at 18:00, "
+                            "valve off, needle parked)")
+        self.assertTrue(il_deploy.parse_holder("- **Holder:** " + v).idle)
+        # no growth: an earlier Infra stamp is replaced, the older text stays
+        again = il_deploy.released_value("rollback", "21:00", "rolled back [x]", v)
+        self.assertEqual(again, "nobody (released by Infra rollback at 21:00; rolled back [x]); earlier: (released "
+                                "by Process at 18:00, valve off, needle parked)")
+        self.assertEqual(il_deploy.released_value("deploy", "20:20", None, "nobody"),
+                         "nobody (released by Infra deploy at 20:20)")
+
+    def test_note_cannot_break_the_stamp(self):
+        v = il_deploy.released_value("deploy", "20:20", "X failed (home: HTTP 409); wants? check", "nobody")
+        self.assertNotIn("(home", v)
+        h = il_deploy.parse_holder("- **Holder:** " + v)
+        self.assertTrue(h.idle, h.reason)
+
+    def test_release_that_cannot_be_written_raises(self):
+        claim = "Infra (deploy t) since 2026-10-31 20:15"
+        il_deploy.claim_holder(self.path, claim)
+
+        def always():
+            with open(self.path, "a") as f:
+                f.write("- another edit\n")
+        with self.assertRaises(il_deploy.StateFileConflict):
+            il_deploy.release_holder(self.path, claim, "nobody", tries=2, before_rename=always)
 
     def test_release_retries_after_a_conflict(self):
         claim = "Infra (deploy t) since 2026-10-31 20:15"

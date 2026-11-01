@@ -7,9 +7,12 @@ OpenPnP was stopped through /api/stop (never SIGTERM with the machine enabled, n
 """
 import json
 import os
+import sys
 import unittest
 
-from fakes import Lab
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from fakes import Lab  # noqa: E402
 
 
 class Inf02Acceptance(unittest.TestCase):
