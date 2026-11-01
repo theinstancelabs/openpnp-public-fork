@@ -11,7 +11,8 @@ the config the SIM acceptance uses, plus visual homing off (the SIM camera has n
   (b) STOP 4 s into a home (POST /api/stop): 'timeout waiting for response to M410' in OpenPnP's log, the home
       fails, lumen-sim is halted, a reconnect cannot talk to it until 'uinav controller power-cycle';
   (c) the 30-turn prime at 180 rpm through the engine (a needle touch-off with primeRotationDeg 10800 and the
-      profile's dwellMs 250, RESEARCH.md section 6a): 'timeout waiting for response to G4 P250'.
+      profile's dwellMs 250, RESEARCH.md section 6a): 'timeout waiting for response to G4 P250' while the engine
+      streams it as one move; once the engine chunks primes (BR-30) a clean run passes too (CI's gate runs this).
 
 Skipped unless LUMEN_SIM_E2E=1 and LUMEN_SIM_E2E_JAR names the OpenPnP jar. Takes about 5 minutes (OpenPnP's own
 60 s G28 timeout is part of (b)). One OpenPnP at a time, stopped at the end.
@@ -334,6 +335,15 @@ class HomeAndPrimeTest(SessionTest):
         io, _ = self.s.io(n0)
         record("c_prime", {"run": {k: run.get(k) for k in ("kind", "status", "message", "linesSent", "totalSeconds")},
                            "stream": ["%.3f %s %s" % x for x in io if x[1] != "<" or not x[2].startswith("Cap:")]})
+        # This test is in CI's gate, so it must not block the engine fix (chunked primes, BR-30). Two outcomes
+        # pass: the run completes with no line timing out (fixed), or it fails with exactly the real board's
+        # timeout below (the known bug, reproduced). Anything else fails. lumen-sim's own pty-level test
+        # (tests/test_repro.py PrimeTimeout) keeps proving the controller side of the reproduction.
+        if run["status"] == "OK":
+            record("c_prime_outcome", "fixed: the 30-turn prime ran without a timeout")
+            self.assertNotIn("timeout waiting for response", self.s.openpnp_log())
+            return
+        record("c_prime_outcome", "known bug reproduced: timeout waiting for response to G4 P250")
         self.assertEqual(run["status"], "ERROR", run)
         self.assertRegex(run["message"], r"^GcodeDriver:.*ttyLUMEN timeout waiting for response to G4 P250$")
         self.assertIn("timeout waiting for response to G4 P250", self.s.openpnp_log())
@@ -421,4 +431,6 @@ class StopDuringHomingTest(SessionTest):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    # With LUMEN_SIM_E2E=1 (CI's controller-e2e job) a skip means a miswired job, not a pass.
+    result = unittest.main(exit=False).result
+    sys.exit(0 if result.wasSuccessful() and not (os.environ.get("LUMEN_SIM_E2E") == "1" and result.skipped) else 1)
