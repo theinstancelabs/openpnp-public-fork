@@ -1,9 +1,11 @@
 """The health check against a fake OpenPnP: each failure mode, and never a STOP during a home."""
+import contextlib
 import json
 import os
 import sys
 import time
 import unittest
+from unittest import mock
 
 # il_deploy is one level up: also when unittest imports this module by bare name (no -t)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -44,6 +46,9 @@ class Health(unittest.TestCase):
     def paths(self):
         return [(r.get("method"), r.get("path")) for r in self.lab.requests() if "path" in r]
 
+    def posts(self):
+        return [p for p in self.paths() if p[0] == "POST"]
+
     def violations(self):
         return [r["violation"] for r in self.lab.requests() if "violation" in r]
 
@@ -54,7 +59,7 @@ class Health(unittest.TestCase):
         self.assertEqual([s["step"] for s in rep["steps"]],
                          ["status", "enable", "serial", "axes", "home", "homed", "stop"])
         self.assertIn(("POST", "/api/machine/home"), self.paths())
-        self.assertEqual(self.paths()[-1], ("POST", "/api/stop"))
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
         self.assertFalse(self.fake.enabled)
         self.assertEqual(self.violations(), [])
         json.dumps(rep)
@@ -127,7 +132,7 @@ class Health(unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertIn("enable", rep["failure"])
         self.assertNotIn(("POST", "/api/machine/home"), self.paths())
-        self.assertEqual(self.paths()[-1], ("POST", "/api/stop"))
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
 
     def test_reset_signature_never_homes(self):
         self.start(fail=["reset"])
@@ -147,6 +152,74 @@ class Health(unittest.TestCase):
         axes[3]["driverCoordinate"] = 720.0
         axes[0]["driverCoordinate"] = 0.5
         self.assertFalse(il_deploy.reset_signature(axes))
+
+    def test_controller_position_not_read_is_never_homed(self):
+        """reset_signature needs B too: a power-cycled controller (X/Y/Z 0) whose B is not reported (its letter changed
+        in machine.xml, no driverCoordinate) must not pass as 'not reset' and be homed."""
+        cases = [dict(fail=["reset"], axes_missing=["B"]), dict(fail=["reset"], axes_null=["B"]),
+                 dict(axes_missing=["X"]), dict(axes_null=["X"]), dict(axes_missing=["B"])]
+        for machine in cases:
+            with self.subTest(**machine):
+                self.start(**machine)
+                try:
+                    rep = self.check()
+                    self.assertFalse(rep["ok"], rep)
+                    self.assertTrue(rep["failure"].startswith("axes: the controller position was not read"), rep)
+                    self.assertNotIn(("POST", "/api/machine/home"), self.paths())
+                    self.assertFalse(self.fake.enabled)
+                finally:
+                    self.fake.shutdown()
+                    self.fake = None
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(self.lab.requests_path)
+
+    def test_serial_match_pattern(self):
+        """--serial-match: the connect line's pattern, for a link without a USB identity (lumen-sim's pty in the e2e);
+        the default is ' S/N <--usb-sn>'."""
+        self.start()
+        rep = self.check("--usb-sn", "", "--serial-match", r"connecting to ttyACM0 by ")
+        self.assertTrue(rep["ok"], rep)
+        self.assertIn("serial", [s["step"] for s in rep["steps"]])
+        self.fake.shutdown()
+        self.start()
+        rep = self.check("--usb-sn", "", "--serial-match", r"connecting to /dev/pts/7 by ")
+        self.assertFalse(rep["ok"])
+        self.assertTrue(rep["failure"].startswith("serial: "), rep)
+        self.assertIn("/dev/pts/7", rep["failure"])
+
+    def test_openpnp_gone_after_the_enable_is_the_machines(self):
+        """The API going away after the enable (the JVM dies mid-home, a person stops the service) is not the build's:
+        the controller may still be homing and the outputs keep their state; no second home by the previous build."""
+        real_get, real_post = il_deploy.Api.get, il_deploy.Api.post
+        for where in ("enable", "axes", "home", "homed"):
+            with self.subTest(where=where):
+                self.start()
+                seen = {"machine_gets": 0, "homed": False}
+
+                def get(api, path, timeout=10):
+                    if path == "/api/machine":
+                        seen["machine_gets"] += 1
+                        # GET /api/machine: 1 before the enable, 2 the axes; after the home, the homed check
+                        if (where == "axes" and seen["machine_gets"] == 2) or (where == "homed" and seen["homed"]):
+                            raise il_deploy.ApiDown(f"GET {path}: Connection refused")
+                    return real_get(api, path, timeout)
+
+                def post(api, path, body=None, timeout=10):
+                    if (where, path) in (("enable", "/api/machine/enable"), ("home", "/api/machine/home")):
+                        real_post(api, path, {"wait": False} if where == "home" else body, timeout)
+                        raise il_deploy.ApiDown(f"POST {path}: Connection reset by peer")
+                    out = real_post(api, path, body, timeout)
+                    seen["homed"] = seen["homed"] or path == "/api/machine/home"
+                    return out
+                try:
+                    with mock.patch.object(il_deploy.Api, "get", get), mock.patch.object(il_deploy.Api, "post", post):
+                        rep = self.check("--home-busy-wait", "0.5")
+                    self.assertFalse(rep["ok"])
+                    self.assertEqual(rep["kind"], "machine", rep)
+                    self.assertTrue(rep["failure"].startswith(where + ": "), rep)
+                finally:
+                    self.fake.shutdown()
+                    self.fake = None
 
     def test_serial_number_missing(self):
         self.start(jar_fail=["no-sn"])
@@ -214,7 +287,7 @@ class Health(unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertIn("hom", rep["failure"])
         self.assertEqual(rep["kind"], "machine", "a failed home is the machine's, not the build's")
-        self.assertEqual(self.paths()[-1], ("POST", "/api/stop"))
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
         self.assertEqual(self.violations(), [])
 
     def test_stop_fails(self):

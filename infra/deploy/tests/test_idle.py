@@ -161,7 +161,10 @@ class Idle(unittest.TestCase):
         r = self.reasons()
         self.assertTrue(any("switched on" in x for x in r), r)
         self.fake.stop()
-        self.assertEqual(self.reasons(), [])
+        r = self.reasons()
+        self.assertFalse(any("switched on" in x for x in r), r)
+        # pressing Start connected the controller (dispense.profile.controllerConnectedAtMs): a person was there
+        self.assertTrue(any("controller connected" in x and "ago" in x for x in r), r)
 
     def test_a_home_by_someone_is_activity(self):
         self.start_fake()
@@ -185,7 +188,9 @@ class Idle(unittest.TestCase):
         for key, word in (("needle_changed_s_ago", "needle change"), ("needle_set_s_ago", "needle touch-off"),
                           ("landing_set_s_ago", "needle landing"), ("tip_mounted_s_ago", "tip mounted"),
                           ("new_seat_s_ago", "new seat"), ("location_set_s_ago", "waste"),
-                          ("surface_set_s_ago", "board")):
+                          ("surface_set_s_ago", "board"), ("purge_reset_s_ago", "purge row"),
+                          ("start_angle_set_s_ago", "start angle"), ("xy_trim_set_s_ago", "XY trim"),
+                          ("anchor_set_s_ago", "anchor"), ("controller_connected_s_ago", "controller connected")):
             for ago, busy in ((60, True), (20 * 60, False)):
                 with self.subTest(key=key, s_ago=ago):
                     self.start_fake(**{key: ago})
@@ -198,6 +203,40 @@ class Idle(unittest.TestCase):
                     finally:
                         self.fake.shutdown()
                         self.fake = None
+
+    def test_status_fields_il_deploy_reads(self):
+        """The key paths il_deploy reads in /api/status (the e2e checks them against the real build: a renamed field
+        would silently turn a check off, since a missing time is skipped)."""
+        self.start_fake()
+        st = il_deploy.Api(self.lab.port).get("/api/status")[1]
+        self.assertEqual(il_deploy.status_field_problems(st), [])
+        self.assertIn("machine.zCheck.homeAtMs", il_deploy.STATUS_FIELDS)
+        del st["machine"]["zCheck"]["homeAtMs"]
+        st["dispense"]["needle"]["landing"] = None
+        st["dispense"].pop("purgeRow")
+        self.assertEqual(il_deploy.status_field_problems(st),
+                         ["machine.zCheck.homeAtMs", "dispense.needle.landing.setAtMs", "dispense.purgeRow.resetAtMs"])
+        st = {"run": None, "lastRun": None, "padCalibration": None}  # null where null is allowed: nothing deeper read
+        self.assertNotIn("run.finishedAtMs", il_deploy.status_field_problems(st))
+        self.assertIn("machine.enabled", il_deploy.status_field_problems(st))
+
+    def test_openpnp_log_is_an_activity_file(self):
+        """OpenPnP logs each change through its API (ApiServer: 'POST ... -> 200'), the engine's work, its start and its
+        stop: after a person's work and a stop of the service (the API is not asked then), the quiet period runs from
+        its last line. What il_deploy's own windows wrote does not count."""
+        clock = il_deploy.Clock()
+        log = os.path.join(self.lab.config, "log", "OpenPnP.log")
+        os.makedirs(os.path.dirname(log))
+        with open(log, "w") as f:
+            f.write("2026-11-01 00:00:00.000 ApiServer INFO: Instance Labs API POST /api/prime -> 200\n")
+        r = self.reasons(clock=clock)
+        self.assertTrue(any("OpenPnP.log" in x and "ago" in x for x in r), r)
+        il_deploy.write_json(os.path.join(self.lab.root, "own-activity.json"), [[time.time() - 30, time.time()]])
+        self.assertEqual(self.reasons(clock=clock), [], "written while il_deploy alone drove OpenPnP")
+        old = time.time() - 20 * 60
+        os.utime(log, (old, old))
+        il_deploy.write_json(os.path.join(self.lab.root, "own-activity.json"), [])
+        self.assertEqual(self.reasons(clock=clock), [])
 
     def test_api_busy_states(self):
         for fail, word in (("busy", "busy"), ("run", "run"), ("pressure", "pressure")):

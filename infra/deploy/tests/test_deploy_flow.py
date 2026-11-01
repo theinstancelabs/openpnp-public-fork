@@ -104,6 +104,11 @@ class Flow(unittest.TestCase):
         _, status = os.waitpid(pid, 0)
         self.assertTrue(os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGKILL, status)
 
+    def age_own_windows(self, seconds):
+        """Move il_deploy's own windows (own-activity.json) back in time."""
+        p = os.path.join(self.lab.root, "own-activity.json")
+        il_deploy.write_json(p, [[w[0] - seconds, w[1] - seconds] for w in il_deploy.read_json(p, [])])
+
     def snapshots(self, kind):
         d = os.path.join(self.lab.root, "snapshots")
         return sorted(n for n in os.listdir(d) if f"-{kind}-" in n)
@@ -501,6 +506,11 @@ class Flow(unittest.TestCase):
         b = self.release(5, self.lab.c)
         self.hard_killed("deploy", at="start_and_check")
         self.assertFalse(self.hold())
+        # resume finds the claim: a hold a person has not seen yet. It is not cleared in the same command.
+        self.assertEqual(self.lab.main("resume"), 2, self.lab.last_out)
+        self.assertIn("killed", self.lab.last_out)
+        self.assertIn("then run `il_deploy.py resume` again", self.lab.last_out)
+        self.assert_held("killed")
         self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
         self.assert_released_by("resume")
         self.assertFalse(self.hold())
@@ -514,6 +524,7 @@ class Flow(unittest.TestCase):
         b = self.release(5, self.lab.c)
         self.hard_killed("deploy", at="set_links")
         self.assertEqual(self.lab.link("current"), a)
+        self.assertEqual(self.lab.main("resume"), 2, self.lab.last_out)
         self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
         self.assert_released_by("resume")
         dep = self.deployed()
@@ -526,6 +537,317 @@ class Flow(unittest.TestCase):
         self.assertEqual(self.lab.main("health"), 0, self.lab.last_out + self.lab.last_err)
         self.assertNotIn("pending", self.deployed()["current"])
         self.assertIn("post_manifest", self.deployed()["current"])
+
+
+    # --- review round 2 ----------------------------------------------------------------------------------------------
+    def test_an_openpnp_that_died_on_its_own_is_a_hold(self):
+        """OpenPnP killed outright (the OOM killer, a JVM crash) during a person's run with the pressure on: the outputs
+        keep their state and nothing sent a STOP. The next run must not take it for an idle machine and home it."""
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.machine(fail=["pressure"])
+        self.lab.start_service()
+        b = self.gh.add_release(5, self.lab.c)
+        self.assertEqual(self.lab.main("run"), 3, self.lab.last_out)
+        self.assertIn("pressure", self.lab.last_out)
+        self.lab.kill_service()
+        seen = len(self.lab.requests())
+        self.assertEqual(self.lab.main("run"), 5, self.lab.last_out)
+        self.assertIn("exited on its own", self.lab.last_out)
+        self.assertEqual(self.home_requests(seen), [])
+        self.assertEqual(self.lab.link("current"), f"il-build-4-{self.lab.b[:7]}")
+        self.assertTrue(self.hold())
+        self.assertEqual(self.lab.main("run"), 3, self.lab.last_out)
+        self.assertIn("on hold", self.lab.last_out)
+        self.assertEqual(self.home_requests(seen), [])
+        # a person checked the machine: the same exit is not a new hold
+        self.lab.machine()
+        self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
+        self.backdate_resume(16 * 60)
+        self.assertEqual(self.lab.main("run"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), b)
+
+    def test_the_quiet_period_runs_from_openpnps_last_log_line(self):
+        """A person works through the web UI, then stops OpenPnP (systemctl --user stop): its API is no longer asked, but
+        its log has the work."""
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.age_own_windows(600)  # that deploy was 10 min ago
+        self.lab.start_service()
+        b = self.gh.add_release(5, self.lab.c)
+        with open(os.path.join(self.lab.config, "log", "OpenPnP.log"), "a") as f:
+            f.write("2026-11-01 00:40:00.000 ApiServer INFO: Instance Labs API POST /api/prime -> 200\n")
+        self.lab.service().stop()
+        self.assertEqual(self.lab.main("run"), 3, self.lab.last_out)
+        self.assertIn("OpenPnP.log", self.lab.last_out)
+        self.lab.age_openpnp_log(16 * 60)
+        self.assertEqual(self.lab.main("run"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), b)
+
+    def test_openpnp_killed_mid_home_is_the_machines(self):
+        """The JVM dies mid-home (a native camera library crash), or a person stops the service: the controller may
+        still be finishing that G28, outputs keep their state. Not the build's: no second home by the previous build."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.machine(home_s=1.0)
+        b = self.release(5, self.lab.c, schema=5)
+        real_post = il_deploy.Api.post
+
+        def post(api, path, body=None, timeout=10):
+            if path == "/api/machine/home":
+                real_post(api, path, {"wait": False}, timeout)  # the home starts
+                self.lab.kill_service()
+                raise il_deploy.ApiDown("POST /api/machine/home: Connection reset by peer")
+            return real_post(api, path, body, timeout)
+        seen = len(self.lab.requests())
+        with mock.patch.object(il_deploy.Api, "post", post):
+            self.deploy(rc=5)
+        self.assertEqual(len(self.home_requests(seen)), 1, "no second home without a person")
+        self.assertNotIn(b, self.bad())
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertEqual(self.lab.schema(), 3)
+        self.assertIn("not checked", self.deployed_line())
+        self.assert_held()
+
+    def test_a_restart_that_fails_is_not_reported_as_running(self):
+        """After a machine problem the previous build is started again, unchecked: STATE.md says it runs only if it
+        does (flock exits 75 when the serial lock is taken)."""
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.start_service()
+        self.lab.machine(fail=["home"])
+        self.release(5, self.lab.c)
+        starts, held = [], []
+        real_start = il_deploy.SubprocessService.start
+
+        def start(svc):
+            starts.append(1)
+            if len(starts) == 2:  # the previous build's restart: a bench tool took the lock meanwhile
+                f = open(self.lab.lock, "w")
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(f)
+            return real_start(svc)
+        with mock.patch.object(il_deploy.SubprocessService, "start", start):
+            self.deploy(rc=5)
+        held[0].close()
+        line = self.deployed_line()
+        self.assertNotIn("runs again", line)
+        self.assertIn("did not start again", line)
+        self.assertFalse(self.lab.service().is_active())
+
+    def stale_save(self):
+        """Someone saves STATE.md from a buffer opened before the claim (an editor, a read-modify-write script)."""
+        text = self.lab.state_text()
+
+        def save(*a, **kw):
+            with open(self.lab.state_md, "w") as f:
+                f.write(text)
+        save.holder = self.lab.holder().value
+        return save
+
+    def test_a_lost_claim_is_noticed_before_openpnp_is_stopped(self):
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.start_service()
+        self.release(5, self.lab.c)
+        save, real, calls = self.stale_save(), il_deploy.Deployer.idle_reasons, []
+
+        def idle(d, *args, **kw):
+            calls.append(1)
+            r = real(d, *args, **kw)
+            if len(calls) == 2:  # the re-check under the claim passed; then the stale save
+                save()
+            return r
+        seen = len(self.lab.requests())
+        with mock.patch.object(il_deploy.Deployer, "idle_reasons", idle):
+            self.deploy(rc=5)
+        self.assertEqual((self.lab.link("current"), self.lab.link("previous")), (a, None))
+        self.assertTrue(self.lab.service().is_active(), "nothing done: OpenPnP keeps running")
+        self.assertFalse(any(r.get("path") == "/api/stop" for r in self.lab.requests()[seen:]))
+        self.assertIn("Holder", self.lab.last_err)
+        self.assertTrue(self.hold())
+        self.assertIn("claim-lost", [r["event"] for r in self.lab.journal()])
+
+    def test_a_lost_claim_is_noticed_before_the_enable(self):
+        self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c)
+        save, real = self.stale_save(), il_deploy.Deployer.start_and_check
+
+        def start_and_check(d, sha7):
+            save()
+            return real(d, sha7)
+        seen = len(self.lab.requests())
+        with mock.patch.object(il_deploy.Deployer, "start_and_check", start_and_check):
+            self.deploy(rc=5)
+        paths = [r.get("path") for r in self.lab.requests()[seen:]]
+        self.assertNotIn("/api/machine/enable", paths)
+        self.assertNotIn("/api/machine/home", paths)
+        self.assertIn("Holder", self.lab.last_err)
+        self.assertTrue(self.hold())
+        self.assertIn(f"{b} installed but NOT verified", self.deployed_line())
+        self.assertEqual(self.lab.holder().value, save.holder, "someone else's: left alone")
+
+    def test_a_lost_claim_is_noticed_before_the_home(self):
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.release(5, self.lab.c)
+        save, real = self.stale_save(), il_deploy.Deployer._wait_serial_line
+
+        def serial(d, offset):
+            save()
+            return real(d, offset)
+        seen = len(self.lab.requests())
+        with mock.patch.object(il_deploy.Deployer, "_wait_serial_line", serial):
+            self.deploy(rc=5)
+        paths = [r.get("path") for r in self.lab.requests()[seen:]]
+        self.assertIn("/api/machine/enable", paths)
+        self.assertNotIn("/api/machine/home", paths)
+        posts = [r.get("path") for r in self.lab.requests()[seen:] if r.get("method") == "POST"]
+        self.assertEqual(posts[-1], "/api/stop", "the machine il_deploy enabled is stopped")
+        self.assertTrue(self.hold())
+
+    def test_a_lost_claim_at_the_hand_back_is_loud(self):
+        tag = self.release(5, self.lab.c)
+        with mock.patch.object(il_deploy.Deployer, "prune", self.stale_save()):
+            rc = self.lab.main("deploy")
+        self.assertEqual(rc, 1, self.lab.last_out)
+        self.assertEqual(self.lab.link("current"), tag)
+        self.assertIn("Holder", self.lab.last_err)
+        self.assertTrue(self.hold())
+        self.assertIn({"event": "release", "ok": False},
+                      [{"event": r["event"], "ok": r.get("ok")} for r in self.lab.journal()])
+
+    def test_terminated_after_the_build_was_verified_keeps_it_verified(self):
+        self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c)
+        with mock.patch.object(il_deploy.Deployer, "prune", side_effect=il_deploy.Terminated("signal 15")):
+            self.deploy(rc=1)
+        line = self.deployed_line()
+        self.assertTrue(line.startswith(f"- **Deployed on the machine:** {b} ("), line)
+        self.assertNotIn("NOT verified", line)
+        self.assertNotIn("pending", self.deployed()["current"])
+        self.assert_held("Terminated")
+
+    def test_terminated_before_the_switch_undoes_the_pending_record(self):
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c)
+        with mock.patch.object(il_deploy.Deployer, "set_links", side_effect=il_deploy.Terminated("signal 15")):
+            self.deploy(rc=1)
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertEqual(self.deployed()["current"]["tag"], a)
+        line = self.deployed_line()
+        self.assertTrue(line.startswith(f"- **Deployed on the machine:** {a}"), line)
+        self.assertIn(f"{b} was cut short before its switch", line)
+        self.assert_held("Terminated")
+        self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
+        self.lab.start_service()
+        self.assertEqual(self.lab.main("health"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertNotIn("pending", self.deployed()["current"])
+
+    def deployed_b_over_a(self):
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c, schema=5)
+        self.deploy()
+        self.assertEqual(self.lab.schema(), 5)
+        return a, b
+
+    def test_rollback_interrupted_while_copying_the_snapshot_changes_nothing(self):
+        a, b = self.deployed_b_over_a()
+        with mock.patch.object(il_deploy.Deployer, "_copy_snapshot", side_effect=il_deploy.Terminated("signal 15")):
+            rc = self.lab.main("rollback", extra=["--discard-config-changes"])
+        self.assertEqual(rc, 1, self.lab.last_out)
+        self.assertEqual((self.lab.link("current"), self.lab.link("previous")), (b, a))
+        self.assertEqual(self.lab.schema(), 5)
+        self.assertEqual(self.deployed()["current"]["tag"], b)
+        self.assertNotIn("pending", self.deployed()["current"])
+        line = self.deployed_line()
+        self.assertTrue(line.startswith(f"- **Deployed on the machine:** {b} ("), line)
+        self.assertNotIn("NOT verified", line)
+        self.assert_held("Terminated")
+        self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
+        self.assertEqual(self.lab.main("rollback", extra=["--discard-config-changes"]), 0,
+                         self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertEqual(self.lab.schema(), 3)
+
+    def assert_rolled_back_unverified(self, a, b):
+        self.assertEqual((self.lab.link("current"), self.lab.link("previous")), (a, None))
+        self.assertEqual(self.lab.schema(), 3, "the config and the binary switch together")
+        self.assertEqual(len(self.snapshots("abandoned")), 1)
+        self.assertEqual(self.deployed()["current"]["tag"], a)
+        self.assertIn("pending", self.deployed()["current"])
+        self.assertFalse(os.path.exists(os.path.join(self.lab.root, "switch.json")))
+        self.assertIn(f"{a} installed but NOT verified", self.deployed_line())
+
+    def test_rollback_signalled_during_its_switch_finishes_it(self):
+        a, b = self.deployed_b_over_a()
+        real = il_deploy.Deployer._set_link
+
+        def set_link(d, name, target):
+            il_deploy._terminate(signal.SIGTERM, None)  # SIGTERM (or Ctrl-C) waits while the switch runs
+            return real(d, name, target)
+        with mock.patch.object(il_deploy.Deployer, "_set_link", set_link):
+            rc = self.lab.main("rollback", extra=["--discard-config-changes"])
+        self.assertEqual(rc, 1, self.lab.last_out)
+        self.assert_rolled_back_unverified(a, b)
+        self.assert_held("Terminated")
+        self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
+        self.lab.start_service()
+        self.assertEqual(self.lab.main("health"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertNotIn("NOT verified", self.deployed_line())
+
+    def test_rollback_failing_inside_its_switch_is_finished_from_its_record(self):
+        a, b = self.deployed_b_over_a()
+        real, calls = il_deploy.Deployer._set_link, []
+
+        def set_link(d, name, target):
+            calls.append(name)
+            if len(calls) == 1:
+                raise OSError(5, "Input/output error")
+            return real(d, name, target)
+        with mock.patch.object(il_deploy.Deployer, "_set_link", set_link):
+            rc = self.lab.main("rollback", extra=["--discard-config-changes"])
+        self.assertEqual(rc, 1, self.lab.last_out)
+        self.assert_rolled_back_unverified(a, b)
+        self.assert_held("Input/output error")
+
+    def test_rollback_hard_killed_inside_its_switch_is_finished_by_the_next_command(self):
+        a, b = self.deployed_b_over_a()
+        self.hard_killed("rollback", at="_set_link", extra=["--discard-config-changes"])
+        self.assertTrue(os.path.exists(os.path.join(self.lab.root, "switch.json")))
+        self.assertEqual(self.lab.main("run"), 2, self.lab.last_out)
+        self.assert_rolled_back_unverified(a, b)
+        self.assertIn("cut short", self.deployed_line())
+        self.assert_held("killed")
+        self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
+        self.lab.start_service()
+        self.assertEqual(self.lab.main("health"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertNotIn("pending", self.deployed()["current"])
+
+    def test_deploy_rechecks_the_releases_provenance(self):
+        tag = self.release(5, self.lab.c)
+        rel = next(r for r in self.gh.releases if r["tag_name"] == tag)
+        rel["author"] = {"login": "aabdel0181", "type": "User"}  # published again by hand under the same tag
+        self.deploy(rc=2)
+        self.assertIn("github-actions[bot]", self.lab.last_out)
+        rel["author"] = {"login": "github-actions[bot]", "type": "Bot"}
+        self.gh.runs[1005]["event"] = "workflow_dispatch"
+        self.deploy(rc=2)
+        self.assertIn("workflow_dispatch", self.lab.last_out)
+        self.assertIsNone(self.lab.link("current"))
+
+    def test_a_hand_published_release_does_not_stall_ci_deploys(self):
+        """`gh release create il-build-9999-<head7>` by a person (a dirty tree at the head reports the head's sha7):
+        never staged, and CI's builds, numbered far below it, still are."""
+        self.gh.add_release(9999, self.lab.c, author="aabdel0181", run=False)
+        ci = self.gh.add_release(5, self.lab.c)
+        self.assertEqual(self.lab.main("run"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), ci)
+        self.assertNotIn("il-build-9999", " ".join(os.listdir(os.path.join(self.lab.root, "releases"))))
 
     # --- after resume: a quiet period before the timer deploys (and homes) again ------------------------------
     def test_run_waits_a_quiet_period_after_resume_but_a_deploy_by_hand_does_not(self):
@@ -809,6 +1131,9 @@ class StubService:
     def exit_status(self):
         return None
 
+    def last_exit(self):
+        return None
+
     def start(self):
         raise AssertionError("must not start")
 
@@ -851,7 +1176,7 @@ class ShutdownBudget(unittest.TestCase):
         self.lab.gh.add_release(5, self.lab.c)
         self.assertEqual(self.lab.main("poll"), 0)
         il_deploy.edit_state_file(self.lab.state_md, lambda t: il_deploy.replace_entry(t, "Holder", "Process role"))
-        self.assertEqual(self.systemd("deploy", budget="17min"), 3, self.lab.last_out)
+        self.assertEqual(self.systemd("deploy", budget=f"{il_deploy.USER_MANAGER_STOP_S}s"), 3, self.lab.last_out)
         self.assertNotIn("TimeoutStopSec", self.lab.last_out)
 
     def test_rollback_is_refused_with_the_5_s_default(self):

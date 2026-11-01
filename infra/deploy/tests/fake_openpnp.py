@@ -21,14 +21,23 @@ Behaviour comes from two places:
   "pad_cal_ended_s_ago" (padCalibration.endedAtMs), "pressure_event_s_ago" (pressure.lastEventAtMs), and the
   dispense config's times: "needle_changed_s_ago", "needle_set_s_ago", "landing_set_s_ago" (or
   "landing_set_at_start": true, stamped when it starts, as DispenseService's landing migration), "tip_mounted_s_ago",
-  "new_seat_s_ago", "location_set_s_ago" (place 'waste'), "surface_set_s_ago" (surface 'board');
+  "new_seat_s_ago", "location_set_s_ago" (place 'waste'), "surface_set_s_ago" (surface 'board'),
+  "purge_reset_s_ago" (dispense.purgeRow.resetAtMs), "start_angle_set_s_ago" (dispense.profile.startAngleSetAtMs),
+  "xy_trim_set_s_ago" (dispense.needle.xyTrim, else null), "anchor_set_s_ago" (dispense.needle.anchor, else null),
+  "controller_connected_s_ago" (dispense.profile.controllerConnectedAtMs; else the time of this OpenPnP's first
+  connect, as HomeTracker's connectedAtMs);
+  "axes_missing" (axis letters /api/machine leaves out), "axes_null" (letters whose driverCoordinate is null);
+  "run_abort_s" (a STOP during an engine run ends it only N s later: the engine's abort waits for the move in
+  progress, as a long auger turn);
   "home_cap_s" (POST /api/machine/home {"wait": true} gives up after it with the real 409 while the home runs on;
   300 as MachineEndpoints' f.get(5, MINUTES)), "keep_alive" (default true, the lab machine.xml's
   connection-keep-alive: a STOP leaves the link open, so only the first enable logs the connect line)}.
 Failures (either list): version (wrong sha7 in server.version), crash (exit 1 at start), enable,
 reset (axes X/Y/Z 0 and B 720 after enable), no-sn (no serial log line), home, stop (machine stays
-enabled), busy, run, pressure, engine (the dispense engine did not start), unavailable (engine without
-its nozzle), machine-500 (GET /api/status and /api/machine answer 500), home-404 (no home endpoint).
+enabled), busy, run (an engine run until a STOP ends it), pressure (the pressure held until a STOP vents it),
+vent-fail (a STOP cannot vent it: pressure.state 'vent_failed'), engine (the dispense engine did not start),
+unavailable (engine without its nozzle), machine-500 (GET /api/status and /api/machine answer 500), home-404 (no
+home endpoint).
 As in the real API (PressureHold.java:77-78), pressure.lastEvent is "pressure off" with lastEventAtMs at the
 start until a real pressure event. A home sets machine.zCheck.homeAtMs (HomeTracker). Each start begins a new
 OpenPnP.log (the old one becomes OpenPnP.0.log), as tinylog's RollingFileWriter with its StartupPolicy.
@@ -72,6 +81,9 @@ class FakeOpenPnP:
         self.axes = {"X": 0.0, "Y": 0.0, "Z": 0.0, "B": 0.0}
         self.server = None
         self.connected = False  # the controller link (GcodeDriver.connected)
+        self.connected_at_ms = None  # HomeTracker's connectedAtMs: this OpenPnP's first connect
+        self.run_active = "run" in self.fail  # the engine run: a STOP ends it (after "run_abort_s")
+        self.pressure_state = "on" if "pressure" in self.fail else "off"  # PressureHold: a STOP vents it
         log_dir = os.path.join(config_dir, "log")
         os.makedirs(log_dir, exist_ok=True)
         # OpenPnP's tinylog RollingFileWriter (StartupPolicy) starts a new OpenPnP.log at each start
@@ -122,9 +134,11 @@ class FakeOpenPnP:
     def machine_status(self):
         with self.lock:
             busy = self.homing or "busy" in self.fail
-            axes = [{"name": n, "type": t, "letter": letter, "driverCoordinate": self.axes[letter],
-                     "coordinate": self.axes[letter]}
-                    for n, t, letter in (("x", "X", "X"), ("y", "Y", "Y"), ("z1", "Z", "Z"), ("b", "Rotation", "B"))]
+            missing, null = self.machine.get("axes_missing") or [], self.machine.get("axes_null") or []
+            axes = [{"name": n, "type": t, "letter": letter,
+                     "driverCoordinate": None if letter in null else self.axes[letter], "coordinate": self.axes[letter]}
+                    for n, t, letter in (("x", "X", "X"), ("y", "Y", "Y"), ("z1", "Z", "Z"), ("b", "Rotation", "B"))
+                    if letter not in missing]
             return {"present": True, "enabled": self.enabled, "connected": self.enabled, "homed": self.homed,
                     "busy": busy, "zCheck": {"needed": True, "homeAtMs": self.home_at_ms, "places": []},
                     "drivers": [{"name": "GcodeDriver", "class": "GcodeDriver", "connection": "fake"}],
@@ -139,14 +153,13 @@ class FakeOpenPnP:
 
     def status(self):
         sim = bool(self.machine.get("simulated", False))
-        pressure_on = "pressure" in self.fail
+        state = self.pressure_state
         event_ms = self.ago_ms("pressure_event_s_ago")
-        pressure = {"state": "on" if pressure_on else "off", "on": pressure_on, "lastEvent": "pressure off",
-                    "lastEventAtMs": self.started_ms}
+        pressure = {"state": state, "on": state == "on", "lastEvent": "pressure off", "lastEventAtMs": self.started_ms}
         if event_ms is not None:
             pressure.update(lastEvent="pressure off (valve, then pump): API request", lastEventAtMs=event_ms)
         run = None
-        if "run" in self.fail:
+        if self.run_active:
             run = {"runId": "r2", "kind": "board", "running": True, "status": "RUNNING", "phase": self.run_phase(),
                    "startedAtMs": self.started_ms, "finishedAtMs": None}
         elif self.ago_ms("run_finished_s_ago") is not None:
@@ -160,11 +173,21 @@ class FakeOpenPnP:
                        "lanAccess": False, "simulated": sim, "simulatorConfirmed": sim},
             "machine": self.machine_status(),
             # DispenseEndpoints.status: config times (persisted) of the needle, tip, seat, places and surfaces
-            "dispense": {"running": True, "available": "unavailable" not in self.fail, "busy": "run" in self.fail,
+            "dispense": {"running": True, "available": "unavailable" not in self.fail, "busy": self.run_active,
                          "needle": {"touchedOff": True, "setAtMs": self.ago_ms("needle_set_s_ago"),
                                     "changedAtMs": self.ago_ms("needle_changed_s_ago"),
                                     "landing": {"known": False, "setAtMs": self.started_ms if self.machine.get(
-                                        "landing_set_at_start") else self.ago_ms("landing_set_s_ago")}},
+                                        "landing_set_at_start") else self.ago_ms("landing_set_s_ago")},
+                                    "anchor": None if self.ago_ms("anchor_set_s_ago") is None else {
+                                        "surfaceZMm": -10.0, "needleContactZMm": -12.5,
+                                        "setAtMs": self.ago_ms("anchor_set_s_ago")},
+                                    "xyTrim": None if self.ago_ms("xy_trim_set_s_ago") is None else {
+                                        "dxMm": 0.02, "dyMm": -0.01, "setAtMs": self.ago_ms("xy_trim_set_s_ago")}},
+                         "profile": {"name": "half-turn", "startAngleSetAtMs": self.ago_ms("start_angle_set_s_ago"),
+                                     "controllerConnectedAtMs": self.connected_at_ms if self.ago_ms(
+                                         "controller_connected_s_ago") is None
+                                     else self.ago_ms("controller_connected_s_ago")},
+                         "purgeRow": {"spots": 40, "usedSpots": [], "resetAtMs": self.ago_ms("purge_reset_s_ago")},
                          "tip": {"key": "27G", "mountedAtMs": self.ago_ms("tip_mounted_s_ago")},
                          "newSeatAtMs": self.ago_ms("new_seat_s_ago"),
                          "locations": {"waste": {"x": 10.0, "y": 20.0, "z": -5.0,
@@ -196,6 +219,8 @@ class FakeOpenPnP:
         with self.lock:
             connect = not self.connected
             self.enabled = self.connected = True
+            if connect and self.connected_at_ms is None:
+                self.connected_at_ms = int(time.time() * 1000)
             if "reset" in self.fail:
                 self.axes = {"X": 0.0, "Y": 0.0, "Z": 0.0, "B": 720.0}
             else:
@@ -215,7 +240,7 @@ class FakeOpenPnP:
         with self.lock:
             if not self.enabled:
                 return 409, {"error": "refused", "reason": "the machine is not started: press Start first"}
-            if "pressure" in self.fail:
+            if self.pressure_state != "off":
                 return 409, {"error": "refused", "reason": "the pressure is being held on from the Dispense tab. "
                                                            "Switch it off first: Pressure off"}
             if self.homing or "busy" in self.fail:
@@ -247,8 +272,22 @@ class FakeOpenPnP:
 
     def stop(self):
         with self.lock:
-            if self.homing or ("run" in self.fail and self.run_phase().startswith("home")):
+            if self.homing or (self.run_active and self.run_phase().startswith("home")):
                 self.record({"violation": "stop-during-home"})
+            # MachineEndpoints.stop: PressureHold.emergencyStop (valve off, then pump off) at once; the engine's abort
+            # sends its STOP_SEQUENCE before its next line, after the move in progress
+            if self.pressure_state != "off":
+                self.pressure_state = "vent_failed" if "vent-fail" in self.fail else "off"
+            if self.run_active:
+                abort_s = float(self.machine.get("run_abort_s", 0))
+                if abort_s <= 0:
+                    self.run_active = False
+                else:
+                    def end_run():
+                        time.sleep(abort_s)
+                        with self.lock:
+                            self.run_active = False
+                    threading.Thread(target=end_run, daemon=True).start()
             if "stop" not in self.fail:
                 self.enabled = False
                 self.homed = False

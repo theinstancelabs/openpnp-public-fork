@@ -146,6 +146,52 @@ class Poll(unittest.TestCase):
         self.assertIn(tag, self.refused())
         self.assertFalse(os.path.exists(os.path.join(self.lab.root, "evil")))
 
+    # --- provenance: the artifact is CI's, not only the commit (a dirty tree built at the head reports the head's sha)
+    def test_release_not_published_by_ci_is_refused(self):
+        hand = self.gh.add_release(9999, self.lab.c, author="aabdel0181", run=False)
+        ci = self.gh.add_release(5, self.lab.c)
+        self.poll()
+        self.assertEqual(self.releases(), [ci])
+        self.assertIn("github-actions[bot]", self.refused()[hand])
+        self.gh.downloads.clear()
+        self.poll()
+        self.assertEqual(self.gh.downloads, [], "a permanent refusal: not downloaded again")
+
+    def test_release_whose_run_is_not_cis_push_on_the_branch_is_refused(self):
+        for overrides, word in (({"event": "pull_request"}, "pull_request"),
+                                ({"event": "workflow_dispatch"}, "workflow_dispatch"),
+                                ({"head_branch": "il/scratch"}, "il/scratch"),
+                                ({"path": ".github/workflows/scratch.yml"}, "scratch.yml"),
+                                ({"head_sha": self.lab.b}, self.lab.b[:7]),
+                                ({"run_number": 77}, "77"),
+                                ({"conclusion": "failure"}, "failure")):
+            with self.subTest(word=word):
+                lab = Lab()
+                try:
+                    tag = lab.gh.add_release(5, lab.c, run_overrides=overrides)
+                    self.assertEqual(lab.main("poll"), 0, lab.last_out)
+                    refused = {r["tag"]: r["reason"] for r in lab.journal() if r["event"] == "refused"}
+                    self.assertIn(word, refused.get(tag, ""), refused)
+                    self.assertFalse(os.path.isdir(os.path.join(lab.root, "releases", tag)))
+                finally:
+                    lab.cleanup()
+
+    def test_release_whose_run_is_unknown_is_refused(self):
+        tag = self.gh.add_release(5, self.lab.c, run=False)
+        self.poll()
+        self.assertEqual(self.releases(), [])
+        self.assertIn("run", self.refused()[tag])
+
+    def test_release_whose_run_is_still_running_is_staged_later(self):
+        """The release job publishes before its run ends: not yet, but not a permanent refusal."""
+        tag = self.gh.add_release(5, self.lab.c, run_overrides={"status": "in_progress", "conclusion": None})
+        self.poll()
+        self.assertEqual(self.releases(), [])
+        self.assertIn("in_progress", self.refused()[tag])
+        self.gh.runs[1005].update(status="completed", conclusion="success")
+        self.poll()
+        self.assertEqual(self.releases(), [tag])
+
     def test_newest_eligible_wins(self):
         good = self.gh.add_release(10, self.lab.c)
         side = self.gh.commit("feature")

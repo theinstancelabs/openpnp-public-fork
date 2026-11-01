@@ -21,8 +21,9 @@ jar, which connects over its real serial stack (jSerialComm) to lumen-sim's pty.
   4. lumen-sim on a link in the temp dir, and Xvfb on a free display in :60-:69.
   5. il_deploy.py in-process (main(argv, deps): only GitHub is faked). It uses the production OpenPnP command line
      (flock + java + the unit's flags) under --service-manager subprocess, a temp STATE.md (Holder: nobody), and a
-     temp lock, activity file and root. The device is the lumen-sim link, and --usb-sn '' (a pty has no USB
-     identity).
+     temp lock, activity file and root. The device is the lumen-sim link. A pty has no USB identity, so --usb-sn ''
+     and --serial-match names the link: the health check's serial step runs against the real connect line
+     (SerialPortCommunications.resolvePort, by port name), its kept-open fallback included.
   6. test_1: poll, deploy; OpenPnP started; run (poll + deploy of the newer build over the running OpenPnP);
      rollback. test_2: lumen-sim power-cycled and a third build: the deploy must not home the reset controller
      (exit 5, the previous build back unchecked, the hold set), then `resume`.
@@ -31,7 +32,9 @@ Checked: rc of each step, the current/previous links, deployed.json, bad.json, t
 saw, STATE.md's "Deployed on the machine" line and Holder, the deploy.jsonl records, and lumen-sim's I/O log. The
 log must show one G28 per health check, each answered before any M410 (a STOP inside G28 hangs the board), and
 make_machine_patch's DISABLE_COMMAND lines after each home; after the power cycle no G0/G1/G28 at all. lumen-sim
-must end with no model errors and not halted.
+must end with no model errors and not halted. And the real /api/status has every key path il_deploy reads
+(il_deploy.STATUS_FIELDS; a missing time is skipped there, so a backend rename would silently turn a check off), with
+the health check's home in machine.zCheck.homeAtMs, inside il_deploy's own window.
 
 Why the cameras are swapped. With no camera device, OpenPnP would start with the fixture's OpenPnpCaptureCameras:
 open() only logs "No camera found with ID ..." and returns (OpenPnpCaptureCamera.java:174), and the native library
@@ -410,6 +413,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         return list(cmd) + [
             "--root", cls.root, "--state-md", cls.state_md, "--lock", cls.lock, "--device", cls.sim.link,
             "--activity", cls.activity, "--quiet-min", "15", "--api-port", str(cls.port), "--usb-sn", "",
+            "--serial-match", "connecting to " + re.escape(cls.sim.link) + " by ",
             "--service-manager", "subprocess", "--java", JAVA, "--display", cls.display,
             "--status-timeout", "180", "--home-timeout", "150", "--home-busy-wait", "90", "--stop-timeout", "20",
             "--poll-interval", "0.25"]
@@ -519,6 +523,30 @@ class DeployRealOpenPnP(unittest.TestCase):
             time.sleep(0.5)
         self.fail("OpenPnP's API did not answer on %d within %d s\n%s" % (self.port, timeout, self.diagnostics()))
 
+    def age_openpnp_log(self):
+        """OpenPnP started by a person (as the unit after `systemctl --user start`): an hour ago, not now. Its log is an
+        activity file (the quiet period runs from its last line): wait until it is quiet, then date it back."""
+        log = os.path.join(self.root, "state", "config", "log", "OpenPnP.log")
+        last, end = None, time.monotonic() + 30
+        while time.monotonic() < end:
+            st = os.stat(log)
+            if last == (st.st_size, st.st_mtime_ns) and time.time() - st.st_mtime > 2:
+                break
+            last = (st.st_size, st.st_mtime_ns)
+            time.sleep(0.5)
+        old = time.time() - 3600
+        os.utime(log, (old, old))
+
+    def assert_status_fields(self):
+        """Every key path il_deploy reads in the real /api/status is there (null is fine), and the health check's home
+        is in machine.zCheck.homeAtMs, inside il_deploy's own window (what keeps it from counting as a person's)."""
+        st = self.wait_api()
+        self.assertEqual(il_deploy.status_field_problems(st), [], json.dumps(st)[:4000])
+        homes = [ms for what, ms in il_deploy.api_activity_times(st) if what == "a home"]
+        self.assertEqual(len(homes), 1, il_deploy.api_activity_times(st))
+        since, until = il_deploy.read_json(os.path.join(self.root, "own-activity.json"))[-1]
+        self.assertTrue(since * 1000 <= homes[0] <= until * 1000, (since, homes[0], until))
+
     def assert_deployed(self, tag, sha, action, running):
         """After a passed deploy or rollback of tag: links, records, the version the health check saw, STATE.md."""
         self.assertEqual(self.link("current"), tag)
@@ -529,8 +557,9 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertTrue(rep["ok"], rep)
         version = rep["report"]["version"]
         self.assertTrue(version.startswith(tag + "_") and version.endswith("." + self.sha7), version)
-        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "enable", "axes", "home", "homed",
-                                                                        "stop"])
+        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "enable", "serial", "axes", "home",
+                                                                        "homed", "stop"])
+        self.assertIn("Serial port: connecting to %s by " % self.sim.link, rep["report"]["steps"][2]["detail"])
         text = self.state_text()
         self.assertIn("- **Deployed on the machine:** %s (%s, %s, CI https://github.com/%s/actions/runs/%d)"
                       % (tag, self.sha7, BRANCH, GH_REPO, 9000 + int(tag.split("-")[2])), text)
@@ -558,6 +587,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         # OpenPnP runs (as the unit after a person starts it); a newer green build lands on il/integration
         self.service().start()
         self.wait_api()
+        self.age_openpnp_log()
         self.gh.head = self.sha_b
         self.gh.add_release_dir(self.rel_b)
         out = self.main("run")
@@ -567,7 +597,8 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertEqual(self.link("previous"), self.tag_a)
         self.assertIn("; previous %s. Config state: %s." % (self.tag_a, cfg), self.state_text())
         stops = [r for r in self.journal() if r["event"] == "stop"]
-        self.assertTrue(stops and stops[-1]["ok"] and stops[-1]["detail"] == "machine disabled", stops)
+        self.assertTrue(stops and stops[-1]["ok"] and stops[-1]["detail"] == il_deploy.STOP_DONE, stops)
+        self.assert_status_fields()  # build B runs on after its health check
 
         # one step back, with the pre-deploy config snapshot
         self.assertIn("rolled back from %s to %s" % (self.tag_b, self.tag_a), self.main("rollback"))
@@ -618,7 +649,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         rep = self.last_health()["report"]
         self.assertEqual((rep["ok"], rep["kind"]), (False, "machine"), rep)
         self.assertTrue(rep["version"].startswith(tag_c + "_"), rep["version"])
-        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "axes"])
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"])
         self.assertEqual(rep["steps"][-1]["detail"][:24], "controller was reset; a ")
 
         self.assertEqual(self.link("current"), self.tag_a)

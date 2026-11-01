@@ -44,7 +44,8 @@ class Units(unittest.TestCase):
         root = self.lab.root
         self.assertIn(f"WorkingDirectory={root}/current\n", u)
         start = [l for l in u.splitlines() if l.startswith("ExecStart=")][0]
-        self.assertTrue(start.startswith(f"ExecStart=/usr/bin/flock -n -E 75 {self.lab.lock} /usr/bin/java "), start)
+        # -F: no fork, java is the unit's main process (KillMode=mixed sends SIGTERM to the main process only)
+        self.assertTrue(start.startswith(f"ExecStart=/usr/bin/flock -n -F -E 75 {self.lab.lock} /usr/bin/java "), start)
         for part in ("--add-opens=java.base/java.lang=ALL-UNNAMED", "--add-opens=java.desktop/java.awt=ALL-UNNAMED",
                      "--add-opens=java.desktop/java.awt.color=ALL-UNNAMED", f"-DconfigDir={root}/state/config",
                      f"-Djava.util.prefs.userRoot={root}/prefs", "-jar openpnp-il.jar"):
@@ -55,7 +56,8 @@ class Units(unittest.TestCase):
         stop = [l for l in u.splitlines() if l.startswith("ExecStop=")][0]
         self.assertIn("il_deploy.py stop-openpnp", stop)
         self.assertIn(f"--api-port {self.lab.port}", stop)
-        for line in ("KillMode=mixed", "Restart=no", "Requires=il-openpnp-xvfb.service",
+        # java's exit on SIGTERM (128 + 15) is a clean stop: only a crash leaves the unit failed (a hold)
+        for line in ("KillMode=mixed", "SuccessExitStatus=143", "Restart=no", "Requires=il-openpnp-xvfb.service",
                      "After=il-openpnp-xvfb.service"):
             self.assertIn(line + "\n", u)
         self.assertRegex(u, r"CPUWeight=\d{3,}")
@@ -70,6 +72,9 @@ class Units(unittest.TestCase):
         limit = float([l for l in u.splitlines() if l.startswith("TimeoutStopSec=")][0].split("=")[1])
         # API homes take 21-23 s and up to 5 min (RESEARCH.md §2): wait out a whole home before any STOP
         self.assertGreaterEqual(wait, 300)
+        # after the STOP, the valve and pump must be off: the engine's own abort lines wait for the move in progress,
+        # which can take the driver's longest timeout (60 s in the lab machine.xml)
+        self.assertGreaterEqual(stop_timeout, 60 + 15)
         # worst case: the wait, one slow status read (5 s), POST /api/stop (10 s), the disable wait, a margin
         self.assertGreaterEqual(limit, wait + 5 + 10 + stop_timeout + 15)
 
