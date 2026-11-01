@@ -1,0 +1,26 @@
+1793139199.136 > M503
+1793139199.136 < echo:; Linear Units:
+1793139199.136 < echo:  G21 ; (mm)
+1793139199.136 < echo:; Temperature Units:
+1793139199.136 < echo:  M149 C ; Units in Celsius
+1793139199.136 < echo:; Steps per unit:
+1793139199.136 < echo:  M92 X320.00 Y320.00 Z40.00 A4.44 B4.44
+1793139199.136 < echo:; Max feedrates (units/s):
+1793139199.137 < echo:  M203 X1500.00 Y1500.00 Z500.00 A50000.00 B50000.00
+1793139199.137 < echo:; Max Acceleration (units/s2):
+1793139199.137 < echo:  M201 X10000.00 Y10000.00 Z10000.00 A10000 B10000
+1793139199.137 < echo:; Acceleration (units/s2) (P<print-accel> R<retract-accel> T<travel-accel>):
+1793139199.137 < echo:  M204 P1000.00 R3000.00 T1000.00
+1793139199.138 < echo:; Advanced (D<min_segment_time_us> S<min_feedrate> T<min_travel_feedrate> J<junc_dev>):
+1793139199.138 < echo:  M205 D20000.00 S0.00 T0.00 J0.01
+1793139199.138 < echo:; Home offset:
+1793139199.138 < echo:  M206 X0.00 Y0.00 Z0.00 A0.00 B0.00
+1793139199.138 < echo:; Stepper driver current:
+1793139199.138 < echo:  M906 X800 Y1000 Z800 A200 B200
+1793139199.138 < echo:  M906 I1 Y1000
+1793139199.138 < echo:; Driver stepping mode:
+1793139199.138 < echo:  M569 S1 Z A B
+1793139199.138 < echo:  M569 S1  A
+1793139199.138 < echo:  M569 S1  B
+1793139199.138 < ok
+1793139237.059 > M150 P255 R255 U255 B255
