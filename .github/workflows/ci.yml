@@ -179,10 +179,43 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  deploy-e2e:
+    name: Deploy end-to-end (il_deploy with the real jar on lumen-sim)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/download-artifact@v8
+        with:
+          name: openpnp-build
+          path: target
+      - name: Xvfb
+        run: command -v Xvfb >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q xvfb; }
+      - name: test_deploy_openpnp.py
+        # Run as a script: with IL_DEPLOY_E2E=1 a skip (no jar, no Xvfb) exits 1, so a miswired job cannot pass.
+        env:
+          IL_DEPLOY_E2E: '1'
+          IL_DEPLOY_E2E_JAR: ${{ env.JAR }}
+          IL_DEPLOY_E2E_LIB: target/lib
+          IL_DEPLOY_E2E_OUT: ${{ runner.temp }}/deploy-e2e
+        run: python3 infra/deploy/e2e/test_deploy_openpnp.py -v
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: deploy-e2e
+          path: ${{ runner.temp }}/deploy-e2e/
+          if-no-files-found: ignore
+          retention-days: 14
+
   gate:
     name: gate
     if: always()
-    needs: [build, infra, maven, ui-e2e, ui-boardview, acceptance]
+    needs: [build, infra, maven, ui-e2e, ui-boardview, acceptance, deploy-e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Every job passed

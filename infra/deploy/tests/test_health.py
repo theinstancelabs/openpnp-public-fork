@@ -62,10 +62,39 @@ class Health(unittest.TestCase):
     def test_already_enabled_is_stopped_first(self):
         self.start()
         self.fake.enable()
-        with open(os.path.join(self.lab.config, "log", "OpenPnP.log"), "w"):
-            pass
         rep = self.check()
         self.assertTrue(rep["ok"], rep)
+
+    def test_link_kept_open_since_an_earlier_enable(self):
+        """connection-keep-alive (the lab machine.xml): a STOP leaves the link open, so the next enable logs no
+        'Serial port: connecting' line. The line from this OpenPnP's earlier connect (its own OpenPnP.log) counts."""
+        self.start()
+        self.fake.enable()
+        self.fake.stop()
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        serial = [s for s in rep["steps"] if s["step"] == "serial"][0]["detail"]
+        self.assertIn("S/N 387932683335", serial)
+        self.assertIn("kept open", serial)
+
+    def test_link_kept_open_to_another_device_fails(self):
+        self.start(usb_sn="111111111111")
+        self.fake.enable()
+        self.fake.stop()
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["failure"].split(":")[0], "serial")
+
+    def test_each_enable_connects_without_keep_alive(self):
+        self.start(keep_alive=False)
+        self.fake.enable()
+        self.fake.stop()
+        log = os.path.join(self.lab.config, "log", "OpenPnP.log")
+        size = os.path.getsize(log)
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertGreater(os.path.getsize(log), size, "the health check's enable connected again")
+        self.assertNotIn("kept open", [s for s in rep["steps"] if s["step"] == "serial"][0]["detail"])
 
     def test_version_mismatch(self):
         self.start(sha=sha_of("b"))
@@ -207,6 +236,46 @@ class Health(unittest.TestCase):
         self.assertEqual(rep["kind"], "home-stuck")
         self.assertNotIn(("POST", "/api/stop"), self.paths())
         self.assertEqual(self.violations(), [])
+
+    # --- the real server's own 5 min limit (MachineEndpoints.home: f.get(5, MINUTES), then 409 while the home runs on)
+    def test_a_home_the_server_gave_up_on_is_waited_out_and_passes(self):
+        self.start(home_s=1.5, home_cap_s=0.3)
+        rep = self.check("--home-timeout", "5", "--home-busy-wait", "5")
+        self.assertTrue(rep["ok"], rep)
+        self.assertIn("ended after", [s for s in rep["steps"] if s["step"] == "home"][0]["detail"])
+        self.assertEqual(self.violations(), [])
+        self.assertEqual(len([p for p in self.paths() if p == ("POST", "/api/machine/home")]), 1)
+
+    def test_a_home_the_server_gave_up_on_that_never_ends_is_left_alone(self):
+        self.start(home_s=3.0, home_cap_s=0.3)
+        rep = self.check("--home-timeout", "5", "--home-busy-wait", "0.5")
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "home-stuck", rep)
+        self.assertNotIn(("POST", "/api/stop"), self.paths())
+        self.assertEqual(self.violations(), [])
+
+    def test_a_home_dropped_by_openpnp_is_the_machines(self):
+        """The same 409 when OpenPnP dropped the home (a task of its own ahead of it failed): not busy, not homed."""
+        self.start(home_s=0.6, home_cap_s=0.3, fail=["home"])
+        rep = self.check("--home-timeout", "5", "--home-busy-wait", "5")
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine", rep)
+        self.assertEqual(self.violations(), [])
+
+    def test_a_home_refused_before_it_starts_is_the_machines(self):
+        """Refusals mean something else holds the machine (the pressure held, OpenPnP busy, an engine task): a person
+        may be at it, so the previous build is not homed after it unwatched."""
+        self.start(jar_fail=["pressure"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine", rep)
+        self.assertIn("pressure", rep["failure"])
+
+    def test_no_home_endpoint_is_the_builds(self):
+        self.start(jar_fail=["home-404"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "build", rep)
 
     def test_health_cli_prints_json(self):
         self.start()

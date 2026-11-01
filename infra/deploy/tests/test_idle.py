@@ -153,6 +153,52 @@ class Idle(unittest.TestCase):
                     self.fake.shutdown()
                     self.fake = None
 
+    def test_machine_switched_on_is_in_use(self):
+        """Someone pressed Start (and Home) in the web UI and works at the machine by hand: no run, no pressure, a
+        quiet serial.log, Holder still nobody. A deploy would turn the machine off under them and home it."""
+        self.start_fake()
+        self.fake.enable()
+        r = self.reasons()
+        self.assertTrue(any("switched on" in x for x in r), r)
+        self.fake.stop()
+        self.assertEqual(self.reasons(), [])
+
+    def test_a_home_by_someone_is_activity(self):
+        self.start_fake()
+        self.fake.enable()
+        self.fake.home({"wait": True})
+        self.fake.stop()
+        r = self.reasons()
+        self.assertTrue(any("a home" in x and "ago" in x for x in r), r)
+
+    def test_the_deployers_own_home_is_not_activity(self):
+        """The health check's own home sets homeAtMs too: a rollback or the next deploy right after it is not held."""
+        self.start_fake()
+        os.makedirs(os.path.join(self.lab.dir, "openpnp-il"), exist_ok=True)
+        cfg = il_deploy.config_from_args(self.lab.argv("status", extra=["--usb-sn", ""]))
+        rep = il_deploy.Deployer(cfg, self.lab.deps(service=self.svc)).health_check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertIsNotNone(self.fake.home_at_ms)
+        self.assertEqual(self.reasons(), [])
+
+    def test_tip_place_and_needle_edits_are_activity(self):
+        for key, word in (("needle_changed_s_ago", "needle change"), ("needle_set_s_ago", "needle touch-off"),
+                          ("landing_set_s_ago", "needle landing"), ("tip_mounted_s_ago", "tip mounted"),
+                          ("new_seat_s_ago", "new seat"), ("location_set_s_ago", "waste"),
+                          ("surface_set_s_ago", "board")):
+            for ago, busy in ((60, True), (20 * 60, False)):
+                with self.subTest(key=key, s_ago=ago):
+                    self.start_fake(**{key: ago})
+                    try:
+                        r = self.reasons()
+                        if busy:
+                            self.assertTrue(any(word in x and "ago" in x for x in r), r)
+                        else:
+                            self.assertEqual(r, [])
+                    finally:
+                        self.fake.shutdown()
+                        self.fake = None
+
     def test_api_busy_states(self):
         for fail, word in (("busy", "busy"), ("run", "run"), ("pressure", "pressure")):
             with self.subTest(fail=fail):

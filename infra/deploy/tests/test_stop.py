@@ -51,9 +51,10 @@ class StubService:
         return set()
 
 
-def status(busy=False, run=None, pressure=False):
+def status(busy=False, run=None, pressure=False, state=None):
+    state = state or ("on" if pressure else "off")
     return 200, {"machine": {"busy": busy, "enabled": True}, "run": run,
-                 "pressure": {"on": pressure, "state": "on" if pressure else "off"}}
+                 "pressure": {"on": state == "on", "state": state}}
 
 
 class Decisions(unittest.TestCase):
@@ -123,6 +124,30 @@ class Decisions(unittest.TestCase):
         ok, detail = self.deployer(api).stop_machine()
         self.assertTrue(ok, detail)
         self.assertEqual(api.posts, ["/api/stop"])
+
+    def test_vent_failed_is_stopped_at_once(self):
+        api = StubApi(lambda n: status(busy=True, state="vent_failed"))
+        ok, detail = self.deployer(api).stop_machine()
+        self.assertTrue(ok, detail)
+        self.assertEqual((api.posts, api.gets), (["/api/stop"], 1))
+
+    def test_pressure_switching_while_busy_waits_like_a_home(self):
+        """PressureHold.start sets STARTING on the HTTP thread and queues its task behind whatever the machine thread
+        runs, e.g. a home: 'starting' with the machine busy may be a G28 underway, and nothing is on yet."""
+        for state in ("starting", "stopping"):
+            with self.subTest(state=state):
+                api = StubApi(lambda n, s=state: status(busy=True, state=s))
+                ok, detail = self.deployer(api).stop_machine()
+                self.assertFalse(ok, detail)
+                self.assertEqual(api.posts, [], "never STOP while the machine thread may be homing")
+                self.assertIn("busy", detail)
+                # the home ends, the start runs (busy again), then the hold is on: STOP at once then
+                seq = {1: status(busy=True, state=state), 2: status(busy=False, state=state),
+                       3: status(busy=False, state="on")}
+                api = StubApi(lambda n: seq.get(n, status(busy=True, state="on")))
+                ok, detail = self.deployer(api).stop_machine()
+                self.assertTrue(ok, detail)
+                self.assertEqual((api.posts, api.gets), (["/api/stop"], 2))
 
     def test_exec_stop_uses_the_same_rules(self):
         for answer, posts, word in ((lambda n: status(busy=True), [], "not sent"),
