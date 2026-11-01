@@ -956,6 +956,7 @@ class Flow(unittest.TestCase):
         with mock.patch.object(il_deploy.Deployer, "health_check", side_effect=il_deploy.Terminated("signal 15")):
             self.deploy(rc=1)
         self.assertEqual(self.lab.main("resume"), 0)
+        self.lab.wait_api()  # the person runs health on an OpenPnP that has finished starting
         self.assertEqual(self.lab.main("health"), 0, self.lab.last_out + self.lab.last_err)
         self.assertNotIn("pending", self.deployed()["current"])
         self.assertTrue(self.deployed_line().startswith(f"- **Deployed on the machine:** {b}"), self.deployed_line())

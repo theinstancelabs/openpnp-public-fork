@@ -364,17 +364,21 @@ class Lab:
         the quiet period runs from OpenPnP's last log line). Neither is what these tests are about."""
         svc = self.service()
         svc.start()
+        self.wait_api(timeout)
+        self.age_openpnp_log()
+        return svc
+
+    def wait_api(self, timeout=15):
+        """Until the (fake) OpenPnP's API answers: a check against one still starting is 'not idle' (fail closed)."""
         api, end = il_deploy.Api(self.port), time.monotonic() + timeout
         while True:
             try:
                 api.get("/api/status", timeout=2)
-                break
+                return
             except il_deploy.ApiDown:
                 if time.monotonic() > end:
                     raise
                 time.sleep(0.02)
-        self.age_openpnp_log()
-        return svc
 
     def age_openpnp_log(self, seconds=3600):
         log = os.path.join(self.config, "log", "OpenPnP.log")
