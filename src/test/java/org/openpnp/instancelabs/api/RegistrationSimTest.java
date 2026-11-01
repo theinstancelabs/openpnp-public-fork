@@ -790,6 +790,7 @@ public class RegistrationSimTest {
     /** §10.2 cases 7, 13 and 16: refusals before N1 or anything else moves. */
     @Test
     public void refusalsComeBeforeAnythingMoves() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         String p0 = plan().get("planId").getAsString();
         assertEquals(400, post("/api/plan/" + p0 + "/register", "{\"probe\":\"bogus\"}").status);
         assertEquals(404, post("/api/plan/nope/register", "{}").status);

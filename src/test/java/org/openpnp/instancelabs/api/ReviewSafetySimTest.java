@@ -38,6 +38,7 @@ public class ReviewSafetySimTest {
     public void before() throws Exception {
         sim = new SimMachine();
         svc = DispenseService.start(Configuration.get());
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         ApiSettings s = new ApiSettings();
         s.port = 0;
         api = ApiServer.start(Configuration.get(), s);

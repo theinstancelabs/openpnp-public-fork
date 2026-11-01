@@ -395,6 +395,7 @@ public class ApiServerSimTest {
 
     @Test
     public void pressureHoldSwitchesPumpThenValveAndVentsValveFirst() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         setPlaces();
         sim.server.mark();
         JsonObject on = ok(post("/api/pressure/start", null));
@@ -429,6 +430,7 @@ public class ApiServerSimTest {
 
     @Test
     public void openPnpsOwnStopVentsTheHold() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         setPlaces();
         ok(post("/api/pressure/start", null));
         sim.server.mark();
@@ -441,6 +443,7 @@ public class ApiServerSimTest {
 
     @Test
     public void holdSwitchesOffAtTheOnTimeLimit() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         setPlaces();
         // I7 counts from the pump: shorter settles than the bench's 1 s + 3 s so the hold reaches ON first
         ok(call("PUT", "/api/config", "{\"maxContinuousOnTimeS\":1,\"pumpToValveSettleMs\":200,\"valveSettleMs\":200}"));
@@ -461,6 +464,7 @@ public class ApiServerSimTest {
 
     @Test
     public void stopVentsTheHoldAndStopsTheMachine() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         setPlaces();
         ok(post("/api/pressure/start", null));
         sim.server.mark();
