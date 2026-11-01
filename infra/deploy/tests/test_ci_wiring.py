@@ -7,12 +7,26 @@
   gate and its release).
 - The release job publishes only after the gate, only for a push to il/integration, and attests the tarball before
   publishing it (the deployer verifies that attestation), with exactly the permissions that needs.
+- Its Publish step, run as GitHub runs it against a fake gh (tests/fake_gh.py): it publishes this run's build, a re-run
+  passes on that release, and a release anyone else put at the tag first fails the step (the run must not end green
+  while its build is never released).
 """
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
-CI_YML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".github", "workflows", "ci.yml")
+import fake_gh
+import make_release
+from fakes import BRANCH, REPO, FakeGitHub
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.normpath(os.path.join(HERE, "..", "..", ".."))
+CI_YML = os.path.join(ROOT, ".github", "workflows", "ci.yml")
+PUBLISHER = "infra/ci/publish_release.py"
 E2E = "infra/deploy/e2e/test_deploy_openpnp.py"
 INTEGRATION = "refs/heads/il/integration"
 RELEASE_PERMISSIONS = {"contents": "write", "id-token": "write", "attestations": "write"}
@@ -59,6 +73,27 @@ def job_steps(block):
     if not m:
         return []
     return ["      - " + s for s in re.split(r"^      - ", m.group(1), flags=re.M) if s.strip()]
+
+
+def step_run(step):
+    """The shell script of a step's `run:` (a `|` block or one line); ValueError if it has none this can read."""
+    lines = step.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"^([ -]*)run:\s*(.*?)\s*$", line)
+        if not m:
+            continue
+        if m.group(2) != "|":
+            if m.group(2)[:1] in (">", "|", ""):
+                raise ValueError(f"cannot read the run: {m.group(2)!r}")
+            return m.group(2) + "\n"
+        body = []
+        for l in lines[i + 1:]:
+            if l.strip() and len(l) - len(l.lstrip()) <= len(m.group(1)):
+                break
+            body.append(l)
+        indent = min(len(l) - len(l.lstrip()) for l in body if l.strip())
+        return "\n".join(l[indent:] for l in body).strip("\n") + "\n"
+    raise ValueError("the step has no run:")
 
 
 # --- a GitHub Actions expression evaluator: the part of the language ci.yml uses -----------------------------------
@@ -230,9 +265,8 @@ def _runs_release(cond, event, ref, gate):
     return condition(cond, {"github.event_name": event, "github.ref": ref, "needs.gate.result": gate})
 
 
-def _same_dir(a, b):
-    norm = lambda p: os.path.dirname(re.sub(r"\$\{\{\s*runner\.temp\s*\}\}|\$\{?RUNNER_TEMP\}?", "<tmp>", p.strip('"')))
-    return norm(a) == norm(b)
+def _path(p):
+    return re.sub(r"\$\{\{\s*runner\.temp\s*\}\}|\$\{?RUNNER_TEMP\}?", "<tmp>", p.strip('"\'')).rstrip("/")
 
 
 def release_problems(text):
@@ -266,24 +300,117 @@ def release_problems(text):
     steps = job_steps(block)
     attest = [i for i, s in enumerate(steps)
               if re.search(r"^\s+(- )?uses: actions/attest-build-provenance@v\d", s, re.M)]
-    publish = [i for i, s in enumerate(steps) if "gh release create" in s]
+    publish = [i for i, s in enumerate(steps) if PUBLISHER in s]
+    by_hand = [i for i, s in enumerate(steps) if re.search(r"\bgh release (create|upload|edit|delete)\b", s)]
+    if by_hand:
+        out.append(f"release step {by_hand[0] + 1} runs gh release itself: only {PUBLISHER} may publish (it checks "
+                   "that a release already at the tag is this run's own)")
     if len(publish) != 1:
-        return out + [f"{len(publish)} release steps run gh release create (expected one)"]
+        return out + [f"{len(publish)} release steps run {PUBLISHER} (expected one)"]
     if len(attest) != 1:
         return out + [f"{len(attest)} release steps use actions/attest-build-provenance (expected one)"]
     a, p = steps[attest[0]], steps[publish[0]]
     if attest[0] > publish[0]:
         out.append("the attest step runs after the publish step")
-    if re.search(r"^\s+(if|continue-on-error):", a, re.M):
-        out.append("the attest step can be skipped or fail (if/continue-on-error)")
+    for name, step in (("attest", a), ("publish", p)):
+        if re.search(r"^\s+(if|continue-on-error):", step, re.M):
+            out.append(f"the {name} step can be skipped or fail (if/continue-on-error)")
     subject = re.search(r"^\s+subject-path: *(.+?)\s*$", a, re.M)
-    uploaded = re.search(r"(\S*/openpnp-il-\$SHA7\.tar\.gz)\"?\s", p)
+    published = re.search(r"--dir[ =](\"[^\"]*\"|\S+)", p)
     if not subject or not subject.group(1).endswith("/openpnp-il-*.tar.gz"):
         out.append(f"the attest step's subject-path is {subject and subject.group(1)!r}, not the openpnp-il-*.tar.gz "
                    "tarball")
-    elif not uploaded or not _same_dir(subject.group(1), uploaded.group(1)):
-        out.append("the attest step's tarball is not the one the publish step uploads "
-                   f"({subject.group(1)} vs {uploaded and uploaded.group(1)})")
+    elif not published or os.path.dirname(_path(subject.group(1))) != _path(published.group(1)):
+        out.append("the attest step's tarball is not the one the publish step publishes "
+                   f"({subject.group(1)} vs --dir {published and published.group(1)})")
+    return out
+
+
+# --- the Publish step's own script, run against a fake gh ---------------------------------------------------------
+# The push run whose Publish step runs (run id 1000 + run number, as FakeGitHub.add_release names a release's run)
+STEP_SHA, STEP_RUN_ID, STEP_RUN_NUMBER = "c" * 40, 1007, 7
+STEP_TAG = f"il-build-{STEP_RUN_NUMBER}-{STEP_SHA[:7]}"
+
+
+class StepRun:
+    """The release job's step that publishes, run as GitHub Actions runs a step (bash -eo pipefail in the checkout,
+    the job's environment) with tests/fake_gh.py as gh, for a push run of il/integration that the gate passed."""
+
+    def __init__(self, text, tmp):
+        steps = [s for s in job_steps(jobs(text)["release"]) if PUBLISHER in s or re.search(r"\bgh release\b", s)]
+        if len(steps) != 1:
+            raise ValueError(f"{len(steps)} release steps publish (expected one)")
+        self.tmp = tmp
+        self.script = os.path.join(tmp, "publish.sh")
+        with open(self.script, "w") as f:
+            f.write(step_run(steps[0]))
+        self.bin = os.path.join(tmp, "bin")
+        os.makedirs(self.bin)
+        with open(os.path.join(self.bin, "gh"), "w") as f:
+            f.write(f'#!/bin/sh\nexec "{sys.executable}" "{os.path.join(HERE, "fake_gh.py")}" "$@"\n')
+        os.chmod(os.path.join(self.bin, "gh"), 0o755)
+        self.state = os.path.join(tmp, "gh-state.json")
+        self.github = FakeGitHub()
+
+    def package(self, attempt):
+        """$RUNNER_TEMP/rel as the Package step writes it, its tarball attested by this run's attempt (attest step)."""
+        rel = os.path.join(self.tmp, "runner", "rel")
+        shutil.rmtree(rel, ignore_errors=True)
+        src = os.path.join(self.tmp, f"build{attempt}")
+        os.makedirs(os.path.join(src, "lib"), exist_ok=True)
+        for name in ("openpnp.jar", "lib/dep.jar"):
+            with open(os.path.join(src, name), "wb") as f:
+                f.write(f"{name} of attempt {attempt}".encode())
+        make_release.make(os.path.join(src, "openpnp.jar"), os.path.join(src, "lib"), STEP_TAG, STEP_SHA,
+                          BRANCH, STEP_RUN_ID, STEP_RUN_NUMBER,
+                          f"https://github.com/{REPO}/actions/runs/{STEP_RUN_ID}", rel)
+        with open(os.path.join(rel, f"openpnp-il-{STEP_SHA[:7]}.tar.gz"), "rb") as f:
+            self.github.attest(f.read(), STEP_RUN_ID, STEP_SHA, attempt=attempt)
+        return rel
+
+    def run(self, attempt=1):
+        """(exit code, output, gh release create calls) of the step in this run's attempt."""
+        self.package(attempt)
+        fake_gh.dump(self.github, self.state)
+        env = {"PATH": self.bin + os.pathsep + os.environ["PATH"], "HOME": self.tmp, "FAKE_GH_STATE": self.state,
+               "GITHUB_REPOSITORY": REPO, "GITHUB_SHA": STEP_SHA, "GITHUB_RUN_ID": str(STEP_RUN_ID),
+               "GITHUB_RUN_NUMBER": str(STEP_RUN_NUMBER), "GITHUB_RUN_ATTEMPT": str(attempt),
+               "GITHUB_REF": INTEGRATION, "GITHUB_REF_NAME": BRANCH, "GITHUB_EVENT_NAME": "push",
+               "GITHUB_SERVER_URL": "https://github.com", "GITHUB_WORKSPACE": ROOT,
+               "RUNNER_TEMP": os.path.join(self.tmp, "runner"), "TAG": STEP_TAG, "GH_TOKEN": "a-fake-token"}
+        p = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", self.script], cwd=ROOT, env=env,
+                           capture_output=True, text=True, timeout=120)
+        self.github, _, calls = fake_gh.load(self.state)
+        return p.returncode, p.stdout + p.stderr, [c for c in calls if c[1:3] == ["release", "create"]]
+
+
+def publish_problems(text):
+    """Why the release job's Publish step could leave a run green with its build unreleased, or not publish it ([] =
+    it cannot): run with nothing at the tag, then as a re-run, then with a release someone else put there first."""
+    out = []
+    with tempfile.TemporaryDirectory(prefix="il-ci-publish-") as tmp:
+        step = StepRun(text, tmp)
+        rc, said, creates = step.run(attempt=1)
+        rel = next((r for r in step.github.releases if r["tag_name"] == STEP_TAG), None)
+        if rc != 0 or len(creates) != 1 or not rel or rel["target_commitish"] != STEP_SHA \
+                or sorted(a["name"] for a in rel["assets"]) != sorted(
+                    ["BUILD-INFO.json", f"openpnp-il-{STEP_SHA[:7]}.tar.gz", f"openpnp-il-{STEP_SHA[:7]}.tar.gz.sha256"]):
+            return [f"the step does not publish this run's build at {STEP_SHA[:7]} (exit {rc}): {said[-400:]}"]
+        rc, said, creates = step.run(attempt=2)
+        if rc != 0 or creates:
+            out.append(f"a re-run of the step fails on the release its first attempt published (exit {rc}, "
+                       f"{len(creates)} creates): {said[-400:]}")
+    first = {"a person": dict(author="mallory"),
+             "github-actions[bot] (a PR run's token), naming this run, its tarball not attested by this run":
+                 dict(jar={"not": "this run's build"}, attest=False)}
+    for who, kw in first.items():
+        with tempfile.TemporaryDirectory(prefix="il-ci-publish-") as tmp:
+            step = StepRun(text, tmp)
+            step.github.add_release(STEP_RUN_NUMBER, STEP_SHA, gate=None, **kw)
+            rc, said, creates = step.run(attempt=1)
+            if rc == 0:
+                out.append(f"the step passes on a release at its tag published first by {who}: the run would end "
+                           "green with its build never released")
     return out
 
 
@@ -345,16 +472,66 @@ class Concurrency(unittest.TestCase):
                 evaluate(bad, ctx)
 
 
+# The Publish step before the 11-01 review: a release at the tag passed if it was at this commit with the three file
+# names, whoever published it.
+OLD_PUBLISH = """\
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA7="${GITHUB_SHA:0:7}"
+          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+            target="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .target_commitish)"
+            assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | sort | join(" ")')"
+            want="BUILD-INFO.json openpnp-il-$SHA7.tar.gz openpnp-il-$SHA7.tar.gz.sha256"
+            if [ "$target" = "$GITHUB_SHA" ] && [ "$assets" = "$want" ]; then
+              echo "release $TAG already published by an earlier attempt of this run"; exit 0
+            fi
+            echo "::error::release $TAG exists but is incomplete or at another commit"
+            exit 1
+          fi
+          gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false --title "$TAG" \\
+            --notes "Green build" \\
+            "$RUNNER_TEMP/rel/openpnp-il-$SHA7.tar.gz" "$RUNNER_TEMP/rel/openpnp-il-$SHA7.tar.gz.sha256" \\
+            "$RUNNER_TEMP/rel/BUILD-INFO.json"
+"""
+
+
 class Release(unittest.TestCase):
     def test_the_release_job_publishes_only_attested_green_pushes_to_il_integration(self):
         self.assertEqual(release_problems(read_ci()), [])
+
+    def test_the_publish_step_publishes_this_runs_build_and_nothing_else_passes_it(self):
+        self.assertEqual(publish_problems(read_ci()), [])
+
+    def test_the_step_checker_sees_the_old_publish_step(self):
+        # the review's reproduction: the old step exits 0 on a release someone else put at the tag first
+        text = read_ci()
+        publish = next(s for s in job_steps(jobs(text)["release"]) if PUBLISHER in s)
+        old = text.replace(publish, OLD_PUBLISH)
+        problems = publish_problems(old)
+        self.assertTrue(any("a person" in p for p in problems), problems)
+        self.assertTrue(any("not attested by this run" in p for p in problems), problems)
+        self.assertTrue(release_problems(old))
+        lenient = text.replace(publish, publish.replace('--run-id "$GITHUB_RUN_ID"', '--run-id "$GITHUB_RUN_NUMBER"'))
+        self.assertNotEqual(lenient, text, "the mutation did not apply")
+        self.assertTrue(publish_problems(lenient), "the step must judge the release by this run's id")
+
+    def test_step_run(self):
+        step = "      - name: x\n        run: |\n          a \\\n            b\n\n          c\n        env:\n          K: v\n"
+        self.assertEqual(step_run(step), "a \\\n  b\n\nc\n")
+        self.assertEqual(step_run("      - run: echo hi\n"), "echo hi\n")
+        for bad in ("      - run: >-\n          a\n", "      - uses: x\n"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                step_run(bad)
 
     def test_the_checker_sees_a_weaker_release_job(self):
         text = read_ci()
         block = jobs(text)["release"]
         steps = job_steps(block)
         attest = next(s for s in steps if "attest-build-provenance" in s)
-        publish = next(s for s in steps if "gh release create" in s)
+        publish = next(s for s in steps if PUBLISHER in s)
         cond = job_value(block, "if")
         mutations = {
             "no gate": text.replace(block, block.replace("    needs: [gate]", "    needs: [build]")),
@@ -373,6 +550,11 @@ class Release(unittest.TestCase):
             "attests the jar": text.replace(attest, attest.replace("rel/openpnp-il-*.tar.gz", "target/*.jar")),
             "attests another dir": text.replace(attest, attest.replace("${{ runner.temp }}/rel/",
                                                                        "${{ runner.temp }}/x/")),
+            "publishes by hand": text.replace(publish, OLD_PUBLISH),
+            "publish skippable": text.replace(publish, publish.replace("        run: |",
+                                                                       "        if: false\n        run: |")),
+            "publish may fail": text.replace(publish, publish.replace("        run: |",
+                                                                      "        continue-on-error: true\n        run: |")),
         }
         for name, mutated in mutations.items():
             with self.subTest(name):

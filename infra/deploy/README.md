@@ -356,7 +356,8 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
   attestations GitHub stores per artifact digest; a fake `gh` (`FakeGhCli`) for `GhAttestation`: `attestation
   verify` with gh's policy flags, exit codes and JSON (`tests/gh-attestation-verify-cli-2.97.0.json` is a real
   output, of gh's own release, that the JSON check is tested on), `--help`, `auth status`, and no gh, an old gh, not
-  logged in, offline; CI-style
+  logged in, offline; for CI's publish step also `api` (JSON and asset bytes), `release view` and `release create`
+  (`tests/fake_gh.py` runs it as a `gh` executable, its FakeGitHub kept in a JSON file between calls); CI-style
   release tarballs, or exactly what `infra/ci/make_release.py` writes (`Lab.ci_release`, published by
   `FakeGitHub.add_release_dir` as `gh release create` does); and a throwaway lab (root, STATE.md, lock,
   device, activity file). `Lab.start_service` starts the fake OpenPnP as a person did an hour ago: it waits for its
@@ -384,7 +385,17 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
   a group and the newer cancels the older; a push or manual run never shares one with any other run. The release job
   needs the gate, runs only for a green push to `il/integration` (its `if:` evaluated per event, branch and gate
   result), attests `openpnp-il-*.tar.gz` from the directory it publishes from before the publish step, and has
-  exactly `contents`, `id-token` and `attestations: write`. Each check is tested on a weakened copy of `ci.yml` too.
+  exactly `contents`, `id-token` and `attestations: write`. Its Publish step's own script runs as GitHub runs it
+  (bash -eo pipefail, the job's environment) with `tests/fake_gh.py` as `gh`: it publishes this run's build, a
+  re-run passes on that release, and a release someone else put at the tag first (a person; `github-actions[bot]`
+  from a PR run's token, naming this run, its tarball not attested by it) fails the step. Each check is tested on a
+  weakened copy of `ci.yml` too, among them the Publish step before the 11-01 review, which passed both.
+- `test_publish_release.py`: `infra/ci/publish_release.py` (the Publish step). Nothing at the tag: `gh release
+  create` with the three files, a prerelease at the commit, not latest. A release already there passes only as this
+  run's own, judged as this deployer judges a release: author `github-actions[bot]`, at the commit, exactly the three
+  files, BUILD-INFO naming this run, the tarball matching its .sha256 and attested by this run
+  (`GhAttestation.command`, then `attestation_problems` with this run's id). Nothing of a release CI did not publish
+  is downloaded, and the tarball only after BUILD-INFO names this run.
 - `test_attestation.py`: `GhAttestation` against the fake `gh` (the command line, accepted, definite mismatches
   refused for good, everything else retried) and the real JSON shape.
 

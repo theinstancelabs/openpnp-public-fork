@@ -296,23 +296,13 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/rel/openpnp-il-*.tar.gz
       - name: Publish
+        # A release already at the tag (a re-run finds what an earlier attempt published) passes only if it is this
+        # run's own: published by github-actions[bot] at this commit, BUILD-INFO naming this run, its tarball attested
+        # by this run under the deployer's policy. Anything else there fails the run instead of leaving it green with
+        # its build unreleased.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          SHA7="${GITHUB_SHA:0:7}"
-          # A re-run of a green run finds its release already there: fine if it is complete and at this commit.
-          if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
-            target="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .target_commitish)"
-            assets="$(gh release view "$TAG" --json assets --jq '[.assets[].name] | sort | join(" ")')"
-            want="BUILD-INFO.json openpnp-il-$SHA7.tar.gz openpnp-il-$SHA7.tar.gz.sha256"
-            if [ "$target" = "$GITHUB_SHA" ] && [ "$assets" = "$want" ]; then
-              echo "release $TAG already published by an earlier attempt of this run"; exit 0
-            fi
-            echo "::error::release $TAG exists but is incomplete or at another commit (target $target, assets: $assets)"
-            exit 1
-          fi
-          gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false --title "$TAG" \
-            --notes "Green build of il/integration at $GITHUB_SHA (CI run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). Installed on the lab computer by infra/deploy when the machine is idle." \
-            "$RUNNER_TEMP/rel/openpnp-il-$SHA7.tar.gz" "$RUNNER_TEMP/rel/openpnp-il-$SHA7.tar.gz.sha256" \
-            "$RUNNER_TEMP/rel/BUILD-INFO.json"
+          python3 infra/ci/publish_release.py --dir "$RUNNER_TEMP/rel" --tag "$TAG" --sha "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

@@ -281,18 +281,25 @@ def attestation_entry(rec, digest, name="artifact"):
 
 
 class FakeGhCli:
-    """`gh` as il_deploy.GhAttestation runs it (subprocess.run's signature), against FakeGitHub's attestations:
-    `attestation verify <file> --repo R [policy flags] --format json` finds the attestations of the file's sha256 in R
-    and keeps those that pass the policy flags (--signer-workflow, --source-ref, --source-digest,
-    --deny-self-hosted-runners), with gh's exit codes and messages; `attestation verify --help`; `auth status`.
+    """`gh` as il_deploy runs it (subprocess.run's signature) and CI's publish step (infra/ci/publish_release.py; the
+    step's own script runs tests/fake_gh.py as gh), against a FakeGitHub:
+    - `attestation verify <file> --repo R [policy flags] --format json` finds the attestations of the file's sha256 in
+      R and keeps those that pass the policy flags (--signer-workflow, --source-ref, --source-digest,
+      --deny-self-hosted-runners), with gh's exit codes and messages; `attestation verify --help`; `auth status`.
+    - `api [-H H]... PATH [--jq EXPR]`: FakeGitHub.get_json, or gh's `gh: Not Found (HTTP 404)`; with
+      `Accept: application/octet-stream`, an asset's bytes (repos/R/releases/assets/<id>), written to stdout=file.
+    - `release view TAG [--repo R] --json F,... [--jq EXPR]`, and `release create TAG [--repo R] --target SHA
+      [--prerelease] [--latest=false] [--title T] [--notes N] FILE...`: a release published by login (the token's
+      account), refused if TAG has one. --jq runs jq (gh's own is built in).
     installed=False (no gh), attestation_command=False (a gh before 2.49), flags (what --help lists: an older gh
     lacks some), logged_in=False, offline=True (no network) and stdout (what verify prints) make the failures."""
 
     def __init__(self, github, installed=True, attestation_command=True, flags=GH_HELP_FLAGS, logged_in=True,
-                 offline=False, stdout=None):
+                 offline=False, stdout=None, login="github-actions[bot]"):
         self.github = github
         self.installed, self.attestation_command, self.flags = installed, attestation_command, flags
         self.logged_in, self.offline, self.stdout = logged_in, offline, stdout
+        self.login = login
         self.calls = []
         self.verified = []  # (file, its sha256) of each `attestation verify`
 
@@ -300,11 +307,21 @@ class FakeGhCli:
     def done(argv, rc, out="", err=""):
         return subprocess.CompletedProcess(argv, rc, out, err)
 
-    def __call__(self, argv, capture_output=False, text=False, timeout=None, **kw):
-        assert capture_output and text and timeout, "GhAttestation captures gh's output as text, with a timeout"
+    def __call__(self, argv, capture_output=False, text=False, timeout=None, stdout=None, **kw):
+        assert timeout, "gh runs with a timeout"
+        assert (capture_output and text) or stdout is not None, "gh's output is captured as text, or goes to a file"
         self.calls.append(list(argv))
         if not self.installed:
             raise FileNotFoundError(2, "No such file or directory", argv[0])
+        p = self.answer(argv)
+        if stdout is not None:  # `gh api ... > file`: il_deploy's GhCliClient.download, in bytes
+            stdout.write(p.stdout if isinstance(p.stdout, bytes) else p.stdout.encode())
+            return subprocess.CompletedProcess(argv, p.returncode, None, p.stderr.encode())
+        assert isinstance(p.stdout, str), "an asset's bytes go to a file"
+        return p
+
+    def answer(self, argv):
+        """gh's exit code and output for argv (stdout is bytes for an asset download)."""
         args = argv[1:]
         if args[:2] == ["auth", "status"]:
             if self.logged_in:
@@ -317,7 +334,99 @@ class FakeGhCli:
                              + "".join(f"      {f} string\n" for f in self.flags))
         if args[:2] == ["attestation", "verify"]:
             return self.verify(argv, args[2:])
+        if args[:1] == ["api"]:
+            return self.api(argv, args[1:])
+        if args[:2] == ["release", "view"]:
+            return self.release_view(argv, args[2:])
+        if args[:2] == ["release", "create"]:
+            return self.release_create(argv, args[2:])
         return self.done(argv, 1, "", f"unknown command {args!r}\n")
+
+    @staticmethod
+    def _parse(args, flags, switches=()):
+        """(positional args, {flag: value}) of a gh command line; a flag gh does not take raises ValueError."""
+        pos, opts, i = [], {}, 0
+        while i < len(args):
+            a = args[i]
+            if a in switches:
+                opts[a], i = True, i + 1
+            elif a in flags:
+                if a == "-H":
+                    opts.setdefault(a, []).append(args[i + 1])
+                else:
+                    opts[a] = args[i + 1]
+                i += 2
+            elif a.startswith("-"):
+                raise ValueError(f"unknown flag: {a}")
+            else:
+                pos.append(a)
+                i += 1
+        return pos, opts
+
+    def _jq(self, argv, obj, expr):
+        if expr is None:
+            return self.done(argv, 0, json.dumps(obj) + "\n")
+        try:
+            p = subprocess.run(["jq", "-r", expr], input=json.dumps(obj), capture_output=True, text=True, timeout=30)
+        except FileNotFoundError:
+            return self.done(argv, 1, "", "the fake gh's --jq runs jq, which is not installed\n")
+        return self.done(argv, p.returncode, p.stdout, p.stderr)
+
+    def _release(self, tag):
+        return next((r for r in self.github.releases if r["tag_name"] == tag), None)
+
+    def api(self, argv, args):
+        try:
+            (path,), opts = self._parse(args, ("-H", "--jq"))
+        except ValueError as e:
+            return self.done(argv, 1, "", f"{e}\n")
+        path = path.lstrip("/")
+        if any(re.fullmatch(r"accept:\s*application/octet-stream", h, re.I) for h in opts.get("-H", [])):
+            m = re.fullmatch(rf"repos/{re.escape(self.github.repo)}/releases/assets/(\d+)", path)
+            asset = m and next((a for r in self.github.releases for a in r["assets"] if a["id"] == int(m.group(1))),
+                               None)
+            if not asset:
+                return self.done(argv, 1, b"", "gh: Not Found (HTTP 404)\n")
+            return self.done(argv, 0, self.github.assets[asset["browser_download_url"]])
+        try:
+            obj = self.github.get_json(path)
+        except il_deploy.GitHubError as e:
+            return self.done(argv, 1, "", f"gh: {e} (HTTP {e.status})\n")
+        return self._jq(argv, obj, opts.get("--jq"))
+
+    def release_view(self, argv, args):
+        try:
+            (tag,), opts = self._parse(args, ("--repo", "--json", "--jq"))
+        except ValueError as e:
+            return self.done(argv, 1, "", f"{e}\n")
+        rel = self._release(tag)
+        if rel is None:
+            return self.done(argv, 1, "", "release not found\n")
+        fields = {"tagName": rel["tag_name"], "targetCommitish": rel["target_commitish"], "author": rel["author"],
+                  "isDraft": rel["draft"], "isPrerelease": rel["prerelease"],
+                  "assets": [{"name": a["name"], "size": a["size"], "url": a["browser_download_url"]}
+                             for a in rel["assets"]]}
+        return self._jq(argv, {k: fields[k] for k in opts["--json"].split(",")}, opts.get("--jq"))
+
+    def release_create(self, argv, args):
+        try:
+            pos, opts = self._parse(args, ("--repo", "--target", "--title", "--notes"), ("--prerelease",
+                                                                                       "--latest=false"))
+        except ValueError as e:
+            return self.done(argv, 1, "", f"{e}\n")
+        tag, paths = pos[0], pos[1:]
+        if self._release(tag) is not None:
+            return self.done(argv, 1, "", "HTTP 422: Validation Failed (https://api.github.com/repos/"
+                             f"{self.github.repo}/releases)\nRelease.tag_name already exists\n")
+        files = []
+        for path in paths:
+            with open(path, "rb") as f:
+                files.append((os.path.basename(path), f.read()))
+        number = (il_deploy.parse_tag(tag) or (len(self.github.releases) + 1,))[0]
+        self.github._publish(number, opts.get("--target"), tag, files, opts.get("--target"), None, self.login)
+        rel = self._release(tag)
+        rel.update(prerelease="--prerelease" in opts, name=opts.get("--title"), body=opts.get("--notes"))
+        return self.done(argv, 0, rel["html_url"] + "\n")
 
     def verify(self, argv, args):
         path, opts, i = args[0], {}, 1

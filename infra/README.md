@@ -7,7 +7,7 @@ directory only holds what runs them and ships them. Python here is standard libr
 |---|---|---|
 | `../.github/workflows/ci.yml` | The pipeline: one required check, `gate` | INF-01 |
 | `../.github/actions/sim-env/` | Sets a runner up for the SIM gates (JDK, uinav, Xvfb, Playwright, lab layout) | INF-01 |
-| `ci/` | CI helpers: `lab_layout.py`, `acceptance.py`, `make_release.py`, `surefire_summary.py` | INF-01 |
+| `ci/` | CI helpers: `lab_layout.py`, `acceptance.py`, `make_release.py`, `publish_release.py`, `surefire_summary.py` | INF-01 |
 | `fixtures/` | The lab files the SIM gates read: `lab-config/` (= `~/.openpnp2` of 10-27, the config the gates are green against, minus backups, logs and two legacy automation scripts), `lab-instancelabs/` (`dispense-config.json`, bench run files without photos) | INF-01 |
 | `deploy/` | The lab computer's deployer (`il_deploy.py`, systemd units) | INF-02 |
 | `lumen-sim/` | Simulated LumenPnP Marlin controller on a pty | INF-03 |
@@ -27,7 +27,7 @@ Runs on every pull request, on pushes to `il/integration`, and by hand (workflow
 | deploy-e2e | `infra/deploy/e2e/test_deploy_openpnp.py`: il_deploy with the build's jar on lumen-sim (deploy, deploy over a running OpenPnP, rollback, a power-cycled controller) | 3 min |
 | acceptance ×4 | `src/test/sim/il_sim_acceptance.py`, sharded; `ci/acceptance.py` fails the job unless every check passed (the script itself always exits 0) | 15 min each |
 | gate | green only if every job above succeeded; the one required status check | seconds |
-| release | push to `il/integration` only, after `gate`: a prerelease `il-build-<run>-<sha7>` with the build (`ci/make_release.py`), its tarball attested first (`actions/attest-build-provenance`; the deployer verifies it with `gh attestation verify`) | 1 min |
+| release | push to `il/integration` only, after `gate`: a prerelease `il-build-<run>-<sha7>` with the build (`ci/make_release.py`), its tarball attested first (`actions/attest-build-provenance`; the deployer verifies it with `gh attestation verify`), then published by `ci/publish_release.py`: a release already at the tag passes only as this run's own (a re-run), checked with the deployer's policy; anything else there fails the run (tests in `deploy/tests/`) | 1 min |
 
 The SIM jobs need read access to the private `theinstancelabs/openpnp-uinav` (Actions secret `UINAV_TOKEN` or
 `UINAV_DEPLOY_KEY`); without it they fail with a message saying so, never pass. uinav is pinned by `UINAV_REF`.
