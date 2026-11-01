@@ -54,6 +54,60 @@ class OkFaults(unittest.TestCase):
         self.assertTrue(b.sim.control({"cmd": "clear"}, b.t)["ok"])
         self.assertEqual(b.send("M400").lines, ["ok"])
 
+    def test_count_limits_a_match_rule(self):
+        b = Bench()
+        fault(b, fault="no_ok", match="^M400", count=2)
+        self.assertIsNone(b.send("M400", timeout=2.0).ok_at)
+        self.assertIsNone(b.send("M400", timeout=2.0).ok_at)
+        self.assertEqual(b.send("M400").lines, ["ok"])
+        self.assertEqual(b.sim.state(b.t)["faults"], [])
+
+    def test_count_limits_a_match_rule_on_lines_read_together(self):
+        """Lines read before the first ok goes out: only `count` of them are hit."""
+        b = Bench()
+        fault(b, fault="no_ok", match="^M400", count=2)
+        b.write("M400\nM400\nM400\n")
+        b.run(1.0)
+        self.assertEqual([l for _, l in b.rx], ["ok"])
+
+    def test_two_rules_on_one_line_are_both_used_up(self):
+        b = Bench()
+        fault(b, fault="no_ok", nth=1)
+        fault(b, fault="dup_ok", nth=1)
+        self.assertIsNone(b.send("M400", timeout=2.0).ok_at)
+        self.assertEqual(b.sim.state(b.t)["faults"], [])
+        b.write("M400\n")
+        b.run(0.1)
+        self.assertEqual([l for _, l in b.rx], ["ok"])
+
+    def test_a_rule_whose_line_a_power_cycle_lost_is_used_up(self):
+        b = Bench()
+        fault(b, fault="no_ok", match="^G4", count=1)
+        b.write("G4 P5000\n")
+        b.run(1.0)
+        self.assertEqual(b.sim.state(b.t)["faults"][0]["pending"], 1)
+        b.sim.control({"cmd": "power_cycle"}, b.t)
+        self.assertEqual(b.sim.state(b.t)["faults"], [])
+        self.assertEqual(b.send("G4 P10").lines, ["ok"])
+
+    def test_clear_lets_held_output_go_at_once(self):
+        """A delay_ok holds back every later line; clear releases them, so the controller is not mute for the rest
+        of the delay."""
+        b = Bench()
+        fault(b, fault="delay_ok", s=600, match="^M400")
+        b.write("M400\n")
+        b.run(1.0)
+        b.write("M105\n")
+        b.run(1.0)
+        self.assertEqual(b.rx, [])
+        t = b.t
+        self.assertTrue(b.sim.control({"cmd": "clear"}, b.t)["ok"])
+        b.run(0.01)
+        self.assertEqual([(round(tt - t, 3), l) for tt, l in b.rx], [(0.0, "ok"), (0.0, "ok T:0")])
+        r = b.send("M115")
+        self.assertEqual(r.lines[-1], "ok")
+        self.assertLess(r.ok_at, 0.001)
+
 
 class Injections(unittest.TestCase):
     def test_inject_lines(self):
@@ -78,6 +132,15 @@ class Injections(unittest.TestCase):
         fault(b, fault="inject", text="start", after_s=1.5)
         b.run(3.0)
         self.assertEqual([(round(t, 3), l) for t, l in b.rx], [(1.5, "start")])
+
+    def test_clear_and_power_cycle_drop_pending_injections(self):
+        for cmd in ("clear", "power_cycle"):
+            b = Bench()
+            fault(b, fault="inject", text="start", after_s=1.5)
+            b.run(1.0)
+            self.assertTrue(b.sim.control({"cmd": cmd}, b.t)["ok"])
+            b.run(3.0)
+            self.assertEqual(b.rx, [], cmd)
 
 
 class LinkAndPower(unittest.TestCase):
@@ -150,6 +213,23 @@ class LinkAndPower(unittest.TestCase):
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(b.sim.take_transport_actions(), [{"action": "power_cycle", "link": None, "down_s": 1.5}])
         self.assertEqual(b.sim.state(b.t)["boots"], 2)  # the board resets at once; the port stays away 1.5 s
+    def test_a_power_cycle_drops_output_the_old_board_had_not_sent(self):
+        b = Bench()
+        fault(b, fault="delay_ok", s=5, match="^M400")
+        b.write("M400\n")
+        b.run(1.0)
+        b.sim.power_cycle(b.t)
+        b.run(10.0)
+        self.assertEqual(b.rx, [])
+
+    def test_dfu_drops_the_port_again_after_a_power_cycle(self):
+        b = Bench(personality="il-safety")
+        for _ in range(2):
+            b.write("M997\n")
+            b.run(0.1)
+            self.assertEqual(b.sim.take_transport_actions(), [{"action": "disconnect", "down_s": None}])
+            b.sim.power_cycle(b.t)
+
 
 class Set(unittest.TestCase):
     def test_set_vacuum_rs485_kill_messages(self):
@@ -192,6 +272,11 @@ class MalformedRequests(unittest.TestCase):
         {"cmd": "power_cycle", "down_s": "x"},
         {"cmd": "power_cycle", "down_s": float("nan")},
         {"cmd": "power_cycle", "link": 5},
+        {"cmd": "fault", "fault": "no_ok", "line": 3},                # a misspelt selector: not every line
+        {"cmd": "fault", "fault": "no_ok", "Nth": 3},
+        {"cmd": "fault", "fault": "dup_ok", "regex": "^M400"},
+        {"cmd": "fault", "fault": "no_ok", "s": 1},                   # s is delay_ok's
+        {"cmd": "fault", "fault": "delay_ok", "s": 1, "after_s": 2},
     ]
 
     def test_each_is_refused_and_the_controller_keeps_answering(self):

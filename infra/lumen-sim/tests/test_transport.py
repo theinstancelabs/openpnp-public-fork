@@ -3,6 +3,7 @@ import json
 import os
 import select
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -13,7 +14,7 @@ import unittest
 from lumen_sim.control import ControlServer
 from lumen_sim.core import Simulator
 from lumen_sim.hostclient import ControllerError, DriverClient
-from lumen_sim.pty_link import check_link_path
+from lumen_sim.pty_link import PtyLink, check_link_path
 from lumen_sim.runner import Runner
 from tests import goldens
 from tests.simproc import PKG_ROOT, SimProcess, open_raw, read_until_ok
@@ -43,6 +44,21 @@ def wait_for(cond, timeout=3.0):
     while not cond() and time.monotonic() < end:
         time.sleep(0.02)
     return cond()
+
+
+def temp_dir(test):
+    """A fresh directory, removed after the test whatever happens."""
+    tmp = tempfile.mkdtemp(prefix="lumen-sim-test-")
+    test.addCleanup(shutil.rmtree, tmp, True)
+    return tmp
+
+
+def in_process_runner(test, clock=None, **kw):
+    """A Runner on a pty of its own in a temp directory, shut down after the test whatever happens."""
+    tmp = temp_dir(test)
+    r = Runner(Simulator(), os.path.join(tmp, "ttyLUMEN"), clock=clock or time.monotonic, **kw)
+    test.addCleanup(r.shutdown)
+    return r
 
 
 class PtyTransport(unittest.TestCase):
@@ -145,30 +161,26 @@ class PtyTransport(unittest.TestCase):
 class PowerCycle(unittest.TestCase):
     def test_power_cycle_drops_the_link_and_repoints_the_symlink(self):
         sim = SimProcess("--personality", "stock")
+        self.addCleanup(sim.stop)
+        fd = open_raw(sim.link)
+        self.addCleanup(os.close, fd)
+        os.write(fd, b"G92 B0\nG1 B360 F360000\n")
+        read_until_ok(fd)
+        read_until_ok(fd)
+        old = os.path.realpath(sim.link)
+        reply = sim.ctl({"cmd": "power_cycle"})
+        self.assertTrue(reply["ok"], reply)
+        self.assertNotEqual(os.path.realpath(sim.link), old)
+        # the host's open descriptor is dead: EIO, or end of file
         try:
-            fd = open_raw(sim.link)
-            os.write(fd, b"G92 B0\nG1 B360 F360000\n")
-            read_until_ok(fd)
-            read_until_ok(fd)
-            old = os.path.realpath(sim.link)
-            reply = sim.ctl({"cmd": "power_cycle"})
-            self.assertTrue(reply["ok"], reply)
-            self.assertNotEqual(os.path.realpath(sim.link), old)
-            # the host's open descriptor is dead: EIO, or end of file
-            try:
-                self.assertEqual(os.read(fd, 100), b"")
-            except OSError as e:
-                self.assertEqual(e.errno, 5)
-            os.close(fd)
-            fd = open_raw(sim.link)
-            try:
-                os.write(fd, b"M114\n")
-                self.assertEqual(read_until_ok(fd),
-                                 ["X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197", "ok"])
-            finally:
-                os.close(fd)
-        finally:
-            sim.stop()
+            self.assertEqual(os.read(fd, 100), b"")
+        except OSError as e:
+            self.assertEqual(e.errno, 5)
+        fd2 = open_raw(sim.link)
+        self.addCleanup(os.close, fd2)
+        os.write(fd2, b"M114\n")
+        self.assertEqual(read_until_ok(fd2),
+                         ["X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197", "ok"])
 
     def test_ctl_cli_fault_and_clear(self):
         sim = SimProcess()
@@ -300,27 +312,20 @@ class RunnerHostClose(unittest.TestCase):
     """In process, on a pty of its own: bytes still waiting to be written go when the host closes."""
 
     def test_pending_bytes_are_dropped_when_the_host_closes(self):
-        tmp = tempfile.mkdtemp(prefix="lumen-sim-test-")
-        r = Runner(Simulator(), os.path.join(tmp, "ttyLUMEN"))
-        fd = None
-        try:
-            r.link.open()
-            fd = open_raw(r.link.link)
-            r._service()
-            self.assertTrue(r.link.host_open)
-            r.pending = b"stale\n"  # as when the host stopped draining
-            os.close(fd)
-            r._service()
-            self.assertEqual(r.pending, b"")
-            fd = open_raw(r.link.link)
-            r._service()
-            r._service()
-            self.assertEqual(read_some(fd, 0.1), b"")
-        finally:
-            if fd is not None:
-                os.close(fd)
-            r.shutdown()
-            shutil.rmtree(tmp, ignore_errors=True)
+        r = in_process_runner(self)
+        r.link.open()
+        fd = open_raw(r.link.link)
+        r._service()
+        self.assertTrue(r.link.host_open)
+        r.pending = b"stale\n"  # as when the host stopped draining
+        os.close(fd)
+        r._service()
+        self.assertEqual(r.pending, b"")
+        fd = open_raw(r.link.link)
+        self.addCleanup(os.close, fd)
+        r._service()
+        r._service()
+        self.assertEqual(read_some(fd, 0.1), b"")
 
 
 class LinkLifecycle(unittest.TestCase):
@@ -455,6 +460,170 @@ class LinkNames(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class RunnerFaults(unittest.TestCase):
+    """In process, on a fake clock: transport failures are logged and the loop goes on."""
+
+    def runner(self, **kw):
+        self.clock = [0.0]
+        return in_process_runner(self, clock=lambda: self.clock[0], **kw)
+
+    def test_a_link_that_cannot_come_back_at_its_new_path_comes_back_at_the_old_one(self):
+        r = self.runner()
+        r.link.open()
+        old = r.link.link
+        other = os.path.join(os.path.dirname(old), "other")
+        os.mkdir(other)
+        new = os.path.join(other, "ttyLUMEN1")
+        self.assertTrue(r._handle_control({"cmd": "power_cycle", "link": new, "down_s": 1.0})["ok"])
+        os.rmdir(other)  # gone during the down time
+        self.clock[0] = 1.5
+        r._service()     # must not raise: that would end the process
+        self.assertEqual(r.link.link, old)
+        self.assertEqual(os.path.realpath(old), r.link.pts)
+        self.assertFalse(r.transport_state()["link_down"])
+
+    def test_a_link_that_cannot_come_back_anywhere_is_retried(self):
+        r = self.runner()
+        r.link.open()
+        link = r.link.link
+        tmp = os.path.dirname(link)
+        self.assertTrue(r._handle_control({"cmd": "fault", "fault": "disconnect", "down_s": 1.0})["ok"])
+        shutil.rmtree(tmp)  # the session directory went away while the port was down
+        self.clock[0] = 1.5
+        r._service()
+        self.assertTrue(r.transport_state()["link_down"])
+        os.mkdir(tmp)
+        self.clock[0] = 5.0
+        r._service()
+        self.assertFalse(r.transport_state()["link_down"])
+        self.assertEqual(os.path.realpath(link), r.link.pts)
+
+    def test_a_power_cycle_ends_frozen(self):
+        r = self.runner()
+        r.link.open()
+        self.assertTrue(r._handle_control({"cmd": "fault", "fault": "frozen", "on": True})["ok"])
+        self.assertTrue(r.frozen)
+        reply = r._handle_control({"cmd": "power_cycle"})
+        self.assertTrue(reply["ok"], reply)
+        self.assertFalse(reply["frozen"])
+
+    def test_the_io_log_takes_any_byte_a_model_error_quotes(self):
+        """A line the model cannot run is noted in the I/O log with its bytes, whatever they are; the board answers."""
+        tmp = temp_dir(self)
+        log = os.path.join(tmp, "io.log")
+        r = self.runner(io_log=log)
+        r.sim.receive(b"M203 X0\nG1 X10 \xe9\nM105\n", 0.0)
+        r.sim.run_until(1.0)
+        self.assertFalse(r.sim.fw.halted, r.sim.fw.halt_reason)
+        self.assertIn(b"ok T:0\n", b"".join(d for _, d in r.sim.take_output(1.0)))
+        r.io.f.flush()
+        with open(log, encoding="ascii") as f:
+            self.assertRegex(f.read(), r"# sim error in 'G1 X10 \\xe9'")
+
+
+class OneInstancePerPath(unittest.TestCase):
+    """Two lumen-sims on the same paths would silently swap controllers under a host: the second is refused."""
+
+    def test_a_link_held_by_another_instance_is_refused(self):
+        tmp = temp_dir(self)
+        path = os.path.join(tmp, "ttyLUMEN")
+        a = PtyLink(path)
+        self.addCleanup(a.release)
+        a.open()
+        with self.assertRaisesRegex(ValueError, "in use"):
+            PtyLink(path)
+        self.assertEqual(os.path.realpath(path), a.pts)
+        a.release()
+        b = PtyLink(path)
+        self.addCleanup(b.release)
+        b.open()
+        self.assertEqual(os.path.realpath(path), b.pts)
+
+    def test_a_power_cycle_cannot_move_onto_another_instances_link(self):
+        tmp = temp_dir(self)
+        a, b = PtyLink(os.path.join(tmp, "ttyLUMEN0")), PtyLink(os.path.join(tmp, "ttyLUMEN1"))
+        self.addCleanup(a.release)
+        self.addCleanup(b.release)
+        a.open()
+        b.open()
+        with self.assertRaisesRegex(ValueError, "in use"):
+            a.open(b.link)
+        self.assertEqual(os.path.realpath(b.link), b.pts)
+
+    def test_close_leaves_a_link_that_is_no_longer_its_own(self):
+        tmp = temp_dir(self)
+        a = PtyLink(os.path.join(tmp, "ttyLUMEN"))
+        self.addCleanup(a.release)
+        a.open()
+        os.symlink("/dev/null", a.link + ".other")
+        os.replace(a.link + ".other", a.link)
+        a.close()
+        self.assertEqual(os.readlink(a.link), "/dev/null")
+
+    def test_a_live_control_socket_is_refused_and_a_stale_one_replaced(self):
+        tmp = temp_dir(self)
+        path = os.path.join(tmp, "ctl.sock")
+        a = ControlServer(path)
+        self.addCleanup(a.close)
+        with self.assertRaisesRegex(ValueError, "in use"):
+            ControlServer(path)
+        self.assertTrue(os.path.exists(path))
+        a.close()
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(path)  # a socket file with nobody listening, as a killed lumen-sim leaves it
+        stale.close()
+        b = ControlServer(path)
+        self.addCleanup(b.close)
+        self.assertTrue(os.path.exists(path))
+
+    def test_a_control_path_that_is_not_a_socket_is_left_alone(self):
+        tmp = temp_dir(self)
+        path = os.path.join(tmp, "ctl.sock")
+        with open(path, "w") as f:
+            f.write("keep me")
+        with self.assertRaises(ValueError):
+            ControlServer(path)
+        with open(path) as f:
+            self.assertEqual(f.read(), "keep me")
+
+    def test_close_leaves_a_socket_that_is_no_longer_its_own(self):
+        tmp = temp_dir(self)
+        path = os.path.join(tmp, "ctl.sock")
+        a = ControlServer(path)
+        self.addCleanup(a.close)
+        os.unlink(path)
+        b = ControlServer(path)
+        self.addCleanup(b.close)
+        a.close()
+        self.assertTrue(os.path.exists(path))
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.connect(path)
+
+    def test_a_second_process_on_the_same_paths_exits_and_the_first_keeps_serving(self):
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        pts = os.path.realpath(sim.link)
+        for link in (sim.link, os.path.join(sim.dir, "ttyLUMEN9")):  # the same link; the same socket
+            out = subprocess.run([sys.executable, "-m", "lumen_sim", "--link", link, "--control", sim.sock],
+                                 cwd=PKG_ROOT, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(out.returncode, 0, link)
+            self.assertIn("in use", out.stderr)
+        self.assertFalse(os.path.lexists(os.path.join(sim.dir, "ttyLUMEN9")))
+        self.assertEqual(os.path.realpath(sim.link), pts)
+        self.assertTrue(sim.ctl({"cmd": "state"})["ok"])
+
+
+class Signals(unittest.TestCase):
+    def test_sighup_stops_it_cleanly(self):
+        """A closed terminal or ssh session sends SIGHUP: the link to the freed /dev/pts/N must go too."""
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        sim.proc.send_signal(signal.SIGHUP)
+        self.assertEqual(sim.proc.wait(timeout=5), 0)
+        self.assertFalse(os.path.lexists(sim.link))
+        self.assertFalse(os.path.exists(sim.sock))
+
+
 class ControlServerErrors(unittest.TestCase):
     def test_a_handler_error_is_a_refusal_not_a_crash(self):
         tmp = tempfile.mkdtemp(prefix="lumen-sim-test-")
@@ -477,6 +646,19 @@ class ControlServerErrors(unittest.TestCase):
             c.close()
             srv.close()
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_client_that_closed_is_dropped(self):
+        """Else select() reports its end of file for ever and the loop spins."""
+        tmp = temp_dir(self)
+        srv = ControlServer(os.path.join(tmp, "ctl.sock"))
+        self.addCleanup(srv.close)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(srv.path)
+        srv.handle(srv.sock, None)  # accept
+        (conn,) = list(srv.clients)
+        c.close()
+        srv.handle(conn, None)
+        self.assertEqual(srv.clients, {})
 
 
 class TimeScale(unittest.TestCase):

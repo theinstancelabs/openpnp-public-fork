@@ -11,7 +11,8 @@ def _text(raw):
 
 class IoLog:
     def __init__(self, path, clock=time.time):
-        self.f = open(path, "a", encoding="ascii", buffering=1)
+        # notes quote host lines (a model error's repr), which may hold any byte: escape, never fail
+        self.f = open(path, "a", encoding="ascii", errors="backslashreplace", buffering=1)
         self.clock = clock
         self._rx = b""
         self._tx = b""

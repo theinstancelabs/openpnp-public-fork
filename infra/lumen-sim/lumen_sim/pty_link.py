@@ -14,6 +14,9 @@ Two Linux pty facts the runner works around:
 
 jSerialComm's getCommPort opens /dev/<name> or /dev/<basename> when the path does not exist and is not a symlink, so
 a link named like a device (ttyACM0) would open the real board whenever the link is missing: check_link_path().
+
+One lumen-sim per link path: each holds an flock on <link>.lock while it runs (the file stays; a killed process lets
+go of the lock), so a second one on the same path is refused instead of silently taking over the first one's host.
 """
 import errno
 import fcntl
@@ -42,9 +45,25 @@ def check_link_path(path, exists=os.path.exists):
     return path
 
 
+def lock_link(path):
+    """Hold <path>.lock (an fd to keep open); ValueError if another lumen-sim holds it."""
+    lock = path + ".lock"
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise ValueError("%s is in use by another lumen-sim (it holds %s)" % (path, lock)) from None
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 class PtyLink:
     def __init__(self, link):
         self.link = check_link_path(link)
+        self.lock = lock_link(self.link)
         self.master = None
         self.pts = None
         self.host_open = False
@@ -52,7 +71,13 @@ class PtyLink:
     def open(self, link=None):
         """Create a new pty and publish it at the link (or at a new path, which then becomes the link)."""
         path = check_link_path(link) if link else self.link
-        master, slave = os.openpty()
+        lock = lock_link(path) if path != self.link else None
+        try:
+            master, slave = os.openpty()
+        except BaseException:
+            if lock is not None:
+                os.close(lock)
+            raise
         try:
             tty.setraw(slave, termios.TCSANOW)  # no echo, no CR/LF translation either way
             pts = os.ttyname(slave)
@@ -65,7 +90,12 @@ class PtyLink:
             os.replace(tmp, path)  # atomic: also replaces a link a killed lumen-sim left behind
         except BaseException:
             os.close(master)
+            if lock is not None:
+                os.close(lock)
             raise
+        if lock is not None:
+            os.close(self.lock)
+            self.lock = lock
         self.link, self.master, self.pts, self.host_open = path, master, pts, False
         return pts
 
@@ -77,6 +107,13 @@ class PtyLink:
             os.unlink(self.link)
         self.master = self.pts = None
         self.host_open = False
+
+    def release(self):
+        """For good: close, and let go of the link path."""
+        self.close()
+        if self.lock is not None:
+            os.close(self.lock)
+            self.lock = None
 
     def host_present(self):
         """Whether a host has the slave open: no POLLHUP on the master. Reads nothing."""

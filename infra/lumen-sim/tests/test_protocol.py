@@ -1,5 +1,7 @@
 """Line handling, parsing and per-command replies (fake clock)."""
+import contextlib
 import re
+import signal
 import unittest
 
 from lumen_sim.bench import Bench
@@ -7,6 +9,28 @@ from lumen_sim.bench import Bench
 # OpenPnP POSITION_REPORT_REGEX from the real machine.xml (Java named groups -> Python)
 POSITION_RE = re.compile(r"^.*X:(?P<X>-?\d+\.\d+)\s*Y:(?P<Y>-?\d+\.\d+)\s*Z:(?P<Z>-?\d+\.\d+)\s*"
                          r"A:(?P<A>-?\d+\.\d+)\s*B:(?P<B>-?\d+\.\d+).*")
+
+
+class Hung(BaseException):
+    """Not an Exception: the firmware's model-error handlers must not swallow it."""
+
+
+@contextlib.contextmanager
+def within(test, seconds):
+    """Fail instead of hanging (and filling memory) when a bug makes the simulator loop for ever (SIGALRM)."""
+    def expired(signum, frame):
+        raise Hung()
+    old = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    except Hung:
+        test.fail("the simulator was still looping after %s s of wall clock" % seconds)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
 BOOT_M114 = "X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197"
 
 
@@ -162,6 +186,32 @@ class Keepalive(unittest.TestCase):
         b = Bench()
         b.run(10)
         self.assertEqual(b.rx, [])
+
+    def test_m113_takes_a_byte_and_at_most_60(self):
+        """M113: host_keepalive_interval = parser.value_byte() (0..255), then NOMORE(..., 60)."""
+        b = Bench()
+        self.assertEqual(b.send("M113").lines, ["echo:M113 S2", "ok"])
+        b.send("M113 S300")
+        self.assertEqual(b.send("M113").lines, ["echo:M113 S60", "ok"])
+        b.send("M113 S-1")
+        self.assertEqual(b.send("M113").lines, ["echo:M113 S0", "ok"])
+        b.send("M113 S5")
+        self.assertEqual(b.send("M113 S").lines, ["echo:M113 S5", "ok"])  # seenval('S'): no value is a report
+
+    def test_a_negative_m113_turns_the_keepalive_off(self):
+        b = Bench()
+        b.send("M113 S-1")
+        with within(self, 0.5):
+            r = b.send("G4 P3000")
+        self.assertEqual(r.lines, ["ok"])
+        self.assertAlmostEqual(r.ok_at, 3.0, delta=0.001)
+
+    def test_m113_s0_turns_it_off_and_s1_gives_a_busy_line_each_second(self):
+        b = Bench()
+        b.send("M113 S0")
+        self.assertEqual(b.send("G4 P3000").lines, ["ok"])
+        b.send("M113 S1")
+        self.assertEqual([round(t, 3) for t in b.send("G4 P3500").busy], [1.0, 2.0, 3.0])
 
 
 class OutOfRangeValues(unittest.TestCase):

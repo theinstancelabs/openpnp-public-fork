@@ -2,7 +2,8 @@
 
 usage:
   python3 -m lumen_sim --link PATH [--personality stock|il-safety] [--control SOCK] [--io-log FILE]
-                       [--time-scale 1.0] [--park X,Y,Z] [--kill-messages] [--vacuum N] [--seed N]
+                       [--time-scale 1.0] [--park X,Y,Z] [--kill-messages] [--vacuum N] [--surface-z Z]
+                       [--seed N]
   python3 -m lumen_sim ctl --control SOCK state
   python3 -m lumen_sim ctl --control SOCK fault '{"fault": "no_ok", "match": "^G4"}'
   python3 -m lumen_sim ctl --control SOCK set '{"vacuum": -1600000}'
@@ -10,7 +11,7 @@ usage:
   python3 -m lumen_sim ctl --control SOCK clear | stop
 
 Point OpenPnP's serial port-name at the --link path (a symlink to /dev/pts/N). Its name must start with ttyLUMEN:
-while the link is missing, jSerialComm opens /dev/<name> instead. Stop with SIGINT/SIGTERM or `ctl stop`.
+while the link is missing, jSerialComm opens /dev/<name> instead. Stop with SIGINT/SIGTERM/SIGHUP or `ctl stop`.
 """
 import argparse
 import json
@@ -42,7 +43,9 @@ def run(argv):
                     help="physical X,Y,Z of the head at power-on (mm from the switches), default 5,5,31.5")
     ap.add_argument("--kill-messages", action="store_true",
                     help="print 'echo:<reason>' and 'Error:Printer halted. kill() called!' on kill()")
-    ap.add_argument("--vacuum", type=int, default=OPEN_AIR_VACUUM, help="raw N1 vacuum reading (M261)")
+    ap.add_argument("--vacuum", type=int, default=OPEN_AIR_VACUUM, help="raw N1 open-air vacuum reading (M261)")
+    ap.add_argument("--surface-z", type=float,
+                    help="physical Z (mm) at which N1 touches a surface and seals (default: nothing under N1)")
     ap.add_argument("--seed", type=int, default=0, help="seed for random fault delays")
     args = ap.parse_args(argv)
     if args.time_scale <= 0:
@@ -53,13 +56,19 @@ def run(argv):
         ap.error("--link: %s" % e)
     sim = Simulator(args.personality, park=args.park, vacuum=args.vacuum, kill_messages=args.kill_messages,
                     seed=args.seed)
-    runner = Runner(sim, args.link, control=args.control, io_log=args.io_log, time_scale=args.time_scale,
-                    log=lambda msg: print(msg, file=sys.stderr, flush=True))
+    if args.surface_z is not None:
+        sim.machine.surface_z = args.surface_z
+    try:
+        runner = Runner(sim, args.link, control=args.control, io_log=args.io_log, time_scale=args.time_scale,
+                        log=lambda msg: print(msg, file=sys.stderr, flush=True))
+    except (OSError, ValueError) as e:  # e.g. another lumen-sim on the same link or socket
+        print("lumen-sim: %s" % e, file=sys.stderr)
+        return 2
 
     def stop(signum, frame):
         runner.running = False
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):  # SIGHUP: its terminal or ssh session closed
+        signal.signal(sig, stop)
     runner.run()
     return 0
 

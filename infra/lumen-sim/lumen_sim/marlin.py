@@ -30,6 +30,7 @@ HOMING_MOVE_OVERHEAD_S = 0.142
 KILL_DELAY_S = 0.6              # minkill(): messages get out, the stepper ISR still runs, then cli()
 DEFAULT_STEPPER_TIMEOUT_MS = 3600 * 1000  # DEFAULT_STEPPER_TIMEOUT_SEC (Configuration_adv.h)
 DISABLE_IDLE = AXES             # DISABLE_IDLE_X/Y/Z/I/J: an idle timeout releases every axis
+MILLIS_HALF = 2 ** 31           # ELAPSED()/PENDING() compare millis_t as int32_t (core/millis_t.h:32-33)
 
 PS_NORMAL, PS_EOL, PS_QUOTED, PS_ESC = 0, 1, 2, 4
 NOT_BUSY, IN_HANDLER = 0, 1
@@ -215,6 +216,12 @@ class Firmware:
         self.input += data
         self._resume()
 
+    def wake(self, t):
+        """Something outside changed what the firmware waits for (a physical fault): run one more pass at t."""
+        self.advance(t)
+        if not self.halted:
+            self._resume()
+
     def halt(self, reason, t):
         """External fault: the MCU stops dead (no output, input ignored)."""
         self.advance(t)
@@ -287,8 +294,8 @@ class Firmware:
             d = min(d, self.stepper.cleaning_until)
         if self.p.host_watchdog and self.wd_timeout and self.busy_state == NOT_BUSY and not self.ring:
             d = min(d, self.wd_last + self.wd_timeout / 1000.0)
-        if self.stepper_timeout_ms and not self.idle_released and not self.stepper.blocks:
-            d = min(d, self.previous_move + self.stepper_timeout_ms / 1000.0)
+        if self.stepper_timeout_ms and not self.stepper.blocks:
+            d = min(d, self._idle_timeout_change())
         return d
 
     def _synchronize(self):
@@ -313,6 +320,22 @@ class Firmware:
         while self.now < end:
             yield end
 
+    def _idle_timed_out(self):
+        """stepper_inactive_timeout(): ELAPSED(ms, previous_move_ms + stepper_inactive_time), a signed 32-bit compare.
+        A timeout of 2^31 ms or more has run out from the start, until 2^31 ms before its end."""
+        timeout, since = self.stepper_timeout_ms, (self.now - self.previous_move) * 1000.0
+        return since >= timeout or (timeout > MILLIS_HALF and since < timeout - MILLIS_HALF)
+
+    def _idle_timeout_change(self):
+        """When _manage_inactivity() next has something to do while the planner stays empty."""
+        if not self.idle_released:
+            return self.now if self._idle_timed_out() else self.previous_move + self.stepper_timeout_ms / 1000.0
+        if self.stepper_timeout_ms > MILLIS_HALF:  # the window where it reads 'pending' again
+            end = self.previous_move + (self.stepper_timeout_ms - MILLIS_HALF) / 1000.0
+            if end > self.now:
+                return end
+        return math.inf
+
     def _manage_inactivity(self):
         """The M18/M84 idle timeout: once the planner has been empty that long, release every axis, once."""
         if self.stepper.blocks:
@@ -321,7 +344,7 @@ class Firmware:
             self.previous_move = max(self.previous_move, self.stepper.last_end)
         if not self.stepper_timeout_ms:
             return
-        if not self.stepper.blocks and self.now >= self.previous_move + self.stepper_timeout_ms / 1000.0:
+        if not self.stepper.blocks and self._idle_timed_out():
             if not self.idle_released:
                 self.idle_released = True
                 for a in DISABLE_IDLE:
@@ -816,8 +839,8 @@ class Firmware:
             self._kill("M112 Shutdown", steppers_off=True)
 
     def m113(self, cmd):
-        if cmd.seen("S"):
-            self.keepalive_interval = float(int(cmd.val("S", 0)))
+        if cmd.params.get("S") is not None:  # seenval('S'); value_byte() is 0..255, then NOMORE(..., 60)
+            self.keepalive_interval = float(min(max(int(cmd.params["S"]), 0), 255, 60))
         else:
             self._emit("echo:M113 S%d" % int(self.keepalive_interval))
 

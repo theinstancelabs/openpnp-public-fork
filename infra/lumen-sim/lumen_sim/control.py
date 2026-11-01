@@ -2,15 +2,37 @@
 import json
 import os
 import socket
+import stat
+
+
+def _answers(path):
+    """Whether something accepts connections at the socket path (anything but 'refused' counts as yes)."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(1.0)
+        try:
+            s.connect(path)
+        except (ConnectionRefusedError, FileNotFoundError):
+            return False
+        except OSError:
+            return True
+        return True
 
 
 class ControlServer:
     def __init__(self, path):
+        """Listen at path. A stale socket (nobody listening, as a killed lumen-sim leaves it) is replaced; a live one,
+        or anything that is not a socket, is refused with ValueError and left alone."""
         self.path = os.path.abspath(path)
-        if os.path.exists(self.path):
+        if os.path.lexists(self.path):
+            if not stat.S_ISSOCK(os.lstat(self.path).st_mode):
+                raise ValueError("%s exists and is not a socket: not removed" % self.path)
+            if _answers(self.path):
+                raise ValueError("%s is in use by another lumen-sim" % self.path)
             os.unlink(self.path)
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.bind(self.path)
+        st = os.stat(self.path)
+        self.ident = (st.st_dev, st.st_ino)  # close() removes the path only while it is still this socket
         self.sock.listen(8)
         self.sock.setblocking(False)
         self.clients = {}  # socket -> pending bytes
@@ -69,8 +91,14 @@ class ControlServer:
     def close(self):
         for c in list(self.clients):
             self._drop(c)
+        if self.sock.fileno() < 0:
+            return
         self.sock.close()
-        if os.path.exists(self.path):
+        try:
+            st = os.stat(self.path)
+        except FileNotFoundError:
+            return
+        if (st.st_dev, st.st_ino) == self.ident:
             os.unlink(self.path)
 
 

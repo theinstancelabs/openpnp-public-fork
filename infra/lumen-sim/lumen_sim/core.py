@@ -111,13 +111,17 @@ class Simulator:
         that an energised Z lets go and drops by the machine's z_drop."""
         self.run_until(t)
         self.fw.halt("power off", t)
-        self.fw.stepper.update(t)  # settle the old stepper so the physical position is where it stopped
+        # The drivers stop at t, also inside a stock kill's 0.6 s (halt() does nothing on a halted board); then
+        # settle the old stepper so the physical position is where it stopped.
+        self.fw.stepper.freeze(t)
+        self.fw.stepper.update(t)
         for axis in AXES:          # power off: every driver lets go (a released Z drops)
             self.fw.release(axis)
         self.out.clear()
         self._timed = []
         self._last_release = -math.inf
         self._dfu_reported = False
+        self.faults.lines_lost()
         self.fw = self._boot(t)
 
     # ------------------------------------------------------------------ control protocol
@@ -139,6 +143,9 @@ class Simulator:
             self.faults.clear()
             self.machine.clear_faults()
             self._timed = []
+            # output a delay_ok holds back (and all queued behind it) goes now
+            self.out = deque((min(when, t), data) for when, data in self.out)
+            self._last_release = min(self._last_release, t)
             self._actions.append({"action": "clear"})
             return {"ok": True}
         if cmd == "power_cycle":
@@ -186,12 +193,12 @@ class Simulator:
         elif kind == "frozen":
             self._actions.append({"action": "frozen", "on": bool(req.get("on", True))})
         elif kind in PHYSICAL_FAULTS:
-            self._physical_fault(kind, {k: v for k, v in spec.items() if k != "fault"})
+            self._physical_fault(kind, {k: v for k, v in spec.items() if k != "fault"}, t)
         else:
             return {"ok": False, "error": "unknown fault %r" % kind}
         return {"ok": True}
 
-    def _physical_fault(self, kind, values):
+    def _physical_fault(self, kind, values, t):
         """The machine moves under the controller; M114 and the step counts never change."""
         keys = PHYSICAL_FAULTS[kind]
         if not values or not set(values) <= set(keys):
@@ -210,6 +217,9 @@ class Simulator:
             m.switches[2] += v["z"]
         else:                        # z_drop: how far the head moves each time the Z driver lets go
             m.z_drop = v["z"]
+        # a homing move running toward a switch now ends where that switch triggers, and the firmware's wait with it
+        self.fw.stepper.recheck_endstops(t)
+        self.fw.wake(t)
 
     def _set(self, req):
         def integer(key):
@@ -220,6 +230,10 @@ class Simulator:
         # check everything first: a bad request changes nothing
         vacuum = integer("vacuum") if "vacuum" in req else None
         mcp = integer("mcp3426") if req.get("mcp3426") is not None else None
+        surface = mm(req["surface_z"], "surface_z") if req.get("surface_z") is not None else None
+        drop = req.get("seal_drop")
+        if drop is not None and (isinstance(drop, bool) or not isinstance(drop, int) or drop < 0):
+            raise ValueError("seal_drop must be an integer >= 0 (counts), not %r" % (drop,))
         rs485 = req.get("rs485", {})
         if not isinstance(rs485, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in rs485.items()):
             raise ValueError("rs485 must map request hex to reply hex (strings), not %r" % (rs485,))
@@ -230,6 +244,10 @@ class Simulator:
         self.machine.rs485.update({k.upper(): v for k, v in rs485.items()})
         if "mcp3426" in req:
             self.machine.mcp3426 = mcp
+        if "surface_z" in req:
+            self.machine.surface_z = surface
+        if drop is not None:
+            self.machine.seal_drop = drop
         return {"ok": True}
 
     # ------------------------------------------------------------------ state
@@ -252,6 +270,9 @@ class Simulator:
             "head": self._head(t),
             "switches": {a: v for a, v in zip("XYZ", self.machine.switches)},
             "z_drop": self.machine.z_drop,
+            "surface_z": self.machine.surface_z,
+            "seal_drop": self.machine.seal_drop,
+            "n1_sealed": self.machine.n1_sealed(fw),
             "stepper_timeout_s": fw.stepper_timeout_ms / 1000.0,
             "homed": {"X": fw.homed[0], "Y": fw.homed[1], "Z": fw.homed[2]},
             "homing_phase": fw.homing_phase,

@@ -136,6 +136,55 @@ class StockStopDuringHoming(unittest.TestCase):
         self.assertFalse(any(st["enabled"].values()))
 
 
+def head_x(b):
+    return b.sim.state(b.t)["head"]["physical"]["X"]
+
+
+class KillAndPowerMidMove(unittest.TestCase):
+    """Where the head ends up when the board is killed or loses power during G1 X100 F600 (10 mm/s, from the boot
+    park at X 5): BR-02's 'the head stays where it physically is'."""
+
+    def moving(self, personality="stock", seconds=5.0):
+        b = Bench(personality=personality)
+        for line in ("M106", "M106 P1 S180", "M106 P2 S255", "M106 P3 S255"):
+            b.send(line)
+        b.send("G1 X100 F600")
+        b.run(seconds)
+        return b
+
+    def test_stock_m112_mid_move_runs_0_6_s_more_then_stops_with_fans_as_they_were(self):
+        b = self.moving()
+        x_kill = head_x(b)
+        self.assertGreater(x_kill, 50.0)
+        b.write("M112\n")
+        b.run(3.0)
+        self.assertAlmostEqual(head_x(b) - x_kill, 6.0, delta=0.01)  # minkill(): 0.6 s at 10 mm/s
+        st = b.sim.state(b.t)
+        self.assertTrue(st["halted"])
+        self.assertEqual(st["fans"], [255, 180, 255, 255])
+
+    def test_power_cycle_mid_move_leaves_the_head_where_it_is(self):
+        b = self.moving()
+        x = head_x(b)
+        self.assertGreater(x, 50.0)
+        b.sim.power_cycle(b.t)
+        self.assertAlmostEqual(head_x(b), x, places=6)
+        b.run(5.0)
+        self.assertAlmostEqual(head_x(b), x, places=6)
+        self.assertEqual(b.sim.state(b.t)["fans"], [0, 0, 0, 0])
+
+    def test_power_cycle_inside_the_kill_window_stops_the_head_at_power_off(self):
+        """A stock kill lets the stepper run 0.6 s more; power off 0.2 s after the kill stops it there."""
+        b = self.moving()
+        b.write("M112\n")
+        b.run(0.2)
+        x = head_x(b)
+        b.sim.power_cycle(b.t)
+        self.assertAlmostEqual(head_x(b), x, places=6)
+        b.run(2.0)
+        self.assertAlmostEqual(head_x(b), x, places=6)
+
+
 class IlSafetyQuickStop(unittest.TestCase):
     def test_m410_acks_after_one_second_and_vents_the_right_side_at_once(self):
         b = Bench(personality="il-safety")

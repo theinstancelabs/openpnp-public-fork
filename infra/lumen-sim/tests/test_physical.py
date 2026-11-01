@@ -3,6 +3,7 @@
 Home offset, lost steps, a Z shift of the whole frame, Z release with a drop, and the M18/M84 S idle timeout. The
 controller never sees these: M114 keeps its belief; the control state's `head` shows physical, logical and offset.
 """
+import re
 import unittest
 
 from lumen_sim.bench import Bench
@@ -28,6 +29,49 @@ def state(b):
 
 def head(b):
     return state(b)["head"]
+
+
+def run_until_phase(b, phase, limit=30.0, step=0.005):
+    """Advance until a move of the G28 phase `phase` is running."""
+    end = b.t + limit
+    while b.t < end:
+        st = state(b)
+        if st["homing_phase"] == phase and st["moving"]:
+            return
+        b.run(step)
+    raise AssertionError("phase %s not reached" % phase)
+
+
+VAC_READ = "M261 A109 B3 S1"
+
+
+def n1_reading(b):
+    m = re.search(r"data:([0-9A-F]{2}) ([0-9A-F]{2}) ([0-9A-F]{2})$", b.send(VAC_READ).lines[0])
+    raw = int("".join(m.groups()), 16)
+    return raw - (1 << 24) if raw & 0x800000 else raw
+
+
+def touch(b, start=6.0, step=0.025, floor=4.0):
+    """An N1 vacuum touch as the backend's prober does it: pump and valve on, open-air baseline, then down in steps
+    until the reading falls 200 k counts below it. The N1 Z of the first sealed step, or None."""
+    for line in ("M106", "M106 P1 S180", "M260 A112 B1 S1", "M260 A109 B6 S1"):
+        b.send(line)
+    b.send("G1 Z%.4f F600" % (start + 1.0))
+    b.send("M400")
+    base = n1_reading(b)
+    found = None
+    for k in range(int(round((start - floor) / step)) + 1):
+        z = round(start - k * step, 4)
+        b.send("G1 Z%.4f F600" % z)
+        b.send("M400")
+        if n1_reading(b) < base - 200_000:
+            found = z
+            break
+    b.send("G1 Z%.4f F600" % (start + 1.0))
+    b.send("M400")
+    b.send("M107 P1")
+    b.send("M107 P0")
+    return found
 
 
 def homed(**faults):
@@ -157,6 +201,54 @@ class LostSteps(unittest.TestCase):
         fault(b, fault="lost_steps", y=0.25)
         b.send("M400")
         self.assertEqual(head(b)["physical"], {"X": 100.0, "Y": 0.25, "Z": 31.5})
+
+
+class FaultsDuringHoming(unittest.TestCase):
+    """A physical fault that lands while a homing move runs toward a switch: the switch stops the head where it now
+    triggers, as a real switch would."""
+
+    def home_x_with_fault_in_x_slow(self, **spec):
+        b = Bench(park=PARK)
+        b.write("G28 X\n")
+        run_until_phase(b, "X_SLOW")
+        b.run(0.05)  # about half way through the 10 mm re-bump
+        fault(b, **spec)
+        b.run(5.0)
+        self.assertEqual(state(b)["homing_phase"], None)
+        self.assertTrue(state(b)["homed"]["X"])
+        return b
+
+    def test_lost_steps_away_from_the_switch_mid_bump_still_ends_on_the_switch(self):
+        b = self.home_x_with_fault_in_x_slow(fault="lost_steps", x=0.3)
+        self.assertEqual(head(b)["physical"]["X"], 0.0)
+        self.assertEqual(head(b)["offset"]["X"], 0.0)
+        self.assertIn("x_min: TRIGGERED", b.send("M119").lines)
+
+    def test_lost_steps_toward_the_switch_mid_bump_stops_at_the_switch(self):
+        b = self.home_x_with_fault_in_x_slow(fault="lost_steps", x=-0.3)
+        self.assertEqual(head(b)["physical"]["X"], 0.0)
+        self.assertIn("x_min: TRIGGERED", b.send("M119").lines)
+
+    def test_a_switch_moved_mid_bump_stops_the_head_at_its_new_place(self):
+        b = self.home_x_with_fault_in_x_slow(fault="home_offset", x=0.5)
+        self.assertEqual(head(b)["physical"]["X"], 0.5)
+        self.assertEqual(head(b)["offset"]["X"], 0.5)
+        self.assertIn("x_min: TRIGGERED", b.send("M119").lines)
+
+    def test_the_ok_comes_when_the_head_reaches_the_switch(self):
+        """The G28's report and ok come at the switch hit worked out again, not at the old one: later or sooner."""
+        times = []
+        for x in (0.0, 0.3, -0.3):
+            b = Bench(park=PARK)
+            b.write("G28 X\n")
+            run_until_phase(b, "X_SLOW")
+            b.run(0.05)
+            fault(b, fault="lost_steps", x=x)
+            b.run(5.0)
+            times.append(next(t for t, line in b.rx if line == "ok"))
+        # 0.3 mm more or less at the re-bump's 75 mm/s
+        self.assertAlmostEqual(times[1] - times[0], 0.3 / 75.0, delta=0.0005)
+        self.assertAlmostEqual(times[2] - times[0], -0.3 / 75.0, delta=0.0005)
 
 
 class ZShift(unittest.TestCase):
@@ -369,6 +461,28 @@ class IdleTimeout(unittest.TestCase):
         self.assertFalse(state(b)["enabled"]["Z"])  # a move re-arms it
         self.assertEqual(head(b)["offset"]["Z"], -0.8)
 
+    def test_a_timeout_of_2_to_the_31_ms_or_more_has_run_out_at_once(self):
+        """millis_t compares are signed 32-bit (PENDING/ELAPSED, core/millis_t.h:32-33): previous_move_ms + S
+        lies 'in the past' when S is 2^31 ms or more, so manage_inactivity() releases every axis on its next pass,
+        and again each time the planner runs empty."""
+        for s in ("2147484", "3000000", "9999999999"):  # the last saturates at 0xFFFFFFFF ms
+            b = homed(z_drop={"z": -0.4})
+            self.assertEqual(b.send("M18 S" + s).lines, ["ok"])
+            b.run(0.01)
+            self.assertEqual(state(b)["enabled"], self.ALL_OFF, s)
+            self.assertEqual(head(b)["offset"]["Z"], -0.4, s)
+            b.send("G1 Z20 F600")
+            b.send("M400")
+            b.run(0.01)
+            self.assertEqual(state(b)["enabled"], self.ALL_OFF, s)
+            self.assertEqual(head(b)["offset"]["Z"], -0.8, s)
+
+    def test_just_under_2_to_the_31_ms_waits(self):
+        b = homed()
+        b.send("M84 S2147483")  # 2147483000 ms < 2^31
+        b.run(3600.0)
+        self.assertTrue(state(b)["enabled"]["Z"])
+
     def test_a_power_cycle_restores_the_default(self):
         b = homed()
         b.send("M84 S0")
@@ -381,6 +495,73 @@ class IdleTimeout(unittest.TestCase):
         self.assertEqual(state(b)["stepper_timeout_s"], 0.25)
         b.send("M18 S-5")  # float to unsigned on the STM32 saturates at 0: never
         self.assertEqual(state(b)["stepper_timeout_s"], 0.0)
+
+
+class NozzleTouch(unittest.TestCase):
+    """The N1 vacuum reading follows the physical head: with a surface set, N1 seals when its tip reaches it (pump
+    P0 and valve P1 on), so a Z fault is read by the next touch, as the backend's Z check and release test do."""
+
+    SURFACE = 5.3
+
+    def surfaced(self, **faults):
+        b = homed(**faults)
+        self.assertTrue(b.sim.control({"cmd": "set", "surface_z": self.SURFACE}, b.t)["ok"])
+        return b
+
+    def test_without_a_surface_n1_reads_open_air_at_every_z(self):
+        b = homed()
+        self.assertIsNone(touch(b))
+        self.assertIsNone(state(b)["surface_z"])
+
+    def test_n1_seals_at_the_surface(self):
+        b = self.surfaced()
+        self.assertEqual(touch(b), self.SURFACE)
+        self.assertEqual(state(b)["surface_z"], self.SURFACE)
+
+    def test_the_seal_needs_the_pump_and_the_valve(self):
+        b = self.surfaced()
+        b.send("G1 Z5 F600")
+        b.send("M400")
+        b.send("M106")
+        open_air = n1_reading(b)
+        b.send("M106 P1 S180")
+        sealed = n1_reading(b)
+        self.assertTrue(state(b)["n1_sealed"])
+        self.assertEqual(open_air - sealed, state(b)["seal_drop"])
+        b.send("M107 P0")
+        self.assertEqual(n1_reading(b), open_air)
+        self.assertFalse(state(b)["n1_sealed"])
+
+    def test_a_z_shift_moves_the_contact_after_a_home(self):
+        """BR-10: shift Z by 0.1 mm, home, and the touch reads 0.1 mm lower."""
+        b = self.surfaced()
+        self.assertEqual(touch(b), self.SURFACE)
+        fault(b, fault="z_shift", z=0.1)
+        b.send("G28")
+        self.assertEqual(touch(b), round(self.SURFACE - 0.1, 4))
+
+    def test_a_z_drop_is_read_by_the_next_touch(self):
+        """BR-12: Z released, the head drops 0.4 mm, and the next touch reads 0.4 mm higher."""
+        b = self.surfaced(z_drop={"z": -0.4})
+        b.send("M18 Z")
+        self.assertEqual(touch(b), round(self.SURFACE + 0.4, 4))
+
+    def test_the_surface_outlives_a_power_cycle_and_can_be_removed(self):
+        b = self.surfaced()
+        b.sim.power_cycle(b.t)
+        self.assertEqual(state(b)["surface_z"], self.SURFACE)
+        self.assertTrue(b.sim.control({"cmd": "set", "surface_z": None}, b.t)["ok"])
+        b.send("G28")
+        self.assertIsNone(touch(b))
+
+    def test_bad_values_are_refused(self):
+        for req in ({"surface_z": "5.3"}, {"surface_z": float("nan")}, {"surface_z": True},
+                    {"seal_drop": -1}, {"seal_drop": 1.5}, {"seal_drop": "x"}):
+            b = Bench()
+            reply = b.sim.control(dict(cmd="set", **req), b.t)
+            self.assertFalse(reply["ok"], req)
+            self.assertIsNone(state(b)["surface_z"], req)
+            self.assertEqual(state(b)["seal_drop"], 329_000, req)
 
 
 class Requests(unittest.TestCase):

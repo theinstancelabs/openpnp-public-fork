@@ -8,14 +8,19 @@ from .iolog import IoLog
 from .pty_link import PtyLink, check_link_path
 
 CLOSED_POLL_S = 0.01   # how often a closed (or frozen) port is checked for the host opening (or closing) it
+RETRY_S = 1.0          # a port that could not come back anywhere is tried again this much later (simulator s)
 
 
 class Runner:
     def __init__(self, sim, link, control=None, io_log=None, time_scale=1.0, clock=time.monotonic, log=None):
         self.sim = sim
         self.link = PtyLink(link)
-        self.control = ControlServer(control) if control else None
-        self.io = IoLog(io_log) if io_log else None
+        try:
+            self.control = ControlServer(control) if control else None
+            self.io = IoLog(io_log) if io_log else None
+        except BaseException:
+            self.link.release()
+            raise
         self.scale = float(time_scale)
         self.clock = clock
         self.t0 = clock()
@@ -45,7 +50,11 @@ class Runner:
         """Everything due now: link back, host input, host open/close, simulator time, actions, output."""
         t = self.now()
         if self.down_until is not None and t >= self.down_until:
-            self._reopen(self.next_link, "link back")
+            try:
+                self._reopen(self.next_link, "link back")
+            except (OSError, ValueError) as e:  # as in _do_actions: noted, and the loop goes on
+                self.log("lumen-sim link back: %s: %s" % (type(e).__name__, e))
+                self._note("link back: %s: %s" % (type(e).__name__, e))
         if self.link.master is not None:
             if not self.frozen:
                 self._read_host()
@@ -148,6 +157,7 @@ class Runner:
     def _do_action(self, a, t):
         kind = a["action"]
         if kind == "power_cycle":
+            self.frozen = False  # the reset MCU reads its port again
             if a.get("down_s"):
                 self._go_down(t, a["down_s"], "power cycle")
                 self.next_link = a.get("link") or self.next_link
@@ -171,6 +181,8 @@ class Runner:
         self._note("%s: port gone" % why)
 
     def _reopen(self, link, why):
+        """The port comes back at `link` (None: where it was). If it cannot, it comes back where it was; if it cannot
+        come back at all (no directory, no pty), it stays down and is tried again RETRY_S later. Raises then too."""
         old = self.link.link
         self.link.close()
         self.pending = b""
@@ -179,7 +191,12 @@ class Runner:
         try:
             self.link.open(link)
         except (OSError, ValueError):
-            self.link.open()  # come back where the port was, so the controller stays reachable
+            try:
+                self.link.open()  # come back where the port was, so the controller stays reachable
+            except (OSError, ValueError) as e:
+                self.down_until = self.now() + RETRY_S
+                self._note("%s: port still gone (%s: %s), again in %g s" % (why, type(e).__name__, e, RETRY_S))
+                raise
             self._note("%s: %s (back at %s)" % (why, self.link.pts, old))
             raise
         self._note("%s: %s" % (why, self.link.pts))
@@ -195,7 +212,7 @@ class Runner:
             self.io.note(text)
 
     def shutdown(self):
-        self.link.close()
+        self.link.release()
         if self.control:
             self.control.close()
         if self.io:
