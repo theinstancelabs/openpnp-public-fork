@@ -5,7 +5,7 @@ import time
 
 from .control import ControlServer
 from .iolog import IoLog
-from .pty_link import PtyLink, check_link_path
+from .pty_link import PtyLink
 
 CLOSED_POLL_S = 0.01   # how often a closed (or frozen) port is checked for the host opening (or closing) it
 RETRY_S = 1.0          # a port that could not come back anywhere is tried again this much later (simulator s)
@@ -14,6 +14,9 @@ RETRY_S = 1.0          # a port that could not come back anywhere is tried again
 class Runner:
     def __init__(self, sim, link, control=None, io_log=None, time_scale=1.0, clock=time.monotonic, log=None,
                  guard=None):
+        scale = float(time_scale)
+        if not (math.isfinite(scale) and scale > 0):  # NaN or inf: now() is NaN and the loop never sleeps
+            raise ValueError("time_scale must be a finite number > 0, not %r" % (time_scale,))
         self.sim = sim
         self.guard = guard  # pty_link.LinkGuard: removes the links if this process is killed
         self.link = PtyLink(link, guard)
@@ -23,7 +26,7 @@ class Runner:
         except BaseException:
             self.link.release()
             raise
-        self.scale = float(time_scale)
+        self.scale = scale
         self.clock = clock
         self.t0 = clock()
         self.log = log or (lambda msg: None)
@@ -123,21 +126,24 @@ class Runner:
     def _handle_control(self, req):
         t = self.now()
         link = req.get("link") if req.get("cmd") == "power_cycle" else None
-        if isinstance(link, str):
-            try:
-                check_link_path(link)  # refused before the controller is reset
-            except ValueError as e:
-                return {"ok": False, "error": str(e)}
-        reply = self.sim.control(req, t)
-        if reply.get("ok"):
-            errors = self._do_actions(t)
-            if errors:
-                return {"ok": False, "error": "; ".join(errors), **self.transport_state()}
-            if req.get("cmd") == "state":
-                reply["state"].update(self.transport_state())
-            elif req.get("cmd") == "power_cycle":
-                reply.update(self.transport_state())
-        return reply
+        try:
+            if isinstance(link, str):
+                try:  # a bad path, or one another lumen-sim holds, is refused before the controller is reset
+                    req = dict(req, link=self.link.reserve(link))
+                except (OSError, ValueError) as e:
+                    return {"ok": False, "error": str(e)}
+            reply = self.sim.control(req, t)
+            if reply.get("ok"):
+                errors = self._do_actions(t)
+                if req.get("cmd") == "state":
+                    reply["state"].update(self.transport_state())
+                elif req.get("cmd") == "power_cycle" or errors:
+                    reply.update(self.transport_state())
+                if errors:  # carried out (a power cycle has reset the board), but the port could not follow
+                    reply["link_error"] = "; ".join(errors)
+            return reply
+        finally:
+            self.link.let_go(keep=self.next_link)  # a refused or replaced power cycle's new path
 
     def transport_state(self):
         return {"link": self.link.link, "pts": self.link.pts, "host_open": self.link.host_open,
@@ -201,6 +207,8 @@ class Runner:
                 raise
             self._note("%s: %s (back at %s)" % (why, self.link.pts, old))
             raise
+        finally:
+            self.link.let_go()  # the new path's claim, if open() never took it
         self._note("%s: %s" % (why, self.link.pts))
         self.log("lumen-sim %s: %s (link %s)" % (why, self.link.pts, self.link.link))
 

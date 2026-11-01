@@ -1,4 +1,5 @@
 """The pty transport, I/O log, control socket and CLI, through a real lumen-sim process (a few seconds)."""
+import errno
 import json
 import os
 import re
@@ -20,6 +21,9 @@ from lumen_sim.runner import Runner
 from tests import goldens
 from tests.hang import within
 from tests.simproc import PKG_ROOT, SimProcess, open_raw, read_until_ok
+
+
+DEEP_JSON = b"[" * 100000 + b"]" * 100000 + b"\n"  # 200 kB, under the 1 MiB line limit
 
 
 def read_some(fd, timeout):
@@ -204,6 +208,20 @@ class PowerCycle(unittest.TestCase):
                 os.close(fd)
         finally:
             sim.stop()
+
+
+    def test_ctl_power_cycle_takes_a_link_relative_to_its_own_directory(self):
+        """Review round 3: lumen-sim resolved it against its own working directory (in uinav, the source tree)."""
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        out = subprocess.run([sys.executable, "-m", "lumen_sim", "ctl", "--control", sim.sock, "power-cycle",
+                              "--link", "ttyLUMEN1"], cwd=sim.dir, env=dict(os.environ, PYTHONPATH=PKG_ROOT),
+                             capture_output=True, text=True, timeout=10)
+        self.assertEqual(out.returncode, 0, out.stderr + out.stdout)
+        new = os.path.join(sim.dir, "ttyLUMEN1")
+        self.assertEqual(json.loads(out.stdout)["link"], new)
+        self.assertEqual(os.path.realpath(new), sim.ctl({"cmd": "state"})["state"]["pts"])
+        self.assertFalse(os.path.lexists(os.path.join(PKG_ROOT, "ttyLUMEN1")))
 
 
 class LinkFaults(unittest.TestCase):
@@ -417,11 +435,12 @@ class LinkLifecycle(unittest.TestCase):
                     [1, 2]):
             reply = self.sim.ctl(req)
             self.assertFalse(reply["ok"], req)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
-            c.settimeout(5)
-            c.connect(self.sim.sock)
-            c.sendall(b"not json\n")
-            self.assertFalse(json.loads(c.recv(65536))["ok"])
+        for line in (b"not json\n", DEEP_JSON):  # DEEP_JSON: RecursionError, not a ValueError (review round 3)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+                c.settimeout(5)
+                c.connect(self.sim.sock)
+                c.sendall(line)
+                self.assertFalse(json.loads(c.recv(65536))["ok"])
         self.assertIsNone(self.sim.proc.poll())
         self.assertEqual(self.state()["faults"], [])
         self.assert_answers(self.sim.link)
@@ -457,6 +476,42 @@ class LinkNames(unittest.TestCase):
         with self.assertRaises(ValueError):
             check_link_path("/x/ttyLUMEN", exists=lambda p: False)  # no such directory
 
+    def test_names_of_lumen_sim_s_own_files_are_refused(self):
+        """Review round 3: a link named <link>.lock or <link>.tmp<pid> would replace a lock or a link in the making."""
+        def never(path):
+            raise AssertionError("stat'ed %s" % path)
+        for bad in ("/x/ttyLUMEN.lock", "/x/ttyLUMEN1.lock", "/x/ttyLUMEN.tmp4242", "/x/ttyLUMEN.", "/x/ttyLUMEN 1"):
+            with self.assertRaises(ValueError):
+                check_link_path(bad, exists=never)
+
+    def test_an_existing_path_that_is_not_a_link_to_a_pty_is_refused(self):
+        """Publishing replaces what is at the path: only a link to a /dev/pts/N (a killed lumen-sim's) may go."""
+        tmp = temp_dir(self)
+        p = lambda name: os.path.join(tmp, name)  # noqa: E731
+        with open(p("ttyLUMEN"), "w") as f:
+            f.write("keep")
+        os.symlink(os.devnull, p("ttyLUMEN1"))
+        os.mkdir(p("ttyLUMEN2"))
+        os.symlink("/dev/pts/999999", p("ttyLUMEN3"))  # never opened: only its name is read
+        for bad in ("ttyLUMEN", "ttyLUMEN1", "ttyLUMEN2"):
+            with self.assertRaisesRegex(ValueError, "not a link to a pty"):
+                check_link_path(p(bad))
+        self.assertEqual(check_link_path(p("ttyLUMEN3")), p("ttyLUMEN3"))
+        with open(p("ttyLUMEN")) as f:
+            self.assertEqual(f.read(), "keep")
+        self.assertEqual(os.readlink(p("ttyLUMEN1")), os.devnull)
+
+    def test_cli_refuses_non_finite_numbers(self):
+        """Review round 3: --time-scale nan or inf passed the '<= 0' check and spun a core at 100 %."""
+        tmp = temp_dir(self)
+        link = os.path.join(tmp, "ttyLUMEN")
+        for args in (["--time-scale", "nan"], ["--time-scale", "inf"], ["--park", "nan,5,31.5"],
+                     ["--park", "5,inf,31.5"], ["--surface-z", "nan"]):
+            out = subprocess.run([sys.executable, "-m", "lumen_sim", "--link", link] + args, cwd=PKG_ROOT,
+                                 capture_output=True, text=True, timeout=10)
+            self.assertEqual(out.returncode, 2, (args, out.stderr))
+            self.assertFalse(os.path.lexists(link), args)
+
     def test_cli_refuses_a_device_like_link(self):
         tmp = tempfile.mkdtemp(prefix="lumen-sim-test-")
         try:
@@ -485,7 +540,7 @@ class RunnerFaults(unittest.TestCase):
         os.mkdir(other)
         new = os.path.join(other, "ttyLUMEN1")
         self.assertTrue(r._handle_control({"cmd": "power_cycle", "link": new, "down_s": 1.0})["ok"])
-        os.rmdir(other)  # gone during the down time
+        shutil.rmtree(other)  # gone during the down time (with the lock the power cycle took there)
         self.clock[0] = 1.5
         r._service()     # must not raise: that would end the process
         self.assertEqual(r.link.link, old)
@@ -530,6 +585,143 @@ class RunnerFaults(unittest.TestCase):
         reply = r._handle_control({"cmd": "power_cycle"})
         self.assertTrue(reply["ok"], reply)
         self.assertFalse(reply["frozen"])
+
+    def test_a_power_cycle_onto_a_link_another_instance_holds_is_refused_before_the_reset(self):
+        """Review round 3: it used to reset the board, then fail to publish the port and reply ok:false."""
+        r = self.runner()
+        r.link.open()
+        old, pts = r.link.link, r.link.pts
+        other = PtyLink(os.path.join(os.path.dirname(old), "ttyLUMEN1"))
+        self.addCleanup(other.release)
+        other.open()
+        reply = r._handle_control({"cmd": "power_cycle", "link": other.link})
+        self.assertFalse(reply["ok"], reply)
+        self.assertIn("in use", reply["error"])
+        self.assertEqual(r.sim.state(0.0)["boots"], 1)  # nothing changed
+        self.assertEqual((r.link.link, r.link.pts), (old, pts))
+        self.assertEqual(os.path.realpath(other.link), other.pts)
+
+    def test_a_power_cycle_holds_its_new_link_through_the_down_time(self):
+        r = self.runner()
+        r.link.open()
+        new = os.path.join(os.path.dirname(r.link.link), "ttyLUMEN1")
+        self.assertTrue(r._handle_control({"cmd": "power_cycle", "link": new, "down_s": 1.0})["ok"])
+        with self.assertRaisesRegex(ValueError, "in use"):
+            PtyLink(new)  # another lumen-sim cannot take the path while this board restarts
+        self.clock[0] = 1.5
+        r._service()
+        self.assertEqual(r.link.link, new)
+        self.assertEqual(os.path.realpath(new), r.link.pts)
+
+    def test_a_refused_or_replaced_power_cycle_lets_go_of_its_new_link(self):
+        r = self.runner()
+        r.link.open()
+        one, two = (os.path.join(os.path.dirname(r.link.link), n) for n in ("ttyLUMEN1", "ttyLUMEN2"))
+        self.assertFalse(r._handle_control({"cmd": "power_cycle", "link": one, "down_s": "x"})["ok"])
+        os.close(lock_link(one))
+        self.assertTrue(r._handle_control({"cmd": "power_cycle", "link": one, "down_s": 1.0})["ok"])
+        self.assertTrue(r._handle_control({"cmd": "power_cycle", "link": two, "down_s": 1.0})["ok"])
+        os.close(lock_link(one))  # the second power cycle's path replaced the first one's
+        self.clock[0] = 2.5
+        r._service()
+        self.assertEqual(os.path.realpath(two), r.link.pts)
+
+    def test_a_port_that_cannot_be_published_after_the_reset_is_reported_with_the_reset(self):
+        """Review round 3: the board was reset either way, so ok:false ('nothing happened') was wrong; the reply is
+        ok with link_error and the link where the port really is."""
+        r = self.runner()
+        r.link.open()
+        old = r.link.link
+        new = os.path.join(os.path.dirname(old), "ttyLUMEN1")
+        real_open = r.link.open
+
+        def no_pty_at_new(link=None):
+            if link:
+                raise OSError(errno.EAGAIN, "out of ptys")
+            return real_open(link)
+        r.link.open = no_pty_at_new
+        reply = r._handle_control({"cmd": "power_cycle", "link": new})
+        self.assertTrue(reply["ok"], reply)
+        self.assertIn("out of ptys", reply["link_error"])
+        self.assertEqual(reply["link"], old)
+        self.assertEqual(os.path.realpath(old), reply["pts"])
+        self.assertEqual(r.sim.state(0.0)["boots"], 2)
+        os.close(lock_link(new))  # its claim on the new path is let go
+
+    def test_a_relative_power_cycle_link_is_refused(self):
+        """Review round 3: it was resolved against lumen-sim's working directory, not the client's."""
+        r = self.runner()
+        r.link.open()
+        work = temp_dir(self)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(work)
+        reply = r._handle_control({"cmd": "power_cycle", "link": "ttyLUMEN1"})
+        self.assertFalse(reply["ok"], reply)
+        self.assertIn("absolute", reply["error"])
+        self.assertEqual(os.listdir(work), [])
+        self.assertEqual(r.sim.state(0.0)["boots"], 1)
+
+    def test_a_power_cycle_onto_a_lock_or_temp_file_is_refused(self):
+        r = self.runner()
+        r.link.open()
+        lock = r.link.link + ".lock"
+        for link in (lock, r.link.link + ".tmp%d" % os.getpid()):
+            reply = r._handle_control({"cmd": "power_cycle", "link": link})
+            self.assertFalse(reply["ok"], link)
+        self.assertTrue(os.path.isfile(lock) and not os.path.islink(lock))
+        self.assertEqual(r.sim.state(0.0)["boots"], 1)
+        self.assertEqual(os.path.realpath(r.link.link), r.link.pts)
+
+    def test_frozen_off_reads_the_port_again(self):
+        r = self.runner()
+        r.link.open()
+        host = open_raw(r.link.link)
+        self.addCleanup(os.close, host)
+        self.assertTrue(r._handle_control({"cmd": "fault", "fault": "frozen", "on": True})["ok"])
+        r._service()
+        os.write(host, b"M400\n")
+        r._service()
+        self.assertEqual(read_some(host, 0.1), b"")
+        self.assertTrue(r._handle_control({"cmd": "fault", "fault": "frozen", "on": False})["ok"])
+        self.assertFalse(r.transport_state()["frozen"])
+        r._service()
+        self.assertEqual(read_some(host, 1.0), b"ok\n")
+
+    def test_bytes_the_host_had_not_taken_are_dropped_by_a_disconnect(self):
+        r = self.runner()
+        r.link.open()
+        host = open_raw(r.link.link)
+        r._service()
+        self.assertTrue(r.link.host_open)
+        self.assertTrue(r._handle_control({"cmd": "fault", "fault": "inject", "text": "x" * 300000})["ok"])
+        r._service()
+        self.assertTrue(r.pending)  # more than the pty takes: the rest waits in lumen-sim
+        self.assertTrue(r._handle_control({"cmd": "fault", "fault": "disconnect", "down_s": 1.0})["ok"])
+        os.close(host)
+        self.clock[0] = 1.5
+        r._service()
+        host = open_raw(r.link.link)
+        self.addCleanup(os.close, host)
+        r._service()
+        r._service()
+        self.assertEqual(read_some(host, 0.3), b"")  # the next host starts clean, as on a USB port
+
+    def test_a_disconnect_does_not_bring_back_the_port_of_a_board_in_dfu(self):
+        tmp = temp_dir(self)
+        self.clock = [0.0]
+        r = Runner(Simulator("il-safety"), os.path.join(tmp, "ttyLUMEN"), clock=lambda: self.clock[0])
+        self.addCleanup(r.shutdown)
+        r.link.open()
+        r.sim.receive(b"M997\n", 0.0)
+        r._service()
+        self.assertFalse(os.path.lexists(r.link.link))
+        self.assertTrue(r._handle_control({"cmd": "fault", "fault": "disconnect", "down_s": 0.5})["ok"])
+        self.clock[0] = 1.0
+        r._service()
+        self.assertFalse(os.path.lexists(r.link.link))  # the bootloader has no serial port: down until a power cycle
+        self.assertTrue(r.transport_state()["link_down"])
+        self.assertTrue(r._handle_control({"cmd": "power_cycle"})["ok"])
+        self.assertEqual(os.path.realpath(r.link.link), r.link.pts)
 
     def test_the_io_log_takes_any_byte_a_model_error_quotes(self):
         """A line the model cannot run is noted in the I/O log with its bytes, whatever they are; the board answers."""
@@ -583,6 +775,23 @@ class OneInstancePerPath(unittest.TestCase):
         os.replace(a.link + ".other", a.link)
         a.close()
         self.assertEqual(os.readlink(a.link), "/dev/null")
+
+    def test_a_lock_that_is_a_symlink_is_never_followed(self):
+        """Review round 3: lock files were opened through symlinks, so a planted <link>.lock could make lumen-sim (or
+        its guardian) open a file, or a device, it does not own."""
+        tmp = temp_dir(self)
+        target = os.path.join(tmp, "victim")
+        with open(target, "w") as f:
+            f.write("keep")
+        link = os.path.join(tmp, "ttyLUMEN")
+        os.symlink(target, link + ".lock")
+        with self.assertRaisesRegex(ValueError, "lock"):
+            PtyLink(link)
+        os.symlink("/dev/pts/999999", link)  # never opened: only its name is read
+        remove_stale_link(link, "/dev/pts/999999")
+        self.assertTrue(os.path.islink(link))  # a lock lumen-sim did not make: the link is left for a person
+        with open(target) as f:
+            self.assertEqual(f.read(), "keep")
 
     def test_a_live_control_socket_is_refused_and_a_stale_one_replaced(self):
         tmp = temp_dir(self)
@@ -676,6 +885,18 @@ class LinkGuardian(unittest.TestCase):
         self.assertFalse(os.path.lexists(sim.link))
         self.assertTrue(wait_for(lambda: not alive(guard)))
 
+    def test_a_kill_of_lumen_sim_s_whole_process_group_leaves_no_link(self):
+        """uinav's kill_tree ends with os.killpg(pid, SIGKILL): the guardian, in a session of its own, outlives it."""
+        sim = SimProcess(new_session=True)
+        self.addCleanup(sim.stop)
+        pgid = sim.proc.pid
+        self.assertEqual(os.getpgid(pgid), pgid)  # its own group: the kill below reaches nothing of this test's
+        guard = sim.ctl({"cmd": "state"})["state"]["guard_pid"]
+        os.killpg(pgid, signal.SIGKILL)
+        sim.proc.wait(timeout=5)
+        self.assertTrue(wait_for(lambda: not os.path.lexists(sim.link)))
+        self.assertTrue(wait_for(lambda: not alive(guard)))
+
     def test_a_clean_stop_ends_the_guardian_too(self):
         sim = SimProcess()
         self.addCleanup(sim.stop)
@@ -732,6 +953,38 @@ class ControlServerErrors(unittest.TestCase):
             c.close()
             srv.close()
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_a_request_nested_too_deep_is_a_refusal_not_a_crash(self):
+        """Review round 3: json.loads raises RecursionError, not ValueError, on JSON nested 100000 deep; it went up
+        through the loop and the process exited."""
+        tmp = temp_dir(self)
+        srv = ControlServer(os.path.join(tmp, "ctl.sock"))
+        self.addCleanup(srv.close)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(c.close)
+        c.connect(srv.path)
+        srv.handle(srv.sock, None)  # accept
+        c.setblocking(False)
+        data, buf, replies = DEEP_JSON + b'{"cmd": "state"}\n', b"", []
+        with within(self, 10):
+            while len(replies) < 2:
+                if data:
+                    try:
+                        data = data[c.send(data):]
+                    except BlockingIOError:
+                        pass
+                r, w, _ = select.select(srv.readers(), srv.writers(), [], 0.01)
+                srv.service(r, w, lambda req: {"ok": True, "cmd": req["cmd"]})
+                try:
+                    buf += c.recv(65536)
+                except BlockingIOError:
+                    pass
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    replies.append(json.loads(line))
+        self.assertFalse(replies[0]["ok"])
+        self.assertIn("bad request", replies[0]["error"])
+        self.assertEqual(replies[1], {"ok": True, "cmd": "state"})
 
     def test_a_client_that_closed_is_dropped(self):
         """Else select() reports its end of file for ever and the loop spins."""
@@ -827,6 +1080,14 @@ class TimeScale(unittest.TestCase):
         self.assertEqual(r.now(), 0.0)
         clock[0] = 100.4
         self.assertAlmostEqual(r.now(), 1.6, places=9)
+
+    def test_a_time_scale_that_is_not_finite_and_positive_is_refused(self):
+        tmp = temp_dir(self)
+        link = os.path.join(tmp, "ttyLUMEN")
+        for scale in (float("nan"), float("inf"), 0.0, -1.0):
+            with self.assertRaisesRegex(ValueError, "time.scale", msg=scale):
+                Runner(Simulator(), link, time_scale=scale)
+        PtyLink(link).release()  # and the path was let go
 
     def test_time_scale_speeds_up_the_simulator_clock(self):
         """End to end through the CLI flag: 1.6 s of G4 at scale 4. Only the bounds a loaded host cannot break: not

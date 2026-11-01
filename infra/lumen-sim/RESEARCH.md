@@ -431,6 +431,7 @@ M261 reply styles (`twibus.cpp`):
 | 3445-3466 | `G92 B0` report; `G1 B21600 F43200`; M400 with 15 busy lines, ok after 30.77 s (accel about 1000) |
 | 29118-29123 | G28: busy, then report, then ok |
 | 166293-166300 | G28 in 5.8 s, then `G92 A0 B0` report |
+| 168526-168542 | M114, then G28 from the same place in 5.25 s, about 1.4 s faster than 166293 for its distance (README, "Homing time") |
 | 122929-122940 | Lone `M410`, ok after 2.000 s, then the stop lines |
 | 96806-96815 | STOP burst, first ok after 1.0 s |
 | 123330 | `M105` |

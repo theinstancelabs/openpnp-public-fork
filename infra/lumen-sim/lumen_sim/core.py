@@ -6,6 +6,7 @@ disconnect, frozen, stop) are queued for take_transport_actions().
 """
 import heapq
 import math
+import os
 from collections import deque
 
 from . import personality as personalities
@@ -17,7 +18,8 @@ INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": '
 # The keys each request takes besides "cmd" (and a fault's "fault"): an unknown one (a misspelt "surfaceZ" or "downs")
 # is refused, not ignored. Ok faults check theirs in faults.KEYS; physical faults take their axes (PHYSICAL_FAULTS).
 REQUEST_KEYS = {"state": (), "clear": (), "stop": (), "power_cycle": ("link", "down_s"),
-                "set": ("kill_messages", "vacuum", "rs485", "mcp3426", "surface_z", "surfaces", "seal_drop")}
+                "set": ("kill_messages", "vacuum", "rs485", "mcp3426", "surface_z", "surfaces", "seal_drop",
+                        "homing_move_delay_s")}
 FAULT_KEYS = {"inject": ("kind", "text", "after_s"), "inject_bytes": ("hex", "text", "after_s"),
               "partial": ("text", "after_s"), "halt": ("reason",), "disconnect": ("down_s",), "frozen": ("on",)}
 # Faults of the physical machine (INF-08): fault -> the axis keys it takes (mm, signed; at least one)
@@ -155,7 +157,7 @@ class Simulator:
         self._timed = []
         self._last_release = -math.inf
         self._halt_seen = False
-        self.faults.lines_lost()
+        self.faults.clear()        # the ok faults are the controller's: the reboot ends them (the machine's stay)
         self.fw = self._boot(t)
 
     # ------------------------------------------------------------------ control protocol
@@ -178,6 +180,9 @@ class Simulator:
         if cmd == "clear":
             self.faults.clear()
             self.machine.clear_faults()
+            # the switches are back at 0: a homing move running toward one ends there, and the firmware's wait with it
+            self.fw.stepper.recheck_endstops(t)
+            self.fw.wake(t)
             self._timed = []
             # output a delay_ok holds back (and all queued behind it) goes now
             self.out = deque((min(when, t), data) for when, data in self.out)
@@ -186,8 +191,9 @@ class Simulator:
             return {"ok": True}
         if cmd == "power_cycle":
             link = req.get("link")
-            if link is not None and not isinstance(link, str):
-                raise ValueError("link must be a path, not %r" % (link,))
+            if link is not None and not (isinstance(link, str) and os.path.isabs(link)):
+                raise ValueError("link must be an absolute path (lumen-sim's working directory is not the client's), "
+                                 "not %r" % (link,))
             down = 0.0 if req.get("down_s") is None else seconds(req["down_s"], "down_s")
             self.power_cycle(t)
             self._actions.append({"action": "power_cycle", "link": link, "down_s": down})
@@ -237,7 +243,10 @@ class Simulator:
             self._check_halt()
         elif kind == "disconnect":
             down = req.get("down_s", 0.0)
-            self._actions.append({"action": "disconnect", "down_s": None if down is None else seconds(down, "down_s")})
+            down = None if down is None else seconds(down, "down_s")
+            if self.fw.halted and self.fw.halt_reason == "DFU":
+                down = None  # a board in its bootloader shows no serial port until a power cycle
+            self._actions.append({"action": "disconnect", "down_s": down})
         elif kind == "frozen":
             self._actions.append({"action": "frozen", "on": flag(req.get("on", True), "on")})
         elif kind in PHYSICAL_FAULTS:
@@ -283,6 +292,8 @@ class Simulator:
         drop = req.get("seal_drop")
         if drop is not None and (isinstance(drop, bool) or not isinstance(drop, int) or drop < 0):
             raise ValueError("seal_drop must be an integer >= 0 (counts), not %r" % (drop,))
+        homing_delay = seconds(req["homing_move_delay_s"], "homing_move_delay_s") \
+            if "homing_move_delay_s" in req else None
         rs485 = req.get("rs485", {})
         if not isinstance(rs485, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in rs485.items()):
             raise ValueError("rs485 must map request hex to reply hex (strings), not %r" % (rs485,))
@@ -300,6 +311,8 @@ class Simulator:
             self.machine.surfaces = surfaces
         if drop is not None:
             self.machine.seal_drop = drop
+        if homing_delay is not None:
+            self.machine.homing_move_delay_s = homing_delay
         return {"ok": True}
 
     @staticmethod
@@ -342,6 +355,7 @@ class Simulator:
             "surface_z": self.machine.surface_z,
             "surfaces": [dict(r) for r in self.machine.surfaces],
             "seal_drop": self.machine.seal_drop,
+            "homing_move_delay_s": self.machine.homing_move_delay_s,
             "n1_sealed": self.machine.n1_sealed(fw),
             "stepper_timeout_s": fw.stepper_timeout_ms / 1000.0,
             "homed": {"X": fw.homed[0], "Y": fw.homed[1], "Z": fw.homed[2]},

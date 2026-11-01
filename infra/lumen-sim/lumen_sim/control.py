@@ -101,7 +101,7 @@ class ControlServer:
                 req = json.loads(line)
                 if not isinstance(req, dict):
                     raise ValueError("request must be a JSON object")
-            except ValueError as e:
+            except (ValueError, RecursionError) as e:  # RecursionError: nested too deep for the parser
                 reply = {"ok": False, "error": "bad request: %s" % e}
             else:
                 try:

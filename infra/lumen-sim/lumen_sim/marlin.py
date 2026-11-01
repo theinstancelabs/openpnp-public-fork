@@ -24,9 +24,6 @@ HOMING_BUMP = [10.0, 10.0, 2.0]
 HOMING_BUMP_DIVISOR = [2, 2, 4]
 Z_AFTER_HOMING = 31.5
 XY_PROBE_FEEDRATE = 133.0
-# The board takes ~1.4 s longer per G28 than the source's kinematics give; spread over the 10 moves of a full home.
-# Fitted to serial.log lines 166293 and 166954 (README, "Homing time").
-HOMING_MOVE_OVERHEAD_S = 0.142
 KILL_DELAY_S = 0.6              # minkill(): messages get out, the stepper ISR still runs, then cli()
 DEFAULT_STEPPER_TIMEOUT_MS = 3600 * 1000  # DEFAULT_STEPPER_TIMEOUT_SEC (Configuration_adv.h)
 DISABLE_IDLE = AXES             # DISABLE_IDLE_X/Y/Z/I/J: an idle timeout releases every axis
@@ -640,7 +637,7 @@ class Firmware:
                 self.enabled[AXES[i]] = True
         self.position = tgt
         return Block(tgt, delta, Trapezoid(n, rate, accel, r0, r0),
-                     extra_delay=HOMING_MOVE_OVERHEAD_S if self.in_g28 else 0.0)
+                     extra_delay=self.machine.homing_move_delay_s if self.in_g28 else 0.0)
 
     def _prepare_line_to(self, dest):
         if self.soft_endstops:

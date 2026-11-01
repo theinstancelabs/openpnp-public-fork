@@ -33,7 +33,10 @@ Then `grep -E 'usb-|port-name' machine.xml` must show no `usb-` and only the lin
 **The link's name must start with `ttyLUMEN`**, and lumen-sim refuses any other (CLI and power cycle). When the
 path does not exist and is not a symlink, jSerialComm's `getCommPort` opens `/dev/<path>` or `/dev/<name>` instead.
 The link is missing whenever lumen-sim is stopped or its port is down, so a link named `ttyACM0` would make OpenPnP's
-reconnect open the real board. Never name a link like a device.
+reconnect open the real board. Never name a link like a device. After `ttyLUMEN` only letters, digits, `_` and `-`
+may follow: `<link>.lock` and `<link>.tmp<pid>` are lumen-sim's own files, and no link may replace one. Publishing
+replaces what is at the path, so a path that holds anything but a link to a `/dev/pts/N` (a killed lumen-sim's) is
+refused too.
 
 | Option | Meaning |
 |---|---|
@@ -41,8 +44,8 @@ reconnect open the real board. Never name a link like a device.
 | `--personality stock\|il-safety` | Firmware build (below). Default `stock`. |
 | `--control SOCK` | Unix socket for the control channel (JSON lines). |
 | `--io-log FILE` | Append the traffic in `serial.log` format. |
-| `--time-scale 1.0` | Simulator seconds per wall second. Keep 1.0 when host timeouts matter: they are wall clock. |
-| `--park X,Y,Z` | Physical head position at power-on, in mm from the X/Y/Z switches. Default `5,5,31.5`. |
+| `--time-scale 1.0` | Simulator seconds per wall second, a finite number > 0. Keep 1.0 when host timeouts matter: they are wall clock. |
+| `--park X,Y,Z` | Physical head position at power-on, in mm from the X/Y/Z switches (finite numbers). Default `5,5,31.5`. |
 | `--kill-messages` | Print `echo:<reason>` and `Error:Printer halted. kill() called!` when the board kills (default silent). |
 | `--vacuum N` | Raw 24-bit N1 vacuum reading in open air (default -1500000). |
 | `--surface-z Z` | Physical Z (mm) at which N1 touches a surface and seals (default: nothing under N1). See "Vacuum model". |
@@ -60,7 +63,8 @@ removes such links in its sessions; elsewhere remove it by hand.
 
 One lumen-sim per path. Each holds an flock on `<link>.lock` while it runs (the file stays; the lock dies with the
 process), and a second one on the same link, or on a socket that still answers, exits with `... is in use` and changes
-nothing. A socket nobody answers on (a killed lumen-sim's) is replaced; a `--control` path that is not a socket is
+nothing. Lock files are never opened through a symlink: a `<link>.lock` that is one (lumen-sim never makes one) is
+refused, and the guardian and `uinav stop` leave its link alone. A socket nobody answers on (a killed lumen-sim's) is replaced; a `--control` path that is not a socket is
 refused and left alone. On exit lumen-sim removes the socket only if it is still its own.
 
 ```sh
@@ -71,6 +75,9 @@ python3 -m lumen_sim ctl --control SOCK power-cycle [--link NEW_PATH] [--down-s 
 python3 -m lumen_sim ctl --control SOCK clear
 python3 -m lumen_sim ctl --control SOCK stop
 ```
+
+`ctl` makes a relative `--link` absolute in its own working directory (lumen-sim refuses relative links: its working
+directory is not the client's). It exits 1 when the reply is not ok or carries `link_error`.
 
 ## What it models
 
@@ -178,13 +185,17 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 - `G28 Z` alone also homes unhomed X/Y first; with X/Y unhomed it prints `echo:Home XY First`.
 - The phase (`X_APPROACH`, `X_BUMP`, `X_SLOW`, ..., `Z_SAFE_XY`, `Z_AFTER`) is in the control state.
 
-**Homing time.**
-- The source's kinematics come out about 1.4 s shorter per G28 than the board's. The sim adds 0.142 s to each of the
-  10 homing moves, fitted to the two logged G28s whose start positions are known: 5.73 s vs 5.80 s and 6.90 s vs
-  6.86 s on the board.
-- The one logged G28 right after a power cycle took 2.82 s. The model needs at least ~3.4 s even with the head
-  already at the switches, so the cause is something not understood (perhaps the speed or acceleration during
-  homing). Its start position is unknown, so it is checked for text only.
+**Homing time.** The board's G28s come in two speeds, with a 1.4 s spread; the cause is not known.
+- Four logged G28s start from a known position (an M114 just before, no move since), all with `M204 S1500`. Lines
+  168535 and 169216 (from X234.5 Y199.1) took 5.25 s, and the source's kinematics give 5.33 s. Lines 166293 (from
+  X217.2 Y63.2) and 166954 (from X240.9 Y215.9) took 5.80 s and 6.86 s, about 1.4 s more than the kinematics (4.31 s
+  and 5.48 s). The G28 right after a power cycle (line 29118, start unknown, `M204 S2000`) took 2.82 s: the
+  kinematics need 2.24 s from the switches themselves, so it cannot have had the 1.4 s either.
+- So the default is the kinematics alone (3 of the 5). `set {"homing_move_delay_s": 0.142}` adds 0.142 s before each
+  of the 10 moves of a full home and reproduces 166293 and 166954 (5.73 s and 6.90 s). It is a knob, not a fault: it
+  outlives a power cycle and `clear`. It moves the end of every phase, so it changes where a STOP at a given time
+  lands (a STOP 5.5 s after a G28 from X234.5 Y199.1 is a plain quick-stop at the default, a kill at 0.142).
+- It is not the `M201 B20000` that came before 168535: the boot G28 is fast with the boot values.
 
 **Quick-stop, `M410`.**
 - The planner is dropped, the head stops where the steps are, and the position is re-read from the step counts
@@ -220,10 +231,11 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 ## Faults and the control channel
 
 Connect to `--control` and send one JSON object per line; each gets one JSON reply line with `"ok": true|false`.
-A malformed request (bad JSON, a bad regex, a `count` that is not an integer >= 1, a non-finite or negative time, a
-link that is not `ttyLUMEN*` or has no directory, a key the request does not take, a flag (`on`, `kill_messages`) that
-is not `true` or `false`, a physical fault with no axis key, or a non-finite value) gets `"ok": false` with an `error`
-and changes nothing. Every request refuses a key it does not take, so a misspelt one (`"surfaceZ"`, `"downs"`,
+A malformed request (bad JSON, also JSON nested too deep to parse, a bad regex, a `count` that is not an integer >= 1,
+a non-finite or negative time, a key the request does not take, a flag (`on`, `kill_messages`) that is not `true` or
+`false`, a physical fault with no axis key, or a non-finite value) gets `"ok": false` with an `error` and changes
+nothing; so does a power cycle's `link` that is relative, not a `ttyLUMEN*` name (above), without a directory, on a
+path that holds something else, or on one another lumen-sim holds. A `set` with one bad value applies none of it. Every request refuses a key it does not take, so a misspelt one (`"surfaceZ"`, `"downs"`,
 `"Nth"`) is an error, not a silent default; the keys are those in the table below. An ok fault with no `nth` and no
 `match` hits every line.
 
@@ -236,23 +248,23 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 
 | Request | Effect |
 |---|---|
-| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
-| `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now; with `"count": 2`, the 3rd and 4th. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. Keys: `nth`, `match`, `count`. Several rules may hit one line; each is used up. A line a power cycle cuts off never gets its `ok`: a hit on it is used up. |
-| `{"cmd": "fault", "fault": "delay_ok", "s": 0.5, ...}` | Extra delay before that `ok`; `"random": [lo, hi]` for a seeded random delay. Later output queues behind it, until `clear`. |
+| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, homing_move_delay_s, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
+| `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now; with `"count": 2`, the 3rd and 4th. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. Keys: `nth`, `match`, `count`. Several rules may hit one line; each is used up. A power cycle ends every ok fault: they are the controller's, and the reboot clears them (the physical faults stay). |
+| `{"cmd": "fault", "fault": "delay_ok", "s": 0.5, ...}` | Extra delay before that `ok`; `"random": [lo, hi]` for a seeded random delay. Later output queues behind it, until `clear` or a power cycle. |
 | `{"cmd": "fault", "fault": "dup_ok", ...}` | The `ok` is sent twice. |
 | `{"cmd": "fault", "fault": "inject", "kind": "error"\|"start"\|"unknown"}` | Sends `Error:simulated fault`, `start` or `echo:Unknown command: "M999999"`; `"text": "..."` for any line; `"after_s": 1.5` to delay. Refused on a halted board. |
 | `{"cmd": "fault", "fault": "inject_bytes", "hex": "ff"}` | Raw bytes (or `"text"`; `"after_s"` as above). A 0xFF kills OpenPnP's reader thread, which reads it as end of stream. Refused on a halted board. |
 | `{"cmd": "fault", "fault": "partial", "text": "X:1"}` | Text with no newline (`"after_s"` as above). Refused on a halted board. |
 | `{"cmd": "fault", "fault": "halt"}` | Dead MCU: no output, input discarded, until a power cycle. Output it had not sent by then (an `ok` a `delay_ok` holds, and all queued behind it) and pending injections are dropped, as after any stop of the board (kill, DFU, sim error). `"reason": "..."` sets `halt_reason`. |
-| `{"cmd": "fault", "fault": "disconnect", "down_s": 1.0}` | Close the pty master (the host gets EIO) and remove the link, so the port is absent, as an unplugged one. After `down_s`, a new pty behind the link; the controller state is kept. `"down_s": null` stays down until a power cycle. |
+| `{"cmd": "fault", "fault": "disconnect", "down_s": 1.0}` | Close the pty master (the host gets EIO) and remove the link, so the port is absent, as an unplugged one. After `down_s`, a new pty behind the link; the controller state is kept. `"down_s": null` stays down until a power cycle, and so does any `down_s` while the board is in DFU (its bootloader shows no serial port). |
 | `{"cmd": "fault", "fault": "frozen", "on": true}` | Stop reading the port (`on` is `true` or `false`, default `true`). The host's writes block once the pty buffer fills. Ends with `clear`, `"on": false` or a power cycle. |
-| `{"cmd": "power_cycle", "link": null, "down_s": 0}` | Close the master, boot state, new pty behind the link, not frozen; output the old board had not sent and pending injections are dropped. The head stays put (a stock kill's last 0.6 s of motion ends at power off). `"link"` publishes it at a new path instead and removes the old link (the board's ttyACM0 becoming ttyACM1; here e.g. ttyLUMEN0 to ttyLUMEN1). `"down_s": 2` keeps the port absent for 2 s first, as while the board resets and USB re-enumerates (the board is reset at once; default 0). |
-| `{"cmd": "set", "kill_messages": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"). |
+| `{"cmd": "power_cycle", "link": null, "down_s": 0}` | Close the master, boot state, new pty behind the link, not frozen; output the old board had not sent and pending injections are dropped. The head stays put (a stock kill's last 0.6 s of motion ends at power off). `"link"` publishes it at a new path instead and removes the old link (the board's ttyACM0 becoming ttyACM1; here e.g. ttyLUMEN0 to ttyLUMEN1). `"down_s": 2` keeps the port absent for 2 s first, as while the board resets and USB re-enumerates (the board is reset at once; default 0). The new `link` must be an absolute path; it is checked and its lock taken before the reset, and held through the down time. If the port still cannot be published after the reset (no pty left, the folder gone), the reply is `"ok": true` (the board was reset) with `link_error`, and `link` says where the port is (back at the old path if it could). Ok faults end (above). |
+| `{"cmd": "set", "kill_messages": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000, "homing_move_delay_s": 0.142}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"; `homing_move_delay_s`: "Homing time", default 0). |
 | `{"cmd": "fault", "fault": "home_offset", "x": 0.5, "y": -0.2}` | The X/Y switches now trigger at these physical positions (mm), so every later home of that axis lands that far off while M114 says 0. Nothing moves until a home. A new value replaces the old one per axis. |
 | `{"cmd": "fault", "fault": "lost_steps", "x": 0.3, "y": 0}` | The head moves by this much now, with no command, also mid-move. M114 and the counts do not change. Calls add up; a home removes it. |
 | `{"cmd": "fault", "fault": "z_shift", "z": 0.1}` | The whole Z frame shifts: the head moves by z now and the Z switch moves with it, so later homes keep the shift. Calls add up. |
 | `{"cmd": "fault", "fault": "z_drop", "z": -0.4}` | From now on, each release of an energised Z moves the head by z (above). `0` turns it off. |
-| `{"cmd": "clear"}` | Drop all ok faults and pending injections, unfreeze. Output a `delay_ok` holds back (and everything queued behind it) goes at once. Switches back to 0 and no Z drop; the head stays where it is until the next home. |
+| `{"cmd": "clear"}` | Drop all ok faults and pending injections, unfreeze. Output a `delay_ok` holds back (and everything queued behind it) goes at once. Switches back to 0 and no Z drop; the head stays where it is until the next home, except that a homing move running toward a switch now ends at the true one. |
 | `{"cmd": "stop"}` | Exit. |
 
 **The backend's acceptance checks (INF-08).** In a uinav pty session the same requests go through
@@ -308,7 +320,7 @@ From the repository root:
 python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```
 
-- 236 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 14 s left).
+- 257 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 16 s left).
 - Most tests run on the fake clock and finish in milliseconds. The pty tests start a `lumen_sim` process each and
   take a few seconds.
 - `tests/golden/` holds excerpts of `runs/serial.log`; see its README.
@@ -323,8 +335,9 @@ python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 | `G1 B21600 F43200` + M400 | 30.766 s, 15 busy | 30.765 s, 15 busy |
 | lone M410 | 2.000 s | 2.000 s |
 | STOP burst, first ok | 0.999 s | 1.000 s |
-| G28 from X217 Y63, M204 S1500 | 5.796 s | 5.727 s |
-| G28 from X241 Y216, M204 S1500 | 6.855 s | 6.904 s |
+| G28 from X235 Y199, M204 S1500 (default) | 5.246 s, 2 busy | 5.329 s, 2 busy |
+| G28 from X217 Y63, M204 S1500, `homing_move_delay_s` 0.142 | 5.796 s | 5.727 s |
+| G28 from X241 Y216, M204 S1500, `homing_move_delay_s` 0.142 | 6.855 s | 6.904 s |
 
 `tests/test_repro.py` reproduces both machine bugs in real time through the pty, with `DriverClient`:
 

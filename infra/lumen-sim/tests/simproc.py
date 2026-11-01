@@ -14,14 +14,16 @@ PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class SimProcess:
-    def __init__(self, *args):
+    def __init__(self, *args, new_session=False):
         self.dir = tempfile.mkdtemp(prefix="lumen-sim-test-")
         self.link = os.path.join(self.dir, "ttyLUMEN")
         self.sock = os.path.join(self.dir, "ctl.sock")
         self.io_log = os.path.join(self.dir, "io.log")
         cmd = [sys.executable, "-m", "lumen_sim", "--link", self.link, "--control", self.sock,
                "--io-log", self.io_log, *args]
-        self.proc = subprocess.Popen(cmd, cwd=PKG_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # new_session: a process group of its own, which a test may kill as a whole (as uinav's kill_tree does)
+        self.proc = subprocess.Popen(cmd, cwd=PKG_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                     start_new_session=new_session)
         end = time.monotonic() + 10
         while not (os.path.islink(self.link) and os.path.exists(self.sock)):
             if self.proc.poll() is not None or time.monotonic() > end:

@@ -2,6 +2,7 @@
 import unittest
 
 from lumen_sim.bench import Bench
+from lumen_sim.machine import OPEN_AIR_VACUUM
 
 
 def fault(b, **spec):
@@ -105,6 +106,30 @@ class OkFaults(unittest.TestCase):
         b.sim.control({"cmd": "power_cycle"}, b.t)
         self.assertEqual(b.sim.state(b.t)["faults"], [])
         self.assertEqual(b.send("G4 P10").lines, ["ok"])
+
+    def test_a_power_cycle_ends_every_ok_fault_and_keeps_the_machine_s(self):
+        """Review round 3: ok faults are the controller's, so the reboot ends them, as it ends halt and frozen; the
+        physical faults are the machine's and stay. 'Controller hung, a reboot fixes it, the Z frame stays shifted'."""
+        b = Bench()
+        b.send("G28")
+        fault(b, fault="no_ok", match="^M400")
+        fault(b, fault="delay_ok", s=5, match="^M114")
+        fault(b, fault="dup_ok", match="^M105")
+        fault(b, fault="z_shift", z=0.1)
+        fault(b, fault="z_drop", z=-0.4)
+        self.assertIsNone(b.send("M400", timeout=2.0).ok_at)
+        self.assertTrue(b.sim.control({"cmd": "power_cycle"}, b.t)["ok"])
+        st = b.sim.state(b.t)
+        self.assertEqual(st["faults"], [])
+        self.assertEqual(b.send("M400").lines, ["ok"])
+        self.assertLess(b.send("M114").ok_at, 0.001)
+        b.write("M105\n")
+        b.run(0.1)
+        self.assertEqual([l for _, l in b.rx[-1:]], ["ok T:0"])
+        self.assertEqual(sum(1 for _, l in b.rx if l == "ok T:0"), 1)
+        self.assertAlmostEqual(st["switches"]["Z"], 0.1, places=9)
+        self.assertEqual(st["z_drop"], -0.4)
+        self.assertAlmostEqual(st["head"]["physical"]["Z"], 31.6 - 0.4, places=6)  # the power-off let Z drop
 
     def test_clear_lets_held_output_go_at_once(self):
         """A delay_ok holds back every later line; clear releases them, so the controller is not mute for the rest
@@ -321,6 +346,17 @@ class Set(unittest.TestCase):
         self.assertFalse(b.sim.control({"cmd": "fault", "fault": "nope"}, b.t)["ok"])
 
 
+def deep(n):
+    """A list nested n deep, built without recursion."""
+    v = []
+    for _ in range(n):
+        v = [v]
+    return v
+
+
+DEEP = deep(100000)
+
+
 class MalformedRequests(unittest.TestCase):
     """A bad control request is refused with ok:false and nothing changes; none of them may break the next line."""
 
@@ -375,6 +411,17 @@ class MalformedRequests(unittest.TestCase):
         {"cmd": "stop", "now": True},
         {"cmd": "fault"},
         {"fault": "halt"},
+        # a valid key next to a bad value: nothing of the request is applied (review round 3)
+        {"cmd": "set", "surface_z": 5.3, "rs485": ["x"]},
+        {"cmd": "set", "kill_messages": True, "surfaces": "x"},
+        {"cmd": "set", "surface_z": 5.3, "homing_move_delay_s": -0.1},
+        {"cmd": "set", "homing_move_delay_s": 0.142, "vacuum": "x"},
+        {"cmd": "set", "homing_move_delay_s": float("nan")},
+        {"cmd": "set", "homing_move_delay_s": "0.1"},
+        {"cmd": "set", "homing_move_delay_s": True},
+        {"cmd": "set", "homing_move_delay_s": None},
+        {"cmd": "set", "rs485": DEEP},                                # its repr in the error recurses too deep
+        {"cmd": "power_cycle", "link": "ttyLUMEN1"},                  # relative: whose working directory?
     ]
 
     def test_each_is_refused_and_the_controller_keeps_answering(self):
@@ -388,6 +435,9 @@ class MalformedRequests(unittest.TestCase):
             self.assertEqual(b.sim.state(b.t)["boots"], 1, req)
             self.assertIsNone(b.sim.state(b.t)["surface_z"], req)
             self.assertFalse(b.sim.state(b.t)["kill_messages"], req)
+            self.assertEqual(b.sim.state(b.t)["homing_move_delay_s"], 0.0, req)
+            self.assertEqual(b.sim.machine.rs485, {}, req)
+            self.assertEqual(b.sim.machine.vacuum, OPEN_AIR_VACUUM, req)
             self.assertEqual(b.send("G4 P10").lines, ["ok"], req)
             self.assertEqual(b.send("M400").lines, ["ok"], req)
 

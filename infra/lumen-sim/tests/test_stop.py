@@ -95,6 +95,21 @@ class StockStopDuringHoming(unittest.TestCase):
         self.assertEqual(lines, [(2.0, "echo:busy: processing"), (4.0, "echo:busy: processing"),
                                  (5.0, "echo:Homing Failed"), (5.0, "Error:Printer halted. kill() called!")])
 
+    def test_a_stop_after_the_home_ended_is_a_plain_quick_stop(self):
+        """Review round 3: from the start of serial.log line 168535 the board's G28 acks after 5.25 s, so the web STOP
+        5.5 s in lands after it, acks, and the board stays alive (the sim's homing used to run 1.5 s long and kill)."""
+        b = Bench(park=(75048 / 320, 63717 / 320, 31.5))
+        b.send("M204 S1500")
+        t0 = b.t
+        b.write("G28\n")
+        b.run(5.5)
+        self.assertEqual([l for t, l in b.rx if t > t0 and l == "ok"], ["ok"])
+        self.assertEqual(sum(1 for t, l in b.rx if t > t0 and "busy" in l), 2)
+        b.write("M410\n")
+        b.run(3.0)
+        self.assertFalse(b.sim.state(b.t)["halted"])
+        self.assertEqual(b.send("M115").lines[-1], "ok")
+
     def test_m410_in_the_z_after_move_is_a_plain_quick_stop(self):
         b = Bench(park=(20.0, 20.0, 31.5))
         b.write("G28\n")

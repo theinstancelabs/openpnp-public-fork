@@ -23,6 +23,10 @@ class Machine:
         self.seal_drop = SEAL_DROP
         self.rs485 = dict(rs485 or {})  # request hex -> reply hex (upper case); missing -> TIMEOUT
         self.mcp3426 = None           # int value for M3426, or None: no chip answers
+        # Extra wait before each move of a G28 (10 in a full home). The board's G28s come in two speeds: none at
+        # serial.log lines 168535 and 169216 (and the boot G28), ~1.4 s more per home at 166293 and 166954 (0.142 s per
+        # move); the cause is unknown (README, "Homing time"). A knob, not a fault: it outlives a power cycle and clear.
+        self.homing_move_delay_s = 0.0
 
     def vacuum_counts(self, fw):
         if callable(self.vacuum):

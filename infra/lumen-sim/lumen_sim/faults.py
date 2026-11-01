@@ -93,14 +93,6 @@ class Faults:
     def clear(self):
         self.rules = []
 
-    def lines_lost(self):
-        """A power cycle: the lines read and not yet answered never will be. A hit on one is used up."""
-        for r in self.rules:
-            if r.left is not None:
-                r.left -= len(r.targets)
-            r.targets.clear()
-        self.rules = [r for r in self.rules if r.left is None or r.left > 0]
-
     def on_line(self, seq, text):
         self.lines_seen += 1
         for r in self.rules:

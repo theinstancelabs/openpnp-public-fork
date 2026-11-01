@@ -238,6 +238,23 @@ class FaultsDuringHoming(unittest.TestCase):
         self.assertEqual(head(b)["offset"]["X"], 0.5)
         self.assertIn("x_min: TRIGGERED", b.send("M119").lines)
 
+    def test_clear_mid_bump_puts_the_switch_back_under_the_running_home(self):
+        """Review round 3: clear moves the switches back to 0 like a fault moves them, so a home in progress ends on
+        the true switch, not where the cleared home_offset had put it."""
+        for x in (0.5, -0.5):
+            b = Bench(park=PARK)
+            fault(b, fault="home_offset", x=x)
+            b.write("G28 X\n")
+            run_until_phase(b, "X_SLOW")
+            b.run(0.05)
+            clear(b)
+            b.run(5.0)
+            self.assertEqual(state(b)["homing_phase"], None, x)
+            self.assertEqual(state(b)["switches"]["X"], 0.0, x)
+            self.assertEqual(head(b)["physical"]["X"], 0.0, x)
+            self.assertEqual(head(b)["offset"]["X"], 0.0, x)
+            self.assertIn("x_min: TRIGGERED", b.send("M119").lines)
+
     def test_the_ok_comes_when_the_head_reaches_the_switch(self):
         """The G28's report and ok come at the switch hit worked out again, not at the old one: later or sooner."""
         times = []

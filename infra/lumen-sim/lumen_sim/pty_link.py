@@ -17,6 +17,8 @@ a link named like a device (ttyACM0) would open the real board whenever the link
 
 One lumen-sim per link path: each holds an flock on <link>.lock while it runs (the file stays; a killed process lets
 go of the lock), so a second one on the same path is refused instead of silently taking over the first one's host.
+Lock files are never opened through a symlink, and a link name has no '.', so no link can replace a <link>.lock or a
+<link>.tmp<pid>; nor can it replace anything at its path but a link to a pty (a killed lumen-sim's).
 
 A killed lumen-sim (SIGKILL: a stop that escalated, the OOM killer) cannot remove its link. A /dev/pts/N is no proof of
 a simulator: on the lab computer Klipper's G-code input (klippy.serial) is a pty too, so a host reconnecting through a
@@ -27,12 +29,18 @@ import errno
 import fcntl
 import json
 import os
+import re
 import select
+import stat
 import struct
 import termios
 import tty
 
 LINK_PREFIX = "ttyLUMEN"
+LINK_NAME = re.compile(r"ttyLUMEN[A-Za-z0-9_-]*\Z")  # no '.': <link>.lock and <link>.tmp<pid> are lumen-sim's own
+PTS = re.compile(r"/dev/pts/[0-9]+\Z")
+# O_NOFOLLOW: a lock that is a symlink (lumen-sim never makes one) is refused, never followed to what it names
+LOCK_FLAGS = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NOCTTY
 
 
 def check_link_path(path, exists=os.path.exists):
@@ -43,19 +51,41 @@ def check_link_path(path, exists=os.path.exists):
         raise ValueError("link name %r must start with %r: while the link is missing, jSerialComm opens "
                          "/dev/<name> instead (a device-like name such as ttyACM0 would be the real board)"
                          % (name, LINK_PREFIX))
+    if not LINK_NAME.match(name):
+        raise ValueError("link name %r: only letters, digits, '_' and '-' may follow %r (<link>.lock and "
+                         "<link>.tmp<pid> are lumen-sim's own files)" % (name, LINK_PREFIX))
     for dev in ("/dev/" + name, "/dev/" + path):
         if exists(dev):
             raise ValueError("%s exists: jSerialComm would open it while the link %s is missing" % (dev, path))
     if not exists(os.path.dirname(path)):
         raise ValueError("no directory for the link %s" % path)
+    if not _replaceable(path):
+        raise ValueError("%s exists and is not a link to a pty: lumen-sim would replace it" % path)
     return path
+
+
+def _replaceable(path):
+    """Nothing at path, or a link to a /dev/pts/N (a killed lumen-sim's): what publishing a link may replace."""
+    try:
+        return PTS.match(os.readlink(path)) is not None
+    except FileNotFoundError:
+        return True
+    except OSError:  # EINVAL: there, and not a symlink
+        return False
 
 
 def lock_link(path):
     """Hold <path>.lock (an fd to keep open); ValueError if another lumen-sim holds it."""
     lock = path + ".lock"
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
+        fd = os.open(lock, LOCK_FLAGS | os.O_CREAT, 0o600)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ValueError("%s is a symlink, not a lock lumen-sim made: refused" % lock) from None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("%s is not a regular file, not a lock lumen-sim made: refused" % lock)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
@@ -70,10 +100,10 @@ def remove_stale_link(link, pts):
     """Remove the link a dead lumen-sim left, if it still points at that one's pty and no lumen-sim holds its lock (one
     may have taken the path since, and the kernel may have given it the same pts number)."""
     try:
-        lock = os.open(link + ".lock", os.O_RDWR | os.O_CLOEXEC)
+        lock = os.open(link + ".lock", LOCK_FLAGS)
     except FileNotFoundError:
         lock = None
-    except OSError:
+    except OSError:  # ELOOP: a symlink, not a lock lumen-sim made; the link is left for a person to look at
         return
     try:
         if lock is not None:
@@ -173,14 +203,37 @@ class PtyLink:
         self.link = check_link_path(link)
         self.lock = lock_link(self.link)
         self.guard = guard  # a LinkGuard, told about each link published and removed
+        self.claims = {}    # new link paths reserve() holds for a later open(): path -> lock fd
         self.master = None
         self.pts = None
         self.host_open = False
 
+    def reserve(self, link):
+        """Hold a new link path for a later open(link), a power cycle's: check it and take its lock now, so a path that
+        is refused or that another lumen-sim holds is refused before the controller is reset, and nobody takes it
+        while the port is down. The absolute path; ValueError or OSError if refused."""
+        if not os.path.isabs(link):
+            raise ValueError("link must be an absolute path (lumen-sim's working directory is not the client's), "
+                             "not %r" % (link,))
+        path = check_link_path(link)
+        if path != self.link and path not in self.claims:
+            self.claims[path] = lock_link(path)
+        return path
+
+    def let_go(self, keep=None):
+        """Release the paths reserve() holds, but keep."""
+        for path in [p for p in self.claims if p != keep]:
+            os.close(self.claims.pop(path))
+
     def open(self, link=None):
         """Create a new pty and publish it at the link (or at a new path, which then becomes the link)."""
         path = check_link_path(link) if link else self.link
-        lock = lock_link(path) if path != self.link else None
+        if path == self.link:
+            lock = None
+        elif path in self.claims:
+            lock = self.claims.pop(path)
+        else:
+            lock = lock_link(path)
         try:
             master, slave = os.openpty()
         except BaseException:
@@ -224,6 +277,7 @@ class PtyLink:
     def release(self):
         """For good: close, and let go of the link path."""
         self.close()
+        self.let_go()
         if self.lock is not None:
             os.close(self.lock)
             self.lock = None
