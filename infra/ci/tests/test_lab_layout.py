@@ -1,6 +1,6 @@
 """Tests for infra/ci/lab_layout.py (lays the lab computer's file layout out on a CI runner from infra/fixtures).
 
-Run from the repo root: python3 -m unittest discover -s infra/ci/tests
+Run from the repo root: python3 -m unittest discover -s infra/ci/tests -t infra/ci
 """
 import filecmp
 import os

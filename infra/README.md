@@ -18,7 +18,7 @@ Runs on every pull request, on pushes to `il/integration`, and by hand (workflow
 | Job | What | About |
 |---|---|---|
 | build | `mvn -DskipTests package` (checkstyle runs at validate); the jar + lib become the artifact every later job tests | 3 min |
-| infra | `python3 -m unittest discover -s infra/<x>/tests` for every component here | 1 min |
+| infra | `python3 -m unittest discover -s infra/<x>/tests -t infra/<x>` for every component here | 1 min |
 | maven | `mvn test`: unit tests and the simulated-machine integration tests (in-JVM GcodeServer, `*SimTest`) | 13 min |
 | ui-e2e | `src/test/web/run-webui-sim-test.sh`: webui-sim, board-import, pad-profile, tip-setups in one SIM session | 55 min |
 | ui-boardview | `src/test/web/run-boardview-test.sh` | 5 min |
@@ -35,7 +35,7 @@ on the lab computer and never overwrites.
 
 ## Tests
 ```
-python3 -m unittest discover -s infra/ci/tests
-python3 -m unittest discover -s infra/deploy/tests
-python3 -m unittest discover -s infra/lumen-sim/tests
+python3 -m unittest discover -s infra/ci/tests -t infra/ci
+python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
+python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```

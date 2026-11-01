@@ -1,6 +1,6 @@
 """Tests for infra/ci/acceptance.py: the CI wrapper around src/test/sim/il_sim_acceptance.py.
 
-Run from the repo root: python3 -m unittest discover -s infra/ci/tests
+Run from the repo root: python3 -m unittest discover -s infra/ci/tests -t infra/ci
 """
 import io
 import json

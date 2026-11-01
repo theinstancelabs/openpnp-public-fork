@@ -1,6 +1,6 @@
 """Tests for infra/ci/make_release.py (the versioned build the deployer installs) and surefire_summary.py.
 
-Run from the repo root: python3 -m unittest discover -s infra/ci/tests
+Run from the repo root: python3 -m unittest discover -s infra/ci/tests -t infra/ci
 """
 import hashlib
 import json

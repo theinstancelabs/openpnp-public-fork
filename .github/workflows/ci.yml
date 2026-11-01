@@ -56,8 +56,9 @@ jobs:
         run: |
           set -e
           for t in infra/*/tests; do
-            echo "::group::$t"
-            python3 -m unittest discover -v -s "$t"
+            d="$(dirname "$t")"
+            echo "::group::$d"
+            python3 -m unittest discover -v -s "$t" -t "$d"
             echo "::endgroup::"
           done
 
