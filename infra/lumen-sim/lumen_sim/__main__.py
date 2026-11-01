@@ -2,7 +2,8 @@
 
 usage:
   python3 -m lumen_sim --link PATH [--personality stock|il-safety] [--control SOCK] [--io-log FILE]
-                       [--time-scale 1.0] [--park X,Y,Z] [--kill-messages] [--vacuum N] [--seed N]
+                       [--time-scale 1.0] [--park X,Y,Z] [--kill-messages] [--vacuum N] [--surface-z Z]
+                       [--seed N]
   python3 -m lumen_sim ctl --control SOCK state
   python3 -m lumen_sim ctl --control SOCK fault '{"fault": "no_ok", "match": "^G4"}'
   python3 -m lumen_sim ctl --control SOCK set '{"vacuum": -1600000}'
@@ -10,22 +11,31 @@ usage:
   python3 -m lumen_sim ctl --control SOCK clear | stop
 
 Point OpenPnP's serial port-name at the --link path (a symlink to /dev/pts/N). Its name must start with ttyLUMEN:
-while the link is missing, jSerialComm opens /dev/<name> instead. Stop with SIGINT/SIGTERM or `ctl stop`.
+while the link is missing, jSerialComm opens /dev/<name> instead. Stop with SIGINT/SIGTERM/SIGHUP or `ctl stop`.
 """
 import argparse
 import json
+import math
+import os
 import signal
 import sys
 
 from . import control
 from .core import Simulator
 from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM
-from .pty_link import check_link_path
+from .pty_link import LinkGuard, check_link_path
 from .runner import Runner
 
 
+def _finite(text):
+    v = float(text)
+    if not math.isfinite(v):
+        raise argparse.ArgumentTypeError("%r is not a finite number" % text)
+    return v
+
+
 def _park(text):
-    parts = [float(v) for v in text.split(",")]
+    parts = [_finite(v) for v in text.split(",")]
     if len(parts) != 3:
         raise argparse.ArgumentTypeError("--park needs X,Y,Z")
     return tuple(parts)
@@ -37,15 +47,17 @@ def run(argv):
     ap.add_argument("--personality", default="stock", choices=["stock", "il-safety"])
     ap.add_argument("--control", help="Unix socket for the JSON control channel")
     ap.add_argument("--io-log", help="append the serial traffic here, serial.log style")
-    ap.add_argument("--time-scale", type=float, default=1.0, help="simulator seconds per wall second")
+    ap.add_argument("--time-scale", type=_finite, default=1.0, help="simulator seconds per wall second")
     ap.add_argument("--park", type=_park, default=DEFAULT_PARK,
                     help="physical X,Y,Z of the head at power-on (mm from the switches), default 5,5,31.5")
     ap.add_argument("--kill-messages", action="store_true",
                     help="print 'echo:<reason>' and 'Error:Printer halted. kill() called!' on kill()")
-    ap.add_argument("--vacuum", type=int, default=OPEN_AIR_VACUUM, help="raw N1 vacuum reading (M261)")
+    ap.add_argument("--vacuum", type=int, default=OPEN_AIR_VACUUM, help="raw N1 open-air vacuum reading (M261)")
+    ap.add_argument("--surface-z", type=_finite,
+                    help="physical Z (mm) at which N1 touches a surface and seals (default: nothing under N1)")
     ap.add_argument("--seed", type=int, default=0, help="seed for random fault delays")
     args = ap.parse_args(argv)
-    if args.time_scale <= 0:
+    if args.time_scale <= 0:  # NaN and inf are refused by _finite: the loop would never sleep
         ap.error("--time-scale must be > 0")
     try:
         check_link_path(args.link)
@@ -53,14 +65,25 @@ def run(argv):
         ap.error("--link: %s" % e)
     sim = Simulator(args.personality, park=args.park, vacuum=args.vacuum, kill_messages=args.kill_messages,
                     seed=args.seed)
-    runner = Runner(sim, args.link, control=args.control, io_log=args.io_log, time_scale=args.time_scale,
-                    log=lambda msg: print(msg, file=sys.stderr, flush=True))
+    if args.surface_z is not None:
+        sim.machine.surface_z = args.surface_z
+    guard = LinkGuard()  # before anything is opened: it must hold none of it
+    try:
+        runner = Runner(sim, args.link, control=args.control, io_log=args.io_log, time_scale=args.time_scale,
+                        log=lambda msg: print(msg, file=sys.stderr, flush=True), guard=guard)
+    except (OSError, ValueError) as e:  # e.g. another lumen-sim on the same link or socket
+        guard.close()
+        print("lumen-sim: %s" % e, file=sys.stderr)
+        return 2
 
     def stop(signum, frame):
         runner.running = False
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    runner.run()
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):  # SIGHUP: its terminal or ssh session closed
+        signal.signal(sig, stop)
+    try:
+        runner.run()
+    finally:
+        guard.close()
     return 0
 
 
@@ -69,7 +92,7 @@ def ctl(argv):
     ap.add_argument("--control", required=True)
     ap.add_argument("what", choices=["state", "fault", "set", "power-cycle", "clear", "stop"])
     ap.add_argument("json", nargs="?", help="the fault or set request, as a JSON object")
-    ap.add_argument("--link", help="power-cycle: publish the new pty at this path instead")
+    ap.add_argument("--link", help="power-cycle: publish the new pty at this path instead (relative: to here)")
     ap.add_argument("--down-s", type=float, help="power-cycle: the port is absent this long before it is back")
     args = ap.parse_args(argv)
     if args.what in ("fault", "set"):
@@ -78,12 +101,13 @@ def ctl(argv):
         req = json.loads(args.json)
         req["cmd"] = args.what
     elif args.what == "power-cycle":
-        req = {"cmd": "power_cycle", "link": args.link, "down_s": args.down_s}
+        # lumen-sim takes absolute paths only: its working directory is not ours
+        req = {"cmd": "power_cycle", "link": os.path.abspath(args.link) if args.link else None, "down_s": args.down_s}
     else:
         req = {"cmd": args.what}
     reply = control.request(args.control, req)
     print(json.dumps(reply, indent=1))
-    return 0 if reply.get("ok") else 1
+    return 0 if reply.get("ok") and not reply.get("link_error") else 1
 
 
 def main(argv=None):

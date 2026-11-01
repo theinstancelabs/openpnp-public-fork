@@ -2,13 +2,16 @@
 
 A rule picks lines by `nth` (the nth line the controller reads after the rule is set, 1 = the next one), by
 `match` (a regex searched in the line), or every line; `count` limits how many lines it hits (default: 1 for nth,
-unlimited otherwise).
+unlimited otherwise). With nth, the count lines in a row from the nth one.
 """
 import math
 import random
 import re
 
 OK_FAULTS = ("no_ok", "delay_ok", "dup_ok")
+# the keys each ok fault takes: any other key (a misspelt "Nth" or "line") is refused, not read as "every line"
+SELECTORS = ("fault", "nth", "match", "count")
+KEYS = {"no_ok": SELECTORS, "dup_ok": SELECTORS, "delay_ok": SELECTORS + ("s", "random")}
 
 
 def seconds(value, name):
@@ -29,6 +32,9 @@ class Rule:
 
     def __init__(self, spec, lines_seen):
         self.kind = spec["fault"]
+        extra = sorted(set(spec) - set(KEYS[self.kind]))
+        if extra:
+            raise ValueError("%s takes %s, not %s" % (self.kind, ", ".join(KEYS[self.kind][1:]), ", ".join(extra)))
         self.spec = dict(spec)
         self.nth = None if spec.get("nth") is None else count(spec["nth"], "nth")
         match = spec.get("match")
@@ -41,6 +47,7 @@ class Rule:
         self.left = count(spec["count"], "count") if spec.get("count") is not None else (
             1 if self.nth is not None else None)
         self.base = lines_seen
+        self.span = self.left  # nth: this many lines in a row
         self.targets = set()
         self.delay = self.random = None
         if self.kind == "delay_ok":
@@ -60,7 +67,7 @@ class Rule:
         if self.left is not None and self.left <= len(self.targets):
             return
         if self.nth is not None:
-            hit = lines_seen - self.base == self.nth
+            hit = 0 <= lines_seen - self.base - self.nth < self.span
         elif self.match is not None:
             hit = self.match.search(text) is not None
         else:
@@ -96,7 +103,8 @@ class Faults:
         if kind != "ok" or seq is None:
             return [(0.0, data)]
         out = [(0.0, data)]
-        for r in list(self.rules):
+        dropped = False
+        for r in list(self.rules):  # every rule on this line is used up, also behind a no_ok
             if seq not in r.targets:
                 continue
             r.targets.discard(seq)
@@ -105,13 +113,13 @@ class Faults:
                 if r.left <= 0 and not r.targets:
                     self.rules.remove(r)
             if r.kind == "no_ok":
-                return []
-            if r.kind == "delay_ok":
+                dropped = True
+            elif r.kind == "delay_ok":
                 extra = self.rng.uniform(*r.random) if r.random else r.delay
                 out = [(d + extra, b) for d, b in out]
             elif r.kind == "dup_ok":
                 out = out + [out[-1]]
-        return out
+        return [] if dropped else out
 
     def describe(self):
         return [r.describe() for r in self.rules]

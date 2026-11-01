@@ -24,10 +24,14 @@ HOMING_BUMP = [10.0, 10.0, 2.0]
 HOMING_BUMP_DIVISOR = [2, 2, 4]
 Z_AFTER_HOMING = 31.5
 XY_PROBE_FEEDRATE = 133.0
-# The board takes ~1.4 s longer per G28 than the source's kinematics give; spread over the 10 moves of a full home.
-# Fitted to serial.log lines 166293 and 166954 (README, "Homing time").
-HOMING_MOVE_OVERHEAD_S = 0.142
 KILL_DELAY_S = 0.6              # minkill(): messages get out, the stepper ISR still runs, then cli()
+DEFAULT_STEPPER_TIMEOUT_MS = 3600 * 1000  # DEFAULT_STEPPER_TIMEOUT_SEC (Configuration_adv.h)
+DISABLE_IDLE = AXES             # DISABLE_IDLE_X/Y/Z/I/J: an idle timeout releases every axis
+MILLIS_HALF = 2 ** 31           # ELAPSED()/PENDING() compare millis_t as int32_t (core/millis_t.h:32-33)
+# Passes of the loop at one instant with nothing to wait for: a wait that never moves on is a model bug. It ends
+# as a sim error (the board halts, the process stays up and answers SIGTERM) instead of a spin.
+STALL_LIMIT = 10000
+FAN_HISTORY = 1000              # output changes kept for the control state
 
 PS_NORMAL, PS_EOL, PS_QUOTED, PS_ESC = 0, 1, 2, 4
 NOT_BUSY, IN_HANDLER = 0, 1
@@ -145,12 +149,16 @@ class Firmware:
         self.cur = [f32(v) for v in BOOT_NATIVE]   # current_position, native
         self.ws = [0.0] * 5                         # position_shift (G92)
         self.position = [lround(f32(self.cur[i] * self.steps[i])) for i in range(5)]  # planner.position
-        self.stepper = Stepper(self.position, machine.physical, self.steps)
+        self.stepper = Stepper(self.position, machine.physical, self.steps, machine.switches)
         self.homed = [False, False, False]
         self.enabled = {a: False for a in AXES}
+        # M18/M84 S: stepper_inactive_time (0 = never), previous_move_ms, already_shutdown_steppers
+        self.stepper_timeout_ms = DEFAULT_STEPPER_TIMEOUT_MS
+        self.previous_move = now
+        self.idle_released = False
         self.soft_endstops = True
         self.fans = [0, 0, 0, 0]
-        self.fan_history = []
+        self.fan_history = deque(maxlen=FAN_HISTORY)  # the state reply must stay small
         self.led = None
         self.i2c_addr, self.i2c_buf, self.mux, self.sensor_reg = 0, [], None, None
         # serial reader and command ring
@@ -163,12 +171,13 @@ class Firmware:
         self.busy_state = NOT_BUSY
         self.keepalive_interval = 2.0
         self.next_busy = now + self.keepalive_interval
-        self.halted, self.halt_reason = False, None
+        self.halted, self.halt_reason, self.halt_time = False, None, None
         self.homing_phase, self.in_g28 = None, False
         # il/safety
         self.wd_timeout, self.wd_last, self.wd_tripped = 0, now, False
         self.ep_state, self.ep_m410, self.ep_m112, self.task_busy = EP_RESET, False, False, False
         self.homing_active = self.homing_aborted = False
+        self._stall_t, self._stalls = now, 0
         self._gen = self._main()
         self._wake = now
         self._resume()
@@ -209,12 +218,18 @@ class Firmware:
         self.input += data
         self._resume()
 
+    def wake(self, t):
+        """Something outside changed what the firmware waits for (a physical fault): run one more pass at t."""
+        self.advance(t)
+        if not self.halted:
+            self._resume()
+
     def halt(self, reason, t):
         """External fault: the MCU stops dead (no output, input ignored)."""
         self.advance(t)
         if not self.halted:
             self.stepper.freeze(self.now)
-            self.halted, self.halt_reason = True, reason
+            self._dead(reason)
             self._gen.close()
 
     def _resume(self):
@@ -225,8 +240,12 @@ class Firmware:
         except Exception as e:  # a model error outside any command: stop dead with the reason, keep the process up
             self._model_error(None, e)
             self.stepper.freeze(self.now)
-            self.halted, self.halt_reason = True, "sim error: %s: %s" % (type(e).__name__, e)
+            self._dead("sim error: %s: %s" % (type(e).__name__, e))
             self._wake = math.inf
+
+    def _dead(self, reason):
+        """The MCU stops answering from now on (halt_time: the output it had not sent by then never goes)."""
+        self.halted, self.halt_reason, self.halt_time = True, reason, self.now
 
     def _model_error(self, line, error):
         if self._on_error:
@@ -257,6 +276,7 @@ class Firmware:
         """One pass of idle(): stepper progress, serial reader, emergency flags, keepalive, host watchdog."""
         self.stepper.update(self.now)
         yield from self._read_serial()
+        self._manage_inactivity()
         if self.p.emergency_parser:
             yield from self._ep_task()
         self._keepalive()
@@ -280,6 +300,16 @@ class Firmware:
             d = min(d, self.stepper.cleaning_until)
         if self.p.host_watchdog and self.wd_timeout and self.busy_state == NOT_BUSY and not self.ring:
             d = min(d, self.wd_last + self.wd_timeout / 1000.0)
+        if self.stepper_timeout_ms and not self.stepper.blocks:
+            d = min(d, self._idle_timeout_change())
+        if d > self.now or self.now != self._stall_t:
+            self._stall_t, self._stalls = self.now, 0
+        if d <= self.now:
+            self._stalls += 1
+            if self._stalls > STALL_LIMIT:
+                self._stalls = 0
+                raise RuntimeError("no progress: %d passes at t=%r with something due and nothing done"
+                                   % (STALL_LIMIT, self.now))
         return d
 
     def _synchronize(self):
@@ -303,6 +333,44 @@ class Firmware:
         end = self.now + seconds
         while self.now < end:
             yield end
+
+    def _idle_at(self, ms):
+        """The simulator time ms after the last move. The timeout check and its wake both use this one expression:
+        computed two ways, rounding can make the check say 'not yet' at the very time of its wake."""
+        return self.previous_move + ms / 1000.0
+
+    def _idle_timed_out(self):
+        """stepper_inactive_timeout(): ELAPSED(ms, previous_move_ms + stepper_inactive_time), a signed 32-bit compare.
+        A timeout of 2^31 ms or more has run out from the start, until 2^31 ms before its end."""
+        timeout = self.stepper_timeout_ms
+        return self.now >= self._idle_at(timeout) or (
+            timeout > MILLIS_HALF and self.now < self._idle_at(timeout - MILLIS_HALF))
+
+    def _idle_timeout_change(self):
+        """When _manage_inactivity() next has something to do while the planner stays empty."""
+        if not self.idle_released:
+            return self.now if self._idle_timed_out() else self._idle_at(self.stepper_timeout_ms)
+        if self.stepper_timeout_ms > MILLIS_HALF:  # the window where it reads 'pending' again
+            end = self._idle_at(self.stepper_timeout_ms - MILLIS_HALF)
+            if end > self.now:
+                return end
+        return math.inf
+
+    def _manage_inactivity(self):
+        """The M18/M84 idle timeout: once the planner has been empty that long, release every axis, once."""
+        if self.stepper.blocks:
+            self.previous_move = self.now
+        else:  # the board polls without pause, so its last look at a queued block was when the last one ended
+            self.previous_move = max(self.previous_move, self.stepper.last_end)
+        if not self.stepper_timeout_ms:
+            return
+        if not self.stepper.blocks and self._idle_timed_out():
+            if not self.idle_released:
+                self.idle_released = True
+                for a in DISABLE_IDLE:
+                    self.release(a)
+        else:
+            self.idle_released = False
 
     def _keepalive(self):
         if self.busy_state != NOT_BUSY and self.keepalive_interval:
@@ -449,7 +517,7 @@ class Firmware:
             self._outputs_off("watchdog")
             if self.homing_active:
                 self.homing_aborted = True
-            self.enabled["B"] = False
+            self.release("B")
             self._emit("Error:host watchdog")
             yield from self._synchronize()
             self._set_current_from_steppers()
@@ -482,9 +550,15 @@ class Firmware:
             self.stepper.freeze(self.now + KILL_DELAY_S)
         if steppers_off:
             for a in AXES:
-                self.enabled[a] = False
-        self.halted, self.halt_reason = True, reason
+                self.release(a)
+        self._dead(reason)
         raise Halted(reason)
+
+    def release(self, axis):
+        """stepper.disable_axis(): the driver lets go. A released Z moves by the machine's z_drop."""
+        if axis == "Z" and self.enabled["Z"]:
+            self.machine.release_z()
+        self.enabled[axis] = False
 
     # ------------------------------------------------------------------ positions
     def logical(self):
@@ -563,7 +637,7 @@ class Firmware:
                 self.enabled[AXES[i]] = True
         self.position = tgt
         return Block(tgt, delta, Trapezoid(n, rate, accel, r0, r0),
-                     extra_delay=HOMING_MOVE_OVERHEAD_S if self.in_g28 else 0.0)
+                     extra_delay=self.machine.homing_move_delay_s if self.in_g28 else 0.0)
 
     def _prepare_line_to(self, dest):
         if self.soft_endstops:
@@ -644,6 +718,7 @@ class Firmware:
         if il:
             self.homing_aborted, self.homing_active = False, True
         yield from self._synchronize()
+        self.previous_move = self.now   # reset_stepper_timeout(): homing counts as activity
         home_z = cmd.seen("Z")
         home_x = (home_z and not self.homed[X]) or cmd.seen("X")
         home_y = (home_z and not self.homed[Y]) or cmd.seen("Y")
@@ -737,12 +812,15 @@ class Firmware:
             self.enabled[a] = True
 
     def m18(self, cmd):
-        if cmd.params.get("S") is not None:
-            return  # stepper inactivity timeout: not modelled
+        if cmd.params.get("S") is not None:  # seenval('S'): set the idle timeout; nothing waits, nothing is released
+            self.previous_move = self.now
+            ms = f32(f32(cmd.params["S"]) * 1000.0)  # SEC_TO_MS: float to millis_t, which saturates at 0 on the STM32
+            self.stepper_timeout_ms = 0 if ms <= 0 else min(int(ms), 0xFFFFFFFF)
+            return
         axes = [a for a in AXES if cmd.seen(a)]
         yield from self._synchronize()
         for a in axes or AXES:
-            self.enabled[a] = False
+            self.release(a)
 
     def m92(self, cmd):
         for i, a in enumerate(AXES):
@@ -781,8 +859,8 @@ class Firmware:
             self._kill("M112 Shutdown", steppers_off=True)
 
     def m113(self, cmd):
-        if cmd.seen("S"):
-            self.keepalive_interval = float(int(cmd.val("S", 0)))
+        if cmd.params.get("S") is not None:  # seenval('S'); value_byte() is 0..255, then NOMORE(..., 60)
+            self.keepalive_interval = float(min(max(int(cmd.params["S"]), 0), 255, 60))
         else:
             self._emit("echo:M113 S%d" % int(self.keepalive_interval))
 
@@ -797,7 +875,7 @@ class Firmware:
         phys = self.stepper.realtime_physical(self.now)
         self._emit("Reporting endstop status")
         for i, name in ((X, "x_min"), (Y, "y_min"), (Z, "z_min")):
-            self._emit("%s: %s" % (name, "TRIGGERED" if phys[i] <= 1e-9 else "open"))
+            self._emit("%s: %s" % (name, "TRIGGERED" if phys[i] - self.machine.switches[i] <= 1e-9 else "open"))
 
     def m150(self, cmd):
         self.led = {k: int(cmd.val(k, 0)) for k in "PRUBW" if cmd.seen(k)}
@@ -967,7 +1045,7 @@ class Firmware:
     def m997(self, cmd):
         """il/safety: reboot into the STM32 DFU bootloader; the serial port goes away until a power cycle."""
         self.stepper.freeze(self.now)
-        self.halted, self.halt_reason = True, "DFU"
+        self._dead("DFU")
         raise Halted("DFU")
 
 

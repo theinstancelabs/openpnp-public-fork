@@ -5,18 +5,28 @@ import time
 
 from .control import ControlServer
 from .iolog import IoLog
-from .pty_link import PtyLink, check_link_path
+from .pty_link import PtyLink
 
 CLOSED_POLL_S = 0.01   # how often a closed (or frozen) port is checked for the host opening (or closing) it
+RETRY_S = 1.0          # a port that could not come back anywhere is tried again this much later (simulator s)
 
 
 class Runner:
-    def __init__(self, sim, link, control=None, io_log=None, time_scale=1.0, clock=time.monotonic, log=None):
+    def __init__(self, sim, link, control=None, io_log=None, time_scale=1.0, clock=time.monotonic, log=None,
+                 guard=None):
+        scale = float(time_scale)
+        if not (math.isfinite(scale) and scale > 0):  # NaN or inf: now() is NaN and the loop never sleeps
+            raise ValueError("time_scale must be a finite number > 0, not %r" % (time_scale,))
         self.sim = sim
-        self.link = PtyLink(link)
-        self.control = ControlServer(control) if control else None
-        self.io = IoLog(io_log) if io_log else None
-        self.scale = float(time_scale)
+        self.guard = guard  # pty_link.LinkGuard: removes the links if this process is killed
+        self.link = PtyLink(link, guard)
+        try:
+            self.control = ControlServer(control) if control else None
+            self.io = IoLog(io_log) if io_log else None
+        except BaseException:
+            self.link.release()
+            raise
+        self.scale = scale
         self.clock = clock
         self.t0 = clock()
         self.log = log or (lambda msg: None)
@@ -45,7 +55,11 @@ class Runner:
         """Everything due now: link back, host input, host open/close, simulator time, actions, output."""
         t = self.now()
         if self.down_until is not None and t >= self.down_until:
-            self._reopen(self.next_link, "link back")
+            try:
+                self._reopen(self.next_link, "link back")
+            except (OSError, ValueError) as e:  # as in _do_actions: noted, and the loop goes on
+                self.log("lumen-sim link back: %s: %s" % (type(e).__name__, e))
+                self._note("link back: %s: %s" % (type(e).__name__, e))
         if self.link.master is not None:
             if not self.frozen:
                 self._read_host()
@@ -68,12 +82,11 @@ class Runner:
             wait = min(wait, CLOSED_POLL_S)
         writers = [self.link.master] if self.pending and self.link.master is not None and self.link.host_open else []
         if self.control:
-            readers.extend(self.control.sockets())
-        r, _, _ = select.select(readers, writers, [], min(wait, 1.0))
+            readers.extend(self.control.readers())
+            writers.extend(self.control.writers())
+        r, w, _ = select.select(readers, writers, [], min(wait, 1.0))
         if self.control:
-            for s in r:
-                if s in self.control.sockets():
-                    self.control.handle(s, self._handle_control)
+            self.control.service(r, w, self._handle_control)
 
     def _read_host(self):
         while True:
@@ -113,25 +126,29 @@ class Runner:
     def _handle_control(self, req):
         t = self.now()
         link = req.get("link") if req.get("cmd") == "power_cycle" else None
-        if isinstance(link, str):
-            try:
-                check_link_path(link)  # refused before the controller is reset
-            except ValueError as e:
-                return {"ok": False, "error": str(e)}
-        reply = self.sim.control(req, t)
-        if reply.get("ok"):
-            errors = self._do_actions(t)
-            if errors:
-                return {"ok": False, "error": "; ".join(errors), **self.transport_state()}
-            if req.get("cmd") == "state":
-                reply["state"].update(self.transport_state())
-            elif req.get("cmd") == "power_cycle":
-                reply.update(self.transport_state())
-        return reply
+        try:
+            if isinstance(link, str):
+                try:  # a bad path, or one another lumen-sim holds, is refused before the controller is reset
+                    req = dict(req, link=self.link.reserve(link))
+                except (OSError, ValueError) as e:
+                    return {"ok": False, "error": str(e)}
+            reply = self.sim.control(req, t)
+            if reply.get("ok"):
+                errors = self._do_actions(t)
+                if req.get("cmd") == "state":
+                    reply["state"].update(self.transport_state())
+                elif req.get("cmd") == "power_cycle" or errors:
+                    reply.update(self.transport_state())
+                if errors:  # carried out (a power cycle has reset the board), but the port could not follow
+                    reply["link_error"] = "; ".join(errors)
+            return reply
+        finally:
+            self.link.let_go(keep=self.next_link)  # a refused or replaced power cycle's new path
 
     def transport_state(self):
         return {"link": self.link.link, "pts": self.link.pts, "host_open": self.link.host_open,
-                "frozen": self.frozen, "link_down": self.down_until is not None, "time_scale": self.scale}
+                "frozen": self.frozen, "link_down": self.down_until is not None, "time_scale": self.scale,
+                "guard_pid": self.guard.pid if self.guard else None}
 
     def _do_actions(self, t):
         """Carry out the simulator's transport actions; the errors, as text (a failure never stops the loop)."""
@@ -148,6 +165,7 @@ class Runner:
     def _do_action(self, a, t):
         kind = a["action"]
         if kind == "power_cycle":
+            self.frozen = False  # the reset MCU reads its port again
             if a.get("down_s"):
                 self._go_down(t, a["down_s"], "power cycle")
                 self.next_link = a.get("link") or self.next_link
@@ -171,6 +189,8 @@ class Runner:
         self._note("%s: port gone" % why)
 
     def _reopen(self, link, why):
+        """The port comes back at `link` (None: where it was). If it cannot, it comes back where it was; if it cannot
+        come back at all (no directory, no pty), it stays down and is tried again RETRY_S later. Raises then too."""
         old = self.link.link
         self.link.close()
         self.pending = b""
@@ -179,9 +199,16 @@ class Runner:
         try:
             self.link.open(link)
         except (OSError, ValueError):
-            self.link.open()  # come back where the port was, so the controller stays reachable
+            try:
+                self.link.open()  # come back where the port was, so the controller stays reachable
+            except (OSError, ValueError) as e:
+                self.down_until = self.now() + RETRY_S
+                self._note("%s: port still gone (%s: %s), again in %g s" % (why, type(e).__name__, e, RETRY_S))
+                raise
             self._note("%s: %s (back at %s)" % (why, self.link.pts, old))
             raise
+        finally:
+            self.link.let_go()  # the new path's claim, if open() never took it
         self._note("%s: %s" % (why, self.link.pts))
         self.log("lumen-sim %s: %s (link %s)" % (why, self.link.pts, self.link.link))
 
@@ -195,7 +222,7 @@ class Runner:
             self.io.note(text)
 
     def shutdown(self):
-        self.link.close()
+        self.link.release()
         if self.control:
             self.control.close()
         if self.io:

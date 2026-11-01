@@ -125,12 +125,20 @@ class MotionTiming(unittest.TestCase):
         self.assertEqual([round(t, 3) for t in r.busy], [2.0, 4.0])
 
 
+# The board's G28s come in two speeds (README, "Homing time"): lines 166293 and 166954 took ~1.4 s more than the
+# source's kinematics, the later 168535 and 169216 (and the boot G28) none. The default is the fast one; the slow one
+# is set {"homing_move_delay_s": 0.142}.
+SLOW_HOMING_MOVE_DELAY_S = 0.142
+
+
 class Homing(unittest.TestCase):
-    def _g28_case(self, name, park, a_b_logical):
+    def _g28_case(self, name, park, a_b_logical, b_native=126211.27, delay=None):
         rows = goldens.load(name)
         b = Bench(park=park)
-        # A/B counts 12965 / 560378 = native 2920.04 / 126211.27; G92 gives the logical A/B the log shows
-        b.send("G1 A2920.04 B126211.27 F6000000")
+        if delay is not None:
+            self.assertTrue(b.sim.control({"cmd": "set", "homing_move_delay_s": delay}, b.t)["ok"])
+        # A count 12965 = native 2920.04; B 560378 = 126211.27 (656282 = 147811.26); G92 gives the logged A/B
+        b.send("G1 A2920.04 B%.2f F6000000" % b_native)
         b.send("M400")
         b.send("G92 " + a_b_logical)
         b.send("M204 S1500")
@@ -141,13 +149,18 @@ class Homing(unittest.TestCase):
         self.assertEqual(text(b.send("G92 A0 B0")), [t for _, t in goldens.replies(rows, "G92 A0 B0")])
         return b, rows
 
-    def test_g28_from_x217_y63(self):
+    def test_g28_from_x217_y63_slow(self):
         # physical start = the native position from the last report and moves before line 166293
-        self._g28_case("g28_166293", (217.171875, 63.17, 31.5), "A200 B0")
+        self._g28_case("g28_166293", (217.171875, 63.17, 31.5), "A200 B0", delay=SLOW_HOMING_MOVE_DELAY_S)
 
-    def test_g28_from_x241_y216_then_m211(self):
-        b, rows = self._g28_case("g28_166954", (240.940625, 215.878125, 31.5), "A0 B0")
+    def test_g28_from_x241_y216_then_m211_slow(self):
+        b, rows = self._g28_case("g28_166954", (240.940625, 215.878125, 31.5), "A0 B0",
+                                 delay=SLOW_HOMING_MOVE_DELAY_S)
         self.assertEqual(text(b.send("M211")), [t for _, t in goldens.replies(rows, "M211")])
+
+    def test_g28_from_x235_y199_at_the_default_speed(self):
+        # the M114 at line 168526 (counts X75048 Y63717, no move since) gives the physical start; 5.246 s, 2 busy
+        self._g28_case("g28_168535", (75048 / 320, 63717 / 320, 31.5), "A0 B0", b_native=147811.26)
 
     def test_g28_after_power_on_report(self):
         # Text and busy count only: the head's physical position after that power cycle is unknown, so the 2.82 s

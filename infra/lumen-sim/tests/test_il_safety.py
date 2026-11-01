@@ -46,8 +46,40 @@ class Watchdog(unittest.TestCase):
         b.run(1.0)
         self.assertEqual([(round(t - t0, 3), l) for t, l in b.rx if t > t0], [(0.5, "Error:host watchdog")])
 
+    def test_a_trip_during_a_move_stops_the_head_where_it_is(self):
+        b = il()
+        b.send("M990 S500")
+        b.send("G1 X100 F600")  # acked when planned; the watchdog counts from this line
+        t0 = b.t
+        b.run(2.0)
+        self.assertEqual([(round(t - t0, 3), l) for t, l in b.rx if t > t0], [(0.5, "Error:host watchdog")])
+        h = b.sim.state(b.t)["head"]
+        # 0.1 s first-move delay, then 0.4 s at 10 mm/s from the park at X 5
+        self.assertAlmostEqual(h["physical"]["X"], 9.0, delta=0.02)
+        b.run(5.0)
+        self.assertEqual(b.sim.state(b.t)["head"], h)
+        line = b.send("M114").lines[0]  # the quick-stop re-read the position from the steps
+        self.assertTrue(line.startswith("X:%.2f " % h["logical"]["X"]), (line, h))
+
     def test_stock_has_no_m990(self):
         self.assertEqual(Bench().send("M990 S3000").lines, ['echo:Unknown command: "M990 S3000"', "ok"])
+
+
+class Kill(unittest.TestCase):
+    def test_m112_turns_every_output_off_and_stops_motion_at_once(self):
+        b = il()
+        for line in ("M106", "M106 P1 S180", "M106 P2 S255", "M106 P3 S255"):
+            b.send(line)
+        b.send("G1 X100 F600")
+        b.run(5.0)
+        x = b.sim.state(b.t)["head"]["physical"]["X"]
+        b.write("M112\n")
+        b.run(3.0)
+        st = b.sim.state(b.t)
+        self.assertTrue(st["halted"])
+        self.assertEqual(st["fans"], [0, 0, 0, 0])
+        self.assertEqual([h["source"] for h in st["fan_history"][-4:]], ["kill"] * 4)
+        self.assertAlmostEqual(st["head"]["physical"]["X"], x, places=6)
 
 
 class Settings(unittest.TestCase):

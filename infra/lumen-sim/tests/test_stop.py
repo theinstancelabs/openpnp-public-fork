@@ -95,6 +95,21 @@ class StockStopDuringHoming(unittest.TestCase):
         self.assertEqual(lines, [(2.0, "echo:busy: processing"), (4.0, "echo:busy: processing"),
                                  (5.0, "echo:Homing Failed"), (5.0, "Error:Printer halted. kill() called!")])
 
+    def test_a_stop_after_the_home_ended_is_a_plain_quick_stop(self):
+        """Review round 3: from the start of serial.log line 168535 the board's G28 acks after 5.25 s, so the web STOP
+        5.5 s in lands after it, acks, and the board stays alive (the sim's homing used to run 1.5 s long and kill)."""
+        b = Bench(park=(75048 / 320, 63717 / 320, 31.5))
+        b.send("M204 S1500")
+        t0 = b.t
+        b.write("G28\n")
+        b.run(5.5)
+        self.assertEqual([l for t, l in b.rx if t > t0 and l == "ok"], ["ok"])
+        self.assertEqual(sum(1 for t, l in b.rx if t > t0 and "busy" in l), 2)
+        b.write("M410\n")
+        b.run(3.0)
+        self.assertFalse(b.sim.state(b.t)["halted"])
+        self.assertEqual(b.send("M115").lines[-1], "ok")
+
     def test_m410_in_the_z_after_move_is_a_plain_quick_stop(self):
         b = Bench(park=(20.0, 20.0, 31.5))
         b.write("G28\n")
@@ -134,6 +149,55 @@ class StockStopDuringHoming(unittest.TestCase):
         self.assertTrue(st["halted"])
         self.assertEqual(st["halt_reason"], "M112 Shutdown")
         self.assertFalse(any(st["enabled"].values()))
+
+
+def head_x(b):
+    return b.sim.state(b.t)["head"]["physical"]["X"]
+
+
+class KillAndPowerMidMove(unittest.TestCase):
+    """Where the head ends up when the board is killed or loses power during G1 X100 F600 (10 mm/s, from the boot
+    park at X 5): BR-02's 'the head stays where it physically is'."""
+
+    def moving(self, personality="stock", seconds=5.0):
+        b = Bench(personality=personality)
+        for line in ("M106", "M106 P1 S180", "M106 P2 S255", "M106 P3 S255"):
+            b.send(line)
+        b.send("G1 X100 F600")
+        b.run(seconds)
+        return b
+
+    def test_stock_m112_mid_move_runs_0_6_s_more_then_stops_with_fans_as_they_were(self):
+        b = self.moving()
+        x_kill = head_x(b)
+        self.assertGreater(x_kill, 50.0)
+        b.write("M112\n")
+        b.run(3.0)
+        self.assertAlmostEqual(head_x(b) - x_kill, 6.0, delta=0.01)  # minkill(): 0.6 s at 10 mm/s
+        st = b.sim.state(b.t)
+        self.assertTrue(st["halted"])
+        self.assertEqual(st["fans"], [255, 180, 255, 255])
+
+    def test_power_cycle_mid_move_leaves_the_head_where_it_is(self):
+        b = self.moving()
+        x = head_x(b)
+        self.assertGreater(x, 50.0)
+        b.sim.power_cycle(b.t)
+        self.assertAlmostEqual(head_x(b), x, places=6)
+        b.run(5.0)
+        self.assertAlmostEqual(head_x(b), x, places=6)
+        self.assertEqual(b.sim.state(b.t)["fans"], [0, 0, 0, 0])
+
+    def test_power_cycle_inside_the_kill_window_stops_the_head_at_power_off(self):
+        """A stock kill lets the stepper run 0.6 s more; power off 0.2 s after the kill stops it there."""
+        b = self.moving()
+        b.write("M112\n")
+        b.run(0.2)
+        x = head_x(b)
+        b.sim.power_cycle(b.t)
+        self.assertAlmostEqual(head_x(b), x, places=6)
+        b.run(2.0)
+        self.assertAlmostEqual(head_x(b), x, places=6)
 
 
 class IlSafetyQuickStop(unittest.TestCase):

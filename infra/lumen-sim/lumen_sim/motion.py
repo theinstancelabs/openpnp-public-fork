@@ -91,10 +91,12 @@ class Block:
 class Stepper:
     """The planner queue as the stepper ISR consumes it, evaluated lazily at any later time."""
 
-    def __init__(self, counts, physical, steps_per_unit):
+    def __init__(self, counts, physical, steps_per_unit, switches=(0.0, 0.0, 0.0)):
         self.counts = list(counts)          # stepper position of the last finished step
-        self.physical = physical            # Machine.physical, mm/deg; endstops sit at physical 0
+        self.physical = physical            # Machine.physical, mm/deg
+        self.switches = switches            # Machine.switches: physical X/Y/Z at which the min endstops trigger
         self.steps = steps_per_unit         # live list owned by the firmware (M92 edits it)
+        self.last_end = -math.inf           # when the planner last ran out of blocks (end or quick-stop)
         self.blocks = deque()
         self.deliver_at = None              # first block's start when it was queued into an empty planner
         self.cleaning_until = -math.inf
@@ -125,6 +127,7 @@ class Stepper:
                 return
             self._finish(b)
             self.blocks.popleft()
+            self.last_end = b.t_end
             if self.blocks:
                 self._start(self.blocks[0], b.t_end)
 
@@ -188,25 +191,42 @@ class Stepper:
         if self.blocks and self.blocks[0].t_start is not None:
             b = self.blocks[0]
             self._move_to(b.counts_after(int(b.profile.steps_at(now - b.t_start) + 1e-9)))
+        if self.blocks:
+            self.last_end = now
         self.blocks.clear()
         self.deliver_at = None
+
+    def recheck_endstops(self, now):
+        """The head or a switch moved under the running block (a physical fault): with the endstops on, its switch
+        hit is worked out again, so the switch stops the head where it now triggers (at once if already passed)."""
+        self.update(now)
+        if self.frozen or not self.endstops_enabled or not self.blocks or self.blocks[0].t_start is None:
+            return
+        b = self.blocks[0]
+        b.t_end, b.cut = b.t_start + b.profile.duration, None
+        self._endstop_cut(b, int(b.profile.steps_at(now - b.t_start) + 1e-9))
 
     def _start(self, b, t):
         b.start = list(self.counts)
         b.t_start = t
         b.t_end = t + b.profile.duration
         if self.endstops_enabled:
-            for axis in range(3):  # X Y Z min switches
-                d = b.delta[axis]
-                if d >= 0:
-                    continue
-                k_axis = max(0, math.ceil(self.physical[axis] * self.steps[axis] - 1e-6))
-                if k_axis > abs(d):
-                    continue
-                events = 0 if k_axis == 0 else math.ceil(k_axis * b.n / abs(d))
-                t_hit = t + b.profile.time_for_steps(events)
-                if t_hit <= b.t_end:
-                    b.t_end, b.cut = t_hit, events
+            self._endstop_cut(b, 0)
+
+    def _endstop_cut(self, b, done):
+        """End block b at its first min-switch hit, at no fewer than `done` step events. self.physical is the head
+        at the block's start (it changes only when a block ends, or under a fault)."""
+        for axis in range(3):  # X Y Z min switches
+            d = b.delta[axis]
+            if d >= 0:
+                continue
+            k_axis = max(0, math.ceil((self.physical[axis] - self.switches[axis]) * self.steps[axis] - 1e-6))
+            if k_axis > abs(d):
+                continue
+            events = max(done, 0 if k_axis == 0 else math.ceil(k_axis * b.n / abs(d)))
+            t_hit = b.t_start + b.profile.time_for_steps(events)
+            if t_hit <= b.t_end:
+                b.t_end, b.cut = t_hit, events
 
     def _finish(self, b):
         if b.cut is not None:
