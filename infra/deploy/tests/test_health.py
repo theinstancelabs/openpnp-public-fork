@@ -1,8 +1,11 @@
 """The health check against a fake OpenPnP: each failure mode, and never a STOP during a home."""
+import contextlib
 import json
 import os
 import sys
+import time
 import unittest
+from unittest import mock
 
 # il_deploy is one level up: also when unittest imports this module by bare name (no -t)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -43,6 +46,9 @@ class Health(unittest.TestCase):
     def paths(self):
         return [(r.get("method"), r.get("path")) for r in self.lab.requests() if "path" in r]
 
+    def posts(self):
+        return [p for p in self.paths() if p[0] == "POST"]
+
     def violations(self):
         return [r["violation"] for r in self.lab.requests() if "violation" in r]
 
@@ -53,7 +59,7 @@ class Health(unittest.TestCase):
         self.assertEqual([s["step"] for s in rep["steps"]],
                          ["status", "enable", "serial", "axes", "home", "homed", "stop"])
         self.assertIn(("POST", "/api/machine/home"), self.paths())
-        self.assertEqual(self.paths()[-1], ("POST", "/api/stop"))
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
         self.assertFalse(self.fake.enabled)
         self.assertEqual(self.violations(), [])
         json.dumps(rep)
@@ -61,10 +67,39 @@ class Health(unittest.TestCase):
     def test_already_enabled_is_stopped_first(self):
         self.start()
         self.fake.enable()
-        with open(os.path.join(self.lab.config, "log", "OpenPnP.log"), "w"):
-            pass
         rep = self.check()
         self.assertTrue(rep["ok"], rep)
+
+    def test_link_kept_open_since_an_earlier_enable(self):
+        """connection-keep-alive (the lab machine.xml): a STOP leaves the link open, so the next enable logs no
+        'Serial port: connecting' line. The line from this OpenPnP's earlier connect (its own OpenPnP.log) counts."""
+        self.start()
+        self.fake.enable()
+        self.fake.stop()
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        serial = [s for s in rep["steps"] if s["step"] == "serial"][0]["detail"]
+        self.assertIn("S/N 387932683335", serial)
+        self.assertIn("kept open", serial)
+
+    def test_link_kept_open_to_another_device_fails(self):
+        self.start(usb_sn="111111111111")
+        self.fake.enable()
+        self.fake.stop()
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["failure"].split(":")[0], "serial")
+
+    def test_each_enable_connects_without_keep_alive(self):
+        self.start(keep_alive=False)
+        self.fake.enable()
+        self.fake.stop()
+        log = os.path.join(self.lab.config, "log", "OpenPnP.log")
+        size = os.path.getsize(log)
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertGreater(os.path.getsize(log), size, "the health check's enable connected again")
+        self.assertNotIn("kept open", [s for s in rep["steps"] if s["step"] == "serial"][0]["detail"])
 
     def test_version_mismatch(self):
         self.start(sha=sha_of("b"))
@@ -97,7 +132,7 @@ class Health(unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertIn("enable", rep["failure"])
         self.assertNotIn(("POST", "/api/machine/home"), self.paths())
-        self.assertEqual(self.paths()[-1], ("POST", "/api/stop"))
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
 
     def test_reset_signature_never_homes(self):
         self.start(fail=["reset"])
@@ -117,6 +152,74 @@ class Health(unittest.TestCase):
         axes[3]["driverCoordinate"] = 720.0
         axes[0]["driverCoordinate"] = 0.5
         self.assertFalse(il_deploy.reset_signature(axes))
+
+    def test_controller_position_not_read_is_never_homed(self):
+        """reset_signature needs B too: a power-cycled controller (X/Y/Z 0) whose B is not reported (its letter changed
+        in machine.xml, no driverCoordinate) must not pass as 'not reset' and be homed."""
+        cases = [dict(fail=["reset"], axes_missing=["B"]), dict(fail=["reset"], axes_null=["B"]),
+                 dict(axes_missing=["X"]), dict(axes_null=["X"]), dict(axes_missing=["B"])]
+        for machine in cases:
+            with self.subTest(**machine):
+                self.start(**machine)
+                try:
+                    rep = self.check()
+                    self.assertFalse(rep["ok"], rep)
+                    self.assertTrue(rep["failure"].startswith("axes: the controller position was not read"), rep)
+                    self.assertNotIn(("POST", "/api/machine/home"), self.paths())
+                    self.assertFalse(self.fake.enabled)
+                finally:
+                    self.fake.shutdown()
+                    self.fake = None
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(self.lab.requests_path)
+
+    def test_serial_match_pattern(self):
+        """--serial-match: the connect line's pattern, for a link without a USB identity (lumen-sim's pty in the e2e);
+        the default is ' S/N <--usb-sn>'."""
+        self.start()
+        rep = self.check("--usb-sn", "", "--serial-match", r"connecting to ttyACM0 by ")
+        self.assertTrue(rep["ok"], rep)
+        self.assertIn("serial", [s["step"] for s in rep["steps"]])
+        self.fake.shutdown()
+        self.start()
+        rep = self.check("--usb-sn", "", "--serial-match", r"connecting to /dev/pts/7 by ")
+        self.assertFalse(rep["ok"])
+        self.assertTrue(rep["failure"].startswith("serial: "), rep)
+        self.assertIn("/dev/pts/7", rep["failure"])
+
+    def test_openpnp_gone_after_the_enable_is_the_machines(self):
+        """The API going away after the enable (the JVM dies mid-home, a person stops the service) is not the build's:
+        the controller may still be homing and the outputs keep their state; no second home by the previous build."""
+        real_get, real_post = il_deploy.Api.get, il_deploy.Api.post
+        for where in ("enable", "axes", "home", "homed"):
+            with self.subTest(where=where):
+                self.start()
+                seen = {"machine_gets": 0, "homed": False}
+
+                def get(api, path, timeout=10):
+                    if path == "/api/machine":
+                        seen["machine_gets"] += 1
+                        # GET /api/machine: 1 before the enable, 2 the axes; after the home, the homed check
+                        if (where == "axes" and seen["machine_gets"] == 2) or (where == "homed" and seen["homed"]):
+                            raise il_deploy.ApiDown(f"GET {path}: Connection refused")
+                    return real_get(api, path, timeout)
+
+                def post(api, path, body=None, timeout=10):
+                    if (where, path) in (("enable", "/api/machine/enable"), ("home", "/api/machine/home")):
+                        real_post(api, path, {"wait": False} if where == "home" else body, timeout)
+                        raise il_deploy.ApiDown(f"POST {path}: Connection reset by peer")
+                    out = real_post(api, path, body, timeout)
+                    seen["homed"] = seen["homed"] or path == "/api/machine/home"
+                    return out
+                try:
+                    with mock.patch.object(il_deploy.Api, "get", get), mock.patch.object(il_deploy.Api, "post", post):
+                        rep = self.check("--home-busy-wait", "0.5")
+                    self.assertFalse(rep["ok"])
+                    self.assertEqual(rep["kind"], "machine", rep)
+                    self.assertTrue(rep["failure"].startswith(where + ": "), rep)
+                finally:
+                    self.fake.shutdown()
+                    self.fake = None
 
     def test_serial_number_missing(self):
         self.start(jar_fail=["no-sn"])
@@ -144,12 +247,31 @@ class Health(unittest.TestCase):
         self.assertTrue(rep["ok"], rep)
         self.assertNotIn("serial", [s["step"] for s in rep["steps"]])
 
+    def test_engine_starting_after_the_api_is_waited_for(self):
+        """OpenPnP starts its web API and the dispense engine on configurationComplete, in no fixed order (its
+        listeners are a HashSet), so /api/status can answer 200 before the engine runs (seen with the real build,
+        e2e/test_deploy_openpnp.py). That is OpenPnP still starting, not a failed build."""
+        self.start(engine_start_s=0.6)
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertGreaterEqual(len([p for p in self.paths() if p == ("GET", "/api/status")]), 2)
+
+    def test_engine_that_never_starts_fails_at_the_status_timeout(self):
+        self.start(jar_fail=["engine"])
+        t = time.monotonic()
+        rep = self.check("--status-timeout", "1")
+        self.assertGreaterEqual(time.monotonic() - t, 1.0)
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "build")
+        self.assertIn("the dispense engine is not usable (dispense.running False, available False", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
+
     def test_dispense_engine_must_run(self):
         for fail in ("engine", "unavailable"):
             with self.subTest(fail=fail):
                 self.start(jar_fail=[fail])
                 try:
-                    rep = self.check()
+                    rep = self.check("--status-timeout", "1")
                     self.assertFalse(rep["ok"])
                     self.assertEqual(rep["kind"], "build")
                     self.assertEqual(rep["steps"][-1]["step"], "status")
@@ -165,7 +287,7 @@ class Health(unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertIn("hom", rep["failure"])
         self.assertEqual(rep["kind"], "machine", "a failed home is the machine's, not the build's")
-        self.assertEqual(self.paths()[-1], ("POST", "/api/stop"))
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
         self.assertEqual(self.violations(), [])
 
     def test_stop_fails(self):
@@ -187,6 +309,46 @@ class Health(unittest.TestCase):
         self.assertEqual(rep["kind"], "home-stuck")
         self.assertNotIn(("POST", "/api/stop"), self.paths())
         self.assertEqual(self.violations(), [])
+
+    # --- the real server's own 5 min limit (MachineEndpoints.home: f.get(5, MINUTES), then 409 while the home runs on)
+    def test_a_home_the_server_gave_up_on_is_waited_out_and_passes(self):
+        self.start(home_s=1.5, home_cap_s=0.3)
+        rep = self.check("--home-timeout", "5", "--home-busy-wait", "5")
+        self.assertTrue(rep["ok"], rep)
+        self.assertIn("ended after", [s for s in rep["steps"] if s["step"] == "home"][0]["detail"])
+        self.assertEqual(self.violations(), [])
+        self.assertEqual(len([p for p in self.paths() if p == ("POST", "/api/machine/home")]), 1)
+
+    def test_a_home_the_server_gave_up_on_that_never_ends_is_left_alone(self):
+        self.start(home_s=3.0, home_cap_s=0.3)
+        rep = self.check("--home-timeout", "5", "--home-busy-wait", "0.5")
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "home-stuck", rep)
+        self.assertNotIn(("POST", "/api/stop"), self.paths())
+        self.assertEqual(self.violations(), [])
+
+    def test_a_home_dropped_by_openpnp_is_the_machines(self):
+        """The same 409 when OpenPnP dropped the home (a task of its own ahead of it failed): not busy, not homed."""
+        self.start(home_s=0.6, home_cap_s=0.3, fail=["home"])
+        rep = self.check("--home-timeout", "5", "--home-busy-wait", "5")
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine", rep)
+        self.assertEqual(self.violations(), [])
+
+    def test_a_home_refused_before_it_starts_is_the_machines(self):
+        """Refusals mean something else holds the machine (the pressure held, OpenPnP busy, an engine task): a person
+        may be at it, so the previous build is not homed after it unwatched."""
+        self.start(jar_fail=["pressure"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine", rep)
+        self.assertIn("pressure", rep["failure"])
+
+    def test_no_home_endpoint_is_the_builds(self):
+        self.start(jar_fail=["home-404"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "build", rep)
 
     def test_health_cli_prints_json(self):
         self.start()

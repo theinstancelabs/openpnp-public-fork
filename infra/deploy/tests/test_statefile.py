@@ -125,6 +125,20 @@ class Replace(unittest.TestCase):
         self.assertNotIn("copied by hand", new)
         self.assertIn("- **Holder:** nobody (released by Process at 18:00)", new)
 
+    def test_deployed_line_keeps_the_notes_under_it(self):
+        """A warning another role leaves under the Deployed line must survive the next deploy, rollback or health."""
+        text = STATE_MD.replace(
+            "- **Deployed on the machine:** a scratch build (`realjar-sw8`),\n  copied by hand.\n",
+            "- **Deployed on the machine:** il-build-4-abc1234 (abc1234) since 2026-11-01 09:00,\n"
+            "  deployed by Infra.\n"
+            "  - Backend 11-01: build 4 drops tip fields on save; do not run tip setups until build 5.\n"
+            "    (see BR-51)\n")
+        new = il_deploy.set_deployed_line(text, "il-build-5-def5678 (def5678) since 2026-11-01 10:00")
+        self.assertIn("- **Deployed on the machine:** il-build-5-def5678 (def5678) since 2026-11-01 10:00\n"
+                      "  - Backend 11-01: build 4 drops tip fields on save; do not run tip setups until build 5.\n"
+                      "    (see BR-51)\n\n## Owners", new)
+        self.assertNotIn("deployed by Infra.", new)
+
     def test_deployed_line_created_in_code_section(self):
         text = STATE_MD.replace("- **Deployed on the machine:** a scratch build (`realjar-sw8`),\n  copied by hand.\n",
                                 "")

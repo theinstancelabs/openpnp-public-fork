@@ -11,6 +11,8 @@ on:
     branches: [il/integration]
   workflow_dispatch:
 
+# Push and manual (workflow_dispatch) runs of one branch in separate groups: a newer run cancels a pending one of its
+# group, and only push runs release, so a manual re-check must never replace the head's pending push run.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -110,8 +112,10 @@ jobs:
         # after a controller power cycle that must hold without homing. Skipping counts as a failure here.
         env:
           IL_DEPLOY_E2E: '1'
+          IL_DEPLOY_E2E_JAR: ${{ env.JAR }}
           IL_DEPLOY_E2E_LIB: target/lib
-        run: IL_DEPLOY_E2E_JAR="$JAR" IL_DEPLOY_E2E_OUT="$RUNNER_TEMP/deploy-e2e" python3 infra/deploy/e2e/test_deploy_openpnp.py -v
+          IL_DEPLOY_E2E_OUT: ${{ runner.temp }}/deploy-e2e
+        run: python3 infra/deploy/e2e/test_deploy_openpnp.py -v
       - uses: actions/upload-artifact@v7
         if: always()
         with:

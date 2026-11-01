@@ -153,6 +153,113 @@ class Idle(unittest.TestCase):
                     self.fake.shutdown()
                     self.fake = None
 
+    def test_machine_switched_on_is_in_use(self):
+        """Someone pressed Start (and Home) in the web UI and works at the machine by hand: no run, no pressure, a
+        quiet serial.log, Holder still nobody. A deploy would turn the machine off under them and home it."""
+        self.start_fake()
+        self.fake.enable()
+        r = self.reasons()
+        self.assertTrue(any("switched on" in x for x in r), r)
+        self.fake.stop()
+        r = self.reasons()
+        self.assertFalse(any("switched on" in x for x in r), r)
+        # pressing Start connected the controller (dispense.profile.controllerConnectedAtMs): a person was there
+        self.assertTrue(any("controller connected" in x and "ago" in x for x in r), r)
+
+    def test_a_home_by_someone_is_activity(self):
+        self.start_fake()
+        self.fake.enable()
+        self.fake.home({"wait": True})
+        self.fake.stop()
+        r = self.reasons()
+        self.assertTrue(any("a home" in x and "ago" in x for x in r), r)
+
+    def test_the_deployers_own_home_is_not_activity(self):
+        """The health check's own home sets homeAtMs too: a rollback or the next deploy right after it is not held."""
+        self.start_fake()
+        os.makedirs(os.path.join(self.lab.dir, "openpnp-il"), exist_ok=True)
+        cfg = il_deploy.config_from_args(self.lab.argv("status", extra=["--usb-sn", ""]))
+        rep = il_deploy.Deployer(cfg, self.lab.deps(service=self.svc)).health_check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertIsNotNone(self.fake.home_at_ms)
+        self.assertEqual(self.reasons(), [])
+
+    def test_tip_place_and_needle_edits_are_activity(self):
+        for key, word in (("needle_changed_s_ago", "needle change"), ("needle_set_s_ago", "needle touch-off"),
+                          ("landing_set_s_ago", "needle landing"), ("tip_mounted_s_ago", "tip mounted"),
+                          ("new_seat_s_ago", "new seat"), ("location_set_s_ago", "waste"),
+                          ("surface_set_s_ago", "board"), ("purge_reset_s_ago", "purge row"),
+                          ("start_angle_set_s_ago", "start angle"), ("xy_trim_set_s_ago", "XY trim"),
+                          ("anchor_set_s_ago", "anchor"), ("controller_connected_s_ago", "controller connected")):
+            for ago, busy in ((60, True), (20 * 60, False)):
+                with self.subTest(key=key, s_ago=ago):
+                    self.start_fake(**{key: ago})
+                    try:
+                        r = self.reasons()
+                        if busy:
+                            self.assertTrue(any(word in x and "ago" in x for x in r), r)
+                        else:
+                            self.assertEqual(r, [])
+                    finally:
+                        self.fake.shutdown()
+                        self.fake = None
+
+    def test_status_fields_il_deploy_reads(self):
+        """The key paths il_deploy reads in /api/status (the e2e checks them against the real build: a renamed field
+        would silently turn a check off, since a missing time is skipped)."""
+        self.start_fake()
+        st = il_deploy.Api(self.lab.port).get("/api/status")[1]
+        self.assertEqual(il_deploy.status_field_problems(st), [])
+        self.assertIn("machine.zCheck.homeAtMs", il_deploy.STATUS_FIELDS)
+        del st["machine"]["zCheck"]["homeAtMs"]
+        st["dispense"]["needle"]["landing"] = None
+        st["dispense"].pop("purgeRow")
+        self.assertEqual(il_deploy.status_field_problems(st),
+                         ["machine.zCheck.homeAtMs", "dispense.needle.landing.setAtMs", "dispense.purgeRow.resetAtMs"])
+        st = {"run": None, "lastRun": None, "padCalibration": None}  # null where null is allowed: nothing deeper read
+        self.assertNotIn("run.finishedAtMs", il_deploy.status_field_problems(st))
+        self.assertIn("machine.enabled", il_deploy.status_field_problems(st))
+
+    def test_status_fields_inside_places_and_surfaces_and_behind_nulls(self):
+        """A place or surface without setAtMs is a rename (status_field_problems). What a null 'key?' or an empty map
+        hides was not checked at all: unchecked_status_fields lists it, so the e2e sees every path it did not check."""
+        self.start_fake()
+        st = il_deploy.Api(self.lab.port).get("/api/status")[1]
+        self.assertEqual(il_deploy.unchecked_status_fields(st), ["run.finishedAtMs", "lastRun.endedAtMs",
+                                                                 "padCalibration.endedAtMs",
+                                                                 "dispense.needle.xyTrim.setAtMs",
+                                                                 "dispense.needle.anchor.setAtMs", "run.running",
+                                                                 "padCalibration.state"])
+        st["dispense"]["locations"]["waste"]["placedAtMs"] = st["dispense"]["locations"]["waste"].pop("setAtMs")
+        del st["dispense"]["surfaces"]["board"]["setAtMs"]
+        self.assertEqual(il_deploy.status_field_problems(st), ["dispense.locations.waste.setAtMs",
+                                                               "dispense.surfaces.board.setAtMs"])
+        st["dispense"]["locations"], st["dispense"]["surfaces"] = {}, {}
+        self.assertEqual(il_deploy.status_field_problems(st), [])
+        self.assertEqual(il_deploy.unchecked_status_fields(st)[-2:], ["dispense.locations.*.setAtMs",
+                                                                      "dispense.surfaces.*.setAtMs"])
+        st["run"] = {"running": False, "finishedAtMs": None}
+        self.assertNotIn("run.running", il_deploy.unchecked_status_fields(st))
+        self.assertNotIn("run.finishedAtMs", il_deploy.unchecked_status_fields(st), "a null leaf is there: checked")
+
+    def test_openpnp_log_is_an_activity_file(self):
+        """OpenPnP logs each change through its API (ApiServer: 'POST ... -> 200'), the engine's work, its start and its
+        stop: after a person's work and a stop of the service (the API is not asked then), the quiet period runs from
+        its last line. What il_deploy's own windows wrote does not count."""
+        clock = il_deploy.Clock()
+        log = os.path.join(self.lab.config, "log", "OpenPnP.log")
+        os.makedirs(os.path.dirname(log))
+        with open(log, "w") as f:
+            f.write("2026-11-01 00:00:00.000 ApiServer INFO: Instance Labs API POST /api/prime -> 200\n")
+        r = self.reasons(clock=clock)
+        self.assertTrue(any("OpenPnP.log" in x and "ago" in x for x in r), r)
+        il_deploy.write_json(os.path.join(self.lab.root, "own-activity.json"), [[time.time() - 30, time.time()]])
+        self.assertEqual(self.reasons(clock=clock), [], "written while il_deploy alone drove OpenPnP")
+        old = time.time() - 20 * 60
+        os.utime(log, (old, old))
+        il_deploy.write_json(os.path.join(self.lab.root, "own-activity.json"), [])
+        self.assertEqual(self.reasons(clock=clock), [])
+
     def test_api_busy_states(self):
         for fail, word in (("busy", "busy"), ("run", "run"), ("pressure", "pressure")):
             with self.subTest(fail=fail):
@@ -220,6 +327,53 @@ class ProcScan(unittest.TestCase):
             self.assertTrue(il_deploy.config_is_real(lab.seed))
             self.assertTrue(il_deploy.config_is_real(os.path.join(lab.dir, "nonexistent")))
         finally:
+            lab.cleanup()
+
+    def test_a_lumen_sim_config_is_not_real(self):
+        """uinav --controller pty (and the deploy e2e) keep the GcodeDriver on serial with port-name a ttyLUMEN* link to
+        lumen-sim's /dev/pts/N and no USB identity: OpenPnP cannot reach the board with it, and a SIM session on the lab
+        computer must not stop the timer's deploys. Anything else on serial stays real (fail closed)."""
+        lab = Lab()
+        master, slave = os.openpty()
+        try:
+            pts = os.ttyname(slave)
+            link = os.path.join(lab.dir, "ttyLUMEN0")
+            os.symlink(pts, link)
+
+            def real(port, attrs=""):
+                with open(os.path.join(lab.seed, "machine.xml"), "w") as f:
+                    f.write('<openpnp-machine><machine><drivers><driver class="org.openpnp.machine.reference.driver.'
+                            f'GcodeDriver" id="D1" communications="serial"><serial port-name="{port}" baud="115200"'
+                            f'{attrs}/><tcp ip-address="127.0.0.1" port="23"/></driver></drivers></machine>'
+                            '</openpnp-machine>')
+                return il_deploy.config_is_real(lab.seed)
+
+            self.assertFalse(real(link))
+            self.assertTrue(real(link, ' usb-serial-number="387932683335"'), "the port matcher looks for the board")
+            self.assertTrue(real(link, ' usb-description="MARLIN_OPULO_LUMEN_REV5"'))
+            other = os.path.join(lab.dir, "ttyUSB9")
+            os.symlink(pts, other)
+            self.assertTrue(real(other), "jSerialComm opens /dev/<name> while a link is missing: only ttyLUMEN*")
+            plain = os.path.join(lab.dir, "ttyLUMEN1")
+            open(plain, "w").close()
+            self.assertTrue(real(plain), "not a pty")
+            dangling = os.path.join(lab.dir, "ttyLUMEN2")
+            os.symlink("/dev/pts/999999", dangling)
+            self.assertTrue(real(dangling), "a pty that does not exist (lumen-sim stopped)")
+            self.assertTrue(real("ttyLUMEN0"), "a relative name resolves against OpenPnP's directory, not ours")
+            self.assertTrue(real(""))
+            with open(os.path.join(lab.seed, "machine.xml"), "w") as f:
+                f.write('<openpnp-machine><machine><drivers><driver communications="serial">'
+                        f'<serial port-name="{link}"/></driver><driver communications="serial">'
+                        '<serial port-name="/dev/ttyACM0"/></driver></drivers></machine></openpnp-machine>')
+            self.assertTrue(il_deploy.config_is_real(lab.seed), "one real driver is enough")
+            with open(os.path.join(lab.seed, "machine.xml"), "w") as f:
+                f.write('<openpnp-machine><machine><drivers><driver communications="serial"/></drivers></machine>'
+                        '</openpnp-machine>')
+            self.assertTrue(il_deploy.config_is_real(lab.seed), "serial without settings")
+        finally:
+            os.close(master)
+            os.close(slave)
             lab.cleanup()
 
 

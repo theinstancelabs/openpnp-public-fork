@@ -24,6 +24,7 @@ Runs on every pull request, on pushes to `il/integration`, and by hand (workflow
 | controller-e2e | `infra/lumen-sim/e2e`: OpenPnP on lumen-sim's pty: home, STOP in G28, the 30-turn prime timeout | 6 min |
 | ui-e2e | `src/test/web/run-webui-sim-test.sh`: webui-sim, board-import, pad-profile, tip-setups in one SIM session | 55 min |
 | ui-boardview | `src/test/web/run-boardview-test.sh` | 5 min |
+| deploy-e2e | `infra/deploy/e2e/test_deploy_openpnp.py`: il_deploy with the build's jar on lumen-sim (deploy, deploy over a running OpenPnP, rollback, a power-cycled controller) | 3 min |
 | acceptance ×4 | `src/test/sim/il_sim_acceptance.py`, sharded; `ci/acceptance.py` fails the job unless every check passed (the script itself always exits 0) | 15 min each |
 | gate | green only if every job above succeeded; the one required status check | seconds |
 | release | push to `il/integration` only, after `gate`: a prerelease `il-build-<run>-<sha7>` with the build (`ci/make_release.py`) | 1 min |
@@ -41,3 +42,9 @@ python3 -m unittest discover -s infra/ci/tests -t infra/ci
 python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
 python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```
+
+End-to-end tests with the real OpenPnP build start Java and need the jar (`mvn -DskipTests package`); they skip
+without their env:
+- `deploy/e2e/test_deploy_openpnp.py`: il_deploy with lumen-sim, no uinav, about 2 min. CI runs it as the
+  `deploy-e2e` job (the `gate` needs it); the command is in `deploy/README.md` "End to end".
+- `lumen-sim/e2e/test_openpnp_pty.py`: OpenPnP on lumen-sim through openpnp-uinav's `--controller pty`.

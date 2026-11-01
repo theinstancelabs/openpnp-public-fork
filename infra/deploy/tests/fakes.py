@@ -8,15 +8,19 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import sys
 import tarfile
 import tempfile
 import time
 
-# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t); make_release (CI's
+# release packager) is in infra/ci
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "ci"))
 import il_deploy  # noqa: E402
+import make_release  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE_OPENPNP = os.path.join(HERE, "fake_openpnp.py")
@@ -40,12 +44,13 @@ class FakeGitHub:
         self.releases = []
         self.assets = {}
         self.checks = {}
+        self.runs = {}  # workflow runs by id: GET repos/<repo>/actions/runs/<id>
         self.calls = []
         self.downloads = []
 
     # --- commit graph --------------------------------------------------------------------------
-    def commit(self, name, *parents):
-        sha = sha_of(name)
+    def commit(self, name, *parents, sha=None):
+        sha = sha or sha_of(name)
         self.parents[sha] = list(parents)
         return sha
 
@@ -75,8 +80,20 @@ class FakeGitHub:
             {"id": len(self.checks.get(sha, [])) + 1, "name": name, "status": status, "conclusion": conclusion})
 
     # --- releases ------------------------------------------------------------------------------
+    def add_run(self, run_id, run_number, sha, branch=BRANCH, overrides=None):
+        """The CI run that published a release: a successful push run of ci.yml on the branch, at sha."""
+        self.runs[int(run_id)] = dict({"id": int(run_id), "run_number": int(run_number), "head_sha": sha,
+                                       "head_branch": branch, "event": "push", "path": ".github/workflows/ci.yml",
+                                       "status": "completed", "conclusion": "success", "run_attempt": 1},
+                                      **(overrides or {}))
+        return self.runs[int(run_id)]
+
     def add_release(self, run_number, sha, branch=BRANCH, jar=None, corrupt_sha256=False, gate="success",
-                    info_overrides=None, target=None, members=None, omit=()):
+                    info_overrides=None, target=None, members=None, omit=(), author="github-actions[bot]", run=True,
+                    run_overrides=None, member_overrides=None):
+        """A release as CI's release job publishes it (author github-actions[bot], its run a successful push of ci.yml);
+        author, run=False (no such run) and run_overrides make the other kinds. members replaces the tarball's files,
+        member_overrides changes or adds some of them ({name: bytes})."""
         sha7 = sha[:7]
         tag = f"il-build-{run_number}-{sha7}"
         jar_bytes = json.dumps(jar if jar is not None else {"sha": sha}).encode()
@@ -91,6 +108,7 @@ class FakeGitHub:
             "openpnp-il/VERSION.txt": (tag + "\n").encode(),
             "openpnp-il/BUILD-INFO.json": info_bytes,
         }
+        files = {**files, **(member_overrides or {})}
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
             for name, data in files.items():
@@ -103,18 +121,38 @@ class FakeGitHub:
         digest = hashlib.sha256(tar_bytes).hexdigest()
         if corrupt_sha256:
             digest = hashlib.sha256(b"something else").hexdigest()
+        files = [(tar_name, tar_bytes), (tar_name + ".sha256", f"{digest}  {tar_name}\n".encode()),
+                 ("BUILD-INFO.json", info_bytes)]
+        if run:
+            self.add_run(1000 + run_number, run_number, sha, branch, run_overrides)
+        return self._publish(run_number, sha, tag, [f for f in files if f[0] not in omit], target or sha, gate, author)
+
+    def add_release_dir(self, out, gate="success"):
+        """Publish what infra/ci/make_release.py wrote into out, as CI's `gh release create "$TAG" --target "$SHA"`
+        does: the tarball, its .sha256 and BUILD-INFO.json, under the tag and sha that BUILD-INFO names."""
+        with open(os.path.join(out, "BUILD-INFO.json"), "rb") as f:
+            info_bytes = f.read()
+        info = json.loads(info_bytes)
+        tag, sha = info["version"], info["sha"]
+        tar_name = f"openpnp-il-{sha[:7]}.tar.gz"
+        files = []
+        for name in (tar_name, tar_name + ".sha256"):
+            with open(os.path.join(out, name), "rb") as f:
+                files.append((name, f.read()))
+        self.add_run(info["run_id"], info["run_number"], sha, info["branch"])
+        return self._publish(il_deploy.parse_tag(tag)[0], sha, tag, files + [("BUILD-INFO.json", info_bytes)], sha,
+                             gate)
+
+    def _publish(self, run_number, sha, tag, files, target, gate, author="github-actions[bot]"):
         assets = []
-        for i, (name, data) in enumerate([(tar_name, tar_bytes),
-                                          (tar_name + ".sha256", f"{digest}  {tar_name}\n".encode()),
-                                          ("BUILD-INFO.json", info_bytes)]):
-            if name in omit:
-                continue
+        for i, (name, data) in enumerate(files):
             aid = run_number * 10 + i
             url = f"https://github.com/{self.repo}/releases/download/{tag}/{name}"
             self.assets[url] = data
             assets.append({"id": aid, "name": name, "size": len(data), "browser_download_url": url,
                            "url": f"{API}repos/{self.repo}/releases/assets/{aid}"})
-        self.releases.insert(0, {"id": run_number, "tag_name": tag, "target_commitish": target or sha,
+        self.releases.insert(0, {"id": run_number, "tag_name": tag, "target_commitish": target,
+                                 "author": {"login": author, "type": "Bot" if author.endswith("[bot]") else "User"},
                                  "draft": False, "prerelease": True,
                                  "created_at": f"2026-10-31T12:{run_number % 60:02d}:00Z",
                                  "html_url": f"https://github.com/{self.repo}/releases/tag/{tag}", "assets": assets})
@@ -145,6 +183,11 @@ class FakeGitHub:
             if base not in self.parents or head not in self.parents:
                 raise il_deploy.GitHubError("Not Found", status=404)
             return {"status": self.compare(base, head), "base_commit": {"sha": base}}
+        m = re.fullmatch(rf"repos/{repo}/actions/runs/(\d+)", path)
+        if m:
+            if int(m.group(1)) not in self.runs:
+                raise il_deploy.GitHubError("Not Found", status=404)
+            return dict(self.runs[int(m.group(1))])
         m = re.fullmatch(rf"repos/{repo}/commits/([0-9a-f]{{40}})/check-runs\?(.*)", path)
         if m:
             sha, query = m.groups()
@@ -264,6 +307,21 @@ class Lab:
             "--stop-timeout", "5", "--poll-interval", "0.05", "--serial-wait", "1",
         ] + list(extra)
 
+    def ci_release(self, run_number, sha, jar=None):
+        """A release exactly as CI's release job makes it (infra/ci/make_release.py), into a fresh directory; the jar
+        is the fake OpenPnP's JSON (default {"sha": sha})."""
+        d = tempfile.mkdtemp(prefix=f"ci-release-{run_number}-", dir=self.dir)
+        jar_path, lib = os.path.join(d, "openpnp-gui-0.0.1-alpha-SNAPSHOT.jar"), os.path.join(d, "lib")
+        os.makedirs(lib)
+        with open(jar_path, "w") as f:
+            json.dump(jar if jar is not None else {"sha": sha}, f)
+        with open(os.path.join(lib, "dep-1.0.jar"), "wb") as f:
+            f.write(b"dependency")
+        out = os.path.join(d, "rel")
+        make_release.make(jar_path, lib, f"il-build-{run_number}-{sha[:7]}", sha, BRANCH, 1000 + run_number,
+                          run_number, f"https://github.com/{REPO}/actions/runs/{1000 + run_number}", out)
+        return out
+
     def deps(self, **kw):
         kw.setdefault("github", self.gh)
         kw.setdefault("procs", self.procs)
@@ -299,6 +357,39 @@ class Lab:
     def service(self):
         cfg = il_deploy.config_from_args(self.argv("status"))
         return il_deploy.make_service(cfg)
+
+    def start_service(self, timeout=15):
+        """Start OpenPnP (the fake) as a person would, an hour ago: wait until its API answers (a deploy over an OpenPnP
+        that is still starting is 'not idle', fail closed), then date its OpenPnP.log back an hour (a start is activity:
+        the quiet period runs from OpenPnP's last log line). Neither is what these tests are about."""
+        svc = self.service()
+        svc.start()
+        api, end = il_deploy.Api(self.port), time.monotonic() + timeout
+        while True:
+            try:
+                api.get("/api/status", timeout=2)
+                break
+            except il_deploy.ApiDown:
+                if time.monotonic() > end:
+                    raise
+                time.sleep(0.02)
+        self.age_openpnp_log()
+        return svc
+
+    def age_openpnp_log(self, seconds=3600):
+        log = os.path.join(self.config, "log", "OpenPnP.log")
+        if os.path.exists(log):
+            old = time.time() - seconds
+            os.utime(log, (old, old))
+
+    def kill_service(self):
+        """SIGKILL OpenPnP's whole process group, as the OOM killer or a JVM crash ends it: no stop, no STOP."""
+        rec = il_deploy.read_json(os.path.join(self.root, "run", "il-openpnp.json"))
+        os.killpg(rec["pid"], signal.SIGKILL)
+        svc, end = self.service(), time.monotonic() + 10
+        while svc.is_active() and time.monotonic() < end:
+            time.sleep(0.02)
+        assert not svc.is_active()
 
     def link(self, name):
         p = os.path.join(self.root, name)

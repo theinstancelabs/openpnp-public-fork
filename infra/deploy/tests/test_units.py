@@ -3,8 +3,11 @@ import contextlib
 import io
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import threading
+import time
 import unittest
 
 # il_deploy is one level up: also when unittest imports this module by bare name (no -t)
@@ -33,14 +36,16 @@ class Units(unittest.TestCase):
 
     def test_files(self):
         self.assertEqual(sorted(os.listdir(self.out)),
-                         ["il-deploy.service", "il-deploy.timer", "il-openpnp-xvfb.service", "il-openpnp.service"])
+                         ["il-deploy.service", "il-deploy.timer", "il-openpnp-xvfb.service", "il-openpnp.service",
+                          "system"])
 
     def test_openpnp_service(self):
         u = self.read("il-openpnp.service")
         root = self.lab.root
         self.assertIn(f"WorkingDirectory={root}/current\n", u)
         start = [l for l in u.splitlines() if l.startswith("ExecStart=")][0]
-        self.assertTrue(start.startswith(f"ExecStart=/usr/bin/flock -n -E 75 {self.lab.lock} /usr/bin/java "), start)
+        # -F: no fork, java is the unit's main process (KillMode=mixed sends SIGTERM to the main process only)
+        self.assertTrue(start.startswith(f"ExecStart=/usr/bin/flock -n -F -E 75 {self.lab.lock} /usr/bin/java "), start)
         for part in ("--add-opens=java.base/java.lang=ALL-UNNAMED", "--add-opens=java.desktop/java.awt=ALL-UNNAMED",
                      "--add-opens=java.desktop/java.awt.color=ALL-UNNAMED", f"-DconfigDir={root}/state/config",
                      f"-Djava.util.prefs.userRoot={root}/prefs", "-jar openpnp-il.jar"):
@@ -51,7 +56,8 @@ class Units(unittest.TestCase):
         stop = [l for l in u.splitlines() if l.startswith("ExecStop=")][0]
         self.assertIn("il_deploy.py stop-openpnp", stop)
         self.assertIn(f"--api-port {self.lab.port}", stop)
-        for line in ("KillMode=mixed", "Restart=no", "Requires=il-openpnp-xvfb.service",
+        # java's exit on SIGTERM (128 + 15) is a clean stop: only a crash leaves the unit failed (a hold)
+        for line in ("KillMode=mixed", "SuccessExitStatus=143", "Restart=no", "Requires=il-openpnp-xvfb.service",
                      "After=il-openpnp-xvfb.service"):
             self.assertIn(line + "\n", u)
         self.assertRegex(u, r"CPUWeight=\d{3,}")
@@ -66,6 +72,9 @@ class Units(unittest.TestCase):
         limit = float([l for l in u.splitlines() if l.startswith("TimeoutStopSec=")][0].split("=")[1])
         # API homes take 21-23 s and up to 5 min (RESEARCH.md §2): wait out a whole home before any STOP
         self.assertGreaterEqual(wait, 300)
+        # after the STOP, the valve and pump must be off: the engine's own abort lines wait for the move in progress,
+        # which can take the driver's longest timeout (60 s in the lab machine.xml)
+        self.assertGreaterEqual(stop_timeout, 60 + 15)
         # worst case: the wait, one slow status read (5 s), POST /api/stop (10 s), the disable wait, a margin
         self.assertGreaterEqual(limit, wait + 5 + 10 + stop_timeout + 15)
 
@@ -76,6 +85,40 @@ class Units(unittest.TestCase):
     def test_xvfb(self):
         u = self.read("il-openpnp-xvfb.service")
         self.assertIn("ExecStart=/usr/bin/Xvfb :50 -nolisten tcp", u)
+
+    def test_xvfb_is_ready_before_openpnp_starts(self):
+        """Type=simple is 'started' at the fork, before Xvfb listens; OpenPnP's first AWT call (Main: setLookAndFeel)
+        exits 1 without the X socket, and a good build would go on the bad list. The unit is active only after
+        ExecStartPost, and il-openpnp is After= it."""
+        post = [l for l in self.read("il-openpnp-xvfb.service").splitlines() if l.startswith("ExecStartPost=")]
+        self.assertEqual(len(post), 1, post)
+        self.assertIn("il_deploy.py wait-display --display :50", post[0])
+
+    def test_user_manager_drop_in(self):
+        """Ubuntu's user@.service.d/timeout.conf gives the whole user manager 5 s at shutdown: rendered here is the
+        system drop-in (installed by root, by hand) that lets the units' own stop budgets run, one after the other."""
+        uid = os.getuid()
+        path = os.path.join(self.out, "system", f"user@{uid}.service.d", "zz-il-deploy-stop-timeout.conf")
+        with open(path) as f:
+            text = f.read()
+        self.assertIn("[Service]\n", text)
+        budget = il_deploy.parse_timespan(text.split("TimeoutStopSec=")[1].split()[0])
+
+        def stop_s(name):
+            return il_deploy.parse_timespan([l for l in self.read(name).splitlines()
+                                             if l.startswith("TimeoutStopSec=")][0].split("=")[1])
+        self.assertGreaterEqual(budget, stop_s("il-deploy.service") + stop_s("il-openpnp.service"))
+        self.assertGreaterEqual(budget, il_deploy.USER_MANAGER_STOP_S)
+        self.assertFalse(any(n.startswith("zz-") for n in os.listdir(self.out)), "never copied with the user units")
+
+    def test_timespans(self):
+        for text, s in (("5s", 5), ("17min", 1020), ("1min 30s", 90), ("500ms", 0.5), ("1h", 3600), ("2min 1s", 121),
+                        ("360", 360), ("infinity", float("inf"))):
+            with self.subTest(text=text):
+                self.assertEqual(il_deploy.parse_timespan(text), s)
+        for text in ("", "soon", "5 parsecs", "5 s 3", "-5s"):
+            with self.subTest(text=text):
+                self.assertIsNone(il_deploy.parse_timespan(text))
 
     def test_deploy_service_and_timer(self):
         s = self.read("il-deploy.service")
@@ -102,7 +145,7 @@ class Units(unittest.TestCase):
     @unittest.skipUnless(shutil.which("systemd-analyze"), "systemd-analyze not installed")
     def test_systemd_analyze_verify(self):
         os.makedirs(os.path.join(self.lab.root, "current"), exist_ok=True)
-        files = [os.path.join(self.out, n) for n in sorted(os.listdir(self.out))]
+        files = [os.path.join(self.out, n) for n in sorted(os.listdir(self.out)) if n.startswith("il-")]
         p = subprocess.run(["systemd-analyze", "--user", "verify"] + files, capture_output=True, text=True,
                            cwd=self.out, timeout=60)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
@@ -111,3 +154,37 @@ class Units(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaitDisplay(unittest.TestCase):
+    """wait-display: the Xvfb unit's ExecStartPost waits for the X socket."""
+
+    def setUp(self):
+        self.lab = Lab()
+        self.x11 = os.path.join(self.lab.dir, "x11")
+        os.makedirs(self.x11)
+
+    def tearDown(self):
+        self.lab.cleanup()
+
+    def run_wait(self, timeout):
+        return self.lab.main("wait-display", "--display", ":57", "--timeout", str(timeout), "--x11-dir", self.x11)
+
+    def test_returns_when_the_socket_appears(self):
+        def listen():
+            time.sleep(0.4)
+            s = socket.socket(socket.AF_UNIX)
+            s.bind(os.path.join(self.x11, "X57"))
+            self.addCleanup(s.close)
+        t = threading.Thread(target=listen)
+        t.start()
+        start = time.monotonic()
+        self.assertEqual(self.run_wait(10), 0, self.lab.last_out)
+        t.join()
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_fails_when_it_never_appears(self):
+        start = time.monotonic()
+        self.assertEqual(self.run_wait(0.5), 1)
+        self.assertGreaterEqual(time.monotonic() - start, 0.5)
+        self.assertIn("X57", self.lab.last_out)

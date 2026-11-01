@@ -29,7 +29,7 @@ class Inf02Acceptance(unittest.TestCase):
         a = lab.gh.add_release(41, lab.b, jar={"sha": lab.b})
         self.assertEqual(lab.main("run"), 0, lab.last_out + lab.last_err)
         self.assertEqual(lab.link("current"), a)
-        lab.service().start()
+        lab.start_service()
 
         b = lab.gh.add_release(42, lab.c, jar={"sha": lab.c, "schema": 4})
         self.assertEqual(lab.main("run"), 0, lab.last_out + lab.last_err)
