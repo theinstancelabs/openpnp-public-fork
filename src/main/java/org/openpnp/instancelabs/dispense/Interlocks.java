@@ -42,8 +42,13 @@ public final class Interlocks {
         public double estimatedPressurisedSeconds;
         /** Top camera + dot vision present (I10 clean-pad check). */
         public boolean opticalCheckAvailable;
-        /** When OpenPnP last connected to the controller (epoch ms; I11), or null if unknown. */
-        public Long controllerConnectedAtMs;
+        /**
+         * When the B step count last restarted or may have (epoch ms; I11): a detected controller reset or a connect
+         * whose position could not be read (BR-02); null if neither was seen. A reconnect keeps the count.
+         */
+        public Long controllerResetAtMs;
+        /** BR-02: why the head's position is unknown (a controller reset not homed since), or null when known. */
+        public String positionUnknownWhy;
         /**
          * Purge-row spots this run lays (I9): the initial purge and the switch spots of every further
          * dose block ({@link DoseBlocks#purgeSpotsNeeded}); and whether it is a board run (I9, I10, I11
@@ -459,7 +464,11 @@ public final class Interlocks {
         if (!in.machineEnabled) {
             r.add("MACHINE", "machine is not enabled");
         }
-        if (!in.machineHomed) {
+        if (in.positionUnknownWhy != null) {
+            // BR-02: no task homes by itself after a reset: the home needs the operator's word that nothing is below
+            r.add("MACHINE", in.positionUnknownWhy + ": " + POSITION_UNKNOWN_REMEDY);
+        }
+        else if (!in.machineHomed) {
             if (in.homeFirst) {
                 r.notes.add("MACHINE: not homed: homes first");
             }
@@ -468,6 +477,10 @@ public final class Interlocks {
             }
         }
     }
+
+    /** What to do when the position is unknown (BR-02). */
+    public static final String POSITION_UNKNOWN_REMEDY = "home first (Home), after checking that nothing is under "
+            + "either tool";
 
     /** I9 refusal: a plan of several doses names the spots each switch takes. */
     private static String i9Text(Inputs in, List<DoseBlocks.Run> blocks, int left) {
@@ -649,10 +662,10 @@ public final class Interlocks {
             if (prof.startAngleSetAtMs == null) {
                 r.add("I11", "the screw start angle has never been set: set or confirm it (Profiles)");
             }
-            else if (in.controllerConnectedAtMs != null && prof.startAngleSetAtMs < in.controllerConnectedAtMs) {
-                r.add("I11", "the controller (re)connected after the screw start angle was set; the B step count "
-                        + "restarts at power-up, so the angle may be lost: confirm it if the controller was not "
-                        + "power-cycled, otherwise measure it again (Profiles)");
+            else if (in.controllerResetAtMs != null && prof.startAngleSetAtMs < in.controllerResetAtMs) {
+                r.add("I11", "the controller was reset (or its position could not be read at a connect) after the "
+                        + "screw start angle was set; the B step count restarts at power-up, so the angle may be "
+                        + "lost: measure it again, or confirm it if the controller was not switched off (Profiles)");
             }
         }
         checkFeed(in, r);

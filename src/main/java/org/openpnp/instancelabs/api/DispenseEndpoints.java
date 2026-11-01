@@ -176,7 +176,7 @@ final class DispenseEndpoints {
         needle.putAll(landingStatus(svc, cfg));
         d.put("needle", needle);
         d.put("tip", tipStatus(svc, cfg));
-        d.put("profile", Views.profile(cfg, svc.getControllerConnectedAtMs()));
+        d.put("profile", Views.profile(cfg, svc.getControllerConnectedAtMs(), svc.getControllerResetAtMs()));
         d.put("purgeRow", Views.purgeRow(cfg));
         d.put("cleanPadCheck", cfg.cleanPadCheck);
         Map<String, Object> surf = new LinkedHashMap<>();
@@ -346,6 +346,7 @@ final class DispenseEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         ApiContext.refuseUnlessOk(ctx.preflight(svc, scope), what);
     }
 
@@ -1127,6 +1128,7 @@ final class DispenseEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         PlanStore.Entry e = requirePlan(Json.str(b, "planId", null));
         DispenseConfig cfg = svc.getConfig();
         DispensePlan full = e.plan;
@@ -1196,6 +1198,7 @@ final class DispenseEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         PlanStore.Entry e = requirePlan(r.group(1));
         ctx.tracker.expect("clean-pad check");
         Future<PadCleanReport> f = svc.checkCleanPads(e.plan);
@@ -1219,7 +1222,8 @@ final class DispenseEndpoints {
             throw ApiException.badRequest("startAngleDeg must be 0 to < 360");
         }
         svc.setStartAngle(a, Json.str(b, "note", null));
-        return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs());
+        return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs(),
+                svc.getControllerResetAtMs());
     }
 
     Object purgeReset() throws Exception {

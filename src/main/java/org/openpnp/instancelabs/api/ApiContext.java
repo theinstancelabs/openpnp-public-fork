@@ -123,6 +123,17 @@ final class ApiContext {
     }
 
     /**
+     * BR-02: after a controller reset nothing moves until a home (the home route itself asks for the operator's word
+     * that nothing is below). The engine's interlocks refuse too; this answers before anything else is checked.
+     */
+    void requirePositionKnown(DispenseService s) throws ApiException {
+        String why = s == null ? null : s.positionUnknownWhy();
+        if (why != null) {
+            throw ApiException.refused("MACHINE: " + why + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
+        }
+    }
+
+    /**
      * The engine's pre-flight interlocks for a run without a board plan (no plan rules, no I9),
      * with the run's I4 scope. The engine re-checks, with the exact dots, when it runs.
      */

@@ -75,7 +75,12 @@ final class Views {
      * in deg/min, start angles) and whether the start angle is valid for the current controller
      * connection (I11).
      */
-    static Map<String, Object> profile(DispenseConfig c, Long controllerConnectedAtMs) {
+    /**
+     * @param controllerConnectedAtMs when OpenPnP last connected (shown)
+     * @param controllerResetAtMs when the B step count last restarted or may have (BR-02): the start angle older than
+     *        it needs confirming
+     */
+    static Map<String, Object> profile(DispenseConfig c, Long controllerConnectedAtMs, Long controllerResetAtMs) {
         DispenseProfile p = c.profile;
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", p.name);
@@ -100,9 +105,10 @@ final class Views {
         m.put("partialTurn", p.isPartialTurn(c));
         m.put("startAngles", p.isPartialTurn(c) ? p.startAngles(c) : null);
         boolean stale = p.isPartialTurn(c) && (p.startAngleSetAtMs == null
-                || (controllerConnectedAtMs != null && p.startAngleSetAtMs < controllerConnectedAtMs));
+                || (controllerResetAtMs != null && p.startAngleSetAtMs < controllerResetAtMs));
         m.put("startAngleNeedsConfirm", stale);
         m.put("controllerConnectedAtMs", controllerConnectedAtMs);
+        m.put("controllerResetAtMs", controllerResetAtMs);
         m.put("fingerprint", p.fingerprint());
         List<String> problems = p.validate(c);
         m.put("problems", problems);

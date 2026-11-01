@@ -19,6 +19,7 @@ import java.util.concurrent.TimeoutException;
 import javax.imageio.ImageIO;
 
 import org.openpnp.instancelabs.dispense.ControllerCommands;
+import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeReport;
@@ -194,6 +195,15 @@ final class MachineEndpoints {
         // OpenPnP homing or jogging by itself: a home queued behind a task of its own that fails is dropped (rc1 review)
         ctx.requireMachineIdle();
         boolean wait = Json.bool(r.json(), "wait", false);
+        // BR-02: after a controller reset the home is G28 straight away, only on the operator's word that nothing is
+        // under either tool (the engine checks again on the machine thread)
+        boolean attested = Json.bool(r.json(), "clearBelowAttested", false);
+        String unknown = svc == null ? null : svc.positionUnknownWhy();
+        if (unknown != null && !attested) {
+            throw ApiException.refused(unknown + ". Check that nothing is under either tool (N1 or the needle), then "
+                    + "home again saying so (clearBelowAttested): the home is then G28 straight away, nothing moves "
+                    + "before it.");
+        }
         // With the engine: N1 raised first when a STOP left it low, and a STOP during the home stops the
         // head for good (the drivers are disconnected), as the engine's own homes (§2.3).
         boolean safe = svc != null && svc.isAvailable();
@@ -213,7 +223,7 @@ final class MachineEndpoints {
                     throw new Exception("the machine is not started: press Start first");
                 }
                 if (safe) {
-                    return svc.homeSafely();
+                    return svc.homeSafely(attested);
                 }
                 m.home();
                 return null;
@@ -274,6 +284,12 @@ final class MachineEndpoints {
         s.put("busy", m.isBusy());
         DispenseService svc = ctx.svcOrNull();
         if (svc != null) {
+            // BR-02: a controller reset seen at a connect; nothing moves until a home the operator confirmed
+            ControllerReset cr = svc.getControllerReset();
+            s.put("positionKnown", cr.isPositionKnown());
+            s.put("positionUnknownWhy", cr.unknownWhy());
+            s.put("powerCycle", Views.map("detected", cr.isDetected(), "atMs", cr.detectedAtMs(), "reported",
+                    cr.reported()));
             Map<String, Object> home = Views.home(svc.homePlan());
             double[] n1 = svc.probeNozzleZ();
             home.put("n1Z", n1 == null ? null : n1[0]);

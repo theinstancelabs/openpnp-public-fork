@@ -963,6 +963,7 @@ final class PadCalibrationJob {
             ctx.requireEngineIdle(svc);
             ctx.requireNoPressureHold();
             ctx.requireMachineIdle();
+            ctx.requirePositionKnown(svc);
         }
         catch (ApiException e) {
             return e.getMessage();
@@ -1837,7 +1838,7 @@ final class PadCalibrationJob {
     }
 
     private DoseRecord.Epochs epochs() {
-        return new DoseRecord.Epochs(svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed());
+        return new DoseRecord.Epochs(svc.getControllerResetAtMs(), svc.isSimulatorConfirmed());
     }
 
     /**
@@ -2076,7 +2077,7 @@ final class PadCalibrationJob {
     }
 
     private static String staleAsMass(DoseRecord coupon, long now, DispenseConfig c, DispenseService svc) {
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed());
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerResetAtMs(), svc.isSimulatorConfirmed());
         if (DispenseService.weighable(coupon, now, c, ep)) {
             return null;
         }
@@ -2110,7 +2111,7 @@ final class PadCalibrationJob {
         m.mgSe = Math.sqrt(2) * ManualBalance.RESOLUTION_MG / coupon.n;
         long now = System.currentTimeMillis();
         m.weighDelayS = (int) Math.max(0, (now - coupon.createdAtMs) / 1000);
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed());
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerResetAtMs(), svc.isSimulatorConfirmed());
         Long by = null;
         for (DoseRecord r : db.doseRecords(null, now - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3))) {
             if (r.hasReading() && r.isFresh(now, c, ep) && r.mgPerStep != null

@@ -68,13 +68,16 @@ public class DoseRecord {
 
     /** What the record is checked against that is not in the configuration. */
     public static final class Epochs {
-        /** The controller's last connect (the B step count restarts at power-up); null = unknown. */
-        public final Long controllerConnectedAtMs;
+        /**
+         * When the B step count last restarted or may have (BR-02: a detected controller reset or a connect whose
+         * position could not be read); null = none seen. A reconnect of a powered controller keeps the count.
+         */
+        public final Long controllerResetAtMs;
         /** {@code SimGuard.isSimulated} now: SIM records never count on the machine and the other way round. */
         public final boolean simulated;
 
-        public Epochs(Long controllerConnectedAtMs, boolean simulated) {
-            this.controllerConnectedAtMs = controllerConnectedAtMs;
+        public Epochs(Long controllerResetAtMs, boolean simulated) {
+            this.controllerResetAtMs = controllerResetAtMs;
             this.simulated = simulated;
         }
     }
@@ -140,8 +143,8 @@ public class DoseRecord {
                     (nowMs - at) / 3600e3);
         }
         if (!MASS.equals(kind) && isPartialTurn(cfg.bStepsPerRev)) {
-            if (epochs.controllerConnectedAtMs != null && at < epochs.controllerConnectedAtMs) {
-                return "made before the controller last connected: the screw angle may have moved";
+            if (epochs.controllerResetAtMs != null && at < epochs.controllerResetAtMs) {
+                return "made before the controller was last reset: the screw angle may have moved";
             }
             Long set = cfg.profile.startAngleSetAtMs;
             if (set == null) {

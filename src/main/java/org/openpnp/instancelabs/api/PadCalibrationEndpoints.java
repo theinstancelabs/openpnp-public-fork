@@ -473,7 +473,7 @@ final class PadCalibrationEndpoints {
         boolean freshOnly = "true".equals(r.query("freshOnly", "false"));
         int limit = r.queryInt("limit", 200, 1, 2000);
         long now = System.currentTimeMillis();
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed());
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerResetAtMs(), svc.isSimulatorConfirmed());
         List<DoseRecord> all = svc.getDb().doseRecords(steps, 0);
         Collections.reverse(all);
         List<Map<String, Object>> out = new ArrayList<>();
@@ -504,7 +504,7 @@ final class PadCalibrationEndpoints {
         DispenseConfig c = svc.getConfig();
         long now = System.currentTimeMillis();
         long age = (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3);
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed());
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerResetAtMs(), svc.isSimulatorConfirmed());
         try {
             Tip tip = PadCalibrationJob.mountedTip(svc);
             for (DoseRecord d : svc.getDb().pendingCoupons(now - age)) {
@@ -562,7 +562,7 @@ final class PadCalibrationEndpoints {
                 null);
         DispenseConfig c = svc.getConfig();
         long now = System.currentTimeMillis();
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed());
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(svc.getControllerResetAtMs(), svc.isSimulatorConfirmed());
         boolean confirmed = DoseRecords.evidence(svc.getDb().doseRecords(null, now - (long) (c.padCalibration
                 .doseRecordMaxAgeH * 3600e3)), c, ep, now, svc.getDb().flaggedJobs()).get(m.steps).massConfirmed;
         return Views.map("record", Views.map("id", m.id, "place", m.couponPlace, "steps", m.steps, "totalMg", m.totalMg,

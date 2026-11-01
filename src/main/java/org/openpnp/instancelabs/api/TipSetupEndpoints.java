@@ -472,6 +472,7 @@ final class TipSetupEndpoints {
             throw ApiException.refused("Switch the pressure off first: the head moves to the bottom camera.");
         }
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         DispenseConfig cfg = svc.getConfig();
         if (!s.key.equals(cfg.tip.key)) {
             throw ApiException.refused("Only the mounted tip can be photographed: mount the " + s.name + " first.");

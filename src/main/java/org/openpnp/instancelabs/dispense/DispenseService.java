@@ -142,6 +142,8 @@ public final class DispenseService {
     private volatile Boolean connectionSimulated;
     /** Connects, disables and homes: whether a task must home first, and Z data older than the last home. */
     private final HomeTracker homeTracker;
+    /** BR-02: a controller reset seen at a connect; the position is unknown until a home. */
+    private final ControllerReset controllerReset;
     /** The last good open-air N1 baseline (the probe's part-on-N1 check across tasks). */
     private final VacuumProber.BaselineMemory baselineMemory = new VacuumProber.BaselineMemory();
     /** The API's manual pressure hold: engine tasks refuse to start while it is on (machine thread). */
@@ -272,17 +274,23 @@ public final class DispenseService {
         }
         Machine machine = configuration.getMachine();
         homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
+        controllerReset = new ControllerReset(null, machine != null && machine.isEnabled(),
+                machine != null && machine.isHomed());
         if (machine != null) {
             machine.addListener(homeTracker);
             machineListener = new MachineListener.Adapter() {
                 @Override
                 public void machineHomed(Machine m, boolean isHomed) {
                     bZeroed.set(false);
+                    if (isHomed && m.isEnabled()) {
+                        controllerReset.homed();
+                    }
                 }
 
                 @Override
                 public void machineEnabled(Machine m) {
                     bZeroed.set(false);
+                    readPositionAtConnect(m);
                 }
 
                 @Override
@@ -365,6 +373,35 @@ public final class DispenseService {
             }
         };
         machine.addListener(identityListener);
+    }
+
+    /**
+     * BR-02: right after a connect, before anything can move (machine listeners run on the machine thread, inside the
+     * enable), reads the controller's position once: the boot position means it was reset.
+     */
+    private void readPositionAtConnect(Machine machine) {
+        List<String> m114 = null;
+        String error = null;
+        char letterB = 'B'; // the mapper's letter once it is resolved
+        try {
+            if (!(machine instanceof ReferenceMachine) || nozzle == null) {
+                error = unavailableReason != null ? unavailableReason : "no dispenser nozzle";
+            }
+            else {
+                OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
+                letterB = mapper.letterB().charAt(0);
+                m114 = new DriverGcodeChannel(mapper.getDriver()).sendAndCollect("M114", cfg.commandTimeoutMs);
+            }
+        }
+        catch (Exception e) {
+            error = String.valueOf(e.getMessage());
+        }
+        controllerReset.connected(m114, letterB, error);
+        String why = controllerReset.unknownWhy();
+        if (why != null) {
+            Logger.warn("dispense: {}", why);
+            db.event(null, "WARN", "MACHINE", why);
+        }
     }
 
     /** The controller's M115 answer on the current connection. */
@@ -688,6 +725,25 @@ public final class DispenseService {
         return homeTracker.getConnectedAtMs();
     }
 
+    /**
+     * When the B step count last restarted or may have (BR-02: a detected controller reset, or a connect whose
+     * position could not be read), or null: the screw start angle (I11) and partial-turn records are checked
+     * against it. A reconnect of a powered controller keeps the count.
+     */
+    public Long getControllerResetAtMs() {
+        return controllerReset.countEpochMs();
+    }
+
+    /** BR-02: the controller reset state (position known, the last detected reset and what it reported). */
+    public ControllerReset getControllerReset() {
+        return controllerReset;
+    }
+
+    /** BR-02: why the head's position is unknown (a controller reset not homed since), or null when it is known. */
+    public String positionUnknownWhy() {
+        return controllerReset.unknownWhy();
+    }
+
     public synchronized void setLocation(String name, double x, double y, double z) throws IOException {
         setLocation(name, x, y, z, null);
     }
@@ -733,7 +789,7 @@ public final class DispenseService {
         writeConfig(c); // a fact: never refused, so never held back by a check of other settings
         lastChange = new Long[] {token, before.needleChangedAtMs};
         String at = ZCheck.clock(token);
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerConnectedAtMs(), isSimulatorConfirmed());
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerResetAtMs(), isSimulatorConfirmed());
         List<DoseRecord> pending = new ArrayList<>();
         try {
             pending = db.pendingCoupons(now - (long) (before.padCalibration.doseRecordMaxAgeH * 3600e3));
@@ -1786,7 +1842,7 @@ public final class DispenseService {
                     + (operator == null ? "you" : operator)));
         }
         else {
-            DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerConnectedAtMs(), isSimulatorConfirmed());
+            DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerResetAtMs(), isSimulatorConfirmed());
             List<DoseRecord> fresh = DoseRecords.fresh(db.doseRecords(null, now - (long) (c.padCalibration
                     .doseRecordMaxAgeH * 3600e3)), c, ep, now, db.flaggedJobs());
             int steps = stored.dotSteps != null ? stored.dotSteps : c.profile.netStepsPerDot;
@@ -1962,7 +2018,7 @@ public final class DispenseService {
         }
         DispenseConfig c = cfg;
         long now = System.currentTimeMillis();
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerConnectedAtMs(), isSimulatorConfirmed());
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerResetAtMs(), isSimulatorConfirmed());
         for (DoseRecord coupon : db.pendingCoupons(now - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3))) {
             if (coupon.jobId != null && jobs.contains(coupon.jobId)) {
                 skipCoupon(coupon, "the calibration was made with another tip", operator, coupon.jobId);
@@ -2292,7 +2348,8 @@ public final class DispenseService {
         in.estimatedPressurisedSeconds = est;
         in.opticalCheckAvailable = imager() != null && imager().isAvailable();
         in.scope = scope == null ? new Interlocks.Scope() : scope;
-        in.controllerConnectedAtMs = homeTracker.getConnectedAtMs();
+        in.controllerResetAtMs = controllerReset.countEpochMs();
+        in.positionUnknownWhy = controllerReset.unknownWhy();
         in.boardRun = plan != null;
         in.purgeDots = plan == null ? 0 : DoseBlocks.purgeSpotsNeeded(plan, c);
         in.homeFirst = homeFirst;
@@ -3055,9 +3112,12 @@ public final class DispenseService {
 
     /**
      * POST /api/machine/home: {@link #homeSafely(DispenseExecutor, OpenPnpRawMapper, BooleanSupplier,
-     * HomeReport, RunResult)} on the machine thread, with an executor of its own that STOP aborts.
+     * HomeReport, RunResult, boolean)} on the machine thread, with an executor of its own that STOP aborts.
+     *
+     * @param clearBelowAttested the operator says nothing is under either tool: needed after a controller reset
+     *        (BR-02), when the home is G28 straight away
      */
-    public HomeReport homeSafely() throws Exception {
+    public HomeReport homeSafely(boolean clearBelowAttested) throws Exception {
         requireAvailable();
         ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
         DispenseConfig c = cfg;
@@ -3068,7 +3128,7 @@ public final class DispenseService {
         activeExecutor = exec;
         try {
             long t0 = System.currentTimeMillis();
-            homeSafely(exec, mapper, exec::isAbortRequested, rep, null);
+            homeSafely(exec, mapper, exec::isAbortRequested, rep, null, clearBelowAttested);
             rep.done = true;
             rep.seconds = (System.currentTimeMillis() - t0) / 1000.0;
         }
@@ -3086,12 +3146,27 @@ public final class DispenseService {
      * home, during which a disable disconnects every driver, so visual homing and the park cannot move
      * the head after a STOP. A STOP (or a disable) during the home un-homes and ends ABORTED. {@code r}
      * is the task's run (its phase, lines and warnings), null for the API's home.
+     *
+     * <p>After a controller reset (BR-02) the position the controller reports is only what it believes at boot:
+     * nothing moves on it. The home is then refused unless {@code clearBelowAttested} (the operator says nothing is
+     * under either tool), and G28 is its first motion line, with no raise before it.</p>
      */
     private void homeSafely(DispenseExecutor exec, OpenPnpRawMapper dispenser, BooleanSupplier aborted, HomeReport rep,
-            RunResult r) throws Exception {
+            RunResult r, boolean clearBelowAttested) throws Exception {
         ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
         DispenseConfig c = cfg;
-        Nozzle n = getProbeNozzle();
+        String unknown = controllerReset.unknownWhy();
+        if (unknown != null && !clearBelowAttested) {
+            throw refused("MACHINE: " + unknown + ". Check that nothing is under either tool (N1 or the needle), then "
+                    + "home saying so: the home is then G28 straight away, nothing moves before it.");
+        }
+        Nozzle n = unknown != null ? null : getProbeNozzle();
+        if (unknown != null) {
+            Logger.info("homing after a controller reset, the operator said nothing is below: G28 first ({})", unknown);
+            if (r != null) {
+                phase(r, "home: the controller was reset · G28 first");
+            }
+        }
         if (n != null) {
             OpenPnpRawMapper n1 = OpenPnpRawMapper.forProbeNozzle(m, n, c.bAxisName);
             double[] pos = new double[3];
@@ -3192,7 +3267,8 @@ public final class DispenseService {
         }
         phase(s.r, "home: " + hp.why);
         long t0 = System.currentTimeMillis();
-        homeSafely(s.exec, s.mapper, aborted, rep, s.r);
+        // a task never homes by itself after a controller reset (BR-02): refused inside, with the reason
+        homeSafely(s.exec, s.mapper, aborted, rep, s.r, false);
         rep.done = true;
         rep.seconds = (System.currentTimeMillis() - t0) / 1000.0;
     }
@@ -4218,7 +4294,7 @@ public final class DispenseService {
         DispenseConfig c = cfg;
         long now = System.currentTimeMillis();
         try {
-            DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerConnectedAtMs(), isSimulatorConfirmed());
+            DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerResetAtMs(), isSimulatorConfirmed());
             for (DoseRecord r : db.pendingCoupons(now - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3))) {
                 if (place.equals(r.couponPlace) && weighable(r, now, c, ep)) {
                     return String.format(Locale.ROOT, "%s carries %d dots waiting to be weighed: type the readings or "
@@ -5054,7 +5130,7 @@ public final class DispenseService {
         long now = System.currentTimeMillis();
         org.openpnp.instancelabs.padprofile.DoseEvidence e = DoseRecords.evidence(db.doseRecords(null, now
                 - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3)), c, new DoseRecord.Epochs(
-                        getControllerConnectedAtMs(), isSimulatorConfirmed()), now, db.flaggedJobs()).get(steps);
+                        getControllerResetAtMs(), isSimulatorConfirmed()), now, db.flaggedJobs()).get(steps);
         boolean optical = e != null && e.opticalFresh && e.opticalPass;
         boolean mass = e != null && e.massConfirmed;
         if (!optical || !mass) {
