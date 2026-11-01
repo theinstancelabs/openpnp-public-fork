@@ -20,6 +20,8 @@ Runs on every pull request, on pushes to `il/integration`, and by hand (workflow
 | build | `mvn -DskipTests package` (checkstyle runs at validate); the jar + lib become the artifact every later job tests | 3 min |
 | infra | `python3 -m unittest discover -s infra/<x>/tests -t infra/<x>` for every component here | 1 min |
 | maven | `mvn test`: unit tests and the simulated-machine integration tests (in-JVM GcodeServer, `*SimTest`) | 13 min |
+| deploy-e2e | `infra/deploy/e2e`: two releases in CI's format deployed and rolled back on the real jar against lumen-sim (no uinav) | 4 min |
+| controller-e2e | `infra/lumen-sim/e2e`: OpenPnP on lumen-sim's pty: home, STOP in G28, the 30-turn prime timeout | 6 min |
 | ui-e2e | `src/test/web/run-webui-sim-test.sh`: webui-sim, board-import, pad-profile, tip-setups in one SIM session | 55 min |
 | ui-boardview | `src/test/web/run-boardview-test.sh` | 5 min |
 | acceptance ×4 | `src/test/sim/il_sim_acceptance.py`, sharded; `ci/acceptance.py` fails the job unless every check passed (the script itself always exits 0) | 15 min each |

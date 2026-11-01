@@ -87,6 +87,69 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  deploy-e2e:
+    name: Deploy dry run (real OpenPnP + lumen-sim, deploy and rollback)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/download-artifact@v8
+        with:
+          name: openpnp-build
+          path: target
+      - name: Xvfb
+        run: command -v Xvfb >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q xvfb; }
+      - name: infra/deploy/e2e
+        # INF-02's CI acceptance on the real backend: two releases in CI's format, deploy + health check (enable,
+        # home, stop) against lumen-sim on a pty, a second deploy over a running OpenPnP, a rollback, and a deploy
+        # after a controller power cycle that must hold without homing. Skipping counts as a failure here.
+        env:
+          IL_DEPLOY_E2E: '1'
+          IL_DEPLOY_E2E_LIB: target/lib
+        run: IL_DEPLOY_E2E_JAR="$JAR" IL_DEPLOY_E2E_OUT="$RUNNER_TEMP/deploy-e2e" python3 infra/deploy/e2e/test_deploy_openpnp.py -v
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: deploy-e2e
+          path: ${{ runner.temp }}/deploy-e2e/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  controller-e2e:
+    name: Simulated controller behind OpenPnP (home, STOP in G28, long prime)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/sim-env
+        with:
+          uinav-token: ${{ secrets.UINAV_TOKEN }}
+          uinav-ssh-key: ${{ secrets.UINAV_DEPLOY_KEY }}
+          playwright: 'false'
+      - name: infra/lumen-sim/e2e
+        # INF-03's acceptance through the real backend: OpenPnP on lumen-sim's pty (uinav --controller pty) homes,
+        # a STOP 4 s into a home reproduces the M410 timeout and the halted controller, and a 30-turn prime at
+        # 180 rpm reproduces "timeout waiting for response to G4 P250".
+        env:
+          LUMEN_SIM_E2E: '1'
+        run: LUMEN_SIM_E2E_JAR="$JAR" LUMEN_SIM_E2E_OUT="$RUNNER_TEMP/controller-e2e" python3 infra/lumen-sim/e2e/test_openpnp_pty.py -v
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: controller-e2e
+          path: |
+            ${{ runner.temp }}/controller-e2e/
+            /tmp/openpnp-uinav-*/*/*.log
+            /tmp/openpnp-uinav-*/*/openpnp.out
+          if-no-files-found: ignore
+          retention-days: 14
+
   ui-e2e:
     name: UI end-to-end (webui-sim, board-import, pad-profile, tip-setups)
     needs: build
@@ -182,7 +245,7 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [build, infra, maven, ui-e2e, ui-boardview, acceptance]
+    needs: [build, infra, maven, deploy-e2e, controller-e2e, ui-e2e, ui-boardview, acceptance]
     runs-on: ubuntu-latest
     steps:
       - name: Every job passed
