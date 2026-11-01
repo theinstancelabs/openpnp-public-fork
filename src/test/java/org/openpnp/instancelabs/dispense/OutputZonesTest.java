@@ -44,6 +44,16 @@ public class OutputZonesTest {
     }
 
     @Test
+    public void aCouponIsAllowedOverItsWholeRectangle() {
+        DispenseConfig c = config();
+        c.locations.put("coupon1", new DispenseConfig.NamedLocation(330, 50, 5.6)); // a 40 x 30 coupon
+        OutputZones z = OutputZones.of(c, CAMERA);
+        assertNull(z.refusal(345, 60), "a weigh dot near the coupon's corner");
+        assertEquals("coupon coupon1", z.zoneAt(345, 60));
+        assertNotNull(z.refusal(355, 70), "beyond the coupon");
+    }
+
+    @Test
     public void theBottomCameraIsForbiddenWhateverCoversIt() {
         OutputZones z = OutputZones.of(config(), CAMERA);
         String why = z.refusal(205, 32);

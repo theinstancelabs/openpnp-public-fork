@@ -7,8 +7,8 @@ import java.util.Map;
 
 /**
  * BR-03: where the valve and the screw may switch on, in the needle's (N2) machine X/Y. Allowed: every place (waste,
- * towel, park, cup, coupons, ...: a circle of {@code placeRadiusMm}), the purge row, the calibration area and every
- * probed surface (its points' box; engine-probed patches, the blank, the boards of plans), each with
+ * towel, park, cup, ...: a circle of {@code placeRadiusMm}), each coupon's rectangle, the purge row, the calibration
+ * area and every probed surface (its points' box; engine-probed patches, the blank, the boards of plans), each with
  * {@code surfaceMarginMm}. Forbidden, whatever else covers it: the bottom camera (a circle of {@code forbidRadiusMm})
  * and the configured circles. With the valve on the needle never crosses a forbidden zone.
  */
@@ -80,6 +80,14 @@ public final class OutputZones {
         for (Map.Entry<String, DispenseConfig.NamedLocation> e : c.locations.entrySet()) {
             if (e.getValue() != null) {
                 z.allow.add(Zone.circle(e.getKey(), e.getValue().x, e.getValue().y, s.placeRadiusMm));
+            }
+        }
+        if (c.padCalibration != null && c.padCalibration.couponPlaces != null) {
+            for (String place : c.padCalibration.couponPlaces) {
+                double[] r = place == null ? null : c.padCalibration.couponRect(c, place);
+                if (r != null) {
+                    z.allow.add(Zone.box("coupon " + place, r[0], r[1], r[2], r[3], s.surfaceMarginMm));
+                }
             }
         }
         DispenseConfig.PurgeRow row = c.purgeRow;
