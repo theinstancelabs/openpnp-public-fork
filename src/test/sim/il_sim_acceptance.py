@@ -555,7 +555,9 @@ def scenario_stop_one(a, what, how):
         setup_machine(s)
         if what == "hold":
             n0 = s.mark()
-            res["start"] = s.api("POST", "/api/pressure/start")
+            # BR-03: the valve opens only over a place where paste may go: park over the first purge spot first
+            res["start"] = s.api("POST", "/api/pressure/start",
+                                 {"park": {"x": PURGE_ROW["x0Mm"], "y": PURGE_ROW["y0Mm"]}})
             s.wait_status(lambda x: (x.get("pressure") or {}).get("on"), 30, "pressure on")
             time.sleep(1.5)  # held: keepalive/I7 timers running
             res["before_press"] = s.sent_since(n0)
