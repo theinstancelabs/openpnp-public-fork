@@ -77,6 +77,21 @@ final class PressureHold implements DispenseListener {
     private volatile String lastEvent = "pressure off";
     private volatile long lastEventAtMs = System.currentTimeMillis();
     private volatile String lastError;
+    /** BR-03: the current session switches the pump only (no valve line). */
+    private volatile boolean pumpOnly;
+
+    /**
+     * BR-03: how the pressure goes on. {@code pumpOnly}: the pump only, never a valve line (allowed anywhere: the
+     * gauge reads the regulator). Otherwise a hold (pump, then valve), only with the needle over an allowed output
+     * zone: {@code park} moves it there first (at travel height), else it must already be in one. {@code durationS}
+     * shortens the I7 auto-off.
+     */
+    static final class Options {
+        boolean pumpOnly;
+        double[] park;
+        String parkName;
+        Double durationS;
+    }
     private DispenseConfig cfg;
     private GcodeChannel channel;
     private ScheduledFuture<?> autoOff;
@@ -119,6 +134,10 @@ final class PressureHold implements DispenseListener {
      * sequence to be acknowledged; returns early with state STARTING if the machine thread is busy.
      */
     Map<String, Object> start(DispenseService svc) throws Exception {
+        return start(svc, new Options());
+    }
+
+    Map<String, Object> start(DispenseService svc, Options o) throws Exception {
         Machine m = ctx.machine();
         synchronized (this) {
             if (state != State.OFF) {
@@ -126,18 +145,20 @@ final class PressureHold implements DispenseListener {
             }
             state = State.STARTING;
             lastError = null;
+            pumpOnly = o.pumpOnly;
         }
         attach(m);
         DispenseConfig c = svc.getConfig();
         Future<String> f;
         try {
-            f = m.submit(() -> doStart(m, svc, c));
+            f = m.submit(() -> doStart(m, svc, c, o));
         }
         catch (RuntimeException e) {
             markOff("could not queue the pressure start: " + e.getMessage());
             throw e;
         }
-        long timeout = c.pumpToValveSettleMs + c.valveSettleMs + 4L * c.commandTimeoutMs + 5000;
+        long timeout = c.pumpToValveSettleMs + c.valveSettleMs + 4L * c.commandTimeoutMs + 5000
+                + (o.park != null ? 60_000L : 0); // a park moves first
         String refused;
         try {
             refused = f.get(timeout, TimeUnit.MILLISECONDS);
@@ -166,7 +187,7 @@ final class PressureHold implements DispenseListener {
      * because OpenPnP drops every task queued behind one that throws, and an engine task dropped so
      * would never end (its busy flag would stay set).
      */
-    private String doStart(Machine m, DispenseService svc, DispenseConfig c) throws Exception {
+    private String doStart(Machine m, DispenseService svc, DispenseConfig c, Options o) throws Exception {
         if (state != State.STARTING) {
             String why = lastEvent;
             markOff("pressure start cancelled before any G-code was sent (" + why + ")");
@@ -178,6 +199,25 @@ final class PressureHold implements DispenseListener {
             markOff("pressure start refused: a dispense task is starting or running");
             return "a dispense task is starting or running: wait for it or press STOP";
         }
+        // BR-03, on the machine thread and before any line: park first, then the valve only where paste may go
+        if (o.park != null) {
+            try {
+                svc.parkNeedle(o.park[0], o.park[1]);
+            }
+            catch (Exception e) {
+                markOff("pressure start refused: the park failed (" + e.getMessage() + ")");
+                return "the park over " + (o.parkName != null ? o.parkName : "the place") + " failed: " + e.getMessage();
+            }
+        }
+        if (!o.pumpOnly) {
+            m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+            double[] at = svc.needleXY();
+            String out = at == null ? "the needle's position is unknown" : svc.outputZones().refusal(at[0], at[1]);
+            if (out != null) {
+                markOff("pressure start refused: I12: " + out);
+                return "I12: " + out;
+            }
+        }
         boolean completed;
         try {
             m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
@@ -188,7 +228,7 @@ final class PressureHold implements DispenseListener {
                 cfg = c;
                 channel = ch; // from here on a Stop vents through this channel
             }
-            completed = switchOn(ch, c);
+            completed = switchOn(ch, c, o.pumpOnly);
         }
         catch (Exception e) {
             lastError = e.getMessage();
@@ -201,6 +241,9 @@ final class PressureHold implements DispenseListener {
                 if (completed) {
                     state = State.ON;
                     long limitMs = Math.round(c.maxContinuousOnTimeS * 1000);
+                    if (o.durationS != null) {
+                        limitMs = Math.min(limitMs, Math.round(o.durationS * 1000));
+                    }
                     autoOffAtMs = onSinceMs + limitMs;
                     autoOff = timer.schedule(() -> stopQuietly("I7: on-time limit of " + c.maxContinuousOnTimeS
                             + " s reached"), Math.max(0, autoOffAtMs - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
@@ -217,14 +260,16 @@ final class PressureHold implements DispenseListener {
             }
             throw new Exception("stopped while switching on");
         }
-        event("pressure on: " + ControllerCommands.PUMP_ON + ", wait " + c.pumpToValveSettleMs + " ms, "
-                + ControllerCommands.VALVE_ON + ", settle " + c.valveSettleMs + " ms"
-                + (keepaliveArmed ? "; host watchdog armed" : ""));
+        event(o.pumpOnly ? "pump on (no valve): " + ControllerCommands.PUMP_ON
+                + (keepaliveArmed ? "; host watchdog armed" : "")
+                : "pressure on" + (o.parkName != null ? " over " + o.parkName : "") + ": " + ControllerCommands.PUMP_ON
+                        + ", wait " + c.pumpToValveSettleMs + " ms, " + ControllerCommands.VALVE_ON + ", settle "
+                        + c.valveSettleMs + " ms" + (keepaliveArmed ? "; host watchdog armed" : ""));
         return null;
     }
 
     /** The switch-on lines and waits; false as soon as a stop was requested. */
-    private boolean switchOn(GcodeChannel ch, DispenseConfig c) throws Exception {
+    private boolean switchOn(GcodeChannel ch, DispenseConfig c, boolean pumpOnly) throws Exception {
         boolean ka;
         synchronized (io) {
             if (state != State.STARTING) {
@@ -243,6 +288,9 @@ final class PressureHold implements DispenseListener {
             return false;
         }
         onSinceMs = System.currentTimeMillis(); // I7 counts from the pump
+        if (pumpOnly) {
+            return true; // BR-03: never a valve line
+        }
         if (!waitWhileStarting(ch, c, c.pumpToValveSettleMs)) {
             return false;
         }
@@ -533,6 +581,7 @@ final class PressureHold implements DispenseListener {
         State s = state;
         m.put("state", s.name().toLowerCase());
         m.put("on", s == State.ON);
+        m.put("mode", pumpOnly ? "pump" : "hold");
         m.put("onSinceMs", onSinceMs == 0 ? null : onSinceMs);
         m.put("autoOffAtMs", autoOffAtMs == 0 ? null : autoOffAtMs);
         m.put("remainingS", autoOffAtMs == 0 ? null : Math.max(0, (autoOffAtMs - now) / 1000.0));

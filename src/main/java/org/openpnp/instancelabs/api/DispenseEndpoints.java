@@ -25,6 +25,7 @@ import org.openpnp.instancelabs.dispense.GcodeProgram;
 import org.openpnp.instancelabs.dispense.GcodeStreamBuilder;
 import org.openpnp.instancelabs.dispense.HomeTracker;
 import org.openpnp.instancelabs.dispense.InterlockReport;
+import org.openpnp.instancelabs.dispense.OutputZones;
 import org.openpnp.instancelabs.dispense.Interlocks;
 import org.openpnp.instancelabs.dispense.LandingResult;
 import org.openpnp.instancelabs.dispense.NeedleChange;
@@ -97,7 +98,7 @@ final class DispenseEndpoints {
 
     void register(ApiServer s) {
         s.route("GET", "/api/status", r -> status(s));
-        s.route("POST", "/api/pressure/start", r -> pressureStart());
+        s.route("POST", "/api/pressure/start", this::pressureStart);
         s.route("POST", "/api/pressure/stop", r -> ctx.pressure.stop("Pressure off pressed"));
         s.route("POST", "/api/prime", this::prime);
         s.route("POST", "/api/test-dot", this::testDot);
@@ -272,6 +273,14 @@ final class DispenseEndpoints {
             l.add(Views.map("id", "I11", "name", "Screw start angle", "state", "off", "text",
                     "whole revolutions per dot: the start angle does not matter"));
         }
+        // BR-03: where the needle is, and whether the valve and the screw may switch on there (every program's lines
+        // are checked against the same zones; the pressure hold parks first or refuses)
+        double[] at = svc.needleXY();
+        OutputZones zones = svc.outputZones();
+        String zone = at == null ? null : zones.zoneAt(at[0], at[1]);
+        String out = at == null ? "the needle's position is unknown" : zones.refusal(at[0], at[1]);
+        l.add(Views.map("id", "I12", "name", "Valve and screw only over a place where paste may go", "state",
+                out == null ? "ok" : "info", "text", out == null ? "the needle is over " + zone : out, "zone", zone));
         return l;
     }
 
@@ -295,14 +304,79 @@ final class DispenseEndpoints {
     // Pressure, prime, test dot
     // ------------------------------------------------------------------------------------------
 
-    Object pressureStart() throws Exception {
+    /**
+     * {@code {mode?: 'hold'|'pump', park?: '<place>'|{x, y}, durationS?}} (BR-03). A hold opens the valve only with
+     * the needle over an allowed output zone (I12): already there, or parked there first at travel height; the pump
+     * alone never sends a valve line and may run anywhere.
+     */
+    Object pressureStart(ApiServer.Request r) throws Exception {
+        JsonObject b = r.json();
         DispenseService svc = ctx.availableSvc();
         ctx.requireEngineIdle(svc);
         if (ctx.pressure.isActive()) {
             throw ApiException.refused("the pressure is already " + ctx.pressure.getState().name().toLowerCase());
         }
+        PressureHold.Options o = pressureOptions(svc.getConfig(), b);
         ApiContext.refuseUnlessOk(ctx.preflight(svc, Interlocks.Scope.noNeedle()), "Pressure on");
-        return ctx.pressure.start(svc);
+        if (o.park != null) {
+            ctx.requireMachineIdle();
+            ctx.requirePositionKnown(svc);
+        }
+        if (!o.pumpOnly) {
+            OutputZones zones = svc.outputZones();
+            double[] at = o.park != null ? o.park : svc.needleXY();
+            String out = at == null ? "the needle's position is unknown" : zones.refusal(at[0], at[1]);
+            if (out != null) {
+                throw ApiException.refused("I12: " + out + (o.park == null ? " (or start it with park: 'waste')"
+                        : ""));
+            }
+        }
+        return ctx.pressure.start(svc, o);
+    }
+
+    static PressureHold.Options pressureOptions(DispenseConfig cfg, JsonObject b) throws ApiException {
+        PressureHold.Options o = new PressureHold.Options();
+        String mode = Json.str(b, "mode", "hold");
+        if (!"hold".equals(mode) && !"pump".equals(mode)) {
+            throw ApiException.badRequest("mode must be 'hold' or 'pump'");
+        }
+        o.pumpOnly = "pump".equals(mode);
+        if (b != null && b.has("parkAboveMm")) {
+            throw ApiException.badRequest("parkAboveMm is not built yet: the hold parks at travel height");
+        }
+        if (b != null && b.has("park") && !b.get("park").isJsonNull()) {
+            if (o.pumpOnly) {
+                throw ApiException.badRequest("the pump alone does not park: drop 'park' or use mode 'hold'");
+            }
+            com.google.gson.JsonElement p = b.get("park");
+            if (p.isJsonPrimitive()) {
+                String name = p.getAsString();
+                DispenseConfig.NamedLocation l = cfg.location(name);
+                if (l == null) {
+                    throw ApiException.refused("no place '" + name + "' to park over: set it first (Places)");
+                }
+                o.park = new double[] {l.x, l.y};
+                o.parkName = name;
+            }
+            else if (p.isJsonObject() && p.getAsJsonObject().has("x") && p.getAsJsonObject().has("y")) {
+                double x = p.getAsJsonObject().get("x").getAsDouble(), y = p.getAsJsonObject().get("y").getAsDouble();
+                if (!Double.isFinite(x) || !Double.isFinite(y)) {
+                    throw ApiException.badRequest("park x and y must be numbers");
+                }
+                o.park = new double[] {x, y};
+                o.parkName = String.format(java.util.Locale.ROOT, "(%.1f, %.1f)", x, y);
+            }
+            else {
+                throw ApiException.badRequest("park must be a place name or {x, y}");
+            }
+        }
+        Double d = Json.num(b, "durationS", null);
+        if (d != null && !(d > 0 && d <= cfg.maxContinuousOnTimeS)) {
+            throw ApiException.badRequest("durationS must be more than 0 and at most the on-time limit ("
+                    + cfg.maxContinuousOnTimeS + " s)");
+        }
+        o.durationS = d;
+        return o;
     }
 
     Object prime(ApiServer.Request r) throws Exception {

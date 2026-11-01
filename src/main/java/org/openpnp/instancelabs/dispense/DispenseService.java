@@ -734,6 +734,52 @@ public final class DispenseService {
         return controllerReset.countEpochMs();
     }
 
+    /** The bottom camera's X/Y (mm), or null when the machine has none: BR-03's forbidden zone. */
+    public double[] bottomCameraXY() {
+        Machine m = configuration.getMachine();
+        if (m == null) {
+            return null;
+        }
+        for (org.openpnp.spi.Camera cam : m.getCameras()) {
+            if (cam.getLooking() == org.openpnp.spi.Camera.Looking.Up) {
+                org.openpnp.model.Location l = cam.getLocation().convertToUnits(LengthUnit.Millimeters);
+                return new double[] {l.getX(), l.getY()};
+            }
+        }
+        return null;
+    }
+
+    /** BR-03: where the valve and the screw may switch on now (the configuration's places, rows and surfaces). */
+    public OutputZones outputZones() {
+        return OutputZones.of(cfg, bottomCameraXY());
+    }
+
+    /**
+     * BR-03: moves the needle over (x, y) at OpenPnP's safe Z (both tools up first), on the calling machine thread,
+     * and waits until the head is still: the pressure hold's park. Refused with the position unknown (BR-02).
+     */
+    public void parkNeedle(double x, double y) throws Exception {
+        requireAvailable();
+        String unknown = controllerReset.unknownWhy();
+        if (unknown != null) {
+            throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
+        }
+        Location at = nozzle.getLocation().convertToUnits(LengthUnit.Millimeters);
+        org.openpnp.util.MovableUtils.moveToLocationAtSafeZ(nozzle, new Location(LengthUnit.Millimeters, x, y,
+                at.getZ(), at.getRotation()));
+        configuration.getMachine().getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+    }
+
+    /** The needle's machine X/Y now (OpenPnP's model), or null when there is no dispenser nozzle. */
+    public double[] needleXY() {
+        Nozzle n = nozzle;
+        if (n == null) {
+            return null;
+        }
+        org.openpnp.model.Location l = n.getLocation().convertToUnits(LengthUnit.Millimeters);
+        return new double[] {l.getX(), l.getY()};
+    }
+
     /** BR-02: the controller reset state (position known, the last detected reset and what it reported). */
     public ControllerReset getControllerReset() {
         return controllerReset;
@@ -5848,7 +5894,8 @@ public final class DispenseService {
             configuration.getMachine().getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
             GcodeProgram p = build.call();
             List<String> problems = GcodeStreamValidator.validate(p, c, mapper.letterB(),
-                    GcodeStreamValidator.zWindow(c, mapper, p.floorReferenceZMm));
+                    GcodeStreamValidator.zWindow(c, mapper, p.floorReferenceZMm),
+                    GcodeStreamValidator.ZoneCheck.of(OutputZones.of(c, bottomCameraXY()), mapper));
             if (!problems.isEmpty()) {
                 throw new IllegalStateException("generated G-code failed validation: " + problems);
             }

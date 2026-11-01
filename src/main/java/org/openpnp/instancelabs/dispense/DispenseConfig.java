@@ -63,6 +63,8 @@ public class DispenseConfig {
     public PurgeRow purgeRow = new PurgeRow();
     /** Clean-pad guard (I10): refuse to dispense on pads that still carry paste. */
     public CleanPadCheck cleanPadCheck = new CleanPadCheck();
+    /** BR-03: where the valve and the screw may switch on ({@link OutputZones}). */
+    public OutputZoneSettings outputZones = new OutputZoneSettings();
 
     // --- named locations (x, y: N2 nozzle coordinates; z: surface Z in OpenPnP's frame, i.e. the
     // N1 nozzle Z touching that surface, the frame of OpenPnP's board Z) -------------------------
@@ -311,6 +313,28 @@ public class DispenseConfig {
         public double minBrightFraction = 0.8;
         public double boxWMm = 0.806;
         public double boxHMm = 0.807;
+    }
+
+    /**
+     * BR-03 output zones ({@link OutputZones}): the valve and the screw switch on only with the needle over an allowed
+     * zone (a place, the purge row, the calibration area, a probed surface) and outside every forbidden one (the
+     * bottom camera, the configured circles); with the valve on, the needle never crosses a forbidden zone.
+     */
+    public static class OutputZoneSettings {
+        /** Radius of the forbidden circle around the bottom camera (mm). */
+        public double forbidRadiusMm = 15;
+        /** Radius of the allowed circle around each place (mm). */
+        public double placeRadiusMm = 6;
+        /** Margin around the purge row, the calibration area and each probed surface's points (mm). */
+        public double surfaceMarginMm = 2;
+        /** More forbidden circles (e.g. a feeder, a nozzle tip holder). */
+        public java.util.List<ForbidZone> forbid = new java.util.ArrayList<>();
+    }
+
+    /** A forbidden circle of {@link OutputZoneSettings#forbid}. */
+    public static class ForbidZone {
+        public String name;
+        public double x, y, radiusMm;
     }
 
     /**
@@ -654,6 +678,13 @@ public class DispenseConfig {
         if (c.calibrationArea == null) {
             c.calibrationArea = new CalibrationArea();
         }
+        if (c.outputZones == null) {
+            c.outputZones = new OutputZoneSettings();
+        }
+        if (c.outputZones.forbid == null) {
+            c.outputZones.forbid = new java.util.ArrayList<>();
+        }
+        c.outputZones.forbid.removeIf(java.util.Objects::isNull);
         if (c.padCalibration == null) {
             c.padCalibration = new PadCalibrationSettings();
         }
@@ -868,6 +899,23 @@ public class DispenseConfig {
         paste.validate(p);
         padCalibration.validate(p);
         calibrationArea.validate(this, p);
+        if (outputZones != null) {
+            // BR-03: bounded, so a typo can neither forbid nothing around the camera nor allow the whole bed
+            if (!(outputZones.forbidRadiusMm >= 10 && outputZones.forbidRadiusMm <= 60)) {
+                p.add("outputZones.forbidRadiusMm must be 10..60 mm (the bottom camera's forbidden circle)");
+            }
+            if (!(outputZones.placeRadiusMm >= 1 && outputZones.placeRadiusMm <= 15)) {
+                p.add("outputZones.placeRadiusMm must be 1..15 mm");
+            }
+            if (!(outputZones.surfaceMarginMm >= 0 && outputZones.surfaceMarginMm <= 10)) {
+                p.add("outputZones.surfaceMarginMm must be 0..10 mm");
+            }
+            for (ForbidZone f : outputZones.forbid) {
+                if (f == null || !(f.radiusMm > 0 && f.radiusMm <= 100) || !Double.isFinite(f.x) || !Double.isFinite(f.y)) {
+                    p.add("outputZones.forbid: every circle needs a finite x, y and a radius of 0..100 mm");
+                }
+            }
+        }
     }
 
     /** Ranges of the registration, probe and homing settings. */
