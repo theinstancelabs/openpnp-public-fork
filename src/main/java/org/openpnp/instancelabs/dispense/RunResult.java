@@ -53,6 +53,12 @@ public class RunResult {
     public final List<String> warnings = new ArrayList<>();
     public final List<String> streamedLines = new ArrayList<>();
     public InterlockReport interlocks;
+    /** Board runs: the profile used, the clean-pad check, purge dots laid, screw state at the start. */
+    public DispenseProfile profile;
+    public PadCleanReport cleanCheck;
+    public int purgeDots;
+    public Long bCountAtStart;
+    public Double workStartAngleDeg;
 
     /** Seconds from the first dot's start to the last dot's end. */
     public Double motionSeconds() {

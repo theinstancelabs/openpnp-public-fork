@@ -20,6 +20,20 @@ public class DriverGcodeChannel implements GcodeChannel {
         this.driver = driver;
     }
 
+    @Override
+    public boolean isLoopbackSimulator() {
+        if (driver.getCommunicationsType() != org.openpnp.machine.reference.driver.AbstractReferenceDriver
+                .CommunicationsType.tcp) {
+            return false;
+        }
+        try {
+            return java.net.InetAddress.getByName(driver.getIpAddress()).isLoopbackAddress();
+        }
+        catch (Exception e) {
+            return false;
+        }
+    }
+
     /** Prefix of GcodeDriver.bailOnError()'s exception for a pending controller error line. */
     static final String ERROR_RESPONSE = "error response from controller";
 

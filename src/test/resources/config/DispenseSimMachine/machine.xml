@@ -1,8 +1,10 @@
 <!--
   Test machine for the Instance Labs dispense engine. Axes, nozzles, head offsets, the z1/z2
   see-saw mapping and backlash settings are copied from the live LumenPnP config (~/.openpnp2,
-  read-only, 2026-10-27). Differences: GcodeDriver talks TCP to a local recording server (port set
-  by the test), no cameras, no feeders, visual homing off, connect wait 0.
+  read-only, 2026-10-27); the N2 head offset is the bench needle offset (25.291, -75.926) of
+  config/machine.xml.patched (2026-10-28). Differences: GcodeDriver talks TCP to a local
+  recording server (port set by the test), no cameras, no feeders, visual homing off, connect
+  wait 0.
 -->
 <openpnp-machine>
    <machine class="org.openpnp.machine.reference.ReferenceMachine" speed="1.0" auto-tool-select="true" safe-Z-park="true">
@@ -98,7 +100,7 @@
                </nozzle>
                <nozzle class="org.openpnp.machine.reference.ReferenceNozzle" axis-X-id="AXS169824381580efcb" axis-Y-id="AXS16982438158c4660" axis-Z-id="AXS17108356271a68ac" axis-rotation-id="AXS17108288e61da5fb" id="NOZ1710829fd33a0170" name="N2" rotation-mode="LimitedArticulation" aligning-rotation-mode="false" max-pick-articulation-angle="15.0" max-alignment-articulation-angle="30.0" pick-dwell-milliseconds="0" place-dwell-milliseconds="0" changer-enabled="false" nozzle-tip-changed-on-manual-feed="false" enable-dynamic-safe-z="true" blow-off-closing-valve="true" version="200" limit-rotation="true">
                   <compatible-nozzle-tip-ids class="java.util.ArrayList"/>
-                  <head-offsets units="Millimeters" x="23.615" y="-63.947" z="0.0" rotation="0.0"/>
+                  <head-offsets units="Millimeters" x="25.291" y="-75.926" z="0.0" rotation="0.0"/>
                   <manual-nozzle-tip-change-location units="Millimeters" x="193.002" y="82.39000000000001" z="31.5" rotation="0.0"/>
                   <vacuum-sense-actuator-name>VAC2</vacuum-sense-actuator-name>
                   <vacuum-actuator-name>VAC2</vacuum-actuator-name>

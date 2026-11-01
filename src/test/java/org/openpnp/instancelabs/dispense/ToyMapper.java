@@ -1,8 +1,9 @@
 package org.openpnp.instancelabs.dispense;
 
 /**
- * Deterministic RawMapper for golden tests: the live N2 geometry written out by hand
- * (raw X = x - 23.615, raw Y = y + 63.947, raw Z = 63 - z for the see-saw), no backlash.
+ * Deterministic RawMapper for golden tests: the live N2 geometry written out by hand (head offset =
+ * the bench needle offset (25.291, -75.926): raw X = x - 25.291, raw Y = y + 75.926; raw Z = 63 - z
+ * for the see-saw), no backlash.
  */
 public class ToyMapper implements RawMapper {
     double[] nozzle;
@@ -38,7 +39,7 @@ public class ToyMapper implements RawMapper {
 
     @Override
     public RawPoint toRaw(double x, double y, double z) {
-        return new RawPoint(x - 23.615, y + 63.947, 63 - z);
+        return new RawPoint(x - 25.291, y + 75.926, 63 - z);
     }
 
     @Override

@@ -67,9 +67,9 @@ public class DispenseTransformTest {
             sim.machine.execute(() -> {
                 OpenPnpRawMapper m = new OpenPnpRawMapper(sim.machine, sim.n2, "b");
                 RawPoint p = m.toRaw(100, 80, 20);
-                // N2 head offsets (23.615, -63.947) and z1 = 63 - z2
-                assertEquals(100 - 23.615, p.x, 1e-9);
-                assertEquals(80 + 63.947, p.y, 1e-9);
+                // N2 head offsets (25.291, -75.926: the bench needle offset) and z1 = 63 - z2
+                assertEquals(100 - 25.291, p.x, 1e-9);
+                assertEquals(80 + 75.926, p.y, 1e-9);
                 assertEquals(63 - 20, p.z, 1e-9);
                 assertEquals("X", m.letterX());
                 assertEquals("Z", m.letterZ());

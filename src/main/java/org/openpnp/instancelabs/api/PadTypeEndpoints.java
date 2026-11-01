@@ -10,8 +10,10 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 import org.openpnp.instancelabs.dispense.Calibration;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DotMath;
+import org.openpnp.instancelabs.dispense.DotSizer;
 import org.openpnp.instancelabs.dispense.PadRule;
 import org.openpnp.instancelabs.dispense.PadType;
 import org.openpnp.instancelabs.dispense.PadTypeStatus;
@@ -82,7 +84,10 @@ final class PadTypeEndpoints {
                 "minPadTypeStatus", svc.getConfig().minPadTypeStatus, "calibration", Views.calibration(cal));
     }
 
-    /** One Profiles row: the current version plus its dot plan (single dot from the current q). */
+    /**
+     * One Profiles row: the current version plus its dot plan (profile dots per pad; the dose is the
+     * dispense profile's, the stencil-equivalent volume is for information).
+     */
     private Map<String, Object> row(DispenseService svc, PadType t, Calibration cal, PadRule rule) throws Exception {
         Map<String, Object> m = Views.padType(t);
         double area = DotMath.padAreaMm2(t.padWMm, t.padHMm, t.padRoundness);
@@ -90,10 +95,10 @@ final class PadTypeEndpoints {
         m.put("padAreaMm2", area);
         m.put("targetVolumeMm3", v);
         m.put("targetMassMg", v * svc.getConfig().pasteDensityMgMm3);
-        m.put("singleDotRotationDeg", cal == null || cal.qMm3PerRev <= 0 ? null
-                : DotMath.rotationDegForVolume(v, cal.qMm3PerRev));
-        m.put("calibrationId", cal == null ? null : cal.id);
-        m.put("calibrationStatus", cal == null ? null : cal.status);
+        DispenseConfig c = svc.getConfig();
+        m.put("dotsPerPad", DotSizer.layout(t.padWMm, t.padHMm, area, rule).size());
+        m.put("rotationPerDotDeg", c.profile.netDeg(c));
+        m.put("profileName", c.profile.name);
         m.put("rule", rule == null ? null : Views.map("maxDots", rule.maxDots, "fitFactor", rule.fitFactor,
                 "largestSingleDotPadMm2", rule.largestSingleDotPadMm2, "version", rule.version));
         List<PadType> history = svc.getDb().padTypeHistory(t.typeKey);

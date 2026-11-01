@@ -46,7 +46,7 @@ public final class DotLadderCalibration {
                 // serpentine rows keep the path short
                 int col = (r % 2 == 0) ? c : req.repeats - 1 - c;
                 double x = blank.x + col * req.pitchMm, y = blank.y + r * req.pitchMm;
-                double z = (plane == null ? blank.z : plane.z(x, y)) + cfg.needleZOffsetMm + cfg.needleGapMm;
+                double z = (plane == null ? blank.z : plane.z(x, y)) + cfg.needleZOffsetMm + cfg.gapMm();
                 l.add(new GcodeStreamBuilder.DotSpec(x, y, z, z + cfg.hopHeightMm, req.rotationsDeg[r], idx++,
                         "ladder r=" + req.rotationsDeg[r]));
             }

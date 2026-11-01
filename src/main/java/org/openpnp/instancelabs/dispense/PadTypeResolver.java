@@ -20,6 +20,22 @@ public class PadTypeResolver {
         this.packageMap = packageMap == null ? Collections.emptyMap() : packageMap;
     }
 
+    /**
+     * Identity of what this resolver can answer: every pad type with its version (an edit of the pattern or status is a
+     * new version) and every package mapping. A plan made with another resolver may resolve its packages differently.
+     */
+    public String fingerprint() {
+        StringBuilder sb = new StringBuilder();
+        for (PadType t : types) {
+            sb.append(t.typeKey).append(':').append(t.version).append(';');
+        }
+        sb.append('|');
+        for (Map.Entry<String, String> e : new java.util.TreeMap<>(packageMap).entrySet()) {
+            sb.append(e.getKey()).append('=').append(e.getValue()).append(';');
+        }
+        return sb.toString();
+    }
+
     public PadType byKey(String key) {
         for (PadType t : types) {
             if (t.typeKey.equals(key)) {

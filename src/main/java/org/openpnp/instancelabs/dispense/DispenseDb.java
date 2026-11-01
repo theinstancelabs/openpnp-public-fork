@@ -629,9 +629,9 @@ public class DispenseDb implements AutoCloseable {
                 ps.setDouble(i++, p.targetVolumeMm3);
                 ps.setInt(i++, p.dotCount);
                 setNullable(ps, i++, p.rotationPerDotDeg);
-                setNullable(ps, i++, p.predictedDiameterMm);
-                setNullable(ps, i++, p.predictedHeightMm);
-                ps.setLong(i++, plan.calibrationId);
+                setNullable(ps, i++, null); // predicted_diameter_mm, predicted_height_mm, calibration_id:
+                setNullable(ps, i++, null); // the volumetric (q) dose model is gone; the profile is in events
+                setNullable(ps, i++, null);
                 ps.setString(i++, p.flags.isEmpty() ? null : String.join(",", p.flagNames()));
                 ps.addBatch();
             }

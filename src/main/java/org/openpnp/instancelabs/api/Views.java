@@ -6,9 +6,12 @@ import java.util.List;
 import java.util.Map;
 
 import org.openpnp.instancelabs.dispense.Calibration;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispensePlan;
+import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DotLadderRow;
 import org.openpnp.instancelabs.dispense.InterlockReport;
+import org.openpnp.instancelabs.dispense.PadCleanReport;
 import org.openpnp.instancelabs.dispense.PadType;
 import org.openpnp.instancelabs.dispense.RunResult;
 
@@ -35,6 +38,99 @@ final class Views {
         return m;
     }
 
+    /** "298 / 118" for a list of start angles. */
+    static String angles(List<Double> a) {
+        List<String> l = new ArrayList<>();
+        for (Double x : a) {
+            l.add(String.format(java.util.Locale.ROOT, "%.0f", x));
+        }
+        return String.join(" / ", l);
+    }
+
+    /**
+     * The dispense profile with the derived numbers the UI shows (forward / net turn, steps, feed
+     * in deg/min, start angles) and whether the start angle is valid for the current controller
+     * connection (I11).
+     */
+    static Map<String, Object> profile(DispenseConfig c, Long controllerConnectedAtMs) {
+        DispenseProfile p = c.profile;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("name", p.name);
+        m.put("pressurePsi", p.pressurePsi);
+        m.put("netStepsPerDot", p.netStepsPerDot);
+        m.put("suckBackDeg", p.suckBackDeg);
+        m.put("startAngleDeg", p.startAngleDeg);
+        m.put("startAngleSetAtMs", p.startAngleSetAtMs);
+        m.put("screwRpm", p.screwRpm);
+        m.put("screwAccelDegS2", p.screwAccelDegS2);
+        m.put("dwellMs", p.dwellMs);
+        m.put("gapMm", p.gapMm);
+        m.put("purgeDots", p.purgeDots);
+        m.put("notes", p.notes);
+        m.put("stepsPerRev", c.bStepsPerRev);
+        m.put("stepsPerDeg", c.bStepsPerDeg);
+        m.put("revolutionsPerDot", p.revolutionsPerDot(c));
+        m.put("netDeg", p.netDeg(c));
+        m.put("forwardDeg", p.forwardDeg(c));
+        m.put("suckBackSteps", p.suckBackSteps(c));
+        m.put("feedDegPerMin", p.feedDegS() * 60);
+        m.put("partialTurn", p.isPartialTurn(c));
+        m.put("startAngles", p.isPartialTurn(c) ? p.startAngles(c) : null);
+        boolean stale = p.isPartialTurn(c) && (p.startAngleSetAtMs == null
+                || (controllerConnectedAtMs != null && p.startAngleSetAtMs < controllerConnectedAtMs));
+        m.put("startAngleNeedsConfirm", stale);
+        m.put("controllerConnectedAtMs", controllerConnectedAtMs);
+        m.put("fingerprint", p.fingerprint());
+        List<String> problems = p.validate(c);
+        m.put("problems", problems);
+        return m;
+    }
+
+    /** The purge row with its spots and how many are left. */
+    static Map<String, Object> purgeRow(DispenseConfig c) {
+        DispenseConfig.PurgeRow r = c.purgeRow;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("surfaceName", r.surfaceName);
+        m.put("x0Mm", r.x0Mm);
+        m.put("y0Mm", r.y0Mm);
+        m.put("pitchXMm", r.pitchXMm);
+        m.put("pitchYMm", r.pitchYMm);
+        m.put("spots", r.spots);
+        m.put("usedSpots", r.usedSpots);
+        m.put("spotsLeft", r.spotsLeft());
+        m.put("defined", r.isDefined());
+        m.put("resetAtMs", r.resetAtMs);
+        m.put("perBoard", c.profile.purgeDots);
+        m.put("boardsLeft", c.profile.purgeDots <= 0 ? null : r.spotsLeft() / c.profile.purgeDots);
+        m.put("surfaceProbed", c.surface(r.surfaceName) != null);
+        return m;
+    }
+
+    /** A clean-pad check (I10). */
+    static Map<String, Object> cleanCheck(PadCleanReport r) {
+        if (r == null) {
+            return null;
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("planId", r.planId);
+        m.put("ok", r.ok);
+        m.put("grayLevel", r.grayLevel);
+        m.put("minBrightFraction", r.minBrightFraction);
+        m.put("boxWMm", r.boxWMm);
+        m.put("boxHMm", r.boxHMm);
+        m.put("checkedAtMs", r.checkedAtMs);
+        m.put("complete", r.isComplete());
+        m.put("targets", r.pads.size());
+        m.put("dirtyPadIds", r.dirtyPadIds());
+        List<Map<String, Object>> pads = new ArrayList<>();
+        for (PadCleanReport.Pad x : r.pads) {
+            pads.add(map("padId", x.padId, "dotIndex", x.dotIndex, "x", x.xMm, "y", x.yMm, "brightFraction",
+                    x.brightFraction, "clean", x.clean, "error", x.error, "boxWMm", x.boxWMm, "boxHMm", x.boxHMm));
+        }
+        m.put("pads", pads);
+        return m;
+    }
+
     /** A stored surface map with its plane fit (or the reason it cannot be fitted). */
     static Map<String, Object> surface(String name, org.openpnp.instancelabs.dispense.DispenseConfig.SurfaceMap m) {
         Map<String, Object> o = new LinkedHashMap<>();
@@ -42,6 +138,7 @@ final class Views {
         o.put("points", m.points);
         o.put("setAtMs", m.setAtMs);
         o.put("note", m.note);
+        o.put("boundToBoard", m.boardFingerprint != null);
         try {
             org.openpnp.instancelabs.dispense.SurfacePlane pl = org.openpnp.instancelabs.dispense.SurfacePlane
                     .fit(m.points);
@@ -83,6 +180,11 @@ final class Views {
         m.put("linesSent", r.linesSent);
         m.put("warnings", new ArrayList<>(r.warnings));
         m.put("interlocks", interlocks(r.interlocks));
+        m.put("profile", r.profile);
+        m.put("cleanCheck", cleanCheck(r.cleanCheck));
+        m.put("purgeDots", r.purgeDots);
+        m.put("bCountAtStart", r.bCountAtStart);
+        m.put("workStartAngleDeg", r.workStartAngleDeg);
         if (withLines) {
             List<Map<String, Object>> dots = new ArrayList<>();
             for (RunResult.DotTiming t : r.dotTimings) {
@@ -108,11 +210,8 @@ final class Views {
         m.put("boardLocationId", p.boardLocationId);
         m.put("createdAtMs", p.createdAtMs);
         m.put("source", e.source);
-        Map<String, Object> cal = new LinkedHashMap<>();
-        cal.put("id", p.calibrationId);
-        cal.put("qMm3PerRev", p.qMm3PerRev);
-        cal.put("status", p.calibrationStatus);
-        m.put("calibration", cal);
+        m.put("profile", p.profile);
+        m.put("profileFingerprint", p.profileFingerprint);
         m.put("needleGapMm", p.needleGapMm);
         m.put("needleZOffsetMm", p.needleZOffsetMm);
         m.put("hopHeightMm", p.hopHeightMm);
@@ -130,9 +229,14 @@ final class Views {
         s.put("estimatedSeconds", e.estimatedSeconds);
         s.put("estimatedPressurisedSeconds", e.estimatedPressurisedSeconds);
         s.put("estimateError", e.estimateError);
-        // The estimate ignores acceleration (a lower bound on time), so this DPH is an upper bound.
-        s.put("estimatedDphUpperBound", e.estimatedSeconds == null || e.estimatedSeconds <= 0 || p.dots.isEmpty()
+        // Whole program (purge, cross, dots, settle, vent): moves with acceleration, dwells; no host
+        // latency or look-ahead. The bench's DPH counts from the cross to the last dot, so this is lower.
+        s.put("estimatedDph", e.estimatedSeconds == null || e.estimatedSeconds <= 0 || p.dots.isEmpty()
                 ? null : p.dots.size() / e.estimatedSeconds * 3600.0);
+        s.put("purgeDots", p.profile == null ? 0 : p.profile.purgeDots);
+        s.put("estimatedWorkSeconds", e.estimatedWorkSeconds);
+        s.put("estimatedWorkDph", e.estimatedWorkSeconds == null || e.estimatedWorkSeconds <= 0 || p.dots.isEmpty()
+                ? null : p.dots.size() / e.estimatedWorkSeconds * 3600.0);
         s.put("text", p.summary());
         m.put("summary", s);
 
@@ -159,8 +263,6 @@ final class Views {
             d.put("targetMassMg", x.targetMassMg);
             d.put("dotCount", x.dotCount);
             d.put("rotationPerDotDeg", x.rotationPerDotDeg);
-            d.put("predictedDiameterMm", x.predictedDiameterMm);
-            d.put("predictedHeightMm", x.predictedHeightMm);
             d.put("flags", x.flagNames());
             d.put("blocked", x.isBlocked());
             pads.add(d);
@@ -178,12 +280,13 @@ final class Views {
             d.put("dispenseZ", x.dispenseZMm);
             d.put("hopZ", x.hopZMm);
             d.put("rotationDeg", x.rotationDeg);
-            d.put("expectedDiameterMm", x.expectedDiameterMm);
             dots.add(d);
         }
         m.put("dots", dots);
         m.put("warnings", new ArrayList<>(p.warnings));
         m.put("interlocks", interlocks(preflight));
+        m.put("cleanCheck", cleanCheck(e.cleanCheck()));
+        m.put("cleanCheckRunning", e.cleanCheckRunning());
         return m;
     }
 

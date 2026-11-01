@@ -1,9 +1,12 @@
 package org.openpnp.instancelabs.api;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.openpnp.instancelabs.dispense.DispenseListener;
 import org.openpnp.instancelabs.dispense.RunResult;
@@ -29,9 +32,15 @@ final class RunTracker implements DispenseListener {
         volatile int dotsPlanned;
         volatile long firstDotStartMs;
         volatile long lastDotEndMs;
+        /** When the run's pressure session started (its first pressurised phase), 0 before. */
+        volatile long pressureOnAtMs;
         final List<Integer> doneDots = new ArrayList<>();
         final List<String> phases = new ArrayList<>();
     }
+
+    /** Phases streamed under pressure (one pressure session each: pump, valve, ..., vent). */
+    static final Set<String> PRESSURE_PHASES = new HashSet<>(
+            Arrays.asList("dispensing", "shots", "dispensing calibration dots"));
 
     private volatile Progress current;
     private volatile String pendingLabel;
@@ -62,6 +71,9 @@ final class RunTracker implements DispenseListener {
     public void onPhase(RunResult run, String phase) {
         Progress p = forRun(run);
         p.phase = phase;
+        if (p.pressureOnAtMs == 0 && PRESSURE_PHASES.contains(phase)) {
+            p.pressureOnAtMs = System.currentTimeMillis();
+        }
         synchronized (p) {
             p.phases.add(phase);
         }
@@ -112,6 +124,7 @@ final class RunTracker implements DispenseListener {
         m.put("startedAtMs", p.startedAtMs);
         m.put("finishedAtMs", p.finishedAtMs == 0 ? null : p.finishedAtMs);
         m.put("elapsedS", ((running ? now : p.finishedAtMs) - p.startedAtMs) / 1000.0);
+        m.put("pressureOnAtMs", p.pressureOnAtMs == 0 ? null : p.pressureOnAtMs);
         synchronized (p) {
             m.put("dotsDone", p.dotsDone);
             m.put("dotsPlanned", p.dotsPlanned);

@@ -17,8 +17,14 @@ import java.util.regex.Pattern;
 
 /**
  * Minimal Marlin-like TCP server on localhost for tests: records every received line, tracks
- * X/Y/Z/A/B from G0/G1/G92, answers M114 with the tracked position and M115 with an optional
- * Cap:HOST_WATCHDOG:1, and "ok" to everything. Never touches any device.
+ * X/Y/Z/A/B from G0/G1/G92, answers M114 with the tracked position (and, like Marlin, the B step
+ * count) and M115 with an optional Cap:HOST_WATCHDOG:1, and "ok" to everything. Never touches any
+ * device.
+ *
+ * <p>B step count as Marlin keeps it: the machine B position is the logical one plus a workspace
+ * shift; G92 B sets the logical position and the shift so that the machine position (and the step
+ * count) does not change; G0/G1 B moves the machine position; only a power-up (here
+ * {@link #setBStepCount}) resets it. M114 reports {@code Count ... B:<round(machine x 4.44)>}.</p>
  */
 public class RecordingGcodeServer implements AutoCloseable {
     private final ServerSocket server;
@@ -30,11 +36,20 @@ public class RecordingGcodeServer implements AutoCloseable {
     public volatile boolean realDwell = false;
     private final Map<Character, Double> pos = new LinkedHashMap<>();
     public volatile boolean hostWatchdogCapability = true;
+    /**
+     * If true, M114 reports the B step count after "Count" (Marlin with the B axis); if false the
+     * count part has X/Y/Z only, as OpenPnP's simulator (the engine then takes the count as 0).
+     */
+    public volatile boolean reportBCount = true;
+    /** Machine B minus logical B (deg): the G92 workspace shift. */
+    private double bShift = 0;
     /** If >= 0, reply "Error: simulated" to the n-th received line (0-based) after mark(). */
     public volatile int failAtLine = -1;
     private volatile int markIndex = 0;
     private final Thread thread;
     private static final Pattern WORD = Pattern.compile("([XYZAB])(-?\\d+(?:\\.\\d+)?)");
+    /** Marlin M92 B (steps per degree), for the reported step count. */
+    public static final double B_STEPS_PER_DEG = 4.44;
 
     public RecordingGcodeServer() throws Exception {
         server = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
@@ -80,8 +95,9 @@ public class RecordingGcodeServer implements AutoCloseable {
                     }
                     else if (line.startsWith("M114")) {
                         synchronized (this) {
-                            reply.append(String.format(Locale.ROOT, "X:%.4f Y:%.4f Z:%.4f A:%.4f B:%.4f Count X:0 Y:0 Z:0\n",
-                                    pos.get('X'), pos.get('Y'), pos.get('Z'), pos.get('A'), pos.get('B')));
+                            reply.append(String.format(Locale.ROOT, "X:%.4f Y:%.4f Z:%.4f A:%.4f B:%.4f Count X:0 Y:0 Z:0%s\n",
+                                    pos.get('X'), pos.get('Y'), pos.get('Z'), pos.get('A'), pos.get('B'),
+                                    reportBCount ? " B:" + bStepCount() : ""));
                         }
                     }
                     if (mute.contains(line)) {
@@ -107,7 +123,12 @@ public class RecordingGcodeServer implements AutoCloseable {
             String body = line.contains(";") ? line.substring(0, line.indexOf(';')) : line;
             Matcher m = WORD.matcher(body.substring(code.length()));
             while (m.find()) {
-                pos.put(m.group(1).charAt(0), Double.parseDouble(m.group(2)));
+                char axis = m.group(1).charAt(0);
+                double v = Double.parseDouble(m.group(2));
+                if (axis == 'B' && code.equals("G92")) {
+                    bShift += pos.get('B') - v; // workspace offset: the machine position stays
+                }
+                pos.put(axis, v);
             }
         }
         else if (code.equals("G28")) {
@@ -138,6 +159,19 @@ public class RecordingGcodeServer implements AutoCloseable {
 
     public synchronized double position(char axis) {
         return pos.get(axis);
+    }
+
+    /** The Marlin step count of B (machine position x steps/deg), as M114 reports it. */
+    public synchronized long bStepCount() {
+        return Math.round((pos.get('B') + bShift) * B_STEPS_PER_DEG);
+    }
+
+    /**
+     * Sets the B step count (the screw history since the controller's power-up) without changing
+     * the logical B position.
+     */
+    public synchronized void setBStepCount(long steps) {
+        bShift = steps / B_STEPS_PER_DEG - pos.get('B');
     }
 
     @Override

@@ -22,10 +22,30 @@ final class PlanStore {
         final DispensePlan plan;
         /** How the board was chosen (job board or file + location), echoed back to the UI. */
         final Map<String, Object> source;
-        /** Kinematic lower-bound estimate of the whole program (no acceleration), s; null if unknown. */
+        /** Estimate of the whole program (moves with acceleration, dwells), s; null if unknown. */
         Double estimatedSeconds;
         Double estimatedPressurisedSeconds;
+        /** Cross after the purge to the last dot (the bench's DPH window), s. */
+        Double estimatedWorkSeconds;
         String estimateError;
+        /** The last camera-only clean-pad check of this plan (POST /api/plan/{id}/clean-check). */
+        volatile java.util.concurrent.Future<org.openpnp.instancelabs.dispense.PadCleanReport> cleanCheckFuture;
+
+        /** The finished clean-pad check, or null (none, still running or failed). */
+        org.openpnp.instancelabs.dispense.PadCleanReport cleanCheck() {
+            java.util.concurrent.Future<org.openpnp.instancelabs.dispense.PadCleanReport> f = cleanCheckFuture;
+            try {
+                return f != null && f.isDone() ? f.get() : null;
+            }
+            catch (Exception e) {
+                return null;
+            }
+        }
+
+        boolean cleanCheckRunning() {
+            java.util.concurrent.Future<?> f = cleanCheckFuture;
+            return f != null && !f.isDone();
+        }
 
         Entry(DispensePlan plan, Map<String, Object> source) {
             this.plan = plan;
@@ -48,6 +68,18 @@ final class PlanStore {
 
     synchronized Entry get(String planId) {
         return plans.get(planId);
+    }
+
+    /** The plans kept, newest first, without the run subsets ({@code <planId>-subset-...}). */
+    synchronized List<Entry> recent() {
+        List<Entry> l = new ArrayList<>();
+        for (Entry e : plans.values()) { // iterating does not change the access order
+            if (!e.plan.planId.contains("-subset-")) {
+                l.add(0, e); // most recently used first, so it wins a tie of createdAtMs below (stable sort)
+            }
+        }
+        l.sort((a, b) -> Long.compare(b.plan.createdAtMs, a.plan.createdAtMs));
+        return l;
     }
 
     /**
@@ -97,14 +129,15 @@ final class PlanStore {
         s.boardName = p.boardName;
         s.boardLocationId = p.boardLocationId;
         s.createdAtMs = System.currentTimeMillis();
-        s.calibrationId = p.calibrationId;
-        s.qMm3PerRev = p.qMm3PerRev;
-        s.calibrationStatus = p.calibrationStatus;
+        s.profile = p.profile;
+        s.profileFingerprint = p.profileFingerprint;
         s.needleGapMm = p.needleGapMm;
         s.needleZOffsetMm = p.needleZOffsetMm;
         s.hopHeightMm = p.hopHeightMm;
         s.surfaceFingerprint = p.surfaceFingerprint;
         s.boardFingerprint = p.boardFingerprint;
+        s.boardRegistration = p.boardRegistration;
+        s.padTypesFingerprint = p.padTypesFingerprint;
         double path = 0;
         for (int i = 1; i < dots.size(); i++) {
             path += Math.hypot(dots.get(i).xMm - dots.get(i - 1).xMm, dots.get(i).yMm - dots.get(i - 1).yMm);
@@ -128,7 +161,6 @@ final class PlanStore {
             d.dispenseZMm = o.dispenseZMm;
             d.hopZMm = o.hopZMm;
             d.rotationDeg = o.rotationDeg;
-            d.expectedDiameterMm = o.expectedDiameterMm;
             s.dots.add(d);
         }
         s.warnings.addAll(p.warnings);

@@ -28,9 +28,15 @@ public class DispenseConfig {
 
     /**
      * Version of this file's schema. 2: the pneumatic and watchdog G-code strings were removed (they
-     * are constants in ControllerCommands); older files load, the removed keys are ignored.
+     * are constants in ControllerCommands). 3: the dose and per-dot motion moved into
+     * {@link #profile}; prime + test dot + optical test-dot split replaced by the purge row; the
+     * volumetric q model removed (bench 2026-10-28). Older files load, the removed keys are ignored,
+     * and {@link #migrate()} brings the motion values to the bench recipe.
      */
-    public int schemaVersion = 2;
+    public static final int SCHEMA_VERSION = 3;
+    /** Largest I4 frame tolerance: below half the needle's 2.59 mm offset from N1 (bench, new mount). */
+    public static final double MAX_FRAME_TOLERANCE_MM = 1.2;
+    public int schemaVersion = SCHEMA_VERSION;
 
     // --- identity of the dispenser in the OpenPnP machine -----------------------------------
     /** Nozzle carrying the auger. Matched against nozzle id first, then name. */
@@ -41,10 +47,18 @@ public class DispenseConfig {
     // --- pneumatics (plan §4.1, §4.2a: pump ON/OFF only, never PWM; valve S255 only) ---------
     // The pump/valve G-code is fixed in ControllerCommands (M106 P2 S255 / M107 P2, M106 P3 S255 /
     // M107 P3): it is not a setting, so it cannot be PWM'd, swapped or left on by a settings edit.
-    /** Pump ON -> wait -> valve ON (plan §4.5 recommendation 1). */
-    public int pumpToValveSettleMs = 500;
-    /** Valve ON -> settle before the first rotation (measured in M8). */
-    public int valveSettleMs = 300;
+    /** Pump ON -> wait -> valve ON (plan §4.5 recommendation 1; bench disp.py 1000 ms). */
+    public int pumpToValveSettleMs = 1000;
+    /** Valve ON -> settle before the first rotation (bench disp.py 3000 ms). */
+    public int valveSettleMs = 3000;
+
+    // --- the dispense recipe ---------------------------------------------------------------
+    /** Active dispense profile: pressure note, screw turn per dot, dwell, gap, purge (bench recipe). */
+    public DispenseProfile profile = new DispenseProfile();
+    /** Purge row: distinct spots on the blank for the purge dots before the work (consumed). */
+    public PurgeRow purgeRow = new PurgeRow();
+    /** Clean-pad guard (I10): refuse to dispense on pads that still carry paste. */
+    public CleanPadCheck cleanPadCheck = new CleanPadCheck();
 
     // --- named locations (x, y: N2 nozzle coordinates; z: surface Z in OpenPnP's frame, i.e. the
     // N1 nozzle Z touching that surface, the frame of OpenPnP's board Z) -------------------------
@@ -54,9 +68,7 @@ public class DispenseConfig {
     /** Blank coupon (glass/copper) for dot-ladder calibration and needle touch-off. */
     public String blankLocationName = "blank";
 
-    // --- Z geometry --------------------------------------------------------------------------
-    /** Commanded needle-to-surface gap while dispensing (plan §6.1: 30-50 % of 0.41 mm ID). */
-    public double needleGapMm = 0.15;
+    // --- Z geometry (the dispense gap is profile.gapMm) ------------------------------------------
     /** Hop height above the dispense Z between dots on the same board. */
     public double hopHeightMm = 1.0;
     /** N2 Z used for travel to/from the board, waste and blank. 31.5 = see-saw balanced (LIVE home). */
@@ -70,6 +82,12 @@ public class DispenseConfig {
     public Long needleZOffsetSetAtMs = null;
     /** Epoch ms of the last needle change; I4 requires a touch-off after it. */
     public Long needleChangedAtMs = null;
+    /**
+     * Needle XY correction (calibration): the needle lands at camera + N2 head offset + this. The
+     * head offset (machine.xml) is the bench's (25.291, -75.926); refinements from landing data go
+     * here, not into machine.xml. Every dispensed target is moved by minus this.
+     */
+    public NeedleXyTrim needleXyTrim = new NeedleXyTrim();
     /**
      * I4 Z frame: one surface touched by N1 and by the needle (review finding: nothing tied the
      * surface Z to the frame of the needle offset). Set only by POST /api/needle/anchor.
@@ -85,58 +103,50 @@ public class DispenseConfig {
     /** I4: waste, blank and every surface point must lie within this of the anchor surface (mm). */
     public double zFrameToleranceMm = 1.0;
     /** I4: largest plane-fit residual of a surface map (gap budget; must be below the gap). */
-    public double surfaceMaxResidualMm = 0.075;
-    /** I4: a dot may lie at most this far outside the probed area (convex hull of the points). */
-    public double surfaceMarginMm = 2.0;
+    public double surfaceMaxResidualMm = 0.04;
+    /**
+     * I4: a dot may lie at most this far outside the probed area (convex hull of the points). The
+     * bench probes boards at 8 mm from the edge; the edge pads are ~3 mm beyond (plane extrapolation
+     * error there 0.01-0.035 mm on boards with residuals <= 0.017).
+     */
+    public double surfaceMarginMm = 3.5;
     /** I4: touch-offs and manual entries may move the offset at most this far from the anchor's. */
     public double needleOffsetMaxDriftMm = 1.0;
     /** Extra height of the prime at the waste pad while the needle is not touched off yet. */
     public double touchOffPrimeExtraClearanceMm = 0.5;
 
     // --- motion --------------------------------------------------------------------------------
+    // XY and Z at M204 S2000 (bench). The screw's acceleration and feed are in the profile; M204 S
+    // also caps the B axis, so the profile's value is sent around the B moves only (F5).
     public double travelFeedMmS = 200;
-    public double travelAccelMmS2 = 1000;
+    public double travelAccelMmS2 = 2000;
     public double zDownFeedMmS = 50;
-    public double zLiftFeedMmS = 25;
-    /** Dispense-lift acceleration, lower than placement (DS:DFS §8: filled-material separation). */
-    public double zLiftAccelMmS2 = 200;
-    /** Auger feed rate while dispensing, deg/s of B. */
-    public double bFeedDegS = 360;
-    /** Auger acceleration sent with M201 (deg/s^2). */
-    public double bAccelDegS2 = 2000;
-    /** Auger max feed sent with M203 (deg/s); must be >= bFeedDegS and retractFeedDegS. */
-    public double bMaxFeedDegS = 720;
-    /** Suck-back after each dot (deg). */
-    public double retractDeg = 5;
-    public double retractFeedDegS = 360;
+    public double zLiftFeedMmS = 50;
+    /** Dispense-lift acceleration (bench: the same 2000 as XY; no slow break-off). */
+    public double zLiftAccelMmS2 = 2000;
+    /** B axis feed limit sent with M203 (deg/s); 2400 = 400 rpm, the Vieweg maximum. */
+    public double bMaxFeedDegS = 2400;
     /**
-     * Dwell after the feed rotation, before suck-back (ms). NOTE: Marlin's G4 calls
-     * planner.synchronize() (Marlin/src/gcode/motion/G4.cpp:36), so any non-zero dwell drains the
-     * motion queue once per dot. 0 = no G4 emitted (full look-ahead streaming).
+     * Marlin M92 B: steps per degree of B. 360 deg = 1598.4 steps, so one screw revolution (1600
+     * steps) is 360.36 deg; B targets are computed from whole steps so dots never drift.
      */
-    public int dwellMs = 50;
+    public double bStepsPerDeg = 4.44;
+    /** Motor steps per screw revolution (200 full steps x 8 microsteps). */
+    public int bStepsPerRev = 1600;
     /** +1 if positive B extrudes, -1 if negative B extrudes. */
     public int bExtrudeSign = 1;
     /** Follow the axes' backlash compensation settings when streaming (as OpenPnP would). */
     public boolean honorBacklash = true;
-    /** Disable the B driver (M18 B) on abort (plan §4.4). */
-    public boolean abortDisablesB = true;
     /** Timeout for one streamed command acknowledgement. */
     public long commandTimeoutMs = 10000;
 
-    // --- prime / test dot (I9) -----------------------------------------------------------------
-    /** I9: prime and test dot on the waste location before each board. */
-    public boolean primeAndTestDot = true;
-    public double primeRotationDeg = 360;
-    /** Re-prime rotation when pressure is re-applied after the optical test-dot check. */
-    public double rePrimeRotationDeg = 90;
-    /** Test dot position relative to the waste location (mm). */
+    // --- manual prime / test dot at the waste place, calibration prime ---------------------------
+    // Board runs purge on the purge row instead (I9), in the same pressure session as the work.
+    /** Prime turn at the waste place for calibration runs and the manual prime (one revolution). */
+    public double primeRotationDeg = 360.36;
+    /** Manual test dot position relative to the waste location (mm). */
     public double testDotOffsetXMm = 2.0;
     public double testDotOffsetYMm = 0.0;
-    /** I9 optical check of the test dot with the top camera (requires vision). */
-    public boolean testDotOpticalCheck = true;
-    /** Minimum acceptable test-dot diameter as a fraction of the expected diameter. */
-    public double testDotMinDiameterRatio = 0.6;
 
     // --- host watchdog keepalive (only used if M115 reports Cap:HOST_WATCHDOG:1) ----------------
     // Query, arm, ping and disarm commands are fixed in ControllerCommands (M115, M990 S<window>,
@@ -152,25 +162,69 @@ public class DispenseConfig {
     /** I5: barrel pressure window (no sensor yet; disabled by default). */
     public boolean pressureInterlockEnabled = false;
     public double pressureMinPsi = 1.0;
-    public double pressureMaxPsi = 18.0;
+    public double pressureMaxPsi = 19.0;
     /** §5.7 rule: refuse pads whose type status is below this (not-started..validated). */
     public String minPadTypeStatus = PadTypeStatus.CHARACTERIZED.dbName;
     /** Refuse the board if any pad is flagged (true), or skip flagged pads (false). */
     public boolean refuseFlaggedPads = true;
 
-    // --- planning ------------------------------------------------------------------------------
-    /** Equivalent stencil thickness t (plan §5.6; your choice 0.10 mm). */
+    // --- planning (one profile dot per pad unless the pad type's rule asks for a grid) ----------
+    /** Equivalent stencil thickness t for new pad types (informational: paste volume a stencil would print). */
     public double pasteThicknessMm = 0.10;
-    /** Paste density, mg/mm^3 (INFERRED 3.7, measure in M21). */
+    /** Paste density, mg/mm^3 (GC 50 T5 84 %: 3.76), for scale records. */
     public double pasteDensityMgMm3 = 3.7;
-    /** Provisional auger displacement, mm^3/rev (DS:DFS Fig. 3 read-off, plan §5.6). */
-    public double provisionalQMm3PerRev = 0.47;
-    public int maxDotsPerPad = 6;
-    /** A dot fits a cell if its diameter <= cell short side * dotFitFactor. */
-    public double dotFitFactor = 1.0;
     /** Include placements disabled for pick-and-place (paste is still wanted on their pads). */
     public boolean includeDisabledPlacements = true;
     public int twoOptMaxPasses = 50;
+
+    /** Needle XY correction on top of the N2 head offset (calibration value). */
+    public static class NeedleXyTrim {
+        public double dxMm, dyMm;
+        public Long setAtMs;
+        public String note;
+    }
+
+    /**
+     * A row of purge spots on a probed surface: spot i at (x0 + i pitchX, y0 + i pitchY), Z from the
+     * surface plane. Spots are used once; {@link #usedSpots} counts the ones already used (reserved
+     * before a run streams) and is reset after the surface is wiped.
+     */
+    public static class PurgeRow {
+        /** Surface the spots lie on (its N1 probe points give the Z). */
+        public String surfaceName = "blank";
+        public Double x0Mm, y0Mm;
+        public double pitchXMm = 2.5;
+        public double pitchYMm = 0;
+        public int spots = 0;
+        public int usedSpots = 0;
+        public Long resetAtMs;
+
+        public boolean isDefined() {
+            return x0Mm != null && y0Mm != null && spots > 0;
+        }
+
+        public int spotsLeft() {
+            return Math.max(0, spots - usedSpots);
+        }
+
+        public double[] spot(int i) {
+            return new double[] {x0Mm + i * pitchXMm, y0Mm + i * pitchYMm};
+        }
+    }
+
+    /**
+     * Clean-pad guard (bench disp.py --require-clean): before the pressure goes on, the top camera
+     * looks at every work dot; the share of bright pixels (OpenCV gray > grayLevel) in a box of
+     * boxWMm x boxHMm at the target must be >= minBrightFraction. Bare copper pads read >= 0.90,
+     * paste left from an earlier run reads dark blue. The box is the bench's 75 x 73 px at its scale.
+     */
+    public static class CleanPadCheck {
+        public boolean enabled = true;
+        public int grayLevel = 200;
+        public double minBrightFraction = 0.8;
+        public double boxWMm = 0.806;
+        public double boxHMm = 0.807;
+    }
 
     public static class NamedLocation {
         public double x, y, z;
@@ -199,6 +253,11 @@ public class DispenseConfig {
         /** Where (informational). */
         public Double xMm, yMm;
         public long setAtMs;
+        /**
+         * Set when the needle contact came from the bench relation "needle contact raw Z = K - N1
+         * contact Z" (side camera): K, else null (needle touched the surface).
+         */
+        public Double rawSumMm;
 
         public NeedleAnchor() {
         }
@@ -235,6 +294,12 @@ public class DispenseConfig {
         public java.util.List<SurfacePoint> points = new java.util.ArrayList<>();
         public Long setAtMs;
         public String note;
+        /**
+         * Board surfaces: the board registration the points were probed on (board X/Y/rotation, side
+         * and fiducial transform; {@link DispenseService#boardRegistration}). A re-seated board gets a
+         * new registration, and I4 then asks for new probes; an untied board surface is refused.
+         */
+        public String boardFingerprint;
     }
 
     public NamedLocation location(String name) {
@@ -259,6 +324,11 @@ public class DispenseConfig {
             return false;
         }
         return needleChangedAtMs == null || needleZOffsetSetAtMs >= needleChangedAtMs;
+    }
+
+    /** The dispense gap of the active profile. */
+    public double gapMm() {
+        return profile.gapMm;
     }
 
     /**
@@ -295,7 +365,42 @@ public class DispenseConfig {
         if (c.surfaces == null) {
             c.surfaces = new LinkedHashMap<>();
         }
+        if (c.profile == null) {
+            c.profile = new DispenseProfile();
+        }
+        if (c.purgeRow == null) {
+            c.purgeRow = new PurgeRow();
+        }
+        if (c.cleanPadCheck == null) {
+            c.cleanPadCheck = new CleanPadCheck();
+        }
+        if (c.needleXyTrim == null) {
+            c.needleXyTrim = new NeedleXyTrim();
+        }
+        c.migrate();
         return c;
+    }
+
+    /**
+     * Schema 1/2 -> 3: the per-dot motion becomes the bench recipe (XY and Z at 2000 mm/s², lift
+     * at 50 mm/s, B limit 400 rpm) and the I4 tolerances follow the new needle frame (offset
+     * -2.59 mm, so the frame tolerance must stay below it). The removed keys were dropped on load.
+     */
+    void migrate() {
+        if (schemaVersion >= SCHEMA_VERSION) {
+            return;
+        }
+        travelAccelMmS2 = 2000;
+        zLiftAccelMmS2 = 2000;
+        zLiftFeedMmS = Math.max(zLiftFeedMmS, 50);
+        bMaxFeedDegS = Math.max(bMaxFeedDegS, 2400);
+        surfaceMaxResidualMm = Math.min(surfaceMaxResidualMm, 0.04);
+        surfaceMarginMm = Math.max(surfaceMarginMm, 3.5);
+        zFrameToleranceMm = Math.min(zFrameToleranceMm, MAX_FRAME_TOLERANCE_MM);
+        if (Math.abs(primeRotationDeg - 360) < 1e-9) {
+            primeRotationDeg = 360.36;
+        }
+        schemaVersion = SCHEMA_VERSION;
     }
 
     public DispenseConfig copy() {
@@ -332,8 +437,8 @@ public class DispenseConfig {
         // Z geometry (review finding: hop/travel values could move a nozzle down on the see-saw).
         // Machine-dependent bounds (travel Z inside the Z axis safe zone, hop <= travel) are checked
         // against the live axes when a program is built (GcodeStreamBuilder).
-        if (!(needleGapMm > 0 && needleGapMm <= 1.0)) {
-            p.add("needleGapMm must be > 0 and <= 1.0");
+        for (String problem : profile.validate(this)) {
+            p.add(problem);
         }
         if (!(hopHeightMm > 0 && hopHeightMm <= 10)) {
             p.add("hopHeightMm must be > 0 and <= 10");
@@ -341,11 +446,12 @@ public class DispenseConfig {
         if (!Double.isFinite(travelSafeZMm)) {
             p.add("travelSafeZMm must be a number");
         }
-        if (!(zFrameToleranceMm > 0 && zFrameToleranceMm <= 3)) {
-            p.add("zFrameToleranceMm must be > 0 and <= 3 (it must catch a needle-frame mix-up of ~5 mm)");
+        if (!(zFrameToleranceMm > 0 && zFrameToleranceMm <= MAX_FRAME_TOLERANCE_MM)) {
+            p.add("zFrameToleranceMm must be > 0 and <= 1.2: a height taken with the needle instead of N1 is 2.59 mm "
+                    + "off, and only a tolerance below half of that always catches it");
         }
-        if (!(surfaceMaxResidualMm > 0 && surfaceMaxResidualMm < needleGapMm)) {
-            p.add("surfaceMaxResidualMm must be > 0 and below needleGapMm");
+        if (!(surfaceMaxResidualMm > 0 && surfaceMaxResidualMm < profile.gapMm)) {
+            p.add("surfaceMaxResidualMm must be > 0 and below the profile gap");
         }
         if (!(surfaceMarginMm >= 0 && surfaceMarginMm <= 20)) {
             p.add("surfaceMarginMm must be 0 to 20");
@@ -356,17 +462,37 @@ public class DispenseConfig {
         if (!(touchOffPrimeExtraClearanceMm >= 0 && touchOffPrimeExtraClearanceMm <= 5)) {
             p.add("touchOffPrimeExtraClearanceMm must be 0 to 5");
         }
-        if (bFeedDegS <= 0 || retractFeedDegS <= 0 || bMaxFeedDegS < Math.max(bFeedDegS, retractFeedDegS)) {
-            p.add("B feeds must be > 0 and bMaxFeedDegS >= max(bFeedDegS, retractFeedDegS)");
+        if (!(bMaxFeedDegS > 0 && bMaxFeedDegS <= DispenseProfile.MAX_RPM * 6)) {
+            p.add("bMaxFeedDegS must be > 0 and <= 2400 (400 rpm, the Vieweg maximum)");
+        }
+        if (!(bStepsPerDeg > 0) || bStepsPerRev < 1) {
+            p.add("bStepsPerDeg and bStepsPerRev must be > 0");
         }
         if (bExtrudeSign != 1 && bExtrudeSign != -1) {
             p.add("bExtrudeSign must be +1 or -1");
         }
-        if (zLiftAccelMmS2 <= 0 || travelAccelMmS2 <= 0 || bAccelDegS2 <= 0) {
-            p.add("accelerations must be > 0");
+        if (!(zLiftAccelMmS2 > 0 && zLiftAccelMmS2 <= 5000 && travelAccelMmS2 > 0 && travelAccelMmS2 <= 5000)) {
+            p.add("travelAccelMmS2 and zLiftAccelMmS2 must be > 0 and <= 5000 (the screw's acceleration is the "
+                    + "profile's)");
         }
-        if (retractDeg < 0 || dwellMs < 0 || pumpToValveSettleMs < 0 || valveSettleMs < 0) {
-            p.add("retract/dwell/settle values must be >= 0");
+        if (!(maxContinuousOnTimeS > 0 && maxContinuousOnTimeS <= 3600)) {
+            p.add("maxContinuousOnTimeS must be > 0 and <= 3600 s (I7: a pressure hold switches off after it)");
+        }
+        if (pumpToValveSettleMs < 0 || valveSettleMs < 0 || pumpToValveSettleMs > 9000 || valveSettleMs > 9000) {
+            p.add("settle values must be 0 to 9000 ms");
+        }
+        if (purgeRow.spots < 0 || purgeRow.usedSpots < 0 || !(Math.hypot(purgeRow.pitchXMm, purgeRow.pitchYMm) >= 1.5
+                || purgeRow.spots <= 1)) {
+            p.add("purgeRow: spots and usedSpots must be >= 0 and the pitch at least 1.5 mm (distinct dots)");
+        }
+        if (!(cleanPadCheck.grayLevel >= 0 && cleanPadCheck.grayLevel <= 254
+                && cleanPadCheck.minBrightFraction > 0 && cleanPadCheck.minBrightFraction <= 1
+                && cleanPadCheck.boxWMm > 0 && cleanPadCheck.boxWMm <= 3 && cleanPadCheck.boxHMm > 0
+                && cleanPadCheck.boxHMm <= 3)) {
+            p.add("cleanPadCheck: grayLevel 0..254, minBrightFraction 0..1, box 0..3 mm");
+        }
+        if (!(Math.abs(needleXyTrim.dxMm) <= 1 && Math.abs(needleXyTrim.dyMm) <= 1)) {
+            p.add("needleXyTrim must be within +-1 mm (larger: fix the N2 head offset in OpenPnP)");
         }
         if (keepaliveIntervalMs < 100) {
             p.add("keepaliveIntervalMs must be >= 100");
@@ -375,11 +501,8 @@ public class DispenseConfig {
                 || keepaliveWindowMs > 60000) {
             p.add("keepaliveWindowMs must be at least 2 x keepaliveIntervalMs and at most 60000");
         }
-        if (pasteThicknessMm <= 0 || pasteDensityMgMm3 <= 0 || provisionalQMm3PerRev <= 0) {
-            p.add("paste thickness, density and q must be > 0");
-        }
-        if (maxDotsPerPad < 1) {
-            p.add("maxDotsPerPad must be >= 1");
+        if (pasteThicknessMm <= 0 || pasteDensityMgMm3 <= 0) {
+            p.add("paste thickness and density must be > 0");
         }
         return p;
     }

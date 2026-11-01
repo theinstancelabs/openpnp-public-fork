@@ -36,6 +36,41 @@ final class Synth {
     static final double PAD_X0 = 1.4, PAD_PITCH_X = 2.8, PAD_Y0 = 1.5, PAD_PITCH_Y = 3.0;
     static final double PAD_W = 0.8, PAD_H = 0.95;
 
+    /** Background radiance (RGB) at (x, y) mm; set on a {@link Shot} it replaces the Background. */
+    interface Scene {
+        void radiance(double x, double y, double[] out);
+    }
+
+    /**
+     * Lumen board under the top camera's ring light, RGB as read on bench frames: blue solder
+     * mask (BGR ~208,45,0), bare copper pad (BGR ~246,244,222), solder paste (BGR ~160,63,13).
+     */
+    static final double[] LUMEN_MASK = {0, 45, 208}, LUMEN_COPPER = {222, 244, 246},
+            LUMEN_PASTE = {13, 63, 160};
+
+    /**
+     * Lumen work board: solder mask with one bare-copper pad of w x h mm (0.15 mm corner radius)
+     * centred at (cx, cy). Bench pads are ~1.0 mm square.
+     */
+    static Scene lumenPad(double cx, double cy, double w, double h) {
+        double r = 0.15;
+        return (x, y, out) -> {
+            double qx = Math.max(0, Math.abs(x - cx) - (w / 2 - r));
+            double qy = Math.max(0, Math.abs(y - cy) - (h / 2 - r));
+            if (qx * qx + qy * qy <= r * r) {
+                double f = 0.97 + 0.06 * value(x / 0.05, y / 0.05, 13);
+                for (int c = 0; c < 3; c++) {
+                    out[c] = LUMEN_COPPER[c] * f;
+                }
+                return;
+            }
+            double tex = 8 * (fbm(x / 0.2, y / 0.2, 12, 2) - 0.5) * 2;
+            for (int c = 0; c < 3; c++) {
+                out[c] = LUMEN_MASK[c] + tex;
+            }
+        };
+    }
+
     /** Paste deposit shape. */
     interface Deposit {
         boolean contains(double x, double y);
@@ -95,7 +130,13 @@ final class Synth {
     static final class Shot {
         int width = 640, height = 480;
         double mmPerPx = 0.035;
+        /** Vertical scale, mm/px; 0 means square pixels (mmPerPx). */
+        double mmPerPxY = 0;
         Background background = Background.PAPER;
+        /** Replaces the background when set. */
+        Scene scene;
+        /** Paste colour (RGB, shaded like the grey paste); null keeps the grey paste. */
+        double[] pasteRgb;
         /** Rotation of the FR4 board (pads) in degrees CCW. */
         double boardRotDeg = 0;
         final List<Deposit> deposits = new ArrayList<>();
@@ -114,7 +155,10 @@ final class Synth {
             s.width = width;
             s.height = height;
             s.mmPerPx = mmPerPx;
+            s.mmPerPxY = mmPerPxY;
             s.background = background;
+            s.scene = scene;
+            s.pasteRgb = pasteRgb;
             s.boardRotDeg = boardRotDeg;
             s.deposits.addAll(deposits);
             s.gain = gain;
@@ -135,6 +179,7 @@ final class Synth {
         int w = s.width;
         int h = s.height;
         final int ss = 3;
+        double mmPerPxY = s.mmPerPxY > 0 ? s.mmPerPxY : s.mmPerPx;
         float[][] img = new float[3][w * h];
         double[] rgb = new double[3];
         for (int j = 0; j < h; j++) {
@@ -142,7 +187,7 @@ final class Synth {
                 double r = 0, g = 0, b = 0;
                 for (int sv = 0; sv < ss; sv++) {
                     double py = j + (sv + 0.5) / ss - 0.5 - s.shiftYPx;
-                    double y = -(py - h / 2.0) * s.mmPerPx;
+                    double y = -(py - h / 2.0) * mmPerPxY;
                     for (int su = 0; su < ss; su++) {
                         double px = i + (su + 0.5) / ss - 0.5 - s.shiftXPx;
                         double x = (px - w / 2.0) * s.mmPerPx;
@@ -207,11 +252,21 @@ final class Synth {
                 double rho = Math.min(1, d.rho(x, y));
                 double v = 150 + 14 * (value(x / 0.025, y / 0.025, 9) - 0.5) * 2
                         - 25 * Math.pow(rho, 6) + d.highlight(x, y);
+                if (s.pasteRgb != null) {
+                    for (int c = 0; c < 3; c++) {
+                        out[c] = s.pasteRgb[c] * v / 150;
+                    }
+                    return;
+                }
                 out[0] = v;
                 out[1] = v;
                 out[2] = v + 6;
                 return;
             }
+        }
+        if (s.scene != null) {
+            s.scene.radiance(x, y, out);
+            return;
         }
         switch (s.background) {
             case PAPER: {

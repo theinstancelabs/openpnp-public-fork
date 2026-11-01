@@ -20,9 +20,20 @@ Model (Marlin 2.1 as built for the LumenPnP rev05 board, il/lumen-rev05 7776c73)
 Not modelled: SLOWDOWN (only stretches segments shorter than 20 ms when 2..7 moves are queued),
 step rounding, USB jitter.
 
+Validation (bench replay of the exact tools/disp.py stream, 2026-10-27; predicted vs measured):
+  rt-ms              0                  1.5                3
+  p18_board1   107.76 s (+2.7%)   108.97 s (+3.9%)   110.18 s (+5.0%)   measured 104.92 s, 5,490 DPH
+  p16_board1   134.32 s (+2.1%)   135.53 s (+3.0%)   136.73 s (+4.0%)   measured 131.52 s, 4,380 DPH
+runs/serial.log puts the host round trip of a queued line under 1 ms (rt-ms 0 is closest); the model is a
+constant ~18 ms per dot over the measured G4-to-G4 cycle (any XY pitch, 190 or 370 deg turn), consistent
+with Marlin's discrete stepping finishing each block a few ms before the continuous trapezoid.
+
 Usage:
   dph_estimate.py gcode FILE [--limits machine-limits.json] [--rt-ms 1.5] [--json]
   dph_estimate.py bench RUN_DIR... [--rt-ms 1.5]     # replay tools/disp.py runs and compare with timing.json
+  dph_estimate.py profile --pitch 160*2.5 --net-steps 800 --suck-back 10 --rpm 180 --screw-accel 20000
+                  --dwell-ms 250 [--xy-accel 2000] [--hop 1] [--z-feed 3000] [--rt-ms 1.5] [--json]
+                  # what-if s/dot and DPH of the bench recipe; also profile() for scripts
 """
 import argparse
 import csv
@@ -273,32 +284,137 @@ def simulate(lines, limits=None, rt_ms=1.5, tag_fn=None):
 
 # --------------------------------------------------------------------------- bench replay
 
+# tools/disp.py constants: needle = camera + OFF (only shifts coordinates, so timing does not depend on
+# it), defaults of the per-dot recipe, travel height above the dot, cross height, XY/Z acceleration.
+DISP_OFF = (25.291, -75.926)
+DISP_RETRACT, DISP_DWELL_MS, DISP_DZ, DISP_ZCROSS, DISP_ACC = 10.0, 100, 1.0, 49.5, 2000
+
+
+def disp_dot(x, y, z, b, th, retract, dwell_ms, bf, bf_retract, bacc=None, brk=None, cross=False,
+             xy_feed=12000, z_feed=3000, acc=DISP_ACC, dz=DISP_DZ):
+    """The lines tools/disp.py dot() sends for one dot (x, y = needle; b = B before the feed)."""
+    out = ["G1 Z%.3f F3000" % DISP_ZCROSS] if cross else []
+    out += ["G1 X%.3f Y%.3f F%g" % (x - DISP_OFF[0], y - DISP_OFF[1], xy_feed), "G1 Z%.3f F%g" % (z, z_feed)]
+    if bacc:
+        out.append("M204 S%g" % bacc)
+    out += ["G1 B%.2f F%g" % (b + th, bf), "G4 P%d" % dwell_ms, "G1 B%.2f F%g" % (b + th - retract, bf_retract)]
+    if bacc:
+        out.append("M204 S%g" % acc)
+    if brk:
+        out += ["G1 Z%.3f F%g" % (z - brk[0], brk[1]), "G4 P%d" % brk[2]]
+    out.append("G1 Z%.3f F%g" % (z - dz, z_feed))
+    return out
+
+
 def bench_lines(run_dir):
-    """Rebuild the exact stream tools/disp.py sent (2026-10-27 version) from its dots.csv."""
-    OFF = (24.351, -76.141)
-    RETRACT, DWELL, DZ = 10.0, 100, 1.0
+    """Rebuild the exact stream tools/disp.py sent for a run (pre, timed lines, per-line dot tags).
+
+    dots.csv gives x, y, z, the forward turn actually sent (theta) and B before it (b_start);
+    timing.json the session feed (bf), screw acceleration (bacc) and purge count; the plan
+    <run_dir>.json (when present, in dots.csv order after the purge rows) the per-dot dwell,
+    suck-back, feed, cross and break-off. Purge dots go into `pre` (before the clock); the cross to
+    the first work dot (Z to ZCROSS, then XY) is timed, as in disp.py.
+    """
     rows = list(csv.DictReader(open(os.path.join(run_dir, "dots.csv"))))
+    meas = json.load(open(os.path.join(run_dir, "timing.json")))
+    plan_file = run_dir.rstrip("/") + ".json"
+    plan = json.load(open(plan_file)) if os.path.exists(plan_file) else []
+    bf = float(meas.get("bf") or 43200)
+    bacc = float(meas["bacc"]) if meas.get("bacc") else None
+    purge = [r for r in rows if r["id"] == "purge"]
+    work = [r for r in rows if r["id"] != "purge"]
+    if len(purge) != meas.get("purge", len(purge)) or len(work) != meas["n"]:
+        raise ValueError("%s: dots.csv has %d purge + %d dots, timing.json %s + %s"
+                         % (run_dir, len(purge), len(work), meas.get("purge"), meas["n"]))
+    if plan:
+        bad = [(r["id"], p["id"]) for r, p in zip(work, plan) if r["id"] != p["id"]]
+        if bad:
+            raise ValueError("%s: dots.csv and %s disagree (first %s)" % (run_dir, plan_file, bad[0]))
+    # purge dots repeat the first plan dot's turn, suck-back, dwell and feed (disp.py `recipe`)
+    recipe = {k: plan[0][k] for k in ("retract", "dwell", "bf") if plan and k in plan[0]}
+    plan_rows = iter(plan)
+
+    def lines_of(r):
+        d = recipe if r["id"] == "purge" else next(plan_rows, {})
+        return disp_dot(float(r["x"]), float(r["y"]), float(r["z"]), float(r["b_start"]), float(r["theta"]),
+                        float(d.get("retract", DISP_RETRACT)), int(d.get("dwell", DISP_DWELL_MS)),
+                        float(d.get("bf", bf)), max(bf, 43200.0), bacc, d.get("brk"), bool(d.get("cross")))
+
     first = rows[0]
-    pre = ["M204 S2000", "M201 B10000",
-           "G92 X%.3f Y%.3f Z%.3f B0" % (float(first["x"]) - OFF[0], float(first["y"]) - OFF[1],
-                                       float(first["z"]) - DZ),
-           "; @t0"]
+    pre = ["M204 S%d" % DISP_ACC, "M201 B%d" % max(10000, int(bacc or 0)),
+           "G92 X%.3f Y%.3f Z%.3f B0" % (float(first["x"]) - DISP_OFF[0], float(first["y"]) - DISP_OFF[1],
+                                       float(first["z"]) - DISP_DZ)]
     lines = []
     tags = []
-    for r in rows:
-        x, y, z = float(r["x"]), float(r["y"]), float(r["z"])
-        th, b = float(r["theta"]), float(r["b_start"])
-        dot = ["G1 X%.3f Y%.3f F12000" % (x - OFF[0], y - OFF[1]),
-               "G1 Z%.3f F3000" % z,
-               "G1 B%.2f F43200" % (b + th),
-               "G4 P%d" % DWELL,
-               "G1 B%.2f F43200" % (b + th - RETRACT),
-               "G1 Z%.3f F3000" % (z - DZ)]
+    for r in purge:
+        pre += lines_of(r)
+    if purge:
+        pre.append("M400")
+        cross = ["G1 Z%.3f F3000" % DISP_ZCROSS,
+                 "G1 X%.3f Y%.3f F12000" % (float(work[0]["x"]) - DISP_OFF[0], float(work[0]["y"]) - DISP_OFF[1])]
+        lines += cross
+        tags += [int(work[0]["i"])] * len(cross)
+    pre.append("; @t0")
+    for r in work:
+        dot = lines_of(r)
         lines += dot
         tags += [int(r["i"])] * len(dot)
     lines.append("M400")
     tags.append(tags[-1])
     return pre, lines, tags
+
+
+# --------------------------------------------------------------------------- what-if profile
+
+def profile(pitches, net_steps_per_dot, suck_back_deg, screw_rpm, screw_accel, dwell_ms, xy_accel=2000.0,
+            hop_mm=1.0, z_feed=3000.0, xy_feed=12000.0, retract_rpm=None, rt_ms=1.5, limits=None):
+    """Seconds per dot and DPH of the bench recipe (disp_dot, validated by `bench`) with engine-style knobs.
+
+    pitches: XY travel before each dot (mm, one per dot). Per dot: XY at xy_feed, Z down hop_mm at z_feed,
+    M204 S<screw_accel>, B forward (net + suck-back) at screw_rpm, G4 P<dwell_ms>, B suck-back at
+    retract_rpm (default max(screw_rpm, 120) as disp.py), M204 S<xy_accel>, Z up hop_mm at z_feed.
+    Session: M204 S<xy_accel>, M201 B<max(10000, screw_accel)>. Timed from the first XY to the final M400.
+    """
+    net = net_steps_per_dot / (limits or {}).get("stepsPerUnit", {}).get("B", FW_STEPS["B"])
+    bf = screw_rpm * 360.0
+    bf_retract = retract_rpm * 360.0 if retract_rpm else max(bf, 43200.0)
+    bacc = screw_accel if abs(screw_accel - xy_accel) > 1e-9 else None
+    z = 60.0
+    lines = ["M204 S%g" % xy_accel, "M201 B%d" % max(10000, int(screw_accel)),
+             "G92 X%.3f Y%.3f Z%.3f B0" % (-DISP_OFF[0], -DISP_OFF[1], z - hop_mm), "; @t0"]
+    x = b = 0.0
+    for p in pitches:
+        x += p
+        lines += disp_dot(x, 0.0, z, b, net + suck_back_deg, suck_back_deg, dwell_ms, bf, bf_retract, bacc,
+                          xy_feed=xy_feed, z_feed=z_feed, acc=xy_accel, dz=hop_mm)
+        b += net
+    lines.append("M400")
+    res = simulate(lines, limits, rt_ms=rt_ms)
+    n = len(pitches)
+    return {"dots": n, "seconds": res["seconds"], "s_per_dot": res["seconds"] / n, "dph": 3600 * n / res["seconds"],
+            "net_deg": net, "forward_deg": net + suck_back_deg, "categories": res["categories"]}
+
+
+def parse_pitches(text):
+    """'1.7,2.5,160*1.7' -> list of mm (N*P repeats P N times)."""
+    out = []
+    for tok in text.split(","):
+        n, _, v = tok.strip().rpartition("*")
+        out += [float(v)] * (int(n) if n else 1)
+    return out
+
+
+def cmd_profile(a):
+    limits = json.load(open(a.limits)) if a.limits else None
+    res = profile(parse_pitches(a.pitch), a.net_steps, a.suck_back, a.rpm, a.screw_accel, a.dwell_ms, a.xy_accel,
+                  a.hop, a.z_feed, a.xy_feed, a.retract_rpm, a.rt_ms, limits)
+    if a.json:
+        print(json.dumps(res, indent=2))
+    else:
+        print("%d dots  %.3f s  %.4f s/dot  %.0f DPH  (B %.2f deg forward, %.2f net)"
+              % (res["dots"], res["seconds"], res["s_per_dot"], res["dph"], res["forward_deg"], res["net_deg"]))
+        for k, v in res["categories"].items():
+            print("  %-10s %8.3f s" % (k, v))
 
 
 def cmd_bench(a):
@@ -339,8 +455,23 @@ def main(argv=None):
     p = sub.add_parser("bench")
     p.add_argument("runs", nargs="+")
     p.add_argument("--rt-ms", type=float, default=1.5)
+    p = sub.add_parser("profile")
+    p.add_argument("--pitch", required=True, help="XY travel before each dot, mm: '1.7,2.5,160*1.7'")
+    p.add_argument("--net-steps", type=float, required=True, help="net B steps per dot (M92 B4.44: 800 = 180.18 deg)")
+    p.add_argument("--suck-back", type=float, required=True, help="suck-back, deg")
+    p.add_argument("--rpm", type=float, required=True, help="screw feed, rpm")
+    p.add_argument("--screw-accel", type=float, required=True, help="screw acceleration, deg/s^2")
+    p.add_argument("--dwell-ms", type=int, required=True)
+    p.add_argument("--xy-accel", type=float, default=2000.0)
+    p.add_argument("--hop", type=float, default=1.0, help="Z hop, mm")
+    p.add_argument("--z-feed", type=float, default=3000.0, help="mm/min")
+    p.add_argument("--xy-feed", type=float, default=12000.0, help="mm/min")
+    p.add_argument("--retract-rpm", type=float, help="suck-back feed (default max(rpm, 120))")
+    p.add_argument("--limits")
+    p.add_argument("--rt-ms", type=float, default=1.5)
+    p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
-    {"gcode": cmd_gcode, "bench": cmd_bench}[a.cmd](a)
+    {"gcode": cmd_gcode, "bench": cmd_bench, "profile": cmd_profile}[a.cmd](a)
 
 
 if __name__ == "__main__":

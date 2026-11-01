@@ -1,22 +1,24 @@
 package org.openpnp.instancelabs.dispense;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
 /**
- * Builds the raw G-code block for one pressure session (plan §4.5): session start (G92 B0 unless B
- * is already zeroed since home/reconnect, M201/M203 for B, optional host-watchdog arm), pump ON ->
- * wait -> valve ON -> settle, prime/test dot on the waste location, then per dot: XY at the
- * current (hop) height, Z down to the gap, B feed, dwell, B suck-back, Z up with the dispense-lift
- * acceleration. Session end: M400, valve OFF, pump OFF, re-zero B (aborts: M410 first, see
- * {@link #abortLines}).
+ * Builds the raw G-code block for one pressure session (plan §4.5, bench recipe 2026-10-28):
+ * session start (G92 B0 unless B is already zeroed since home/reconnect, M201/M203 for B, optional
+ * host-watchdog arm), pump ON -> wait -> valve ON -> settle, the purge row (same recipe as the
+ * work; the last purge dot leaves the screw at the profile's start angle), a cross to the work at
+ * travel Z with no stop, then per dot: XY at the current (hop) height, Z down to the gap,
+ * {@code M204 S<screw accel>}, B forward (net + suck-back), dwell, B back (suck-back),
+ * {@code M204 S<XY/Z accel>}, Z up. Session end: M400, valve OFF, pump OFF, re-zero B (aborts:
+ * the Stop sequence, see {@link #abortLines}).
  *
  * <p>All XYZ coordinates go through {@link RawMapper} (OpenPnP's transform chain) and
- * {@link BacklashEmulator}. B is absolute from the session's G92 B0; the B coordinate at the end
- * of each feed advances by exactly the dot's rotation, so the suck-back of one dot is taken up by
- * the next feed and the net extrusion per dot equals its planned rotation.</p>
+ * {@link BacklashEmulator}. B targets are whole motor steps from the session's G92 B0 (Marlin
+ * rounds each absolute target to steps): every dot, the first included, turns forward net +
+ * suck-back and back by the suck-back, so the screw rests exactly net steps further (800 for half
+ * a revolution) and the start angle repeats.</p>
  */
 public class GcodeStreamBuilder {
     /** One dot to dispense, in N2 machine coordinates. */
@@ -41,18 +43,9 @@ public class GcodeStreamBuilder {
         }
     }
 
-    /** Which part of a board run a program covers. */
-    public enum Part {
-        /** Prime + test dot + all dots in one pressure session. */
-        FULL,
-        /** Prime + test dot only (when the test dot is optically checked before the board). */
-        PRIME_AND_TEST,
-        /** Re-prime + all dots (after a passed optical test-dot check). */
-        DOTS
-    }
-
     public static final int PRIME_INDEX = -1;
     public static final int TEST_DOT_INDEX = -2;
+    public static final int PURGE_INDEX = -3;
 
     private final DispenseConfig cfg;
     private final RawMapper mapper;
@@ -62,16 +55,21 @@ public class GcodeStreamBuilder {
     private final String lb;
     private double[] lastDriver;
     private double[] nozzle;
+    private final DispenseProfile profile;
     private boolean bZeroed;
-    /** Current B position in extrude-positive units (raw B = bExtrudeSign * bPos). */
-    private double bPos;
-    /** B position at the end of the last feed (the next feed ends rotation further). */
-    private double bFeedEnd;
+    /** B position (extrude-positive deg) that step 0 stands for (raw B = bExtrudeSign * position). */
+    private double bOrigin;
+    /** Current and resting B position in extrude-positive steps from bOrigin. */
+    private long bSteps, restSteps;
+    /** Marlin step count of B at the start of this program (M114 Count), or null if unknown. */
+    private Long bCountAtStart;
     private boolean pumpOn, valveOn, armed;
     private final boolean keepalive;
     private double t;
     private double pumpOnT = -1;
     private double accel = Double.NaN;
+    /** M201 B sent at session start (caps the screw acceleration). */
+    private double bAccelLimit = Double.NaN;
     private GcodeProgram.Marker pending;
     private int pendingIndex;
     private String pendingPad;
@@ -92,9 +90,9 @@ public class GcodeStreamBuilder {
         this.nozzle = mapper.currentNozzleLocation().clone();
         this.letters = new String[] {mapper.letterX(), mapper.letterY(), mapper.letterZ()};
         this.lb = mapper.letterB();
+        this.profile = cfg.profile;
         this.bZeroed = bZeroedAtStart;
-        this.bPos = bZeroedAtStart ? cfg.bExtrudeSign * mapper.currentB() : Double.NaN;
-        this.bFeedEnd = bPos;
+        this.bOrigin = bZeroedAtStart ? cfg.bExtrudeSign * mapper.currentB() : Double.NaN;
         prog.bZeroedAtStart = bZeroedAtStart;
         prog.keepalive = keepalive;
         checkTravelZ();
@@ -150,46 +148,47 @@ public class GcodeStreamBuilder {
     // Composite programs
     // ------------------------------------------------------------------------------------------
 
-    /** Program for (part of) a board plan. */
+    /**
+     * Program for a board plan: one pressure session with the purge row first (same recipe as the
+     * work), then a cross to the first dot at travel Z with no M400 or dwell (any pause with the
+     * pressure on lets paste ooze onto the tip), then every dot.
+     *
+     * @param purge purge spots (dot specs at the purge row; their rotation is replaced by the
+     *        profile's), possibly empty
+     * @param bCount Marlin step count of B at the start of the program (M114 Count), or null if the
+     *        controller did not report it: then the start angle cannot be set (refused for a
+     *        partial-turn profile)
+     */
     public static GcodeProgram forPlan(DispenseConfig cfg, RawMapper mapper, DispensePlan plan,
-            boolean bZeroed, boolean keepalive, Part part) throws Exception {
+            List<DotSpec> purge, boolean bZeroed, boolean keepalive, Long bCount) throws Exception {
         List<DotSpec> dots = new ArrayList<>();
         for (DispensePlan.PlannedDot d : plan.dots) {
             dots.add(DotSpec.of(d));
         }
-        double testRot = plan.dots.isEmpty() ? 0 : plan.dots.get(0).rotationDeg;
         GcodeStreamBuilder b = new GcodeStreamBuilder(cfg, mapper, bZeroed, keepalive);
-        b.comment("; instancelabs dispense plan " + plan.planId + " board " + plan.boardName + " part " + part
-                + " calibration #" + plan.calibrationId);
+        b.bCountAtStart = bCount;
+        b.comment("; instancelabs dispense plan " + plan.planId + " board " + plan.boardName + " profile '"
+                + cfg.profile.name + "' " + cfg.profile.fingerprint());
         b.sessionStart();
-        DispenseConfig.NamedLocation waste = cfg.location(cfg.wasteLocationName);
-        boolean prime = cfg.primeAndTestDot || part != Part.FULL;
-        if (prime) {
-            if (waste == null) {
-                throw new Exception("I9: waste location '" + cfg.wasteLocationName + "' is not set");
-            }
-            b.travelTo(waste.x, waste.y);
+        if (!purge.isEmpty()) {
+            b.travelTo(purge.get(0).x, purge.get(0).y);
         }
         else if (!dots.isEmpty()) {
             b.travelTo(dots.get(0).x, dots.get(0).y);
         }
         b.pressurize();
-        if (prime) {
-            double primeRot = part == Part.DOTS ? cfg.rePrimeRotationDeg : cfg.primeRotationDeg;
-            b.dot(b.atLocation(waste, 0, 0, primeRot, PRIME_INDEX, "prime"));
-            if (part != Part.DOTS && testRot > 0) {
-                b.dot(b.atLocation(waste, cfg.testDotOffsetXMm, cfg.testDotOffsetYMm, testRot, TEST_DOT_INDEX,
-                        "test-dot"));
+        b.purge(purge);
+        double workT0 = b.t;
+        for (int i = 0; i < dots.size(); i++) {
+            if (i == 0) {
+                b.travelTo(dots.get(0).x, dots.get(0).y);
+                b.markWorkStart();
             }
+            // whole steps from the profile (not the plan's degrees: a changed bStepsPerDeg would drift)
+            b.dot(dots.get(i), cfg.profile.netStepsPerDot);
         }
-        if (part != Part.PRIME_AND_TEST) {
-            for (int i = 0; i < dots.size(); i++) {
-                if (i == 0) {
-                    b.travelTo(dots.get(0).x, dots.get(0).y);
-                }
-                b.dot(dots.get(i));
-            }
-        }
+        // From the cross after the purge to the last dot's lift: what the bench's DPH counts.
+        b.prog.estimatedWorkSeconds = b.t - workT0;
         b.endSession();
         return b.build();
     }
@@ -235,13 +234,12 @@ public class GcodeStreamBuilder {
         return b.build();
     }
 
-    /** The fixed abort / error sequence (plan §4.4 order): quick-stop, valve OFF, pump OFF. */
+    /**
+     * The fixed abort / error sequence: the Stop sequence (M410, valve OFF, pump OFF, left valve and
+     * pump OFF, M18 B), then the watchdog disarm if it was armed.
+     */
     public static List<String> abortLines(DispenseConfig cfg, boolean keepaliveArmed, String letterB) {
-        List<String> l = new ArrayList<>(Arrays.asList("M410", ControllerCommands.VALVE_OFF,
-                ControllerCommands.PUMP_OFF));
-        if (cfg.abortDisablesB) {
-            l.add("M18 " + letterB);
-        }
+        List<String> l = new ArrayList<>(ControllerCommands.stopSequence(letterB));
         if (keepaliveArmed) {
             l.add(ControllerCommands.KEEPALIVE_DISARM);
         }
@@ -251,7 +249,7 @@ public class GcodeStreamBuilder {
     /** Dot at a named location (+ offset) with the configured gap; lifts to travel Z after. */
     public DotSpec atLocation(DispenseConfig.NamedLocation loc, double dx, double dy, double rot, int index,
             String label) {
-        double z = loc.z + cfg.needleZOffsetMm + cfg.needleGapMm + primeExtraClearanceMm;
+        double z = loc.z + cfg.needleZOffsetMm + cfg.gapMm() + primeExtraClearanceMm;
         return new DotSpec(loc.x + dx, loc.y + dy, z, cfg.travelSafeZMm, rot, index, label);
     }
 
@@ -271,10 +269,12 @@ public class GcodeStreamBuilder {
         if (!bZeroed) {
             add("G92 " + lb + "0", GcodeProgram.Marker.B_ZERO);
             bZeroed = true;
-            bPos = 0;
-            bFeedEnd = 0;
+            bOrigin = 0;
         }
-        add("M201 " + lb + f0(cfg.bAccelDegS2), GcodeProgram.Marker.NONE);
+        bSteps = 0;
+        restSteps = 0;
+        bAccelLimit = profile.screwAccelDegS2;
+        add("M201 " + lb + f0(bAccelLimit), GcodeProgram.Marker.NONE);
         add("M203 " + lb + f0(cfg.bMaxFeedDegS), GcodeProgram.Marker.NONE);
         setAccel(cfg.travelAccelMmS2);
         if (keepalive) {
@@ -294,20 +294,78 @@ public class GcodeStreamBuilder {
         dwell(cfg.valveSettleMs);
     }
 
-    /** Lift to travel safe Z (if not there), then XY. */
+    /**
+     * Lift to travel safe Z (if not there), then XY (a dispense target: the needle XY trim applies).
+     */
     public void travelTo(double x, double y) throws Exception {
         if (Math.abs(nozzle[2] - cfg.travelSafeZMm) > 1e-6) {
             moveNozzle(nozzle[0], nozzle[1], cfg.travelSafeZMm, cfg.zLiftFeedMmS, "G1");
         }
-        moveNozzle(x, y, cfg.travelSafeZMm, cfg.travelFeedMmS, "G0");
+        moveNozzle(trimX(x), trimY(y), cfg.travelSafeZMm, cfg.travelFeedMmS, "G0");
     }
 
+    /** One dot of its own rotation (rounded to whole steps). */
     public void dot(DotSpec d) throws Exception {
+        dot(d, Math.round(d.rotationDeg * cfg.bStepsPerDeg));
+    }
+
+    /**
+     * Purge row: one profile dot per spot. If the B step count is known, the first purge dot turns
+     * the screw so that, after the other purge dots, it rests at the profile's start angle for the
+     * first work dot (required for a partial turn: its dose depends on the angle). The other purge
+     * dots flush the odd-sized first one.
+     */
+    public void purge(List<DotSpec> spots) throws Exception {
+        long net = profile.netStepsPerDot;
+        if (spots.isEmpty()) {
+            return; // a partial-turn profile always has purge dots (DispenseProfile.validate, I9)
+        }
+        if (profile.isPartialTurn(cfg) && bCountAtStart == null) {
+            throw new IllegalStateException("the controller did not report the B step count (M114 Count): the "
+                    + "screw start angle of a partial-turn profile cannot be set");
+        }
+        for (int i = 0; i < spots.size(); i++) {
+            DotSpec d = spots.get(i);
+            long steps = net;
+            if (i == 0 && bCountAtStart != null) {
+                steps = profile.phaseSteps(cfg, restCount(), spots.size() - 1);
+                comment(String.format(Locale.ROOT, "; first purge dot sets the phase: rest %.1f deg -> %.1f deg, the "
+                        + "work starts at %.1f deg", DispenseProfile.angleOfCount(restCount(), cfg.bStepsPerRev),
+                        DispenseProfile.angleOfCount(restCount() + cfg.bExtrudeSign * steps, cfg.bStepsPerRev),
+                        profile.startAngleSteps(cfg) * 360.0 / cfg.bStepsPerRev));
+            }
+            dot(new DotSpec(d.x, d.y, d.dispenseZ, d.hopZ, steps / cfg.bStepsPerDeg, PURGE_INDEX, d.label), steps);
+        }
+        prog.purgeDotCount = spots.size();
+    }
+
+    /** Records the screw state where the work starts (after the purge). */
+    private void markWorkStart() {
+        if (bCountAtStart != null) {
+            prog.workStartCount = restCount();
+            prog.workStartAngleDeg = DispenseProfile.angleOfCount(restCount(), cfg.bStepsPerRev);
+        }
+    }
+
+    /** Marlin step count of B at rest (null-safe callers only). */
+    private long restCount() {
+        return bCountAtStart + cfg.bExtrudeSign * restSteps;
+    }
+
+    /**
+     * One dot turning the screw by {@code netSteps}: forward net + suck-back under the screw
+     * acceleration, dwell, back by the suck-back, XY/Z acceleration again (M204 S caps B as well),
+     * lift.
+     */
+    public void dot(DotSpec d, long netSteps) throws Exception {
         if (!bZeroed) {
             throw new IllegalStateException("I2: no B move before B is zeroed");
         }
         if (!(pumpOn && valveOn)) {
             throw new IllegalStateException("dot outside a pressure session");
+        }
+        if (netSteps <= 0) {
+            throw new IllegalStateException("dot " + d.index + " (" + d.label + "): the screw turn must be > 0");
         }
         checkDotZ(d);
         comment(String.format(Locale.ROOT, "; dot %d %s rot %.3f", d.index, d.label, d.rotationDeg));
@@ -315,19 +373,30 @@ public class GcodeStreamBuilder {
         pendingIndex = d.index;
         pendingPad = d.label;
         pendingRot = d.rotationDeg;
-        moveNozzle(d.x, d.y, nozzle[2], cfg.travelFeedMmS, "G0");
-        moveNozzle(d.x, d.y, d.dispenseZ, cfg.zDownFeedMmS, "G1");
-        bFeedEnd += d.rotationDeg;
-        moveB(bFeedEnd, cfg.bFeedDegS);
-        dwell(cfg.dwellMs);
-        if (cfg.retractDeg > 0) {
-            moveB(bFeedEnd - cfg.retractDeg, cfg.retractFeedDegS);
+        double x = trimX(d.x), y = trimY(d.y);
+        moveNozzle(x, y, nozzle[2], cfg.travelFeedMmS, "G0");
+        moveNozzle(x, y, d.dispenseZ, cfg.zDownFeedMmS, "G1");
+        long suck = profile.suckBackSteps(cfg);
+        setAccel(profile.screwAccelDegS2);
+        moveBSteps(restSteps + netSteps + suck, profile.feedDegS());
+        dwell(profile.dwellMs);
+        if (suck > 0) {
+            moveBSteps(restSteps + netSteps, profile.feedDegS());
         }
+        restSteps += netSteps;
         setAccel(cfg.zLiftAccelMmS2);
-        moveNozzle(d.x, d.y, d.hopZ, cfg.zLiftFeedMmS, "G1");
+        moveNozzle(x, y, d.hopZ, cfg.zLiftFeedMmS, "G1");
         setAccel(cfg.travelAccelMmS2);
         markLast(GcodeProgram.Marker.DOT_END, d.index, d.label, d.rotationDeg);
         prog.dotCount += d.index >= 0 ? 1 : 0;
+    }
+
+    private double trimX(double x) {
+        return x - cfg.needleXyTrim.dxMm;
+    }
+
+    private double trimY(double y) {
+        return y - cfg.needleXyTrim.dyMm;
     }
 
     public void endSession() throws Exception {
@@ -349,8 +418,9 @@ public class GcodeStreamBuilder {
             armed = false;
         }
         add("G92 " + lb + "0", GcodeProgram.Marker.B_ZERO);
-        bPos = 0;
-        bFeedEnd = 0;
+        bOrigin = 0;
+        bSteps = 0;
+        restSteps = 0;
         if (Math.abs(nozzle[2] - cfg.travelSafeZMm) > 1e-6) {
             moveNozzle(nozzle[0], nozzle[1], cfg.travelSafeZMm, cfg.zLiftFeedMmS, "G1");
         }
@@ -377,7 +447,8 @@ public class GcodeStreamBuilder {
         }
         prog.finalPlanned = emu.planned();
         prog.finalDriver = emu.driver();
-        prog.finalB = cfg.bExtrudeSign * bPos;
+        prog.finalB = cfg.bExtrudeSign * bPosDeg();
+        prog.bCountAtStart = bCountAtStart;
         prog.finalNozzle = nozzle.clone();
         prog.estimatedSeconds = t;
         return prog;
@@ -402,17 +473,41 @@ public class GcodeStreamBuilder {
             double f = feedMmS * m.speedFactor;
             sb.append(" F").append(f0(f * 60));
             double dx = m.driver[0] - lastDriver[0], dy = m.driver[1] - lastDriver[1], dz = m.driver[2] - lastDriver[2];
-            t += Math.sqrt(dx * dx + dy * dy + dz * dz) / f;
+            t += moveSeconds(Math.sqrt(dx * dx + dy * dy + dz * dz), f, accel);
             lastDriver = m.driver.clone();
             add(sb.toString(), GcodeProgram.Marker.NONE);
         }
         nozzle = new double[] {x, y, z};
     }
 
-    private void moveB(double ext, double feedDegS) {
+    /** Absolute B move to a whole number of extrude steps from the origin. */
+    private void moveBSteps(long steps, double feedDegS) {
+        double ext = bOrigin + steps / cfg.bStepsPerDeg;
         add("G1 " + lb + f4(cfg.bExtrudeSign * ext) + " F" + f0(feedDegS * 60), GcodeProgram.Marker.NONE);
-        t += Math.abs(ext - bPos) / feedDegS;
-        bPos = ext;
+        double a = Double.isNaN(bAccelLimit) ? accel : Math.min(accel, bAccelLimit);
+        t += moveSeconds(Math.abs(steps - bSteps) / cfg.bStepsPerDeg, Math.min(feedDegS, cfg.bMaxFeedDegS), a);
+        bSteps = steps;
+    }
+
+    /** Current B position, extrude-positive degrees. */
+    private double bPosDeg() {
+        return bOrigin + bSteps / cfg.bStepsPerDeg;
+    }
+
+    /**
+     * Time of one move from rest to rest (trapezoid, or triangle if it never reaches the feed). The
+     * moves of a dot are separated by stops anyway (Z down, the B turn, G4 drains the planner, lift),
+     * so this is close to Marlin's; between dots it ignores look-ahead (a small overestimate).
+     */
+    static double moveSeconds(double dist, double feed, double accel) {
+        if (dist <= 0) {
+            return 0;
+        }
+        if (!(accel > 0) || Double.isInfinite(accel)) {
+            return dist / feed;
+        }
+        double accelDist = feed * feed / accel;
+        return dist >= accelDist ? dist / feed + feed / accel : 2 * Math.sqrt(dist / accel);
     }
 
     private void setAccel(double a) {

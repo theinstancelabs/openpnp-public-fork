@@ -22,4 +22,12 @@ public interface GcodeChannel {
         send(line, timeoutMs);
         return null;
     }
+
+    /**
+     * True only for a simulated controller on this computer (a TCP link to a loopback address): a
+     * real Marlin reports the B step count with M114, OpenPnP's simulator does not.
+     */
+    default boolean isLoopbackSimulator() {
+        return false;
+    }
 }

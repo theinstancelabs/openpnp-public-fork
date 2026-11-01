@@ -5,7 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.junit.jupiter.api.Test;
 
-/** Volume / rotation arithmetic (plan §5.6, §6.1). */
+/**
+ * Volume / rotation arithmetic (plan §5.6, §6.1). The planner no longer sizes dots by volume (one
+ * profile dot per pad, bench 2026-10-28); these helpers remain for the scale records and the
+ * informational stencil volume of a pad.
+ */
 public class DotMathTest {
     @Test
     public void first0603PadMatchesPlanNumbers() {

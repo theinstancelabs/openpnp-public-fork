@@ -3,6 +3,7 @@ package org.openpnp.instancelabs.dispense;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -21,11 +22,14 @@ import java.util.regex.Pattern;
  * of 24 V; never S180).</li>
  * <li>Host watchdog (il/safety firmware): {@code M115} capability query, {@code M990 S<ms>} arm,
  * {@code M990} ping, {@code M990 S0} disarm.</li>
+ * <li>Stop (bench, = machine.xml DISABLE_COMMAND): {@link #STOP_SEQUENCE} {@code M410, M107 P3,
+ * M107 P2, M107 P1, M107 P0, M18 B}: quick-stop, right valve, right pump, left valve, left pump,
+ * screw driver off.</li>
  * </ul>
  *
- * <p>{@link #check(String)} allows only the command words the engine needs. Any line whose command is
- * M106 or M107 must be one of the four pneumatic constants exactly; output-driving commands such as
- * M42/M43/M3-M9 are not on the list, so they are refused.</p>
+ * <p>{@link #check(String)} allows only the command words the engine needs. M106 must be one of the
+ * two ON constants exactly (pump, valve); M107 one of the four OFF constants (P0-P3: switching an
+ * output off is always safe). Output-driving commands such as M42/M43/M3-M9 are not on the list.</p>
  */
 public final class ControllerCommands {
     private ControllerCommands() {
@@ -35,6 +39,9 @@ public final class ControllerCommands {
     public static final String PUMP_OFF = "M107 P2";
     public static final String VALVE_ON = "M106 P3 S255";
     public static final String VALVE_OFF = "M107 P3";
+    /** Left (N1) vacuum valve and pump OFF: only ever switched off by the dispenser (Stop). */
+    public static final String LEFT_VALVE_OFF = "M107 P1";
+    public static final String LEFT_PUMP_OFF = "M107 P0";
     public static final String CAPABILITY_QUERY = "M115";
     public static final String WATCHDOG_CAPABILITY = "Cap:HOST_WATCHDOG:1";
     public static final String KEEPALIVE_PING = "M990";
@@ -43,8 +50,23 @@ public final class ControllerCommands {
     public static final int KEEPALIVE_MIN_MS = 100;
     public static final int KEEPALIVE_MAX_MS = 3600000;
 
-    private static final Set<String> PNEUMATIC = Collections.unmodifiableSet(
-            new HashSet<>(Arrays.asList(PUMP_ON, PUMP_OFF, VALVE_ON, VALVE_OFF)));
+    private static final Set<String> OUTPUT_ON = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList(PUMP_ON, VALVE_ON)));
+    private static final Set<String> OUTPUT_OFF = Collections.unmodifiableSet(
+            new HashSet<>(Arrays.asList(VALVE_OFF, PUMP_OFF, LEFT_VALVE_OFF, LEFT_PUMP_OFF)));
+
+    /**
+     * The Stop sequence for a screw on axis letter {@code b} (bench F9; machine.xml DISABLE_COMMAND):
+     * quick-stop, right valve OFF (vent first), right pump OFF, left valve OFF, left pump OFF, screw
+     * driver off.
+     */
+    public static List<String> stopSequence(String b) {
+        return Collections.unmodifiableList(Arrays.asList("M410", VALVE_OFF, PUMP_OFF, LEFT_VALVE_OFF, LEFT_PUMP_OFF,
+                "M18 " + b));
+    }
+
+    /** {@link #stopSequence} for the B axis. */
+    public static final List<String> STOP_SEQUENCE = stopSequence("B");
     /** Command words (letter + number, leading zeros removed) the engine may send. */
     private static final Set<String> ALLOWED_WORDS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             "G0", "G1", "G4", "G92", "M18", "M106", "M107", "M114", "M115", "M201", "M203", "M204", "M400",
@@ -94,10 +116,15 @@ public final class ControllerCommands {
         }
         switch (w) {
             case "M106":
+                if (!OUTPUT_ON.contains(s)) {
+                    return "'" + line + "': only " + PUMP_ON + " and " + VALVE_ON
+                            + " may switch an output on (no PWM, no other port)";
+                }
+                return null;
             case "M107":
-                if (!PNEUMATIC.contains(s)) {
-                    return "'" + line + "': only " + PUMP_ON + ", " + PUMP_OFF + ", " + VALVE_ON + " and " + VALVE_OFF
-                            + " may switch an output (no PWM, no other port)";
+                if (!OUTPUT_OFF.contains(s)) {
+                    return "'" + line + "': only " + VALVE_OFF + ", " + PUMP_OFF + ", " + LEFT_VALVE_OFF + " and "
+                            + LEFT_PUMP_OFF + " may switch an output off";
                 }
                 return null;
             case "M115":

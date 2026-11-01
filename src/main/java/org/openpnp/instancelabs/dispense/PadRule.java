@@ -8,11 +8,11 @@ public class PadRule {
     public long rowId;
     public String typeKey;
     public int version;
-    /** Maximum dots per pad for this type. */
+    /** Maximum dots per pad for this type (default DotSizer.DEFAULT_MAX_DOTS). */
     public Integer maxDots;
-    /** A dot fits a grid cell if diameter <= cell short side * fitFactor. */
+    /** Unused since the dose model was removed (kept for the stored rows). */
     public Double fitFactor;
-    /** Pads larger than this (mm^2) never get a single dot. */
+    /** Pads larger than this (mm^2) get ceil(area / this) profile dots on a grid. */
     public Double largestSingleDotPadMm2;
     /** Informational: how the grid pitch is chosen (currently always "cell = pad / grid"). */
     public String gridPitchRule;

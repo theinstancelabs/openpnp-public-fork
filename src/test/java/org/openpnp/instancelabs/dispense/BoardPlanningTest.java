@@ -163,20 +163,19 @@ public class BoardPlanningTest {
         assertEquals(0.5, m.get("R1.1").rotationDeg, 1e-6);
     }
 
+    /** One profile dot per pad (no dose model): the plan carries the profile and its fingerprint. */
     @Test
-    public void plannerVolumesFlagsAndOrder() {
+    public void plannerProfileDotsFlagsAndOrder() {
         DispenseConfig cfg = new DispenseConfig();
         cfg.minPadTypeStatus = "provisional";
-        cfg.needleZOffsetMm = 0.05;
-        Calibration cal = new Calibration();
-        cal.id = 7;
-        cal.qMm3PerRev = 0.47;
-        cal.densityMgMm3 = 3.7;
-        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(types, null), cal, null);
+        cfg.needleZOffsetMm = -2.59;
+        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(types, null));
         BoardLocation bl = new BoardLocation(board());
-        bl.setLocation(new Location(LengthUnit.Millimeters, 100, 50, 1.6, 0));
+        bl.setLocation(new Location(LengthUnit.Millimeters, 100, 50, 5.5, 0));
         DispensePlan plan = planner.planBoard(bl, 100, 50);
-        assertEquals(7, plan.calibrationId);
+        assertEquals(cfg.profile.fingerprint(), plan.profileFingerprint);
+        assertEquals(cfg.profile.fingerprint(), plan.profile.fingerprint());
+        assertEquals(0.10, plan.needleGapMm, 0);
         // R1, R2, R3, D1: 2 pads each; U1: 2 pads; X1: 1 (blocked)
         assertEquals(11, plan.pads.size());
         DispensePlan.PlannedPad r11 = null, x1 = null, centre = null;
@@ -191,14 +190,16 @@ public class BoardPlanningTest {
                 centre = p;
             }
         }
+        // informational stencil volume; the dot is the profile's half turn (800 steps)
         assertEquals(0.076, r11.targetVolumeMm3, 1e-12);
-        assertEquals(58.2128, r11.rotationPerDotDeg, 1e-4);
-        assertTrue(r11.flags.contains(PadFlag.NO_LADDER));
-        assertTrue(r11.flags.contains(PadFlag.PROVISIONAL_CALIBRATION));
+        assertEquals(800 / 4.44, r11.rotationPerDotDeg, 1e-12);
+        assertEquals(1, r11.dotCount);
+        assertTrue(r11.flags.isEmpty(), r11.flagNames().toString());
         assertFalse(r11.isBlocked());
         assertTrue(x1.flags.contains(PadFlag.NO_PAD_TYPE));
         assertTrue(x1.isBlocked());
         assertEquals(0.5 * 1.7 * 1.7 * 0.1, centre.targetVolumeMm3, 1e-12);
+        assertEquals(1, centre.dotCount, "no pad rule: one dot even on the QFN centre pad");
         // 10 dispensable pads -> 10 dots, each cites the pad and has Z = surface + offset + gap (+hop)
         assertEquals(10, plan.dots.size());
         Set<String> pads = new HashSet<>();
@@ -206,21 +207,49 @@ public class BoardPlanningTest {
             DispensePlan.PlannedDot d = plan.dots.get(i);
             assertEquals(i, d.index);
             pads.add(d.padId);
-            assertEquals(1.6 + 0.05 + 0.15, d.dispenseZMm, 1e-12);
+            assertEquals(5.5 - 2.59 + 0.10, d.dispenseZMm, 1e-12);
             assertEquals(d.dispenseZMm + 1.0, d.hopZMm, 1e-12);
+            assertEquals(cfg.profile.netDeg(cfg), d.rotationDeg, 0);
         }
         assertEquals(10, pads.size());
+        assertEquals(10 * 800 / 4.44, plan.totalRotationDeg(), 1e-9);
         assertTrue(plan.pathLengthMm <= plan.pathLengthNearestNeighbourMm + 1e-9);
         // first dot is the one nearest the start point (100, 50): R1.1 at (109.175, 60)
         assertEquals("R1.1", plan.dots.get(0).padId);
+        assertTrue(plan.summary().contains(cfg.profile.fingerprint()), plan.summary());
+    }
+
+    /** A pad type's rule asks for a grid of profile dots on a large pad (here the QFN centre pad). */
+    @Test
+    public void padRuleGivesAGridOfProfileDots() {
+        DispenseConfig cfg = new DispenseConfig();
+        cfg.minPadTypeStatus = "provisional";
+        Map<String, PadRule> rules = new HashMap<>();
+        rules.put("qfn-centre", new PadRule("qfn-centre", 4, null, 0.8));
+        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(types, null)).withRules(rules);
+        BoardLocation bl = new BoardLocation(board());
+        bl.setLocation(new Location(LengthUnit.Millimeters, 100, 50, 5.5, 0));
+        DispensePlan plan = planner.planBoard(bl, 100, 50);
+        List<DispensePlan.PlannedDot> centre = new ArrayList<>();
+        for (DispensePlan.PlannedDot d : plan.dots) {
+            if (d.padId.equals("U1.17")) {
+                centre.add(d);
+            }
+        }
+        // 2.89 mm^2 / 0.8 -> 4 dots (maxDots 4) on a 2 x 2 grid around the pad centre (140, 90)
+        assertEquals(4, centre.size());
+        for (DispensePlan.PlannedDot d : centre) {
+            assertEquals(1.7 / 4, Math.abs(d.xMm - 140), 1e-9);
+            assertEquals(1.7 / 4, Math.abs(d.yMm - 90), 1e-9);
+            assertEquals(cfg.profile.netDeg(cfg), d.rotationDeg, 0);
+        }
+        assertEquals(13, plan.dots.size());
     }
 
     @Test
     public void statusBelowMinimumBlocks() {
         DispenseConfig cfg = new DispenseConfig(); // default minimum: characterized
-        Calibration cal = new Calibration();
-        cal.qMm3PerRev = 0.47;
-        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(types, null), cal, null);
+        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(types, null));
         List<PadGeometry> pads = new ArrayList<>();
         pads.add(new PadGeometry("P1", 0, 0, 0, 0.8, 0.95, 0, types.get(1)));
         DispensePlan plan = planner.plan("t", pads, 0, 0);
@@ -250,11 +279,9 @@ public class BoardPlanningTest {
         }
         DispenseConfig cfg = new DispenseConfig();
         cfg.minPadTypeStatus = "provisional";
-        Calibration cal = new Calibration();
-        cal.qMm3PerRev = 0.47;
         BoardLocation bl = new BoardLocation(b);
         bl.setLocation(new Location(LengthUnit.Millimeters, 150, 100, 1.6, 0));
-        DispensePlan plan = new DispensePlanner(cfg, new PadTypeResolver(types, null), cal, null).planBoard(bl, 150, 100);
+        DispensePlan plan = new DispensePlanner(cfg, new PadTypeResolver(types, null)).planBoard(bl, 150, 100);
         assertEquals(160, plan.pads.size());
         assertEquals(160, plan.dots.size());
         assertEquals(0, plan.blockedPads().size());

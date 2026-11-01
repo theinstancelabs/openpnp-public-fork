@@ -174,14 +174,88 @@ public class DispenseDbTest {
         File dir = java.nio.file.Files.createTempDirectory("dispense-cfg").toFile();
         DispenseConfig c = new DispenseConfig();
         c.locations.put("waste", new DispenseConfig.NamedLocation(1, 2, 3));
-        c.needleGapMm = 0.12;
+        c.profile.gapMm = 0.12;
+        c.profile.dwellMs = 300;
+        c.profile.startAngleSetAtMs = 1234L;
+        c.purgeRow.x0Mm = 88.0;
+        c.purgeRow.y0Mm = 45.0;
+        c.purgeRow.spots = 16;
+        c.purgeRow.usedSpots = 8;
+        c.cleanPadCheck.minBrightFraction = 0.85;
+        c.needleXyTrim.dxMm = 0.04;
+        c.needleXyTrim.note = "landing data";
+        c.surfaces.put("board", new DispenseConfig.SurfaceMap());
+        c.surfaces.get("board").boardFingerprint = "abc";
+        c.needleAnchor = new DispenseConfig.NeedleAnchor(5.5, 2.91, null, null, 99L);
+        c.needleAnchor.rawSumMm = 65.59;
         c.save(dir);
         assertTrue(new File(dir, "instancelabs/dispense-config.json").exists());
         DispenseConfig back = DispenseConfig.load(dir);
-        assertEquals(0.12, back.needleGapMm, 0);
+        assertEquals(0.12, back.gapMm(), 0);
+        assertEquals(c.profile.fingerprint(), back.profile.fingerprint());
+        assertEquals(1234L, (long) back.profile.startAngleSetAtMs);
+        assertEquals(8, back.purgeRow.spotsLeft());
+        assertEquals(88.0 + 3 * 2.5, back.purgeRow.spot(3)[0], 1e-12);
+        assertEquals(0.85, back.cleanPadCheck.minBrightFraction, 0);
+        assertEquals(0.04, back.needleXyTrim.dxMm, 0);
+        assertEquals("landing data", back.needleXyTrim.note);
+        assertEquals("abc", back.surface("board").boardFingerprint);
+        assertEquals(65.59, back.needleAnchor.rawSumMm, 0);
+        assertEquals(-2.59, back.needleAnchor.offsetMm(), 1e-12);
+        assertEquals(DispenseConfig.SCHEMA_VERSION, back.schemaVersion);
         assertEquals(3, back.location("waste").z, 0);
         assertFalse(back.toJson().contains("Gcode"), "pump/valve/watchdog G-code are constants, not settings");
-        assertEquals(new DispenseConfig().toJson().length() > 100, true);
-        assertEquals(0.15, DispenseConfig.load(java.nio.file.Files.createTempDirectory("x").toFile()).needleGapMm, 0);
+        assertEquals(c.toJson(), back.toJson());
+        DispenseConfig fresh = DispenseConfig.load(java.nio.file.Files.createTempDirectory("x").toFile());
+        assertEquals(0.10, fresh.gapMm(), 0, "default gap: the profile's 0.10 mm");
+        assertTrue(fresh.validate().isEmpty(), fresh.validate().toString());
+    }
+
+    /**
+     * Schema 2 -> 3: the removed per-dot and test-dot keys are ignored, the motion becomes the bench
+     * recipe (XY/Z at 2000, lift at 50 mm/s, B limit 400 rpm) and the I4 limits follow the new
+     * needle frame.
+     */
+    @Test
+    public void schemaTwoConfigMigrates() {
+        String v2 = "{\"schemaVersion\":2,\"needleGapMm\":0.15,\"bFeedDegS\":360,\"bAccelDegS2\":2000,"
+                + "\"retractDeg\":5,\"retractFeedDegS\":360,\"dwellMs\":50,\"abortDisablesB\":true,"
+                + "\"primeAndTestDot\":true,\"testDotOpticalCheck\":true,\"rePrimeRotationDeg\":90,"
+                + "\"testDotMinDiameterRatio\":0.6,\"provisionalQMm3PerRev\":0.47,\"maxDotsPerPad\":4,"
+                + "\"dotFitFactor\":1.0,\"travelAccelMmS2\":1000,\"zLiftAccelMmS2\":200,\"zLiftFeedMmS\":25,"
+                + "\"bMaxFeedDegS\":720,\"surfaceMaxResidualMm\":0.075,\"surfaceMarginMm\":2.0,"
+                + "\"zFrameToleranceMm\":3.0,\"primeRotationDeg\":360,\"hopHeightMm\":1.5,"
+                + "\"locations\":{\"waste\":{\"x\":1,\"y\":2,\"z\":3}}}";
+        DispenseConfig c = DispenseConfig.fromJson(v2);
+        assertEquals(DispenseConfig.SCHEMA_VERSION, c.schemaVersion);
+        assertEquals(3, c.schemaVersion);
+        assertEquals(0.10, c.gapMm(), 0, "needleGapMm is gone: the gap is the profile's");
+        assertEquals(new DispenseProfile().fingerprint(), c.profile.fingerprint());
+        assertEquals(2000, c.travelAccelMmS2, 0);
+        assertEquals(2000, c.zLiftAccelMmS2, 0);
+        assertEquals(50, c.zLiftFeedMmS, 0);
+        assertEquals(2400, c.bMaxFeedDegS, 0);
+        assertEquals(0.04, c.surfaceMaxResidualMm, 0);
+        assertEquals(3.5, c.surfaceMarginMm, 0);
+        assertTrue(c.zFrameToleranceMm <= 2, "" + c.zFrameToleranceMm);
+        assertEquals(360.36, c.primeRotationDeg, 0);
+        // kept: everything that still exists
+        assertEquals(1.5, c.hopHeightMm, 0);
+        assertEquals(3, c.location("waste").z, 0);
+        assertTrue(c.validate().isEmpty(), c.validate().toString());
+        String json = c.toJson();
+        for (String gone : new String[] {"needleGapMm", "bFeedDegS", "retractDeg", "testDotOpticalCheck",
+            "primeAndTestDot", "provisionalQMm3PerRev", "maxDotsPerPad", "dotFitFactor", "abortDisablesB"}) {
+            assertFalse(json.contains("\"" + gone + "\""), gone);
+        }
+        // tighter or newer values are kept, and a schema-3 file is not migrated again
+        DispenseConfig tight = DispenseConfig.fromJson("{\"schemaVersion\":2,\"surfaceMaxResidualMm\":0.02,"
+                + "\"surfaceMarginMm\":5.0,\"zFrameToleranceMm\":0.5,\"zLiftFeedMmS\":80}");
+        assertEquals(0.02, tight.surfaceMaxResidualMm, 0);
+        assertEquals(5.0, tight.surfaceMarginMm, 0);
+        assertEquals(0.5, tight.zFrameToleranceMm, 0);
+        assertEquals(80, tight.zLiftFeedMmS, 0);
+        DispenseConfig v3 = DispenseConfig.fromJson("{\"schemaVersion\":3,\"travelAccelMmS2\":1500}");
+        assertEquals(1500, v3.travelAccelMmS2, 0);
     }
 }

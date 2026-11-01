@@ -7,29 +7,24 @@ import java.util.UUID;
 import org.openpnp.model.BoardLocation;
 
 /**
- * Board -> pads -> volume (A * t * k) -> rotation via calibration q -> dots -> order (nearest
- * neighbour + 2-opt). Deterministic: no fitted model, every dot cites the calibration it used.
+ * Board -> pads -> dots -> order (nearest neighbour + 2-opt). Every dot is one dot of the active
+ * dispense profile (its screw turn, dwell and gap): one dot per pad, or a grid where the pad
+ * type's rule says the pad is too large for one dot. There is no dose model: the volumetric
+ * (q per revolution) model was removed after the bench showed the dose follows the turn, pressure
+ * and dwell, not a displacement constant (2026-10-28). Each plan carries a copy of the profile.
  */
 public class DispensePlanner {
     private final DispenseConfig cfg;
     private final PadTypeResolver resolver;
-    private final Calibration calibration;
-    private final DotLadder ladder;
     private java.util.Map<String, PadRule> rules = java.util.Collections.emptyMap();
     private SurfacePlane surface;
 
-    public DispensePlanner(DispenseConfig cfg, PadTypeResolver resolver, Calibration calibration,
-            List<DotLadderRow> ladderRows) {
-        if (calibration == null) {
-            throw new IllegalArgumentException("no calibration record");
-        }
+    public DispensePlanner(DispenseConfig cfg, PadTypeResolver resolver) {
         this.cfg = cfg;
         this.resolver = resolver;
-        this.calibration = calibration;
-        this.ladder = DotLadder.of(ladderRows);
     }
 
-    /** Per pad-type layout rules (pad_rules); missing entries use the config defaults. */
+    /** Per pad-type layout rules (pad_rules): pads larger than largestSingleDotPadMm2 get a grid. */
     public DispensePlanner withRules(java.util.Map<String, PadRule> rules) {
         this.rules = rules == null ? java.util.Collections.emptyMap() : rules;
         return this;
@@ -42,10 +37,6 @@ public class DispensePlanner {
     public DispensePlanner withSurface(SurfacePlane surface) {
         this.surface = surface;
         return this;
-    }
-
-    public DotLadder getLadder() {
-        return ladder;
     }
 
     /** Plans an OpenPnP board location (pads from packages.xml footprints or pad types). */
@@ -63,16 +54,15 @@ public class DispensePlanner {
         plan.planId = UUID.randomUUID().toString();
         plan.boardName = boardName;
         plan.createdAtMs = System.currentTimeMillis();
-        plan.calibrationId = calibration.id;
-        plan.qMm3PerRev = calibration.qMm3PerRev;
-        plan.calibrationStatus = calibration.status;
-        plan.needleGapMm = cfg.needleGapMm;
+        plan.profile = cfg.profile.copy();
+        plan.profileFingerprint = cfg.profile.fingerprint();
+        plan.needleGapMm = cfg.gapMm();
         plan.needleZOffsetMm = cfg.needleZOffsetMm;
         plan.hopHeightMm = cfg.hopHeightMm;
         plan.surfaceFingerprint = surface == null ? null : surface.fingerprint();
+        plan.padTypesFingerprint = resolver == null ? null : resolver.fingerprint();
         double worstBoardZDiff = 0;
-        double density = calibration.densityMgMm3 != null ? calibration.densityMgMm3 : cfg.pasteDensityMgMm3;
-        DotSizer sizer = new DotSizer(calibration.qMm3PerRev, ladder, cfg.maxDotsPerPad, cfg.dotFitFactor, density);
+        double netDeg = cfg.profile.netDeg(cfg);
         PadTypeStatus minStatus = cfg.minPadTypeStatus();
 
         List<double[]> dotXy = new ArrayList<>();
@@ -108,36 +98,29 @@ public class DispensePlanner {
                 p.flags.add(PadFlag.NO_GEOMETRY);
                 continue;
             }
-            if (!calibration.isCharacterized()) {
-                p.flags.add(PadFlag.PROVISIONAL_CALIBRATION);
-            }
             p.tMm = t.tMm;
             p.k = t.k;
             p.areaMm2 = DotMath.padAreaMm2(g.wMm, g.hMm, g.roundness);
             p.targetVolumeMm3 = DotMath.targetVolumeMm3(p.areaMm2, t.tMm, t.k);
-            p.targetMassMg = p.targetVolumeMm3 * density;
-            DotSizer.Result s = sizer.size(g.wMm, g.hMm, p.targetVolumeMm3, rules.get(t.typeKey));
-            p.flags.addAll(s.flags);
-            p.rotationPerDotDeg = s.rotationPerDotDeg;
-            p.predictedDiameterMm = s.predictedDiameterMm;
-            p.predictedHeightMm = s.predictedHeightMm;
+            p.targetMassMg = p.targetVolumeMm3 * cfg.pasteDensityMgMm3;
+            p.rotationPerDotDeg = netDeg;
             if (p.isBlocked()) {
                 p.dotCount = 0;
                 continue;
             }
-            p.dotCount = s.dotCount();
+            List<double[]> offsets = DotSizer.layout(g.wMm, g.hMm, p.areaMm2, rules.get(t.typeKey));
+            p.dotCount = offsets.size();
             double rad = Math.toRadians(g.rotationDeg);
             double c = Math.cos(rad), sn = Math.sin(rad);
-            for (double[] o : s.offsets) {
+            for (double[] o : offsets) {
                 DispensePlan.PlannedDot d = new DispensePlan.PlannedDot();
                 d.padId = g.padId;
                 d.xMm = g.xMm + o[0] * c - o[1] * sn;
                 d.yMm = g.yMm + o[0] * sn + o[1] * c;
                 d.surfaceZMm = surface == null ? g.surfaceZMm : surface.z(d.xMm, d.yMm);
-                d.dispenseZMm = d.surfaceZMm + cfg.needleZOffsetMm + cfg.needleGapMm;
+                d.dispenseZMm = d.surfaceZMm + cfg.needleZOffsetMm + cfg.gapMm();
                 d.hopZMm = d.dispenseZMm + cfg.hopHeightMm;
-                d.rotationDeg = s.rotationPerDotDeg;
-                d.expectedDiameterMm = s.predictedDiameterMm;
+                d.rotationDeg = netDeg;
                 unordered.add(d);
                 dotXy.add(new double[] {d.xMm, d.yMm});
             }

@@ -40,9 +40,24 @@ public class DispenseExecutorTest {
         }
     }
 
+    /** The toy board program: 8 purge dots (index -3), then 3 work dots, one pressure session. */
     static GcodeProgram program(DispenseConfig c, boolean keepalive) throws Exception {
-        return GcodeStreamBuilder.forPlan(c, new ToyMapper(150, 100, 31.5, 0), GcodeStreamTest.toyPlan(c), false,
-                keepalive, GcodeStreamBuilder.Part.FULL);
+        return GcodeStreamTest.board(c, GcodeStreamTest.mapper(), GcodeStreamTest.toyPlan(c), false, keepalive, 0L);
+    }
+
+    /** The I1 Stop sequence (bench F9), plus the watchdog disarm if it was armed. */
+    static final List<String> STOP = Arrays.asList("M410", "M107 P3", "M107 P2", "M107 P1", "M107 P0", "M18 B");
+
+    static List<String> stop(boolean armed) {
+        List<String> l = new ArrayList<>(STOP);
+        if (armed) {
+            l.add("M990 S0");
+        }
+        return l;
+    }
+
+    static List<String> tail(List<String> l, int n) {
+        return l.subList(l.size() - n, l.size());
     }
 
     static RunResult run(int dots) {
@@ -75,8 +90,9 @@ public class DispenseExecutorTest {
             }
         }
         assertEquals(expected, ch.sent);
-        assertEquals(Arrays.asList(1, 2, 3), progress);
+        assertEquals(Arrays.asList(1, 2, 3), progress, "purge dots are not work dots");
         assertEquals(3, r.dotsDone);
+        assertEquals(3, r.dotTimings.size());
         assertEquals(2, java.util.Collections.frequency(ch.sent, "M400"), "only the two session-end M400s");
         // timings: per dot start < end, monotonic
         long prev = 0;
@@ -103,8 +119,7 @@ public class DispenseExecutorTest {
         DispenseExecutor ex = new DispenseExecutor(c, ch, "B", () -> ch.now);
         RunResult r = run(3);
         assertThrows(Exception.class, () -> ex.stream(p, r, null));
-        List<String> tail = ch.sent.subList(ch.sent.size() - 5, ch.sent.size());
-        assertEquals(Arrays.asList("M410", "M107 P3", "M107 P2", "M18 B", "M990 S0"), tail);
+        assertEquals(stop(true), tail(ch.sent, 7));
     }
 
     @Test
@@ -123,9 +138,8 @@ public class DispenseExecutorTest {
                 }));
         assertEquals("operator stop", e.getMessage());
         assertEquals(1, r.dotsDone);
-        List<String> tail = ch.sent.subList(ch.sent.size() - 4, ch.sent.size());
-        assertEquals(Arrays.asList("M410", "M107 P3", "M107 P2", "M18 B"), tail);
-        assertFalse(ch.sent.subList(0, ch.sent.size() - 4).contains("M410"));
+        assertEquals(stop(false), tail(ch.sent, 6));
+        assertFalse(ch.sent.subList(0, ch.sent.size() - 6).contains("M410"));
     }
 
     @Test
@@ -139,7 +153,7 @@ public class DispenseExecutorTest {
         RunResult r = run(3);
         Exception e = assertThrows(DispenseExecutor.AbortedException.class, () -> ex.stream(p, r, null));
         assertTrue(e.getMessage().startsWith("I7"), e.getMessage());
-        assertEquals("M107 P2", ch.sent.get(ch.sent.size() - 2));
+        assertEquals(stop(false), tail(ch.sent, 6));
     }
 
     @Test
@@ -281,7 +295,7 @@ public class DispenseExecutorTest {
         // after that line only the engine's own stop lines follow (in any interleaving with OpenPnP's)
         List<String> after = new ArrayList<>(wire.subList(15, wire.size()));
         after.remove("<<DISABLE_COMMAND>>");
-        assertEquals(Arrays.asList("M410", "M107 P3", "M107 P2", "M18 B"), after, wire.toString());
+        assertEquals(stop(false), after, wire.toString());
     }
 
     /** Review finding: every line passes the controller-command guard before it reaches the channel. */
@@ -302,8 +316,7 @@ public class DispenseExecutorTest {
         Exception e = assertThrows(IllegalStateException.class, () -> ex.stream(p, r, null));
         assertTrue(e.getMessage().contains("M106 P3 S180"), e.getMessage());
         assertFalse(ch.sent.contains("M106 P3 S180"));
-        assertEquals(Arrays.asList("M410", "M107 P3", "M107 P2", "M18 B"), ch.sent.subList(ch.sent.size() - 4,
-                ch.sent.size()));
+        assertEquals(stop(false), tail(ch.sent, 6));
     }
 
     /** Review finding: the abort sequence goes through sendCritical (stale controller errors). */
@@ -324,7 +337,7 @@ public class DispenseExecutorTest {
         DispenseExecutor ex = new DispenseExecutor(c, ch, "B", () -> ch.now);
         RunResult r = run(3);
         assertThrows(Exception.class, () -> ex.stream(p, r, null));
-        assertEquals(Arrays.asList("M410", "M107 P3", "M107 P2", "M18 B"), critical);
+        assertEquals(stop(false), critical);
         assertTrue(r.warnings.contains("cleared a pending error"), r.warnings.toString());
     }
 }

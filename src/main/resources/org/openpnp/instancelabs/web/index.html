@@ -3,355 +3,138 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Paste dispenser</title>
-<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="icon" id="favicon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/run.css">
+<link rel="stylesheet" href="/static/setup.css">
+<link rel="stylesheet" href="/static/profile.css">
+<!-- core.js runs at once (sets the theme before the first paint, defines IL); the workspace modules
+     register with IL.workspace() in order; app.js (last) boots. See DEV_NOTES.md. -->
+<script src="/static/core.js"></script>
+<script src="/static/boardview.js" defer></script>
+<script src="/static/run.js" defer></script>
+<script src="/static/setup.js" defer></script>
+<script src="/static/profile.js" defer></script>
+<script src="/static/calibrate.js" defer></script>
+<script src="/static/records.js" defer></script>
 <script src="/static/app.js" defer></script>
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">Paste dispenser</div>
-  <div class="pills" data-testid="connection">
-    <span class="pill" id="pill-conn" title="Whether OpenPnP is connected to the controller board">Connecting…</span>
-    <span class="pill" id="pill-homed" title="Homed: every axis has been to its home switch, so positions are known">…</span>
-    <span class="pill" id="pill-pressure" title="Barrel pressure: the pump and valve that push paste into the auger">…</span>
-    <span class="pill" id="pill-engine" title="The dispense engine inside OpenPnP">…</span>
-  </div>
-  <div class="machine-actions">
-    <button id="btn-start" type="button" title="Connect to the controller board and switch the motors on (OpenPnP's Start button)">Start</button>
-    <button id="btn-home" type="button" title="Move every axis to its home switch so positions are known">Home</button>
-  </div>
-  <button id="btn-stop" class="stop" type="button" data-testid="stop"
-          title="Stops everything now: the auger stops, the valve vents the barrel, the pump stops, and OpenPnP stops the machine (it must be homed again).">STOP</button>
-</header>
+<svg class="sprite" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="g-check" viewBox="0 0 24 24"><path d="M6 12.5l4 4 8-9"/></symbol>
+<symbol id="g-x" viewBox="0 0 24 24"><path d="M7.5 7.5l9 9M16.5 7.5l-9 9"/></symbol>
+<symbol id="g-bang" viewBox="0 0 24 24"><path d="M12 6.5v7M12 17.6v.2"/></symbol>
+<symbol id="g-dash" viewBox="0 0 24 24"><path d="M7.5 12h9"/></symbol>
+<symbol id="g-info" viewBox="0 0 24 24"><path d="M12 11v6.5M12 6.8v.2"/></symbol>
+<symbol id="i-run" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8.6l5.4 3.4-5.4 3.4z"/></symbol>
+<symbol id="i-setup" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></symbol>
+<symbol id="i-profile" viewBox="0 0 24 24"><path d="M12 3.5c3.6 4.5 6 7.8 6 10.8a6 6 0 0 1-12 0c0-3 2.4-6.3 6-10.8z"/><path d="M9.5 14.5a2.5 2.5 0 0 0 2.5 2.5"/></symbol>
+<symbol id="i-cal" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7.5"/><path d="M12 2.5v4M12 17.5v4M2.5 12h4M17.5 12h4"/><circle cx="12" cy="12" r="1.4"/></symbol>
+<symbol id="i-records" viewBox="0 0 24 24"><path d="M4 6h12M4 11h7M4 16h5"/><circle cx="16.5" cy="15.5" r="4.5"/><path d="M16.5 13.2v2.5l1.6 1.2"/></symbol>
+<symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4.2 16.5a8.2 8.2 0 1 1 15.6 0"/><path d="M12 14.2l4.2-4.6"/><circle cx="12" cy="14.5" r="1.3"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></symbol>
+<symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+<symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l1.6-2.2h6.8L17 8h3v10.5H4z"/><circle cx="12" cy="13" r="3.2"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 4.5V8h-3.5"/></symbol>
+<symbol id="i-swap" viewBox="0 0 24 24"><path d="M5 9h13l-3.5-3.5M19 15H6l3.5 3.5"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5l11 6.5-11 6.5z"/></symbol>
+<symbol id="i-capture" viewBox="0 0 24 24"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></symbol>
+<symbol id="i-mark" viewBox="0 0 24 24"><path d="M12 3v8M8.5 11h7l-1.6 4.2h-3.8z"/><circle cx="12" cy="19.5" r="1.4"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+<symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M6.5 8h11v3a5.5 5.5 0 0 1-11 0zM12 16.5V21"/></symbol>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-6.5 8 6.5M6.5 9.5V19h11V9.5"/></symbol>
+<symbol id="i-wipe" viewBox="0 0 24 24"><path d="M4 18h16M7 14l4.5-9 6.5 3.2-4.5 9"/></symbol>
+<symbol id="i-hand" viewBox="0 0 24 24"><path d="M8 12V6.5a1.5 1.5 0 0 1 3 0V11M11 10V5a1.5 1.5 0 0 1 3 0v5M14 10V6.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-.5a6 6 0 0 1-4.6-2.2L4 15.2a1.5 1.5 0 0 1 2.3-1.9L8 15"/></symbol>
+<symbol id="i-paste" viewBox="0 0 24 24"><rect x="7" y="3" width="10" height="13" rx="2"/><path d="M12 16v3M10 21h4"/></symbol>
+<symbol id="i-back" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
+<symbol id="i-needle" viewBox="0 0 24 24"><path d="M12 3v12M9 6h6M12 15l-1.2 4h2.4z"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.6-3.2 8.2-7.5 9.5-4.3-1.3-7.5-4.9-7.5-9.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6.5h11M9 12h11M9 17.5h11"/><circle cx="4.8" cy="6.5" r="1.1"/><circle cx="4.8" cy="12" r="1.1"/><circle cx="4.8" cy="17.5" r="1.1"/></symbol>
+<symbol id="i-angle" viewBox="0 0 24 24"><path d="M4 19h16M4 19L16 6"/><path d="M10.5 19a6.5 6.5 0 0 0-2-4.7"/></symbol>
+<symbol id="i-purge" viewBox="0 0 24 24"><rect x="3" y="9" width="4" height="6" rx="1"/><rect x="10" y="9" width="4" height="6" rx="1"/><rect x="17" y="9" width="4" height="6" rx="1"/></symbol>
+<symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.1M9.5 10h.1M13 10h.1M16.5 10h1.5M6 14h12"/></symbol>
+</svg>
 
-<div id="banner" class="banner hidden" role="alert"><span id="banner-text"></span><button type="button" id="banner-close" class="link" aria-label="Close">×</button></div>
+<div class="app" id="app">
+  <header class="strip" id="strip">
+    <!-- STOP is first in the DOM (first Tab stop); CSS order puts it at the right edge. -->
+    <div class="stop-bay">
+      <button type="button" id="btn-stop" class="stop" data-testid="stop" aria-keyshortcuts="F9"
+              title="Stops everything now. Sends M410, M107 P3, M107 P2, M107 P1, M107 P0, M18 B (quick stop, dispenser valve and pump off, pick valve and pump off, screw motor off), vents a pressure hold, then stops OpenPnP (the machine must be connected and homed again). Key: F9."><span class="stop__word">STOP</span><span class="stop__sub"><kbd>F9</kbd> motion · vent · screw off</span></button>
+    </div>
+    <a class="skip" href="#main" id="skip-main">Skip to main</a>
+    <button type="button" class="brand" id="brand" data-open-view="activity" title="Activity: what OpenPnP and this page did">
+      <span class="brand__mark"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-mark"/></svg><span class="sim-tag" id="sim-tag" hidden title="Simulator: OpenPnP runs the simulated machine">Sim</span></span>
+      <span class="brand__text"><span class="brand__name">Paste dispenser</span><span class="brand__live" id="heartbeat"><span class="live-dot"></span><span class="hb__who">OpenPnP</span> <b class="hb__age">…</b><span class="hb__ago"> ago</span></span></span>
+      <span class="brand__short" id="heartbeat-short"><span class="live-dot"></span><b class="hb__age">…</b></span>
+    </button>
+    <div class="cells" id="cells" aria-live="polite">
+      <button type="button" class="cell cell--off" id="cell-machine" data-open-view="machine"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Machine</span><span class="cell__v"><span id="pill-conn" data-l="1">Connecting…</span><span class="cell__sep" hidden> · </span><span id="pill-homed" class="sr">…</span></span></span></button>
+      <button type="button" class="cell-act" id="btn-start" hidden title="Connect to the controller (OpenPnP's Start button). Nothing moves.">Connect</button>
+      <button type="button" class="cell-act" id="btn-home" hidden title="Move every axis to its home switch so positions are known (press twice)">Home</button>
+      <button type="button" class="cell cell--off" id="pill-pressure" data-open-view="pressure"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Pressure</span><span class="cell__v">…</span></span></button>
+      <button type="button" class="cell cell--off" id="chip-angle" data-open-view="angle"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Start angle</span><span class="cell__v">…</span></span></button>
+      <button type="button" class="cell cell--off" id="chip-purge" data-open-view="purge"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Purge row</span><span class="cell__v">…</span></span></button>
+      <button type="button" class="cell cell--off cell--verdict" id="pill-engine"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Board run</span><span class="cell__v">…</span></span><svg class="chev ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chev"/></svg></button>
+    </div>
+  </header>
+  <!-- STOP NOT CONFIRMED / confirmed after n tries: its own grid row directly under the strip (pushes the page down) -->
+  <div class="stop-band" id="stop-unconfirmed" role="alert" hidden></div>
 
-<nav class="tabs" role="tablist">
-  <button type="button" role="tab" id="tabbtn-run" data-tab="run" aria-selected="true">Run</button>
-  <button type="button" role="tab" id="tabbtn-dispense" data-tab="dispense" aria-selected="false">Dispense</button>
-  <button type="button" role="tab" id="tabbtn-calibrate" data-tab="calibrate" aria-selected="false">Calibrate</button>
-  <button type="button" role="tab" id="tabbtn-profiles" data-tab="profiles" aria-selected="false">Profiles</button>
-</nav>
-
-<main>
-<!-- ============================== RUN ============================== -->
-<section id="tab-run" class="tab active" role="tabpanel" aria-labelledby="tabbtn-run">
-  <div class="grid">
-    <div class="card">
-      <h2>1. Board</h2>
-      <label>Board
-        <select id="board-select" title="A board from the job open in OpenPnP (its position and fiducial check come from the job), or a board file placed by hand"></select>
-      </label>
-      <div id="board-file-row" class="hidden">
-        <label>Board file (.board.xml)
-          <input id="board-file" type="text" placeholder="/home/…/my.board.xml">
-        </label>
+  <nav class="nav tabs" id="nav" role="tablist" aria-label="Workspaces">
+    <a class="nav__item" href="#run" id="tab-btn-run" data-tab="run" role="tab" aria-selected="true" aria-controls="ws-run" aria-keyshortcuts="Alt+1"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-run"/></svg><span class="nav__txt"><span class="nav__t">Run</span><span class="nav__s"></span></span><span class="nav__badge" hidden></span></a>
+    <a class="nav__item" href="#setup" id="tab-btn-setup" data-tab="setup" role="tab" aria-selected="false" aria-controls="ws-setup" aria-keyshortcuts="Alt+2"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-setup"/></svg><span class="nav__txt"><span class="nav__t">Setup</span><span class="nav__s"></span></span><span class="nav__badge" hidden></span></a>
+    <a class="nav__item" href="#profile" id="tab-btn-profile" data-tab="profile" role="tab" aria-selected="false" aria-controls="ws-profile" aria-keyshortcuts="Alt+3"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-profile"/></svg><span class="nav__txt"><span class="nav__t">Profile</span><span class="nav__s"></span></span><span class="nav__badge" hidden></span></a>
+    <a class="nav__item" href="#calibrate" id="tab-btn-calibrate" data-tab="calibrate" role="tab" aria-selected="false" aria-controls="ws-calibrate" aria-keyshortcuts="Alt+4"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-cal"/></svg><span class="nav__txt"><span class="nav__t">Calibrate</span><span class="nav__s"></span></span><span class="nav__badge" hidden></span></a>
+    <a class="nav__item" href="#records" id="tab-btn-records" data-tab="records" role="tab" aria-selected="false" aria-controls="ws-records" aria-keyshortcuts="Alt+5"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-records"/></svg><span class="nav__txt"><span class="nav__t">Records</span><span class="nav__s"></span></span><span class="nav__badge" hidden></span></a>
+    <div class="nav__foot">
+      <div class="seg seg--block" role="group" aria-label="Theme">
+        <button type="button" data-theme-set="light" aria-pressed="true">Light</button>
+        <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
       </div>
-      <fieldset id="board-loc" class="row4">
-        <legend title="Where the board's origin (its 0,0 corner) sits on the machine, in mm. Z is the board's top surface.">Board position on the machine (mm)</legend>
-        <label>X <input id="board-x" type="number" step="0.01"></label>
-        <label>Y <input id="board-y" type="number" step="0.01"></label>
-        <label title="Height of the board's top surface: the N1 nozzle Z touching it (OpenPnP's frame). Required. The dots take their height from the probed board surface (Dispense tab, Surfaces).">Z <input id="board-z" type="number" step="0.01" placeholder="required"></label>
-        <label title="Board rotation in degrees, counter-clockwise">Rot. <input id="board-rot" type="number" step="0.1" value="0"></label>
-      </fieldset>
-      <p class="hint" id="board-hint"></p>
-      <button id="btn-plan" type="button" class="primary"
-              title="Work out where every dot goes and how much paste each gets. Nothing moves.">Plan</button>
-    </div>
-
-    <div class="card wide">
-      <h2>2. Preview</h2>
-      <div class="plan-layout">
-        <div class="svg-wrap"><svg id="plan-svg" data-testid="plan-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60" preserveAspectRatio="xMidYMid meet"></svg></div>
-        <div class="plan-side">
-          <ul class="legend">
-            <li><span class="sw pad-ok"></span>pad ready</li>
-            <li><span class="sw pad-warn"></span>pad with a warning</li>
-            <li><span class="sw pad-blocked"></span>pad that cannot be dispensed</li>
-            <li><span class="sw dot-planned"></span>planned dot</li>
-            <li><span class="sw dot-done"></span>dot done</li>
-          </ul>
-          <dl id="plan-summary" class="kv"></dl>
-        </div>
-      </div>
-      <div id="plan-interlocks"></div>
-      <details id="plan-flags-wrap" class="hidden"><summary id="plan-flags-title">Pads that need attention</summary><div id="plan-flags"></div></details>
-    </div>
-
-    <div class="card">
-      <h2>3. Run</h2>
-      <label title="Leave empty to dispense every dot. A number dispenses only the first dots in path order (the exact count is logged).">Only the first N dots (optional)
-        <input id="run-maxdots" type="number" min="1" step="1" placeholder="all">
-      </label>
-      <button id="btn-run" type="button" class="primary" disabled
-              title="Dispense the planned board: pressure on, prime and test dot on the waste pad, every dot, pressure off">Run board</button>
-      <div class="progress" title="Dots done out of dots planned"><div id="run-bar" class="bar"></div></div>
-      <dl id="run-live" class="kv"></dl>
-      <h3><abbr title="Dots per hour: how many paste dots the machine lays down per hour">DPH</abbr> of the last run</h3>
-      <dl id="run-last" class="kv"></dl>
-    </div>
-  </div>
-</section>
-
-<!-- ============================== DISPENSE ============================== -->
-<section id="tab-dispense" class="tab" role="tabpanel" aria-labelledby="tabbtn-dispense">
-  <div class="grid">
-    <div class="card">
-      <h2>Pressure</h2>
-      <p class="hint">Holds the barrel under pressure, e.g. to read the regulator gauge. Order: pump, then valve. Off: valve (the barrel vents), then pump. Prime, test dot and runs switch the pressure on and off by themselves, so switch it off before using them.</p>
-      <p class="big" id="pressure-state" data-testid="pressure-state">…</p>
-      <div class="btns">
-        <button id="btn-pressure-on" type="button" title="Pump on, wait, valve on">Pressure on</button>
-        <button id="btn-pressure-off" type="button" title="Valve off (vents the barrel), then pump off">Pressure off</button>
+      <div class="nav__keys">
+        <kbd>F9</kbd><span>STOP</span>
+        <span><kbd>Alt</kbd></span><span><kbd>1</kbd>–<kbd>5</kbd> workspaces</span>
+        <kbd>Esc</kbd><span>closes a dialog</span>
       </div>
     </div>
+    <button type="button" class="nav__theme" id="btn-theme" data-theme-toggle title="Switch between light and dark" aria-label="Switch between light and dark"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-moon"/></svg></button>
+  </nav>
 
-    <div class="card">
-      <h2>Prime and test dot</h2>
-      <p class="hint"><abbr title="Turning the auger over the waste pad so paste flows evenly before real dots">Prime</abbr> and the
-        <abbr title="One dot next to the prime spot, to check that paste comes out before a board">test dot</abbr> go on the
-        <abbr title="A spot off the board where priming and test dots go (Places, below)">waste pad</abbr>.</p>
-      <div class="row2">
-        <label title="Auger rotation for the prime, in degrees (360 = one turn)">Prime rotation (°)
-          <input id="prime-rot" type="number" min="1" step="1"></label>
-        <button id="btn-prime" type="button">Prime</button>
-      </div>
-      <div class="row2">
-        <label title="Auger rotation for the test dot, in degrees; the default is one 0603 pad from the current calibration">Test dot rotation (°)
-          <input id="testdot-rot" type="number" min="1" step="0.1"></label>
-        <button id="btn-testdot" type="button">Test dot</button>
-      </div>
-      <p id="dispense-result" class="result"></p>
-    </div>
+  <main class="main" id="main" tabindex="-1">
+    <!-- offline, vent_failed and other page-level bands (IL.msg) -->
+    <div class="msg-area" id="msg-area"></div>
+    <!-- workspaces: empty here, filled by run.js, setup.js, profile.js, calibrate.js, records.js -->
+    <section class="ws" data-workspace="run" id="ws-run" role="tabpanel" aria-labelledby="tab-btn-run"></section>
+    <section class="ws" data-workspace="setup" id="ws-setup" role="tabpanel" aria-labelledby="tab-btn-setup" hidden></section>
+    <section class="ws" data-workspace="profile" id="ws-profile" role="tabpanel" aria-labelledby="tab-btn-profile" hidden></section>
+    <section class="ws" data-workspace="calibrate" id="ws-calibrate" role="tabpanel" aria-labelledby="tab-btn-calibrate" hidden></section>
+    <section class="ws" data-workspace="records" id="ws-records" role="tabpanel" aria-labelledby="tab-btn-records" hidden></section>
+  </main>
 
-    <div class="card">
-      <h2>Top camera</h2>
-      <img id="cam-img" alt="Top camera snapshot" class="cam hidden">
-      <div id="cam-empty" class="cam-empty">No picture yet: press Snapshot (nothing moves).</div>
-      <div class="btns">
-        <button id="btn-cam" type="button" title="Take a picture with the top camera (nothing moves)">Snapshot</button>
-        <label class="inline"><input id="cam-auto" type="checkbox"> refresh every 2 s</label>
-      </div>
+  <aside class="panel" id="panel" data-view="" aria-label="Context panel">
+    <div class="panel__bar" id="panel-bar" hidden>
+      <button type="button" class="btn btn--quiet btn--sm" id="panel-back" title="Back (Esc)"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-back"/></svg>Back</button>
+      <h2 class="panel__bar-t" id="panel-bar-title"></h2>
     </div>
+    <div class="panel__top" id="panel-top" hidden></div>
+    <div class="panel__scroll" id="panel-scroll">
+      <div class="panel__stop" id="panel-stop" hidden>
+        <button type="button" class="stop stop--panel" data-stop-copy aria-keyshortcuts="F9"
+                title="Stops everything now. Sends M410, M107 P3, M107 P2, M107 P1, M107 P0, M18 B (quick stop, dispenser valve and pump off, pick valve and pump off, screw motor off), vents a pressure hold, then stops OpenPnP (the machine must be connected and homed again). Key: F9."><span class="stop__word">STOP</span><span class="stop__sub"><kbd>F9</kbd> motion · vent · screw off</span></button>
+      </div>
+      <div class="panel__body" id="panel-body"></div>
+    </div>
+    <div class="panel__foot" id="panel-foot" hidden></div>
+  </aside>
+</div>
 
-    <div class="card wide">
-      <h2>Places</h2>
-      <p class="hint">Positions of the dispenser needle (N2) in machine mm. <b>Z is the surface height in OpenPnP's frame: the N1 nozzle Z touching that surface</b> (the frame OpenPnP's board Z uses). Jog N2 there in OpenPnP for X/Y; take Z with N1 touching, or with the needle touching once the needle Z frame is set.</p>
-      <table class="tbl" id="places-table">
-        <thead><tr><th>Name</th><th>X</th><th>Y</th><th title="Surface height at this place">Z (surface)</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="row2">
-        <label>New place name <input id="place-new" type="text" placeholder="e.g. cup" pattern="[A-Za-z0-9_-]+"></label>
-        <button id="btn-place-add" type="button">Add place</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Needle</h2>
-      <p id="needle-state" class="big"></p>
-      <button id="btn-needle-changed" type="button" title="Tell the machine the needle was changed: dispensing is blocked until the needle Z frame is recorded again and the needle is touched off">I changed the needle</button>
-      <h3 title="Ties the needle offset to OpenPnP's Z frame (I4): touch the same surface with N1 and with the needle tip">Needle Z frame</h3>
-      <p id="anchor-state" class="hint"></p>
-      <div class="row2">
-        <label title="N1 nozzle Z with N1 touching the reference surface (e.g. the blank)">N1 contact Z
-          <input id="anchor-n1" type="number" step="0.005"></label>
-        <button id="btn-anchor-n1" type="button" class="small" title="Copy N1's current Z (N1 tip resting on the surface)">Use N1 Z (tip touching)</button>
-      </div>
-      <div class="row2">
-        <label title="N2 Z with the needle tip touching the same surface">Needle contact Z
-          <input id="anchor-n2" type="number" step="0.005"></label>
-        <button id="btn-anchor-n2" type="button" class="small" title="Copy N2's current Z (needle tip resting on the same surface)">Use N2 Z (tip touching)</button>
-      </div>
-      <button id="btn-anchor" type="button" title="Record the needle Z frame: offset = needle contact Z − N1 contact Z. A touch-off is still needed before dispensing.">Record needle frame</button>
-      <div class="row2">
-        <label title="How far below/above the nominal needle position the real tip is (mm), if you measured it yourself">Needle Z offset (mm)
-          <input id="needle-offset" type="number" step="0.005"></label>
-        <button id="btn-needle-offset" type="button">Save offset</button>
-      </div>
-    </div>
-
-    <div class="card wide">
-      <h2>Surfaces</h2>
-      <p class="hint">Probed heights for the board (every dot takes its Z from this plane) and the blank (dot ladder and touch-off). Touch at least 3 points spread around the area with <b>N1</b> (Z in OpenPnP's frame), or paste points, e.g. <code>[[x, y, z], …]</code> or the <code>points</code> of a zmap.json.</p>
-      <div class="row3">
-        <label>Surface <select id="surf-name"><option value="board">board</option><option value="blank">blank</option></select></label>
-        <button id="btn-surf-add" type="button" class="small" title="Add N1's current X, Y and Z (N1 tip resting on the surface)">Add N1 point (tip touching)</button>
-        <button id="btn-surf-clear" type="button" class="small" title="Delete the stored surface">Delete surface</button>
-      </div>
-      <textarea id="surf-points" rows="5" spellcheck="false" placeholder="[[x, y, z], ...]"></textarea>
-      <button id="btn-surf-save" type="button">Save surface</button>
-      <p id="surf-state" class="hint"></p>
-    </div>
-
-    <div class="card">
-      <h2><abbr title="Safety checks that must pass before the machine may dispense">Interlocks</abbr></h2>
-      <ul id="interlock-list" class="checks"></ul>
-    </div>
-
-    <div class="card">
-      <h2>Settings</h2>
-      <label title="Height of the needle tip above the surface while dispensing">Needle gap (mm) <input id="set-gap" type="number" step="0.005"></label>
-      <label title="Longest time the pressure may stay on without a break (I7)">Maximum pressure time (s) <input id="set-maxon" type="number" step="1"></label>
-      <label title="A board refuses pads whose profile status is below this">Lowest profile status allowed on a board
-        <select id="set-minstatus"></select></label>
-      <label class="inline"><input id="set-prime" type="checkbox"> Prime and test dot before each board (I9)</label>
-      <label class="inline"><input id="set-optical" type="checkbox"> Check the test dot with the camera</label>
-      <button id="btn-settings" type="button">Save settings</button>
-      <details>
-        <summary>All settings (advanced)</summary>
-        <textarea id="set-json" rows="14" spellcheck="false"></textarea>
-        <button id="btn-settings-json" type="button">Save all settings</button>
-      </details>
-    </div>
-  </div>
-</section>
-
-<!-- ============================== CALIBRATE ============================== -->
-<section id="tab-calibrate" class="tab" role="tabpanel" aria-labelledby="tabbtn-calibrate">
-  <div id="setup-guide" class="banner info hidden"></div>
-  <div class="grid">
-    <div class="card">
-      <h2>Scale: shots</h2>
-      <p class="hint">Measures <abbr title="Paste pushed out per full auger turn, mm³ per turn">q</abbr>: dispense big shots into a cup on the scale, then type what the scale reads.</p>
-      <div class="row3">
-        <label>Place <select id="shots-place"></select></label>
-        <label>Rotation per shot (°) <input id="shots-rot" type="number" value="360" step="1"></label>
-        <label>Shots <input id="shots-count" type="number" value="30" step="1" min="1"></label>
-      </div>
-      <button id="btn-shots-run" type="button">Dispense shots</button>
-      <hr>
-      <div class="row3">
-        <label>Rotation per shot (°) <input id="ss-rot" type="number" value="360" step="1"></label>
-        <label>Number of shots <input id="ss-count" type="number" value="30" step="1"></label>
-        <label>Total mass (mg) <input id="ss-total" type="number" step="0.1"></label>
-      </div>
-      <label title="Optional: one mass per shot (mg), separated by commas; gives the spread (CV)">Mass of each shot (mg)
-        <input id="ss-each" type="text" placeholder="e.g. 1.81, 1.79, 1.84"></label>
-      <div class="row3">
-        <label>Tip <input id="ss-tip" type="text" value="22G 0.41 mm"></label>
-        <label>Paste lot <input id="ss-lot" type="text"></label>
-        <label>Set pressure (psi) <input id="ss-psi" type="number" step="0.1"></label>
-      </div>
-      <div class="row3">
-        <label>Barrel temperature (°C) <input id="ss-temp" type="number" step="0.1"></label>
-        <label>Cartridge <input id="ss-cart" type="text"></label>
-        <label>Operator <input id="ss-op" type="text"></label>
-      </div>
-      <label class="inline"><input id="ss-char" type="checkbox"> The spread meets my pass criteria: mark it "characterized"</label>
-      <button id="btn-ss-save" type="button" class="primary">Save scale reading</button>
-    </div>
-
-    <div class="card">
-      <h2><abbr title="A grid of dots made with different auger rotations and measured by the camera, so the planner knows which dot size each rotation makes">Dot ladder</abbr> (camera)</h2>
-      <p class="hint">Dots on the blank, imaged before and after. Needs the needle touched off.</p>
-      <label>Rotations (°) <input id="dl-rots" type="text" value="30, 45, 58, 75, 90"></label>
-      <div class="row3">
-        <label>Repeats <input id="dl-rep" type="number" value="5" min="1"></label>
-        <label title="Distance between dots on the blank">Pitch (mm) <input id="dl-pitch" type="number" value="1.5" step="0.1"></label>
-        <label>Place <select id="dl-place"></select></label>
-      </div>
-      <label class="inline"><input id="dl-prime" type="checkbox" checked> Prime on the waste pad first</label>
-      <button id="btn-dl-run" type="button">Run dot ladder</button>
-    </div>
-
-    <div class="card">
-      <h2>Scale: dot batch</h2>
-      <p class="hint">Weigh a batch of equal dots on a slide (gross minus tare) to get mg per dot for one rotation.</p>
-      <div class="row3">
-        <label>Calibration # <input id="sd-cal" type="number" step="1"></label>
-        <label>Rotation per dot (°) <input id="sd-rot" type="number" step="0.1"></label>
-        <label>Number of dots <input id="sd-count" type="number" step="1"></label>
-      </div>
-      <div class="row3">
-        <label>Net mass (mg) <input id="sd-mass" type="number" step="0.1"></label>
-        <label title="Scale repeatability (one standard deviation), for the error bar">Scale SD (mg) <input id="sd-sd" type="number" step="0.1"></label>
-        <label title="Mean dot diameter measured by the camera, if you have it">Mean diameter (mm) <input id="sd-dia" type="number" step="0.01"></label>
-      </div>
-      <button id="btn-sd-save" type="button" class="primary">Save dot batch</button>
-    </div>
-
-    <div class="card">
-      <h2>Needle <abbr title="Finding exactly where the needle tip touches the surface: dots are made at falling heights; when the tip reaches the surface the dot squashes or stops forming">touch-off</abbr></h2>
-      <div class="row3">
-        <label title="First (largest) gap above the surface, mm">Start gap (mm) <input id="to-start" type="number" value="0.125" step="0.005"></label>
-        <label>Step (mm) <input id="to-step" type="number" value="0.025" step="0.005"></label>
-        <label>Steps <input id="to-steps" type="number" value="6" step="1"></label>
-      </div>
-      <div class="row3">
-        <label>Rotation per dot (°) <input id="to-rot" type="number" value="58" step="0.1"></label>
-        <label>Place <select id="to-place"></select></label>
-        <label class="inline"><input id="to-apply" type="checkbox"> Use the result</label>
-      </div>
-      <button id="btn-to-run" type="button">Run touch-off</button>
-    </div>
-
-    <div class="card wide">
-      <h2>Records</h2>
-      <p id="cal-current" class="big"></p>
-      <h3>Calibrations</h3>
-      <table class="tbl" id="cal-table"><thead><tr><th>#</th><th>Method</th><th>Status</th><th title="mm³ per auger turn">q</th><th title="Spread: standard deviation / mean">CV</th><th>n</th><th>Date</th><th>Notes</th></tr></thead><tbody></tbody></table>
-      <h3>Dot ladder of the current calibration</h3>
-      <table class="tbl" id="ladder-table"><thead><tr><th>Rotation (°)</th><th>n</th><th>Diameter (mm)</th><th>CV</th><th>mg/dot</th><th>Height (mm)</th><th>Method</th></tr></thead><tbody></tbody></table>
-      <p id="cal-result" class="result"></p>
-    </div>
-  </div>
-</section>
-
-<!-- ============================== PROFILES ============================== -->
-<section id="tab-profiles" class="tab" role="tabpanel" aria-labelledby="tabbtn-profiles">
-  <div class="toolbar">
-    <button id="btn-padtype-new" type="button" class="primary" data-testid="new-pad-type">New pad type</button>
-    <label class="inline"><input id="show-retired" type="checkbox"> show retired</label>
-    <span class="hint" id="profiles-hint"></span>
-  </div>
-  <div id="profiles"></div>
-</section>
-</main>
-
-<dialog id="dlg-padtype" aria-labelledby="dlg-padtype-title">
-  <form method="dialog" id="padtype-form">
-    <h2 id="dlg-padtype-title">New pad type</h2>
-    <div class="row2">
-      <label>Family <select id="pt-family"></select></label>
-      <label id="pt-family-other-wrap" class="hidden">Other family <input id="pt-family-other" type="text"></label>
-    </div>
-    <div class="row2">
-      <label>Name <input id="pt-name" type="text" required placeholder="e.g. 0201"></label>
-      <label title="Stable identity across versions">Key <input id="pt-key" type="text" placeholder="made from the name" pattern="[a-z0-9][a-z0-9-]*"></label>
-    </div>
-    <label title="Copy the pad size from a package footprint in OpenPnP">Pick the size from a footprint <select id="pt-footprint"><option value="">—</option></select></label>
-    <div class="row3">
-      <label>Pad width (mm) <input id="pt-w" type="number" step="0.005" required></label>
-      <label>Pad height (mm) <input id="pt-h" type="number" step="0.005" required></label>
-      <label title="Corner rounding, 0 = square corners, 100 = fully round">Roundness (%) <input id="pt-round" type="number" step="1" value="0"></label>
-    </div>
-    <div class="row3">
-      <label title="Used only when the package has no footprint pads in OpenPnP">Pad layout <select id="pt-layout"></select></label>
-      <label title="Centre-to-centre distance of the pads (two-terminal and SOT-23 layouts)">Pitch (mm) <input id="pt-pitch" type="number" step="0.005"></label>
-      <label>Status <select id="pt-status"></select></label>
-    </div>
-    <div class="row3">
-      <label title="Paste thickness the pad should get, like a stencil's thickness">t (mm) <input id="pt-t" type="number" step="0.005" value="0.10"></label>
-      <label title="Fraction of the pad area to cover (1.0 = all; less for e.g. QFN centre pads)">k <input id="pt-k" type="number" step="0.05" value="1.0"></label>
-      <label title="Regular expression matched against OpenPnP package names, e.g. 0603|1608Metric">Package names <input id="pt-pattern" type="text"></label>
-    </div>
-    <label>Notes <textarea id="pt-notes" rows="2"></textarea></label>
-    <p id="pt-error" class="error"></p>
-    <div class="btns end">
-      <button type="button" id="pt-cancel">Cancel</button>
-      <button type="submit" id="pt-save" class="primary" value="save">Save</button>
-    </div>
-  </form>
-</dialog>
-
-<dialog id="dlg-history" aria-labelledby="dlg-history-title">
-  <h2 id="dlg-history-title">History</h2>
-  <div id="history-body"></div>
-  <div class="btns end"><button type="button" id="history-close">Close</button></div>
-</dialog>
-
-<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

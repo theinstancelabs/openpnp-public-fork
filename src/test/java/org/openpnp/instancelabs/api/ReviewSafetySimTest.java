@@ -14,9 +14,11 @@ import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DriverGcodeChannel;
 import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
 
 import com.google.gson.JsonObject;
@@ -193,6 +195,34 @@ public class ReviewSafetySimTest {
         assertEquals(409, lastStatus, r.toString());
         assertTrue(r.toString().contains("error"), r.toString());
         assertFalse(sim.server.sinceMark().contains("M106 P2 S255"), sim.server.sinceMark().toString());
+        assertEquals("off", pressure().get("state").getAsString());
+    }
+
+    /**
+     * Bench F9: with the machine.xml patch, OpenPnP's Stop (DISABLE_COMMAND) sends the whole Stop
+     * sequence, so the web STOP of a held pressure ends in M410, both valves and pumps off, M18 B.
+     */
+    @Test
+    public void webStopWithTheF9DisableCommandSendsTheWholeStopSequence() throws Exception {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND,
+                String.join("\n", ControllerCommands.STOP_SEQUENCE));
+        JsonObject i1 = null;
+        for (com.google.gson.JsonElement e : ok("GET", "/api/status", null).getAsJsonArray("interlocks")) {
+            if (e.getAsJsonObject().get("id").getAsString().equals("I1")) {
+                i1 = e.getAsJsonObject();
+            }
+        }
+        assertEquals("ok", i1.get("state").getAsString(), i1.toString());
+        assertEquals("on", ok("POST", "/api/pressure/start", null).get("state").getAsString());
+        sim.server.mark();
+        JsonObject r = ok("POST", "/api/stop", null);
+        assertFalse(r.get("machineEnabled").getAsBoolean(), r.toString());
+        List<String> l = sim.server.sinceMark();
+        int vent = l.indexOf("M107 P3");
+        int seq = java.util.Collections.indexOfSubList(l, ControllerCommands.STOP_SEQUENCE);
+        assertTrue(vent >= 0 && l.indexOf("M107 P2") > vent, "the hold vents first: " + l);
+        assertTrue(seq > vent, "then OpenPnP's Stop sends M410, M107 P3, M107 P2, M107 P1, M107 P0, M18 B: " + l);
+        assertFalse(l.subList(vent, l.size()).contains("M106 P3 S255"), l.toString());
         assertEquals("off", pressure().get("state").getAsString());
     }
 

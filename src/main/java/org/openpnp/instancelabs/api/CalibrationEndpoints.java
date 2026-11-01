@@ -86,8 +86,9 @@ final class CalibrationEndpoints {
         e.pasteLot = Json.str(b, "pasteLot", null);
         e.operator = Json.str(b, "operator", null);
         e.notes = Json.str(b, "notes", null);
-        e.setPressurePsi = Json.num(b, "setPressurePsi", null);
-        e.bFeedDegS = Json.num(b, "bFeedDegS", cfg.bFeedDegS);
+        // Scale records note the profile's pressure and screw feed unless given.
+        e.setPressurePsi = Json.num(b, "setPressurePsi", cfg.profile.pressurePsi);
+        e.bFeedDegS = Json.num(b, "bFeedDegS", cfg.profile.feedDegS());
         e.barrelTempC = Json.num(b, "barrelTempC", null);
         e.barrelPressurePsi = Json.num(b, "barrelPressurePsi", null);
         e.pasteHoursRt = Json.num(b, "pasteHoursRt", null);
@@ -201,7 +202,9 @@ final class CalibrationEndpoints {
         req.primeAtWaste = Json.bool(b, "primeAtWaste", req.primeAtWaste);
         req.jumpRatio = Json.num(b, "jumpRatio", req.jumpRatio);
         boolean apply = Json.bool(b, "apply", false);
-        DispenseEndpoints.checkRotation(req.rotationDeg, 720);
+        if (!Double.isNaN(req.rotationDeg)) {
+            DispenseEndpoints.checkRotation(req.rotationDeg, DispenseEndpoints.maxDotRotation(svc.getConfig()));
+        }
         if (req.steps < 2 || req.steps > 20 || req.stepMm <= 0 || req.stepMm > 0.5 || req.startGapMm > 2
                 || req.pitchMm <= 0 || req.jumpRatio <= 0) {
             throw ApiException.badRequest("steps 2 to 20, step 0 to 0.5 mm, start gap at most 2 mm, pitch and jump ratio above 0");

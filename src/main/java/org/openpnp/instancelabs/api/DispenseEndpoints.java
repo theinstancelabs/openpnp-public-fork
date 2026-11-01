@@ -9,18 +9,16 @@ import java.util.concurrent.Future;
 
 import org.openpnp.Main;
 import org.openpnp.gui.MainFrame;
-import org.openpnp.instancelabs.dispense.Calibration;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispensePlan;
 import org.openpnp.instancelabs.dispense.DispenseService;
-import org.openpnp.instancelabs.dispense.DotMath;
 import org.openpnp.instancelabs.dispense.GcodeProgram;
 import org.openpnp.instancelabs.dispense.GcodeStreamBuilder;
 import org.openpnp.instancelabs.dispense.InterlockReport;
 import org.openpnp.instancelabs.dispense.Interlocks;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
-import org.openpnp.instancelabs.dispense.PadType;
+import org.openpnp.instancelabs.dispense.PadCleanReport;
 import org.openpnp.instancelabs.dispense.RunResult;
 import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.model.Board;
@@ -46,8 +44,17 @@ final class DispenseEndpoints {
     static final java.util.Set<String> PROTECTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "needleZOffsetMm", "needleZOffsetSetAtMs", "needleChangedAtMs", "needleAnchor", "surfaces",
             "schemaVersion"));
-    /** Pad type whose single-dot rotation is the default test-dot size (plan §5.6 first target). */
-    static final String TEST_DOT_PAD_TYPE = "chip-0603";
+    /** Nested settings PUT /api/config merges one level deep (a partial object keeps the other fields). */
+    static final java.util.Set<String> NESTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "profile", "purgeRow", "cleanPadCheck", "needleXyTrim"));
+    /**
+     * Nested fields only the engine or their own endpoints change: the start angle's set time (I11:
+     * POST /api/screw/start-angle, or a changed angle), the times of the trim and the purge reset,
+     * and the used purge spots (runs reserve them, POST /api/purge-row/reset frees them: a stale
+     * full-settings save must not put paste-covered spots back in use).
+     */
+    static final java.util.Set<String> PROTECTED_NESTED = new java.util.HashSet<>(java.util.Arrays.asList(
+            "profile.startAngleSetAtMs", "needleXyTrim.setAtMs", "purgeRow.resetAtMs", "purgeRow.usedSpots"));
 
     private final ApiContext ctx;
     private final MachineEndpoints machine;
@@ -76,7 +83,11 @@ final class DispenseEndpoints {
         s.route("GET", "/api/boards", r -> boards());
         s.route("GET", "/api/packages", r -> packages());
         s.route("POST", "/api/plan", this::plan);
+        s.route("GET", "/api/plans", r -> plans());
         s.route("GET", "/api/plan/([A-Za-z0-9-]+)", this::getPlan);
+        s.route("POST", "/api/plan/([A-Za-z0-9-]+)/clean-check", this::cleanCheck);
+        s.route("POST", "/api/screw/start-angle", this::startAngle);
+        s.route("POST", "/api/purge-row/reset", r -> purgeReset());
         s.route("POST", "/api/run", this::run);
         s.route("GET", "/api/runs", r -> ctx.svc().getDb().recentRuns(r.queryInt("limit", 20, 1, 500)));
         s.route("GET", "/api/runs/last", r -> lastRun());
@@ -115,8 +126,12 @@ final class DispenseEndpoints {
         d.put("bZeroed", svc.isBZeroed());
         d.put("needle", Views.map("touchedOff", cfg.isNeedleTouchedOff(), "zOffsetMm", cfg.needleZOffsetMm,
                 "setAtMs", cfg.needleZOffsetSetAtMs, "changedAtMs", cfg.needleChangedAtMs, "gapMm",
-                cfg.needleGapMm, "anchored", cfg.isNeedleAnchored(), "anchor", cfg.needleAnchor,
-                "anchorOffsetMm", cfg.needleAnchor == null ? null : cfg.needleAnchor.offsetMm()));
+                cfg.gapMm(), "anchored", cfg.isNeedleAnchored(), "anchor", cfg.needleAnchor,
+                "anchorOffsetMm", cfg.needleAnchor == null ? null : cfg.needleAnchor.offsetMm(), "xyTrim",
+                cfg.needleXyTrim));
+        d.put("profile", Views.profile(cfg, svc.getControllerConnectedAtMs()));
+        d.put("purgeRow", Views.purgeRow(cfg));
+        d.put("cleanPadCheck", cfg.cleanPadCheck);
         Map<String, Object> surf = new LinkedHashMap<>();
         for (Map.Entry<String, DispenseConfig.SurfaceMap> e : cfg.surfaces.entrySet()) {
             surf.put(e.getKey(), Views.surface(e.getKey(), e.getValue()));
@@ -128,12 +143,9 @@ final class DispenseEndpoints {
         d.put("blankLocationName", cfg.blankLocationName);
         d.put("primeRotationDeg", cfg.primeRotationDeg);
         d.put("testDot", Views.map("offsetXMm", cfg.testDotOffsetXMm, "offsetYMm", cfg.testDotOffsetYMm,
-                "opticalCheck", cfg.testDotOpticalCheck, "defaultRotationDeg", defaultTestDotRotation(svc)));
+                "defaultRotationDeg", defaultTestDotRotation(cfg)));
         d.put("maxContinuousOnTimeS", cfg.maxContinuousOnTimeS);
         d.put("minPadTypeStatus", cfg.minPadTypeStatus);
-        Calibration cal = svc.getCurrentCalibration();
-        d.put("calibration", cal == null ? null
-                : Views.map("id", cal.id, "qMm3PerRev", cal.qMm3PerRev, "status", cal.status, "method", cal.method));
         RunResult last = svc.getLastRun();
         out.put("lastRun", Views.run(last, false));
         out.put("interlocks", interlockList(svc, cfg));
@@ -149,10 +161,11 @@ final class DispenseEndpoints {
         Map<String, Object> stopCheck = machine.stopCommandCheck(cfg);
         boolean stopOk = stopCheck != null && Boolean.TRUE.equals(stopCheck.get("ok"));
         l.add(Views.map("id", "I1", "name", "Stop switches the pneumatics off", "state", stopOk ? "ok" : "warning",
-                "text", stopOk ? "dispense runs stop their own pneumatics, and OpenPnP's Stop sends M410 + valve off + pump off"
+                "text", stopOk ? "dispense runs stop their own pneumatics, and OpenPnP's Stop sends "
+                        + String.join(", ", ControllerCommands.STOP_SEQUENCE)
                         : "dispense runs and this page's STOP switch the pneumatics off, but OpenPnP's own Stop button does not: "
-                                + "add the plan §4.4 DISABLE_COMMAND (M410, " + ControllerCommands.VALVE_OFF + ", "
-                                + ControllerCommands.PUMP_OFF + ", ..., M18 B) to the driver",
+                                + "set the driver's DISABLE_COMMAND to " + String.join(", ", ControllerCommands.STOP_SEQUENCE)
+                                + " (machine.xml patch)",
                 "detail", stopCheck));
         l.add(Views.map("id", "I2", "name", "Auger (B) zeroed before it moves", "state", "ok", "text",
                 svc.isBZeroed() ? "B zeroed since the last home/start"
@@ -168,20 +181,41 @@ final class DispenseEndpoints {
             l.add(Views.map("id", "I5", "name", "Barrel pressure inside the window", "state", "off", "text",
                     "off: no barrel pressure sensor is fitted yet"));
         }
-        l.add(Views.map("id", "I6", "name", "Pump cannot exceed the auger's 20 psi", "state", "info", "text",
-                "hardware (deferred): the regulator sets the pressure; optional buck cap at <= 18 psi dead-head"));
+        l.add(Views.map("id", "I6", "name", "Regulator at the profile's pressure", "state", "info", "text",
+                String.format(java.util.Locale.ROOT, "set by hand: %.1f psi for profile '%s' (no sensor). The window is "
+                        + "narrow: 16 psi starved the screw, 20 psi drooled", cfg.profile.pressurePsi, cfg.profile.name)));
         l.add(Views.map("id", "I7", "name", "Maximum continuous pressure time", "state", "ok", "text",
                 "pressure is switched off after " + Math.round(cfg.maxContinuousOnTimeS) + " s"));
         l.add(Views.map("id", "I8", "name", "Paste within its working life", "state", "off", "text",
                 "not tracked yet: check the paste date yourself"));
-        if (cfg.primeAndTestDot) {
-            l.add(item("I9", "Prime and test dot before each board", r, "ok",
-                    "prime at '" + cfg.wasteLocationName + "' + test dot" + (cfg.testDotOpticalCheck
-                            ? " checked by the camera" : " (no camera check)")));
+        DispenseConfig.PurgeRow row = cfg.purgeRow;
+        InterlockReport board = svc.checkInterlocks(new DispensePlan(), 0);
+        if (cfg.profile.purgeDots > 0) {
+            l.add(item("I9", "Purge row before each board (same recipe, no stop before the work)", board, "ok",
+                    cfg.profile.purgeDots + " purge dots per board; " + row.spotsLeft() + " of " + row.spots
+                            + " spots left on '" + row.surfaceName + "'"));
         }
         else {
-            l.add(Views.map("id", "I9", "name", "Prime and test dot before each board", "state", "off", "text",
+            l.add(Views.map("id", "I9", "name", "Purge row before each board", "state", "off", "text",
+                    "the profile has no purge dots"));
+        }
+        if (cfg.cleanPadCheck.enabled) {
+            l.add(item("I10", "Clean pads (no leftover paste) before the pressure goes on", board, "ok",
+                    String.format(java.util.Locale.ROOT, "top camera at every dot: bright share >= %.2f",
+                            cfg.cleanPadCheck.minBrightFraction)));
+        }
+        else {
+            l.add(Views.map("id", "I10", "name", "Clean pads before the pressure goes on", "state", "off", "text",
                     "switched off in the dispenser settings"));
+        }
+        if (cfg.profile.isPartialTurn(cfg)) {
+            l.add(item("I11", "Screw start angle set for this controller power-up", board, "ok",
+                    String.format(java.util.Locale.ROOT, "dots start at %s deg (the first purge dot sets it)",
+                            Views.angles(cfg.profile.startAngles(cfg)))));
+        }
+        else {
+            l.add(Views.map("id", "I11", "name", "Screw start angle", "state", "off", "text",
+                    "whole revolutions per dot: the start angle does not matter"));
         }
         return l;
     }
@@ -197,20 +231,9 @@ final class DispenseEndpoints {
                 msgs.isEmpty() ? okText : String.join("; ", msgs));
     }
 
-    /** Single-dot rotation for the 0603 pad with the current calibration (plan §5.6: ~58 deg). */
-    static Double defaultTestDotRotation(DispenseService svc) {
-        try {
-            PadType t = svc.getDb().currentPadType(TEST_DOT_PAD_TYPE);
-            Calibration cal = svc.getCurrentCalibration();
-            if (t == null || cal == null || cal.qMm3PerRev <= 0) {
-                return null;
-            }
-            double v = DotMath.targetVolumeMm3(DotMath.padAreaMm2(t.padWMm, t.padHMm, t.padRoundness), t.tMm, t.k);
-            return Math.round(DotMath.rotationDegForVolume(v, cal.qMm3PerRev) * 10) / 10.0;
-        }
-        catch (Exception e) {
-            return null;
-        }
+    /** A test dot is one dot of the dispense profile (net screw turn, deg of B). */
+    static double defaultTestDotRotation(DispenseConfig cfg) {
+        return Math.round(cfg.profile.netDeg(cfg) * 10000) / 10000.0;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -245,9 +268,8 @@ final class DispenseEndpoints {
         JsonObject b = r.json();
         DispenseService svc = ctx.availableSvc();
         DispenseConfig cfg = svc.getConfig();
-        Double def = defaultTestDotRotation(svc);
-        double rot = Json.num(b, "rotationDeg", def == null ? 58.0 : def);
-        checkRotation(rot, 720);
+        double rot = Json.num(b, "rotationDeg", defaultTestDotRotation(cfg));
+        checkRotation(rot, maxDotRotation(cfg));
         DispenseConfig.NamedLocation waste = requireWaste(cfg);
         startChecks(svc, DispenseService.shotsScope(cfg.wasteLocationName, true), "Test dot");
         DispenseConfig.NamedLocation spot = new DispenseConfig.NamedLocation(waste.x + cfg.testDotOffsetXMm,
@@ -268,6 +290,11 @@ final class DispenseEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ApiContext.refuseUnlessOk(ctx.preflight(svc, scope), what);
+    }
+
+    /** Largest single-dot rotation: 720 deg, or more for a profile of two revolutions (720.72 deg). */
+    static double maxDotRotation(DispenseConfig cfg) {
+        return Math.max(720, cfg.profile.forwardDeg(cfg));
     }
 
     static void checkRotation(double rot, double max) throws ApiException {
@@ -320,16 +347,24 @@ final class DispenseEndpoints {
 
     /**
      * I4 needle Z frame: the same surface touched by N1 (its Z in OpenPnP's frame) and by the needle
-     * tip (N2 Z). Body: {"surfaceZ": n1ContactZ, "needleContactZ": n2ContactZ, "x"?, "y"?}.
+     * tip (N2 Z). Body: {"surfaceZ": n1ContactZ, "needleContactZ": n2ContactZ, "x"?, "y"?}, or instead
+     * of needleContactZ the bench relation {"needleContactRawSum": K}: needle contact raw Z = K - N1
+     * contact Z (side camera, 2026-10-27: K = 65.59, i.e. N2 contact = N1 contact - 2.59).
      */
     Object needleAnchor(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
         DispenseService svc = ctx.svc();
-        double sz = Json.reqNum(b, "surfaceZ"), nz = Json.reqNum(b, "needleContactZ");
+        double sz = Json.reqNum(b, "surfaceZ");
+        Double rawSum = Json.num(b, "needleContactRawSum", null);
+        if (rawSum != null && b.has("needleContactZ")) {
+            throw ApiException.badRequest("give either needleContactZ or needleContactRawSum, not both");
+        }
+        double nz = rawSum == null ? Json.reqNum(b, "needleContactZ") : svc.needleContactZFromRawSum(sz, rawSum);
         if (!Double.isFinite(sz) || !Double.isFinite(nz) || Math.abs(nz - sz) > 20) {
             throw ApiException.badRequest("the needle contact Z must be within 20 mm of the N1 contact Z");
         }
-        DispenseConfig.NeedleAnchor a = svc.setNeedleAnchor(sz, nz, Json.num(b, "x", null), Json.num(b, "y", null));
+        DispenseConfig.NeedleAnchor a = svc.setNeedleAnchor(sz, nz, Json.num(b, "x", null), Json.num(b, "y", null),
+                rawSum);
         return Views.map("anchor", a, "offsetMm", a.offsetMm(), "touchedOff", svc.getConfig().isNeedleTouchedOff(),
                 "note", "needle Z offset set to " + String.format(java.util.Locale.ROOT, "%.3f", a.offsetMm())
                         + " mm; run a needle touch-off (or confirm the offset) before dispensing");
@@ -379,8 +414,17 @@ final class DispenseEndpoints {
         if (pts.size() > 500) {
             throw ApiException.badRequest("at most 500 points");
         }
+        // A board surface can be tied to the board registration of a plan (I4: re-probe on re-seat).
+        String planId = Json.str(b, "planId", null);
+        String boardFp = null;
+        if (planId != null) {
+            boardFp = currentBoardRegistration(svc, requirePlan(planId));
+            if (boardFp == null || boardFp.startsWith("unavailable")) {
+                throw ApiException.refused("the board of plan " + planId + " cannot be found: " + boardFp);
+            }
+        }
         try {
-            svc.setSurface(r.group(1), pts, Json.str(b, "note", null));
+            svc.setSurface(r.group(1), pts, Json.str(b, "note", null), boardFp);
         }
         catch (IllegalArgumentException e) {
             throw ApiException.badRequest(e.getMessage());
@@ -408,6 +452,27 @@ final class DispenseEndpoints {
         for (Map.Entry<String, JsonElement> e : patch.entrySet()) {
             if (!cur.has(e.getKey())) {
                 throw ApiException.badRequest("unknown setting '" + e.getKey() + "'");
+            }
+            if (NESTED_SETTINGS.contains(e.getKey())) {
+                if (!e.getValue().isJsonObject()) {
+                    throw ApiException.badRequest("'" + e.getKey() + "' must be an object");
+                }
+                JsonObject sub = cur.getAsJsonObject(e.getKey());
+                for (Map.Entry<String, JsonElement> f : e.getValue().getAsJsonObject().entrySet()) {
+                    String path = e.getKey() + "." + f.getKey();
+                    if (!sub.has(f.getKey())) {
+                        throw ApiException.badRequest("unknown setting '" + path + "'");
+                    }
+                    if (PROTECTED_NESTED.contains(path)) {
+                        if (!sub.get(f.getKey()).equals(f.getValue())) {
+                            throw ApiException.badRequest("'" + path + "' is stamped by the engine: set or confirm "
+                                    + "the value with its own action");
+                        }
+                        continue;
+                    }
+                    sub.add(f.getKey(), f.getValue());
+                }
+                continue;
             }
             if (PROTECTED_SETTINGS.contains(e.getKey())) {
                 if (!cur.get(e.getKey()).equals(e.getValue())) {
@@ -532,6 +597,22 @@ final class DispenseEndpoints {
         return Views.plan(e, ctx.preflightPlan(svc, e.plan, nz(e.estimatedPressurisedSeconds)));
     }
 
+    /**
+     * The plans kept in memory (last {@value PlanStore#MAX}, run subsets left out), newest first, without dots or
+     * interlocks: a browser opened later shows the latest plan (GET /api/plan/{id} for the rest). Each carries the
+     * profile it was made with (small), so a list of runs can name its profile without fetching every full plan.
+     */
+    Object plans() {
+        List<Map<String, Object>> l = new ArrayList<>();
+        for (PlanStore.Entry e : ctx.plans.recent()) {
+            DispensePlan p = e.plan;
+            l.add(Views.map("planId", p.planId, "boardName", p.boardName, "boardLocationId", p.boardLocationId,
+                    "createdAtMs", p.createdAtMs, "source", e.source, "pads", p.pads.size(), "dots", p.dots.size(),
+                    "blockedPads", p.blockedPads().size(), "profile", p.profile, "profileFingerprint", p.profileFingerprint));
+        }
+        return l;
+    }
+
     private PlanStore.Entry requirePlan(String id) throws ApiException {
         PlanStore.Entry e = id == null ? null : ctx.plans.get(id);
         if (e == null) {
@@ -553,10 +634,11 @@ final class DispenseEndpoints {
             Machine m = ctx.machine();
             DispenseConfig cfg = svc.getConfig();
             OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) m, svc.getDispenserNozzle(), cfg.bAxisName);
-            GcodeProgram p = GcodeStreamBuilder.forPlan(cfg, mapper, e.plan, svc.isBZeroed(), false,
-                    GcodeStreamBuilder.Part.FULL);
+            GcodeProgram p = GcodeStreamBuilder.forPlan(cfg, mapper, e.plan, DispenseService.purgeSpecs(cfg),
+                    svc.isBZeroed(), false, 0L);
             e.estimatedSeconds = p.estimatedSeconds;
             e.estimatedPressurisedSeconds = p.estimatedPressurisedSeconds;
+            e.estimatedWorkSeconds = p.estimatedWorkSeconds;
         }
         catch (Exception ex) {
             e.estimateError = MachineEndpoints.rootMessage(ex);
@@ -566,20 +648,34 @@ final class DispenseEndpoints {
     /** Fingerprint of the board the plan came from, as it is now (null if it cannot be found). */
     private String currentBoardFingerprint(DispenseService svc, PlanStore.Entry e) {
         try {
-            Map<String, Object> src = e.source;
-            if ("job".equals(src.get("source"))) {
-                return DispenseService.boardFingerprint(findJobBoard((String) src.get("boardLocationId")));
-            }
-            Board board = ctx.configuration.getBoard(new File((String) src.get("file")));
-            BoardLocation bl = new BoardLocation(board);
-            bl.setLocation(new Location(LengthUnit.Millimeters, ((Number) src.get("x")).doubleValue(),
-                    ((Number) src.get("y")).doubleValue(), ((Number) src.get("z")).doubleValue(),
-                    ((Number) src.get("rotation")).doubleValue()));
-            return DispenseService.boardFingerprint(bl);
+            return DispenseService.boardFingerprint(currentBoardLocation(e));
         }
         catch (Exception ex) {
             return "unavailable: " + ex.getMessage();
         }
+    }
+
+    /** Registration (X/Y/rotation, side, fiducial transform) of the plan's board as it is now. */
+    private String currentBoardRegistration(DispenseService svc, PlanStore.Entry e) {
+        try {
+            return DispenseService.boardRegistration(currentBoardLocation(e));
+        }
+        catch (Exception ex) {
+            return "unavailable: " + ex.getMessage();
+        }
+    }
+
+    private BoardLocation currentBoardLocation(PlanStore.Entry e) throws Exception {
+        Map<String, Object> src = e.source;
+        if ("job".equals(src.get("source"))) {
+            return findJobBoard((String) src.get("boardLocationId"));
+        }
+        Board board = ctx.configuration.getBoard(new File((String) src.get("file")));
+        BoardLocation bl = new BoardLocation(board);
+        bl.setLocation(new Location(LengthUnit.Millimeters, ((Number) src.get("x")).doubleValue(),
+                ((Number) src.get("y")).doubleValue(), ((Number) src.get("z")).doubleValue(),
+                ((Number) src.get("rotation")).doubleValue()));
+        return bl;
     }
 
     private BoardLocation findJobBoard(String id) throws ApiException {
@@ -603,11 +699,10 @@ final class DispenseEndpoints {
         PlanStore.Entry e = requirePlan(Json.str(b, "planId", null));
         DispenseConfig cfg = svc.getConfig();
         DispensePlan full = e.plan;
-        Calibration cal = svc.getCurrentCalibration();
-        if (cal == null || cal.id != full.calibrationId || cfg.needleZOffsetMm != full.needleZOffsetMm
-                || cfg.needleGapMm != full.needleGapMm || cfg.hopHeightMm != full.hopHeightMm) {
-            throw ApiException.refused("the calibration, needle offset, gap or hop height changed since this plan was "
-                    + "made (its dot heights would be wrong): plan the board again");
+        if (!cfg.profile.fingerprint().equals(full.profileFingerprint) || cfg.needleZOffsetMm != full.needleZOffsetMm
+                || cfg.gapMm() != full.needleGapMm || cfg.hopHeightMm != full.hopHeightMm) {
+            throw ApiException.refused("the dispense profile, needle offset, gap or hop height changed since this plan "
+                    + "was made (its dots would be wrong): plan the board again");
         }
         // Review finding: a board moved, re-checked (fiducials) or edited after planning was not detected.
         String now = currentBoardFingerprint(svc, e);
@@ -630,6 +725,50 @@ final class DispenseEndpoints {
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, rr -> Views.run(rr, false),
                 Views.map("kind", "board", "planId", p.planId, "parentPlanId", p == full ? null : full.planId, "dots",
                         p.dots.size(), "pads", p.pads.size()));
+    }
+
+    /**
+     * Clean-pad check alone (camera only, pressure off): {"wait"?: bool}. The result is kept with the
+     * plan (GET /api/plan/{id} -> cleanCheck); a run repeats the check before the pressure goes on.
+     */
+    Object cleanCheck(ApiServer.Request r) throws Exception {
+        JsonObject b = r.json();
+        DispenseService svc = ctx.availableSvc();
+        ctx.requireEngineIdle(svc);
+        ctx.requireNoPressureHold();
+        PlanStore.Entry e = requirePlan(r.group(1));
+        ctx.tracker.expect("clean-pad check");
+        Future<PadCleanReport> f = svc.checkCleanPads(e.plan);
+        e.cleanCheckFuture = f;
+        return ApiContext.awaitIf(Json.bool(b, "wait", false), f, Views::cleanCheck,
+                Views.map("kind", "clean-pad check", "planId", e.plan.planId, "dots", e.plan.dots.size()));
+    }
+
+    /**
+     * I11: set ({"startAngleDeg": a}) or confirm ({} or {"confirm": true}) the screw start angle for
+     * the current controller power-up (the B step count restarts at power-up).
+     */
+    Object startAngle(ApiServer.Request r) throws Exception {
+        JsonObject b = r.json();
+        DispenseService svc = ctx.svc();
+        if (svc.isBusy()) {
+            throw ApiException.refused("the start angle cannot change while a dispense task runs");
+        }
+        Double a = Json.num(b, "startAngleDeg", null);
+        if (a != null && !(a >= 0 && a < 360)) {
+            throw ApiException.badRequest("startAngleDeg must be 0 to < 360");
+        }
+        svc.setStartAngle(a, Json.str(b, "note", null));
+        return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs());
+    }
+
+    Object purgeReset() throws Exception {
+        DispenseService svc = ctx.svc();
+        if (svc.isBusy()) {
+            throw ApiException.refused("the purge row cannot be reset while a dispense task runs");
+        }
+        svc.resetPurgeRow();
+        return Views.purgeRow(svc.getConfig());
     }
 
     Object lastRun() throws ApiException {

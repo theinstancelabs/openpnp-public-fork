@@ -37,13 +37,12 @@ public class LiveBoardPlanTest {
         Configuration.get().load();
         Board board = Configuration.get().getBoard(boardCopy);
         BoardLocation bl = new BoardLocation(board);
-        bl.setLocation(new Location(LengthUnit.Millimeters, 150, 100, 1.6, 0));
+        bl.setLocation(new Location(LengthUnit.Millimeters, 150, 100, 5.5, 0));
         try (DispenseDb db = DispenseDb.inMemory()) {
-            DispenseConfig cfg = new DispenseConfig();
+            DispenseConfig cfg = GcodeStreamTest.toyConfig(); // bench needle frame, purge row on a probed blank
             cfg.minPadTypeStatus = "not-started"; // seeds only: this checks geometry, not readiness
-            Calibration cal = db.currentCalibration(System.currentTimeMillis());
-            DispensePlan plan = new DispensePlanner(cfg, new PadTypeResolver(db.currentPadTypes(), db.packageMappings()),
-                    cal, db.dotLadder(cal.id)).planBoard(bl, 150, 100);
+            DispensePlan plan = new DispensePlanner(cfg, new PadTypeResolver(db.currentPadTypes(), db.packageMappings()))
+                    .planBoard(bl, 150, 100);
             assertEquals(160, plan.pads.size(), plan.summary());
             assertEquals(160, plan.dots.size(), plan.summary());
             assertEquals(0, plan.blockedPads().size());
@@ -52,16 +51,18 @@ public class LiveBoardPlanTest {
                 assertEquals(PadGeometry.Source.PAD_TYPE, p.source, "live packages have no footprint pads for 0603");
             }
             assertTrue(plan.pathLengthMm < plan.pathLengthNearestNeighbourMm);
-            cfg.locations.put("waste", new DispenseConfig.NamedLocation(140, 90, 1.0));
-            GcodeProgram prog = GcodeStreamBuilder.forPlan(cfg, new ToyMapper(150, 100, 31.5, 0), plan, false, false,
-                    GcodeStreamBuilder.Part.FULL);
+            GcodeProgram prog = GcodeStreamBuilder.forPlan(cfg, new ToyMapper(150, 100, 31.5, 0), plan,
+                    DispenseService.purgeSpecs(cfg), false, false, 0L);
             assertTrue(GcodeStreamValidator.validate(prog, cfg, "B").isEmpty());
+            assertEquals(160, prog.dotCount);
+            assertEquals(8, prog.purgeDotCount);
             System.out.println(String.format(java.util.Locale.ROOT,
-                    "LiveBoardPlanTest: kinematic lower-bound estimate (no acceleration) %.1f s for %d dots, %d lines",
-                    prog.estimatedSeconds, prog.dotCount, prog.lines.size()));
+                    "LiveBoardPlanTest: estimate (moves with acceleration, settles, purge) %.1f s for %d + %d purge "
+                    + "dots, %d lines: %.0f DPH overall", prog.estimatedSeconds, prog.dotCount, prog.purgeDotCount,
+                    prog.lines.size(), prog.dotCount / prog.estimatedSeconds * 3600));
             System.out.println("LiveBoardPlanTest: " + plan.summary() + String.format(java.util.Locale.ROOT,
-                    ", total rotation %.0f deg = %.3f mm3", plan.totalRotationDeg(),
-                    DotMath.volumeForRotation(plan.totalRotationDeg(), cal.qMm3PerRev)));
+                    ", total screw turn %.0f deg = %.1f revolutions", plan.totalRotationDeg(),
+                    plan.totalRotationDeg() * cfg.bStepsPerDeg / cfg.bStepsPerRev));
         }
     }
 }

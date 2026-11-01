@@ -11,7 +11,7 @@ import java.util.List;
 public class GcodeProgram {
     public enum Marker {
         NONE,
-        /** First line of a dot (prime and test dots carry dotIndex < 0). */
+        /** First line of a dot (prime, test and purge dots carry dotIndex < 0). */
         DOT_BEGIN,
         /** Last line of a dot. A line can be both begin and end only for 1-line dots (never here). */
         DOT_END,
@@ -30,7 +30,7 @@ public class GcodeProgram {
     public static final class Line {
         public final String text;
         public final Marker marker;
-        /** Dot index for DOT_BEGIN/DOT_END; -1 prime, -2 test dot, else -9. */
+        /** Dot index for DOT_BEGIN/DOT_END; -1 prime, -2 test dot, -3 purge, else -9. */
         public final int dotIndex;
         public final String padId;
         public final double rotationDeg;
@@ -64,11 +64,22 @@ public class GcodeProgram {
     public double[] finalNozzle;
     public boolean bZeroedAtStart;
     public boolean keepalive;
-    /** Kinematic lower-bound duration estimate (no acceleration), seconds. */
+    /**
+     * Duration estimate, seconds: every move from rest to rest with its acceleration, dwells and
+     * settles (no host latency, no look-ahead between moves).
+     */
     public double estimatedSeconds;
+    /** Board programs: estimated seconds from the cross after the purge to the last dot (bench DPH). */
+    public double estimatedWorkSeconds;
     /** Estimated seconds from the pump ON line to the pump OFF line. */
     public double estimatedPressurisedSeconds;
     public int dotCount;
+    public int purgeDotCount;
+    /** Marlin step count of B at the start of the block (M114 Count), or null if unknown. */
+    public Long bCountAtStart;
+    /** Step count and screw angle where the first work dot starts (after the purge), or null. */
+    public Long workStartCount;
+    public Double workStartAngleDeg;
 
     /** All lines (including comments), one per entry. */
     public List<String> text() {

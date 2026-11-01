@@ -13,6 +13,9 @@ import java.util.regex.Pattern;
  * <li>Valve ON only while the pump is ON; valve OFF before pump OFF (plan §4.5).</li>
  * <li>I2: no B move before G92 B0 unless B was already zeroed since home/reconnect.</li>
  * <li>B moves only inside a pressure session (pump and valve ON).</li>
+ * <li>No X/Y/Z move while the screw acceleration (M204 S above the XY/Z one) is in force: M204 S also
+ * governs XY and Z, so the screw's 20000 deg/s² must only ever cover the B moves.</li>
+ * <li>No B feed above the B limit (bMaxFeedDegS, at most 400 rpm).</li>
  * <li>No M400 between a dot's first and last line (no per-dot synchronisation).</li>
  * <li>The program ends with valve and pump OFF and the watchdog disarmed.</li>
  * </ul>
@@ -65,6 +68,11 @@ public final class GcodeStreamValidator {
                 : Pattern.compile("(?:^|\\s)" + Pattern.quote(zw.letterZ) + "([-+]?[0-9]*\\.?[0-9]+)");
         boolean pump = false, valve = false, zeroed = prog.bZeroedAtStart, inDot = false, armed = false;
         Pattern bWord = Pattern.compile("(^|\\s)" + Pattern.quote(letterB) + "[-+]?[0-9.]");
+        Pattern otherAxis = Pattern.compile("(^|\\s)(?!" + Pattern.quote(letterB) + ")[A-EG-Z][-+]?[0-9.]");
+        Pattern fWord = Pattern.compile("(?:^|\\s)F([-+]?[0-9]*\\.?[0-9]+)");
+        Pattern m204 = Pattern.compile("^M204\\s+S([0-9]*\\.?[0-9]+)$");
+        double xyzAccelMax = Math.max(cfg.travelAccelMmS2, cfg.zLiftAccelMmS2);
+        double accel = Double.NaN;
         int n = 0;
         for (GcodeProgram.Line line : prog.lines) {
             n++;
@@ -109,7 +117,20 @@ public final class GcodeStreamValidator {
                     }
                 }
             }
+            java.util.regex.Matcher am = m204.matcher(norm);
+            if (am.matches()) {
+                accel = Double.parseDouble(am.group(1));
+            }
+            if (s.matches("G[01](\\s.*)?") && otherAxis.matcher(s.substring(2)).find() && accel > xyzAccelMax + 1e-6) {
+                p.add(where + "X/Y/Z move under the screw acceleration M204 S" + GcodeStreamBuilder.f0(accel)
+                        + " (XY/Z limit " + GcodeStreamBuilder.f0(xyzAccelMax) + ")");
+            }
             if (s.matches("G[01](\\s.*)?") && bWord.matcher(s.substring(2)).find()) {
+                java.util.regex.Matcher fm = fWord.matcher(s.substring(2));
+                if (fm.find() && Double.parseDouble(fm.group(1)) > cfg.bMaxFeedDegS * 60 + 1e-6) {
+                    p.add(where + "B feed above the B limit " + GcodeStreamBuilder.f0(cfg.bMaxFeedDegS * 60)
+                            + " deg/min");
+                }
                 if (!zeroed) {
                     p.add(where + "I2: B move before G92 " + letterB + "0");
                 }

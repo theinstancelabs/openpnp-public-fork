@@ -67,6 +67,10 @@ public final class DispenseService {
     private volatile BarrelPressureSensor pressureSensor;
     private volatile DotImager dotImagerOverride;
     private MachineListener machineListener;
+    /** When OpenPnP last enabled (connected to) the controller: the B step count may restart (I11). */
+    private volatile Long controllerConnectedAtMs;
+    /** Set by {@link #abort}: stops a camera-only clean-pad check (it has no executor). */
+    private volatile boolean cameraTourAbort;
 
     // ------------------------------------------------------------------------------------------
     // Lifecycle
@@ -123,6 +127,7 @@ public final class DispenseService {
                 @Override
                 public void machineEnabled(Machine m) {
                     bZeroed.set(false);
+                    controllerConnectedAtMs = System.currentTimeMillis();
                 }
 
                 @Override
@@ -219,17 +224,57 @@ public final class DispenseService {
         return cfg.copy();
     }
 
-    /** Validates, saves to dispense-config.json and applies a new configuration. */
+    /**
+     * Validates, saves to dispense-config.json and applies a new configuration. A changed start
+     * angle or needle XY trim is stamped with the time it was set (calibration values).
+     */
     public synchronized void updateConfig(DispenseConfig newCfg) throws IOException {
         List<String> problems = newCfg.validate();
         if (!problems.isEmpty()) {
             throw new IllegalArgumentException("invalid dispense config: " + problems);
         }
         DispenseConfig c = newCfg.copy();
+        long now = System.currentTimeMillis();
+        if (cfg != null && c.profile.startAngleDeg != cfg.profile.startAngleDeg) {
+            c.profile.startAngleSetAtMs = now;
+        }
+        if (cfg != null && (c.needleXyTrim.dxMm != cfg.needleXyTrim.dxMm || c.needleXyTrim.dyMm != cfg.needleXyTrim.dyMm)) {
+            c.needleXyTrim.setAtMs = now;
+        }
         c.save(configDir);
         cfg = c;
         resolveNozzle();
         db.event(null, "INFO", "CONFIG", "configuration updated");
+    }
+
+    /**
+     * I11: sets (angle != null) or confirms the screw start angle for the current controller
+     * power-up (the B step count restarts at power-up).
+     */
+    public synchronized DispenseProfile setStartAngle(Double angleDeg, String note) throws IOException {
+        DispenseConfig c = cfg.copy();
+        if (angleDeg != null) {
+            c.profile.startAngleDeg = angleDeg;
+        }
+        c.profile.startAngleSetAtMs = System.currentTimeMillis();
+        updateConfig(c);
+        db.event(null, "INFO", "I11", String.format(java.util.Locale.ROOT, "screw start angle %s %.1f deg%s",
+                angleDeg == null ? "confirmed" : "set to", c.profile.startAngleDeg, note == null ? "" : ": " + note));
+        return c.profile.copy();
+    }
+
+    /** The purge row was wiped: all its spots are free again. */
+    public synchronized void resetPurgeRow() throws IOException {
+        DispenseConfig c = cfg.copy();
+        c.purgeRow.usedSpots = 0;
+        c.purgeRow.resetAtMs = System.currentTimeMillis();
+        updateConfig(c);
+        db.event(null, "INFO", "I9", "purge row reset (" + c.purgeRow.spots + " spots free)");
+    }
+
+    /** When OpenPnP last connected to the controller (epoch ms), or null. */
+    public Long getControllerConnectedAtMs() {
+        return controllerConnectedAtMs;
     }
 
     public synchronized void setLocation(String name, double x, double y, double z) throws IOException {
@@ -265,10 +310,17 @@ public final class DispenseService {
      */
     public synchronized DispenseConfig.NeedleAnchor setNeedleAnchor(double surfaceZMm, double needleContactZMm,
             Double xMm, Double yMm) throws IOException, SQLException {
+        return setNeedleAnchor(surfaceZMm, needleContactZMm, xMm, yMm, null);
+    }
+
+    /** As above; {@code rawSumMm} records the bench relation the needle contact came from (or null). */
+    public synchronized DispenseConfig.NeedleAnchor setNeedleAnchor(double surfaceZMm, double needleContactZMm,
+            Double xMm, Double yMm, Double rawSumMm) throws IOException, SQLException {
         DispenseConfig c = cfg.copy();
         double prev = c.needleZOffsetMm;
         long now = Math.max(System.currentTimeMillis(), c.needleChangedAtMs == null ? 0 : c.needleChangedAtMs);
         c.needleAnchor = new DispenseConfig.NeedleAnchor(surfaceZMm, needleContactZMm, xMm, yMm, now);
+        c.needleAnchor.rawSumMm = rawSumMm;
         c.needleZOffsetMm = c.needleAnchor.offsetMm();
         updateConfig(c);
         db.insertTouchOff("needle-frame (N1 + needle contact)", c.needleZOffsetMm, prev, new com.google.gson.Gson()
@@ -279,15 +331,41 @@ public final class DispenseService {
         return c.needleAnchor;
     }
 
+    /**
+     * Needle contact Z (N2, OpenPnP frame) from the bench relation "needle contact raw Z = K - N1
+     * contact Z" (side camera, 2026-10-27: K = 65.59, so the needle touches 2.59 mm below N1 in
+     * OpenPnP's N2 frame). N1's OpenPnP Z is its raw Z on this machine (N1 is not transformed).
+     */
+    public double needleContactZFromRawSum(double n1ContactZ, double rawSumMm) throws Exception {
+        requireAvailable();
+        OpenPnpRawMapper m = new OpenPnpRawMapper((ReferenceMachine) configuration.getMachine(), nozzle, cfg.bAxisName);
+        double[] n = m.currentNozzleLocation();
+        double r0 = m.toRaw(n[0], n[1], 0).z, r1 = m.toRaw(n[0], n[1], 10).z;
+        if (Math.abs(r1 - r0) < 1e-9) {
+            throw new IllegalStateException("N2's Z does not move the raw Z axis");
+        }
+        return (rawSumMm - n1ContactZ - r0) * 10 / (r1 - r0);
+    }
+
     /** Stores a probed surface (validated: at least 3 points spanning an area). */
     public synchronized SurfacePlane setSurface(String name, List<DispenseConfig.SurfacePoint> points, String note)
             throws IOException {
+        return setSurface(name, points, note, null);
+    }
+
+    /**
+     * As above; {@code boardFingerprint} ties a board surface to the board registration it was
+     * probed on (a re-seated board then needs new probes, I4).
+     */
+    public synchronized SurfacePlane setSurface(String name, List<DispenseConfig.SurfacePoint> points, String note,
+            String boardFingerprint) throws IOException {
         SurfacePlane plane = SurfacePlane.fit(points); // throws IllegalArgumentException if unusable
         DispenseConfig c = cfg.copy();
         DispenseConfig.SurfaceMap m = new DispenseConfig.SurfaceMap();
         m.points = new ArrayList<>(points);
         m.setAtMs = System.currentTimeMillis();
         m.note = note;
+        m.boardFingerprint = boardFingerprint;
         c.surfaces.put(name, m);
         updateConfig(c);
         db.event(null, "INFO", "SURFACE", String.format(java.util.Locale.ROOT,
@@ -330,8 +408,31 @@ public final class DispenseService {
     public static String boardFingerprint(BoardLocation bl) {
         StringBuilder sb = new StringBuilder();
         Location g = bl.getGlobalLocation().convertToUnits(LengthUnit.Millimeters);
-        sb.append(String.format(java.util.Locale.ROOT, "%.4f,%.4f,%.4f,%.4f;%s;%s;", g.getX(), g.getY(), g.getZ(),
-                g.getRotation(), bl.getGlobalSide(), bl.getPlacementsTransformStatus()));
+        sb.append(String.format(java.util.Locale.ROOT, "%.4f;", g.getZ()));
+        appendRegistration(sb, bl);
+        if (bl.getBoard() != null) {
+            for (org.openpnp.model.Placement pl : bl.getBoard().getPlacements()) {
+                Location l = pl.getLocation().convertToUnits(LengthUnit.Millimeters);
+                sb.append(String.format(java.util.Locale.ROOT, "|%s,%s,%s,%s,%.4f,%.4f,%.4f,%.4f", pl.getId(),
+                        pl.getSide(), pl.getType(), pl.isEnabled(), l.getX(), l.getY(), l.getZ(), l.getRotation()));
+            }
+        }
+        return digest(sb);
+    }
+
+    /**
+     * Identity of where the board sits: X/Y/rotation, side and the fiducial transform (not its Z or
+     * placements). A board surface is tied to it (I4: re-probe after a re-seat; editing a placement
+     * or the board's nominal Z does not move the board).
+     */
+    public static String boardRegistration(BoardLocation bl) {
+        return digest(appendRegistration(new StringBuilder("reg;"), bl));
+    }
+
+    private static StringBuilder appendRegistration(StringBuilder sb, BoardLocation bl) {
+        Location g = bl.getGlobalLocation().convertToUnits(LengthUnit.Millimeters);
+        sb.append(String.format(java.util.Locale.ROOT, "%.4f,%.4f,%.4f;%s;%s;", g.getX(), g.getY(), g.getRotation(),
+                bl.getGlobalSide(), bl.getPlacementsTransformStatus()));
         java.awt.geom.AffineTransform t;
         try {
             t = bl.getLocalToGlobalTransform();
@@ -346,13 +447,10 @@ public final class DispenseService {
                 sb.append(String.format(java.util.Locale.ROOT, "%.6f,", v));
             }
         }
-        if (bl.getBoard() != null) {
-            for (org.openpnp.model.Placement pl : bl.getBoard().getPlacements()) {
-                Location l = pl.getLocation().convertToUnits(LengthUnit.Millimeters);
-                sb.append(String.format(java.util.Locale.ROOT, "|%s,%s,%s,%s,%.4f,%.4f,%.4f,%.4f", pl.getId(),
-                        pl.getSide(), pl.getType(), pl.isEnabled(), l.getX(), l.getY(), l.getZ(), l.getRotation()));
-            }
-        }
+        return sb;
+    }
+
+    private static String digest(StringBuilder sb) {
         try {
             byte[] h = java.security.MessageDigest.getInstance("SHA-256")
                     .digest(sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -403,6 +501,7 @@ public final class DispenseService {
 
     /** Thread-safe: stops the active stream before its next line; pneumatics are switched off (I1). */
     public void abort(String reason) {
+        cameraTourAbort = true;
         DispenseExecutor e = activeExecutor;
         if (e != null) {
             e.requestAbort(reason);
@@ -455,17 +554,17 @@ public final class DispenseService {
     // ------------------------------------------------------------------------------------------
 
     public DispensePlanner newPlanner() throws SQLException {
-        Calibration cal = getCurrentCalibration();
-        return new DispensePlanner(cfg, new PadTypeResolver(db.currentPadTypes(), db.packageMappings()), cal,
-                db.dotLadder(cal.id)).withRules(db.currentPadRules()).withSurface(planeOf(cfg, cfg.boardSurfaceName));
+        return new DispensePlanner(cfg, new PadTypeResolver(db.currentPadTypes(), db.packageMappings()))
+                .withRules(db.currentPadRules()).withSurface(planeOf(cfg, cfg.boardSurfaceName));
     }
 
-    /** Plans a board location; the path starts at the waste location (or N2's current XY). */
+    /** Plans a board location; the path starts at the end of the purge row (or N2's current XY). */
     public DispensePlan planBoard(BoardLocation bl) throws Exception {
         requireAvailable();
         double[] start = planStart();
         DispensePlan plan = newPlanner().planBoard(bl, start[0], start[1]);
         plan.boardFingerprint = boardFingerprint(bl);
+        plan.boardRegistration = boardRegistration(bl);
         db.insertPadPlan(plan);
         db.event(null, "INFO", "PLAN", plan.summary());
         return plan;
@@ -480,12 +579,35 @@ public final class DispenseService {
     }
 
     private double[] planStart() {
-        DispenseConfig.NamedLocation w = cfg.location(cfg.wasteLocationName);
-        if (cfg.primeAndTestDot && w != null) {
-            return new double[] {w.x, w.y};
+        DispenseConfig.PurgeRow row = cfg.purgeRow;
+        if (cfg.profile.purgeDots > 0 && row.isDefined()) {
+            return row.spot(Math.min(row.spots - 1, row.usedSpots + cfg.profile.purgeDots - 1));
         }
         Location l = nozzle.getLocation().convertToUnits(LengthUnit.Millimeters);
         return new double[] {l.getX(), l.getY()};
+    }
+
+    /**
+     * The next {@code profile.purgeDots} unused spots of the purge row as dot specs (Z from the purge
+     * surface plane, the profile's gap). Empty if the profile has no purge or the row cannot supply
+     * them (I9 refuses the run then).
+     */
+    public static List<GcodeStreamBuilder.DotSpec> purgeSpecs(DispenseConfig c) {
+        List<GcodeStreamBuilder.DotSpec> l = new ArrayList<>();
+        DispenseConfig.PurgeRow row = c.purgeRow;
+        int n = c.profile.purgeDots;
+        SurfacePlane plane = planeOf(c, row.surfaceName);
+        if (n <= 0 || !row.isDefined() || row.spotsLeft() < n || plane == null) {
+            return l;
+        }
+        for (int i = 0; i < n; i++) {
+            int k = row.usedSpots + i;
+            double[] xy = row.spot(k);
+            double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
+            l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm, c.profile.netDeg(c),
+                    GcodeStreamBuilder.PURGE_INDEX, "purge#" + k));
+        }
+        return l;
     }
 
     /**
@@ -496,27 +618,30 @@ public final class DispenseService {
         return Interlocks.check(interlockInputs(cfg, plan, estimatedPressurisedSeconds, boardScope(cfg, plan)));
     }
 
-    /** Pre-flight interlocks for a calibration / shots / hold scope (no plan rules, no I9). */
+    /** Pre-flight interlocks for a calibration / shots / hold scope (no plan rules, no I9-I11). */
     public InterlockReport checkInterlocks(Interlocks.Scope scope, double estimatedPressurisedSeconds) {
-        DispenseConfig ic = cfg.copy();
-        ic.primeAndTestDot = false;
-        return Interlocks.check(interlockInputs(ic, null, estimatedPressurisedSeconds, scope));
+        return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope));
     }
 
-    /** I4 scope of a board run: waste (prime / test dot) and the board surface under every dot. */
+    /** I4 scope of a board run: the board surface under every dot, the purge surface under the purge. */
     public static Interlocks.Scope boardScope(DispenseConfig c, DispensePlan plan) {
         Interlocks.Scope sc = new Interlocks.Scope();
         if (plan == null) {
             return sc;
-        }
-        if (c.primeAndTestDot) {
-            sc.referencePlaces.add(c.wasteLocationName);
         }
         sc.surfaceName = c.boardSurfaceName;
         for (DispensePlan.PlannedDot d : plan.dots) {
             sc.surfaceTargets.add(new double[] {d.xMm, d.yMm});
         }
         sc.checkPlanSurface = true;
+        DispenseConfig.PurgeRow row = c.purgeRow;
+        if (c.profile.purgeDots > 0 && row.isDefined()) {
+            List<double[]> t = new ArrayList<>();
+            for (int i = 0; i < Math.min(c.profile.purgeDots, row.spotsLeft()); i++) {
+                t.add(row.spot(row.usedSpots + i));
+            }
+            sc.moreSurfaces.put(row.surfaceName, t);
+        }
         return sc;
     }
 
@@ -566,9 +691,26 @@ public final class DispenseService {
         }
         in.pressureSensor = pressureSensor;
         in.plan = plan;
+        if (plan != null) {
+            try {
+                List<PadType> types = db.currentPadTypes();
+                in.padTypesNow = new java.util.HashMap<>();
+                for (PadType t : types) {
+                    in.padTypesNow.put(t.typeKey, t);
+                }
+                in.padTypesFingerprintNow = new PadTypeResolver(types, db.packageMappings()).fingerprint();
+            }
+            catch (Exception e) {
+                in.padTypesNow = null; // unknown: the version checks are skipped, the gate check still runs
+                in.padTypesFingerprintNow = null;
+            }
+        }
         in.estimatedPressurisedSeconds = est;
         in.opticalCheckAvailable = imager() != null && imager().isAvailable();
         in.scope = scope == null ? new Interlocks.Scope() : scope;
+        in.controllerConnectedAtMs = controllerConnectedAtMs;
+        in.boardRun = plan != null;
+        in.purgeDots = plan == null ? 0 : c.profile.purgeDots;
         return in;
     }
 
@@ -580,49 +722,197 @@ public final class DispenseService {
         return runPlan(planBoard(bl));
     }
 
-    /** Streams a plan on the machine thread. The Future never throws for dispense failures; see status. */
+    /**
+     * Streams a plan on the machine thread as one pressure session (bench recipe): the clean-pad
+     * check with the pressure off (I10), then pump/valve ON, the purge row, a cross to the work with
+     * no stop, every dot, vent. The Future never throws for dispense failures; see status.
+     */
     public Future<RunResult> runPlan(DispensePlan plan) throws Exception {
         requireAvailable();
-        RunResult r = newRun("board", plan.planId, plan.boardName, plan.calibrationId, plan.dots.size());
+        RunResult r = newRun("board", plan.planId, plan.boardName, 0, plan.dots.size());
         return submit(r, () -> {
             DispenseConfig c = cfg;
+            if (plan.profileFingerprint == null || !plan.profileFingerprint.equals(c.profile.fingerprint())) {
+                // before the session: nothing at all is sent to the controller
+                r.startedAtMs = System.currentTimeMillis();
+                r.status = RunResult.Status.REFUSED;
+                r.message = "the dispense profile changed since this plan was made: plan the board again";
+                return r;
+            }
             Session s = new Session(c, r);
-            boolean optical = c.primeAndTestDot && c.testDotOpticalCheck;
+            r.profile = c.profile.copy();
+            db.event(r.runId, "INFO", "PROFILE", new com.google.gson.Gson().toJson(r.profile));
             // Interlocks first (I4 Z frame before any program is built), then again with the estimate (I7).
             r.interlocks = Interlocks.check(interlockInputs(c, plan, 0, boardScope(c, plan)));
             if (!r.interlocks.ok()) {
                 return s.refuse(r.interlocks.toString());
             }
-            GcodeProgram full = GcodeStreamBuilder.forPlan(c, s.mapper, plan, bZeroed.get(), s.keepalive,
-                    GcodeStreamBuilder.Part.FULL);
-            r.interlocks = Interlocks.check(interlockInputs(c, plan, full.estimatedPressurisedSeconds,
+            List<GcodeStreamBuilder.DotSpec> purge = purgeSpecs(c);
+            GcodeProgram estimate = GcodeStreamBuilder.forPlan(c, s.mapper, plan, purge, bZeroed.get(), s.keepalive,
+                    0L);
+            r.interlocks = Interlocks.check(interlockInputs(c, plan, estimate.estimatedPressurisedSeconds,
                     boardScope(c, plan)));
             if (!r.interlocks.ok()) {
                 return s.refuse(r.interlocks.toString());
             }
-            if (!optical) {
-                s.runSegment(() -> full, "dispensing");
-                return s.ok();
+            if (c.cleanPadCheck.enabled) {
+                phase(r, "I10 clean pads: top camera at every dot (pressure off)");
+                r.cleanCheck = PadCleanReport.of(c.cleanPadCheck);
+                cleanCheck(c, plan, r.cleanCheck, s.exec::isAbortRequested);
+                if (!r.cleanCheck.ok) {
+                    return s.refuse(r.cleanCheck.refusal());
+                }
             }
-            DispenseConfig.NamedLocation w = c.location(c.wasteLocationName);
-            double tx = w.x + c.testDotOffsetXMm, ty = w.y + c.testDotOffsetYMm;
-            phase(r, "I9 test dot: before image");
-            DotImager im = imager();
-            DotImager.Frame before = im.capture(tx, ty);
-            s.runSegment(() -> GcodeStreamBuilder.forPlan(c, s.mapper, plan, bZeroed.get(), s.keepalive,
-                    GcodeStreamBuilder.Part.PRIME_AND_TEST), "prime + test dot");
-            phase(r, "I9 test dot: after image");
-            DotImager.Frame after = im.capture(tx, ty);
-            Double expected = plan.dots.isEmpty() ? null : plan.dots.get(0).expectedDiameterMm;
-            String fail = TestDotCheck.evaluate(im.inspect(before, after), expected, c.testDotMinDiameterRatio,
-                    new org.openpnp.instancelabs.vision.DotInspectorSettings().minDiameterMm, 1.0);
-            if (fail != null) {
-                return s.fail(fail);
-            }
-            s.runSegment(() -> GcodeStreamBuilder.forPlan(c, s.mapper, plan, true, s.keepalive,
-                    GcodeStreamBuilder.Part.DOTS), "dispensing");
+            GcodeProgram p = s.runSegment(() -> {
+                Long count = s.readBCount();
+                if (count == null && c.profile.isPartialTurn(c)) {
+                    throw new RunRefusedException("I11: the controller did not report the B step count (M114 "
+                            + "Count): the start angle of a partial-turn profile cannot be set. Nothing was sent.",
+                            null);
+                }
+                return GcodeStreamBuilder.forPlan(c, s.mapper, plan, purge, bZeroed.get(), s.keepalive, count);
+            }, "dispensing", () -> reservePurgeSpots(purge.size(), r.runId));
+            r.purgeDots = p.purgeDotCount;
+            r.bCountAtStart = p.bCountAtStart;
+            r.workStartAngleDeg = p.workStartAngleDeg;
             return s.ok();
         });
+    }
+
+    /**
+     * Clean-pad guard alone (camera only, no pressure): the bright share at every dot of a plan, so
+     * the operator can wipe before a run. A run repeats it right before the pressure goes on.
+     */
+    public Future<PadCleanReport> checkCleanPads(DispensePlan plan) throws Exception {
+        requireAvailable();
+        RunResult r = newRun("clean-check", plan.planId, plan.boardName, 0, 0);
+        PadCleanReport rep = PadCleanReport.of(cfg.cleanPadCheck);
+        cameraTourAbort = false;
+        return submitResult(r, rep, () -> {
+            r.startedAtMs = System.currentTimeMillis();
+            activeRun = r;
+            phase(r, "I10 clean pads: top camera at every dot (pressure off)");
+            cleanCheck(cfg, plan, rep, () -> cameraTourAbort);
+            r.cleanCheck = rep;
+            r.status = RunResult.Status.OK;
+            r.message = rep.ok ? "all " + rep.pads.size() + " targets clean" : rep.refusal();
+        });
+    }
+
+    /** Top camera at every distinct dot of the plan; fills the report (machine thread). */
+    private void cleanCheck(DispenseConfig c, DispensePlan plan, PadCleanReport rep,
+            java.util.function.BooleanSupplier aborted) throws Exception {
+        DotImager im = imager();
+        if (im == null || !im.isAvailable()) {
+            throw new RunRefusedException("I10: no top camera / dot vision available for the clean-pad check", null);
+        }
+        rep.planId = plan.planId;
+        java.util.Map<String, DispensePlan.PlannedPad> pads = new java.util.HashMap<>();
+        for (DispensePlan.PlannedPad pp : plan.pads) {
+            pads.put(pp.padId, pp);
+        }
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (DispensePlan.PlannedDot d : plan.dots) {
+            if (!seen.add(String.format(java.util.Locale.ROOT, "%.3f,%.3f", d.xMm, d.yMm))) {
+                continue;
+            }
+            if (aborted.getAsBoolean()) {
+                throw new DispenseExecutor.AbortedException("aborted during the clean-pad check");
+            }
+            PadCleanReport.Pad pad = new PadCleanReport.Pad();
+            pad.padId = d.padId;
+            pad.dotIndex = d.index;
+            pad.xMm = d.xMm;
+            pad.yMm = d.yMm;
+            DispenseConfig.CleanPadCheck box = cleanBox(c.cleanPadCheck, pads.get(d.padId));
+            pad.boxWMm = box.boxWMm;
+            pad.boxHMm = box.boxHMm;
+            DotImager.Frame f = im.capture(d.xMm, d.yMm);
+            try {
+                pad.brightFraction = im.brightFraction(f, box);
+                pad.clean = pad.brightFraction >= c.cleanPadCheck.minBrightFraction;
+            }
+            catch (IllegalArgumentException e) {
+                pad.error = e.getMessage();
+                pad.clean = false;
+            }
+            rep.pads.add(pad);
+        }
+        rep.checkedAtMs = System.currentTimeMillis();
+        rep.ok = !rep.pads.isEmpty() && rep.dirtyPadIds().isEmpty();
+        db.event(null, rep.ok ? "INFO" : "WARN", "I10", rep.ok ? "clean-pad check: all " + rep.pads.size()
+                + " targets clean" : rep.refusal());
+    }
+
+    /**
+     * The clean-pad box for one dot: the bench box (0.806 x 0.807 mm, validated on 0.80 x 0.95 mm 0603
+     * pads) where the pad (or the dot's grid cell) is at least about that large, otherwise 0.05 mm
+     * inside its edges, so a clean small pad is not read as dirty because the box spills onto the
+     * solder mask. Pads at other than a multiple of 90 deg get the square that fits inside.
+     */
+    static DispenseConfig.CleanPadCheck cleanBox(DispenseConfig.CleanPadCheck s, DispensePlan.PlannedPad pad) {
+        DispenseConfig.CleanPadCheck b = new DispenseConfig.CleanPadCheck();
+        b.enabled = s.enabled;
+        b.grayLevel = s.grayLevel;
+        b.minBrightFraction = s.minBrightFraction;
+        b.boxWMm = s.boxWMm;
+        b.boxHMm = s.boxHMm;
+        if (pad == null || !(pad.wMm > 0 && pad.hMm > 0)) {
+            return b;
+        }
+        int[] grid = DotSizer.bestGrid(Math.max(1, pad.dotCount), pad.wMm, pad.hMm);
+        double w = pad.wMm / grid[0], h = pad.hMm / grid[1];
+        double r = Math.toRadians(pad.rotationDeg);
+        double c = Math.abs(Math.cos(r)), sn = Math.abs(Math.sin(r));
+        double ex, ey;
+        if (sn < 0.09) { // ~0/180 deg (within 5 deg)
+            ex = w;
+            ey = h;
+        }
+        else if (c < 0.09) { // ~90/270 deg
+            ex = h;
+            ey = w;
+        }
+        else {
+            ex = ey = Math.min(w, h) / (c + sn);
+        }
+        b.boxWMm = fitBox(s.boxWMm, ex);
+        b.boxHMm = fitBox(s.boxHMm, ey);
+        return b;
+    }
+
+    private static double fitBox(double box, double extent) {
+        return extent >= box - 0.02 ? box : Math.max(0.15, extent - 0.10);
+    }
+
+    /** Marks the next n purge spots used (before streaming: an aborted purge leaves them dirty). */
+    private synchronized void reservePurgeSpots(int n, String runId) {
+        if (n <= 0) {
+            return;
+        }
+        try {
+            DispenseConfig c = cfg.copy();
+            c.purgeRow.usedSpots += n;
+            updateConfig(c);
+            db.event(runId, "INFO", "I9", "purge spots " + (c.purgeRow.usedSpots - n) + ".." + (c.purgeRow.usedSpots - 1)
+                    + " used (" + c.purgeRow.spotsLeft() + " left)");
+        }
+        catch (IOException e) {
+            throw new IllegalStateException("could not record the used purge spots: " + e.getMessage(), e);
+        }
+    }
+
+    /** The Marlin step count of B in an M114 reply ("... Count X:.. B:1234"), or null. */
+    static Long parseBCount(List<String> lines, String letterB) {
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile("Count\\b.*?(?:^|\\s)"
+                + java.util.regex.Pattern.quote(letterB) + ":(-?\\d+)");
+        for (String line : lines) {
+            java.util.regex.Matcher m = p.matcher(line);
+            if (m.find()) {
+                return Long.parseLong(m.group(1));
+            }
+        }
+        return null;
     }
 
     /**
@@ -644,7 +934,7 @@ public final class DispenseService {
                 return r;
             }
             List<GcodeStreamBuilder.DotSpec> specs = new ArrayList<>();
-            double z = loc.z + c.needleZOffsetMm + c.needleGapMm;
+            double z = loc.z + c.needleZOffsetMm + c.gapMm();
             for (int i = 0; i < count; i++) {
                 specs.add(new GcodeStreamBuilder.DotSpec(loc.x, loc.y, z, z + c.hopHeightMm, rotationDeg, i, "shot"));
             }
@@ -684,7 +974,7 @@ public final class DispenseService {
                 return;
             }
             List<Dot> found = s.imageDots(specs, req.primeAtWaste, 0, req.pitchMm / 2);
-            res.rows.addAll(DotLadderCalibration.analyze(cal.id, req, specs, found, c.needleGapMm, res.notes));
+            res.rows.addAll(DotLadderCalibration.analyze(cal.id, req, specs, found, c.gapMm(), res.notes));
             for (DotLadderRow row : res.rows) {
                 db.insertDotLadderRow(row);
             }
@@ -712,6 +1002,9 @@ public final class DispenseService {
             DispenseConfig c = cfg;
             Session s = new Session(c, r);
             SurfacePlane plane = planeOf(c, blankName);
+            if (Double.isNaN(req.rotationDeg)) {
+                req.rotationDeg = c.profile.netDeg(c);
+            }
             List<GcodeStreamBuilder.DotSpec> specs = NeedleTouchOff.layout(req, blank, c, plane);
             // The named I4 waiver: this run sets the touched-off state. The needle frame (anchor) is
             // still required, and while the needle is not touched off the prime at the waste pad is
@@ -812,7 +1105,9 @@ public final class DispenseService {
                 }
                 catch (Exception e) {
                     if (r.status == RunResult.Status.RUNNING) {
-                        r.status = e instanceof RunRefusedException ? RunResult.Status.REFUSED : RunResult.Status.ERROR;
+                        r.status = e instanceof RunRefusedException ? RunResult.Status.REFUSED
+                                : e instanceof DispenseExecutor.AbortedException ? RunResult.Status.ABORTED
+                                        : RunResult.Status.ERROR;
                         r.message = String.valueOf(e.getMessage());
                     }
                     Logger.error(e, "dispense {} failed", r.kind);
@@ -845,7 +1140,9 @@ public final class DispenseService {
                 }
                 catch (Exception e) {
                     if (r.status == RunResult.Status.RUNNING) {
-                        r.status = e instanceof RunRefusedException ? RunResult.Status.REFUSED : RunResult.Status.ERROR;
+                        r.status = e instanceof RunRefusedException ? RunResult.Status.REFUSED
+                                : e instanceof DispenseExecutor.AbortedException ? RunResult.Status.ABORTED
+                                        : RunResult.Status.ERROR;
                         r.message = String.valueOf(e.getMessage());
                     }
                     Logger.error(e, "dispense {} failed", r.kind);
@@ -970,11 +1267,9 @@ public final class DispenseService {
             }
         }
 
-        /** Interlocks for calibration/shots runs (no plan rules, no I9; I4 per the scope). */
+        /** Interlocks for calibration/shots runs (no plan rules, no I9-I11; I4 per the scope). */
         boolean preflight(Interlocks.Scope scope, double estimatedPressurisedSeconds) {
-            DispenseConfig ic = c.copy();
-            ic.primeAndTestDot = false;
-            r.interlocks = Interlocks.check(interlockInputs(ic, null, estimatedPressurisedSeconds, scope));
+            r.interlocks = Interlocks.check(interlockInputs(c.copy(), null, estimatedPressurisedSeconds, scope));
             if (!r.interlocks.ok()) {
                 refuse(r.interlocks.toString());
                 return false;
@@ -986,8 +1281,14 @@ public final class DispenseService {
          * Settle OpenPnP motion, build (from the now-current axis state), validate, stream, re-sync
          * OpenPnP. On failure the I1 shutdown has already been sent; recover state.
          */
-        void runSegment(Callable<GcodeProgram> build, String phaseName) throws Exception {
-            // OpenPnP may have moved in between (camera for I9/calibration images): settle first.
+        GcodeProgram runSegment(Callable<GcodeProgram> build, String phaseName) throws Exception {
+            return runSegment(build, phaseName, null);
+        }
+
+        /** As above; {@code beforeStream} runs after validation, right before the first line is sent. */
+        GcodeProgram runSegment(Callable<GcodeProgram> build, String phaseName, Runnable beforeStream)
+                throws Exception {
+            // OpenPnP may have moved in between (camera for I10/calibration images): settle first.
             configuration.getMachine().getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
             GcodeProgram p = build.call();
             List<String> problems = GcodeStreamValidator.validate(p, c, mapper.letterB(),
@@ -997,6 +1298,9 @@ public final class DispenseService {
             }
             if (exec.isAbortRequested()) {
                 throw new DispenseExecutor.AbortedException("aborted before " + phaseName);
+            }
+            if (beforeStream != null) {
+                beforeStream.run();
             }
             phase(r, phaseName);
             streamed = true;
@@ -1013,6 +1317,22 @@ public final class DispenseService {
             }
             mapper.resync(p.finalPlanned, p.finalDriver, p.finalB);
             bZeroed.set(true);
+            return p;
+        }
+
+        /**
+         * The Marlin step count of B (M400, M114 Count): the screw angle reference, which restarts at
+         * controller power-up. OpenPnP's simulator does not report it: on a loopback TCP link the
+         * count is taken as 0 (with a warning); on a real link a missing count returns null.
+         */
+        Long readBCount() throws Exception {
+            channel.send("M400", -1);
+            Long n = parseBCount(channel.sendAndCollect("M114", c.commandTimeoutMs), mapper.letterB());
+            if (n == null && channel.isLoopbackSimulator()) {
+                r.warnings.add("simulated controller (no M114 Count): B step count taken as 0 for the start angle");
+                return 0L;
+            }
+            return n;
         }
 
         /** Before/after images of every spec around one pressure session; returns the dot per spec. */
@@ -1043,6 +1363,8 @@ public final class DispenseService {
             bZeroed.set(false);
             try {
                 channel.send("M400", -1);
+                // A stop between the screw's M204 S and the restore leaves the screw acceleration in force.
+                channel.send("M204 S" + GcodeStreamBuilder.f0(c.travelAccelMmS2), c.commandTimeoutMs);
                 AxesLocation rep = mapper.getDriver().getReportedLocation(c.commandTimeoutMs);
                 ReferenceControllerAxis[] xyz = mapper.xyzAxes();
                 double[] pos = new double[3];
