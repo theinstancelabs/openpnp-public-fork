@@ -2,12 +2,14 @@
 """Automatic deploy of green il/integration builds of the OpenPnP fork to the lab computer (INF-02).
 
 CI publishes each green il/integration build as a GitHub prerelease 'il-build-<run>-<sha7>' (tarball,
-.sha256, BUILD-INFO.json). This tool stages the newest eligible one, deploys it only when the machine
+.sha256, BUILD-INFO.json; the tarball attested by the run). This tool stages the newest eligible one (gh verifies
+the attestation), deploys it only when the machine
 is idle, health-checks it (API up, version, connect, controller state, home, stop), rolls back
 automatically on failure, and keeps STATE.md's Holder and "Deployed on the machine" lines current.
 
 Layout under --root (default ~/instancelabs/deploy):
-  releases/<tag>/          openpnp-il.jar, lib/, VERSION.txt, BUILD-INFO.json, STAGED.json
+  releases/<tag>/          openpnp-il.jar, lib/, VERSION.txt, BUILD-INFO.json, STAGED.json, and
+                           openpnp-il-<sha7>.tar.gz (the attested tarball; the deploy verifies it again)
   current, previous        symlinks to releases/<tag> (switched atomically)
   state/config/            the one live OpenPnP config (seeded once by init)
   snapshots/<ts>-pre-<tag>/, <ts>-abandoned-<tag>/   config copies around each switch
@@ -426,6 +428,118 @@ def default_github():
     if gh and subprocess.run([gh, "auth", "status"], capture_output=True, timeout=30).returncode == 0:
         return GhCliClient(gh)
     return UrllibClient()
+
+
+# ------------------------------------------------------------------------------------------------
+# Build provenance: CI's release job attests the tarball (actions/attest-build-provenance), signed with the run's own
+# GitHub OIDC identity; `gh attestation verify` checks the signature and the policy, its JSON names the run.
+# ------------------------------------------------------------------------------------------------
+ATTESTATION_FLAGS = ("--signer-workflow", "--source-ref", "--source-digest", "--deny-self-hosted-runners")
+GITHUB = "https://github.com/"
+
+
+def _said(p):
+    """What a failed gh said, on one line."""
+    return " / ".join(l.strip() for l in (p.stderr or "").splitlines() if l.strip())[:300] or f"exit {p.returncode}"
+
+
+def attestation_problems(entry, repo, branch, sha, run_id, workflow=CI_WORKFLOW):
+    """What, in one verified attestation (an entry of `gh attestation verify --format json`), is not CI's release job of
+    run run_id: workflow on GitHub's runners, on the branch, at sha ([] = it is). Read from the signing certificate,
+    which GitHub's OIDC token fills in (the workflow cannot change it); the provenance's runDetails invocationId must
+    name the same run attempt. A missing key raises KeyError or TypeError (an output gh no longer writes)."""
+    result = entry["verificationResult"]
+    cert = result["signature"]["certificate"]
+    want = {"sourceRepositoryURI": GITHUB + repo, "sourceRepositoryRef": f"refs/heads/{branch}",
+            "sourceRepositoryDigest": sha, "buildSignerURI": f"{GITHUB}{repo}/{workflow}@refs/heads/{branch}",
+            "runnerEnvironment": "github-hosted"}
+    out = [f"{k} {cert.get(k)!r}, not {v!r}" for k, v in want.items() if cert.get(k) != v]
+    uri = cert["runInvocationURI"]
+    m = re.fullmatch(re.escape(f"{GITHUB}{repo}/actions/runs/") + r"(\d+)(/attempts/\d+)?", str(uri))
+    if not m or m.group(1) != str(run_id):
+        out.append(f"attested by the run {uri}, not BUILD-INFO's run {run_id}")
+    invocation = result["statement"]["predicate"]["runDetails"]["metadata"]["invocationId"]
+    if invocation != uri:
+        out.append(f"the provenance's runDetails invocationId {invocation!r} is not the certificate's run {uri!r}")
+    return out
+
+
+class GhAttestation:
+    """verify(tarball, repo, branch, sha, run_id): the tarball's bytes carry an attestation by CI_WORKFLOW's run run_id
+    on a GitHub-hosted runner, for the branch at sha (`gh attestation verify` with that policy, then the run in its
+    JSON).
+    Returns what it accepted, else raises Refused: permanent (the build is never trusted) only for a definite mismatch,
+    gh having verified an attestation of these bytes in the repo by another run, workflow, ref, commit or runner. No
+    gh, a gh without the command or a policy flag or not logged in, a network error or no attestation: retried.
+    ready() checks gh before the tarball is downloaded."""
+
+    def __init__(self, gh=None, runner=subprocess.run, timeout=180):
+        self.gh = gh  # None: gh on PATH
+        self.runner = runner
+        self.timeout = timeout
+        self._ready = False
+
+    def _run(self, args):
+        gh = self.gh or shutil.which("gh")
+        if not gh:
+            raise Refused("cannot verify the tarball's attestation: no gh (GitHub CLI) on PATH")
+        try:
+            return self.runner([gh] + args, capture_output=True, text=True, timeout=self.timeout)
+        except FileNotFoundError:
+            raise Refused(f"cannot verify the tarball's attestation: no gh at {gh}")
+        except (OSError, subprocess.SubprocessError) as e:
+            raise Refused(f"cannot verify the tarball's attestation: gh {' '.join(args[:2])}: {e}")
+
+    def ready(self):
+        """gh is there, knows every flag of the policy, and is logged in (it fetches attestations from GitHub's API)."""
+        if self._ready:
+            return
+        p = self._run(["attestation", "verify", "--help"])
+        if p.returncode != 0:
+            raise Refused(f"cannot verify the tarball's attestation: this gh has no `attestation verify` ({_said(p)}): "
+                          "update gh")
+        missing = [f for f in ATTESTATION_FLAGS if not re.search(rf"(?m)^\s+{re.escape(f)}\b", p.stdout or "")]
+        if missing:
+            raise Refused(f"cannot verify the tarball's attestation: this gh's `attestation verify` lacks "
+                          f"{', '.join(missing)}: update gh")
+        p = self._run(["auth", "status", "--active", "--hostname", "github.com"])
+        if p.returncode != 0:
+            raise Refused(f"cannot verify the tarball's attestation: gh is not logged in ({_said(p)})")
+        self._ready = True
+
+    @staticmethod
+    def command(path, repo, branch, sha):
+        return ["attestation", "verify", path, "--repo", repo, "--signer-workflow", f"{repo}/{CI_WORKFLOW}",
+                "--source-ref", f"refs/heads/{branch}", "--source-digest", sha, "--deny-self-hosted-runners",
+                "--format", "json"]
+
+    def _judged(self, p, repo, branch, sha, run_id):
+        """[(entry, its problems)] of a verify gh passed; Refused (retried) if its JSON is not what gh writes."""
+        try:
+            entries = json.loads(p.stdout)
+            if not isinstance(entries, list) or not entries:
+                raise ValueError("no attestation in it")
+            return [(e, attestation_problems(e, repo, branch, sha, run_id)) for e in entries]
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise Refused(f"cannot read the result of gh attestation verify: {type(e).__name__}: {e}")
+
+    def verify(self, path, repo, branch, sha, run_id):
+        self.ready()
+        p = self._run(self.command(path, repo, branch, sha))
+        if p.returncode == 0:
+            judged = self._judged(p, repo, branch, sha, run_id)
+            ok = [e for e, problems in judged if not problems]
+            if ok:
+                return (f"attested by {ok[0]['verificationResult']['signature']['certificate']['runInvocationURI']} "
+                        f"({CI_WORKFLOW} on {branch} at {sha[:7]})")
+        else:
+            # gh refused the policy: definite only if gh verifies an attestation of these bytes in the repo at all
+            loose = self._run(["attestation", "verify", path, "--repo", repo, "--format", "json"])
+            judged = self._judged(loose, repo, branch, sha, run_id) if loose.returncode == 0 else []
+            if not judged or any(not problems for _, problems in judged):
+                raise Refused(f"the tarball's attestation does not verify as CI's (gh: {_said(p)})")
+        raise Refused("the tarball is attested, but not as CI's build of this release: "
+                      + " | ".join("; ".join(problems) for _, problems in judged), True)
 
 
 def parse_tag(tag):
@@ -1173,8 +1287,10 @@ def read_json(path, default=None):
 class Deps:
     """Injectable collaborators; None means the real one for this host."""
 
-    def __init__(self, github=None, service=None, clock=None, procs=None, runner=None):
+    def __init__(self, github=None, service=None, clock=None, procs=None, runner=None, attestation=None):
         self.github, self.service, self.clock, self.procs, self.runner = github, service, clock, procs, runner
+        # the build provenance verifier; tests pass one with a fake gh here (no flag or environment variable can)
+        self.attestation = attestation
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1189,6 +1305,7 @@ class Deployer:
         self.svc = deps.service or make_service(cfg)
         self.runner = deps.runner or subprocess.run
         self._gh = deps.github
+        self.attest = deps.attestation or GhAttestation()
         self.api = Api(cfg.api_port)
         self.out = sys.stdout
         self.held = False  # a person must check the machine (set during this claim)
@@ -2060,8 +2177,10 @@ class Deployer:
     def branch_head(self):
         return self.gh.get_json(f"repos/{self.cfg.repo}/git/ref/heads/{self.cfg.branch}")["object"]["sha"]
 
-    def commit_eligible(self, sha, head=None):
-        """(ok, why): the sha is the branch head or one of its ancestors, and its 'gate' check passed."""
+    def commit_eligible(self, sha, suite, head=None):
+        """(ok, why): the sha is the branch head or one of its ancestors, and the 'gate' check-run of the CI run that
+        built it passed: the newest one in that run's check suite (a re-run attempt adds its check-runs there). A gate
+        of another run on the same sha (a workflow_dispatch re-check, a PR from a fork) neither vetoes nor approves."""
         repo, branch, sha7 = self.cfg.repo, self.cfg.branch, sha[:7]
         head = head or self.branch_head()
         try:
@@ -2073,15 +2192,19 @@ class Deployer:
         if status not in ELIGIBLE_COMPARE:
             return False, (f"never deploy a scratch merge: {sha7} is not on {branch} "
                            f"(compare {branch} {head[:7]}...{sha7}: {status})")
-        runs = self.gh.get_json(f"repos/{repo}/commits/{sha}/check-runs?check_name=gate&filter=latest")
-        gate = [r for r in runs.get("check_runs", []) if r.get("name") == "gate"]
+        if not suite:
+            return False, f"the CI run that built {sha7} names no check suite, so its 'gate' cannot be told apart"
+        # filter=latest: the newest check-run per check suite and name
+        runs = self.gh.get_json(f"repos/{repo}/commits/{sha}/check-runs?check_name=gate&filter=latest&per_page=100")
+        gate = [r for r in runs.get("check_runs", [])
+                if r.get("name") == "gate" and (r.get("check_suite") or {}).get("id") == suite]
         if not gate:
-            return False, f"no 'gate' check-run on {sha7}"
-        bad = [f"{r.get('status')}/{r.get('conclusion')}" for r in gate
-               if r.get("status") != "completed" or r.get("conclusion") != "success"]
-        if bad:
-            return False, f"the 'gate' check-run on {sha7} is {', '.join(bad)}, not completed/success"
-        return True, f"on {branch} ({status} vs head {head[:7]}), gate success"
+            return False, f"no 'gate' check-run on {sha7} in the check suite {suite} of the CI run that built it"
+        r = max(gate, key=lambda r: r.get("id") or 0)
+        if r.get("status") != "completed" or r.get("conclusion") != "success":
+            return False, (f"the 'gate' check-run of the CI run that built {sha7} is {r.get('status')}/"
+                           f"{r.get('conclusion')}, not completed/success")
+        return True, f"on {branch} ({status} vs head {head[:7]}), gate success in its CI run"
 
     def _check_build_info(self, info, tag, sha7):
         if not isinstance(info, dict):
@@ -2103,7 +2226,7 @@ class Deployer:
         must be a completed, successful push run of CI_WORKFLOW on the branch, at the build's sha, with the tag's run
         number (also what keeps a hand-published high number from stalling CI's releases). Refused otherwise:
         permanently, except a run not completed or not successful yet (the release job publishes before its run ends; a
-        re-run may pass)."""
+        re-run may pass). Returns the run (its check suite holds the gate commit_eligible reads)."""
         author = (rel.get("author") or {}).get("login")
         if author != RELEASE_AUTHOR:
             raise Refused(f"release {tag} was published by {author!r}, not by CI ({RELEASE_AUTHOR})", True)
@@ -2125,6 +2248,7 @@ class Deployer:
                           + "; ".join(bad), True)
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             raise Refused(f"CI run {run_id} is {run.get('status')}/{run.get('conclusion')}, not completed/success")
+        return run
 
     def _check_tree(self, d, tag, info):
         jar = os.path.join(d, "openpnp-il.jar")
@@ -2156,7 +2280,8 @@ class Deployer:
             raise Refused(f"sha256 mismatch for {name}: {got[:12]}... vs {m.group(1)[:12]}...")
 
     def stage(self, rel, head):
-        """Download, verify and unpack a release into releases/<tag>/ (one rename). Refused if ineligible."""
+        """Download, verify and unpack a release into releases/<tag>/ (one rename), with the attested tarball kept
+        there for the deploy's re-check. Refused if ineligible."""
         tag = rel["tag_name"]
         sha7 = parse_tag(tag)[1]
         assets = {a.get("name"): a for a in rel.get("assets") or []}
@@ -2177,14 +2302,16 @@ class Deployer:
             if rel.get("target_commitish") != info["sha"]:
                 raise Refused(f"target_commitish {rel.get('target_commitish')!r} is not the build sha {info['sha']}",
                               True)
-            self.check_provenance(rel, info, tag)
-            ok, why = self.commit_eligible(info["sha"], head)
+            run = self.check_provenance(rel, info, tag)
+            ok, why = self.commit_eligible(info["sha"], run.get("check_suite_id"), head)
             if not ok:
                 raise Refused(why)
+            self.attest.ready()  # before the download: no gh, no point fetching the tarball
             tar = os.path.join(work, tar_name)
             self.gh.download(assets[tar_name], tar)
             self.gh.download(assets[tar_name + ".sha256"], tar + ".sha256")
             self._verify_sha256(tar, tar + ".sha256", tar_name)
+            attested = self.attest.verify(tar, self.cfg.repo, self.cfg.branch, info["sha"], info["run_id"])
             out = os.path.join(work, "x")
             try:
                 with tarfile.open(tar, "r:gz") as tf:
@@ -2196,10 +2323,12 @@ class Deployer:
                 raise Refused(f"the tarball cannot be unpacked: {e}", True)
             d = os.path.join(out, "openpnp-il")
             self._check_tree(d, tag, info)
+            os.rename(tar, os.path.join(d, tar_name))
             write_json(os.path.join(d, "STAGED.json"), {"tag": tag, "sha": info["sha"], "staged_at": self.iso(),
-                                                        "release": rel.get("html_url"), "eligible": why})
+                                                        "release": rel.get("html_url"), "eligible": why,
+                                                        "attestation": attested})
             os.rename(d, os.path.join(self.releases, tag))
-            self.record("staged", tag=tag, sha=info["sha"], why=why)
+            self.record("staged", tag=tag, sha=info["sha"], why=why, attestation=attested)
             return info
         finally:
             shutil.rmtree(work, ignore_errors=True)
@@ -2261,12 +2390,20 @@ class Deployer:
             raise Refused(f"{tag} is not an il-build tag")
         self._check_build_info(info, tag, t[1])
         self._check_tree(d, tag, info)
+        tar = self.kept_tarball(tag)
+        if not os.path.isfile(tar):
+            raise Refused(f"the staged folder has no {os.path.basename(tar)}, the attested tarball it was unpacked "
+                          f"from (placed by hand?): delete releases/{tag} and poll again")
         return info
+
+    def kept_tarball(self, tag):
+        return os.path.join(self.releases, tag, f"openpnp-il-{parse_tag(tag)[1]}.tar.gz")
 
     def verify_on_github(self, tag, info):
         """The staged folder must be the GitHub release's build: its BUILD-INFO from the release, compared by sha,
-        jar_sha256 and run_id (a folder copied in by hand agrees only with itself), and the release CI's
-        (check_provenance, again: a release can be deleted and published again by hand under its tag)."""
+        jar_sha256 and run_id (a folder copied in by hand agrees only with itself), the release CI's (check_provenance,
+        again: a release can be deleted and published again by hand under its tag), and the tarball it was unpacked
+        from still attested by that run (an attestation can be deleted, e.g. to revoke a build). Returns the run."""
         try:
             rel = self.gh.get_json(f"repos/{self.cfg.repo}/releases/tags/{tag}")
         except GitHubError as e:
@@ -2284,7 +2421,9 @@ class Deployer:
             if remote.get(k) != info.get(k):
                 raise Refused(f"the staged folder is not the GitHub release's build: its {k} "
                               f"{str(info.get(k))[:12]} differs from {str(remote.get(k))[:12]}")
-        self.check_provenance(rel, remote, tag)
+        run = self.check_provenance(rel, remote, tag)
+        self.attest.verify(self.kept_tarball(tag), self.cfg.repo, self.cfg.branch, remote["sha"], remote["run_id"])
+        return run
 
     def deploy(self, version=None, auto=False):
         """The timer's deploy (auto, from run) or one by hand. By hand, whatever its result, a person is at the
@@ -2329,8 +2468,8 @@ class Deployer:
         if reasons:
             return self.not_idle(reasons)
         try:
-            self.verify_on_github(tag, info)
-            ok, why = self.commit_eligible(info["sha"])
+            run = self.verify_on_github(tag, info)
+            ok, why = self.commit_eligible(info["sha"], run.get("check_suite_id"))
         except Refused as e:
             return self.refuse(f"{tag}: {e}")
         except GitHubError as e:

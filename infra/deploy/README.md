@@ -12,7 +12,10 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
    - `BUILD-INFO.branch` is `il/integration`, and the tag, `target_commitish` and BUILD-INFO agree on the sha;
    - the sha is the head of `il/integration` or one of its ancestors (compare `<head>...<sha>` is
      `identical` or `behind`). A scratch merge is `ahead` or `diverged` and is refused;
-   - the commit's `gate` check-run is `completed/success`;
+   - the `gate` check-run of the CI run that built it (`BUILD-INFO.run_id`) is `completed/success`: the newest
+     `gate` in that run's own check suite (`actions/runs/<run_id>` gives `check_suite_id`; a re-run attempt adds its
+     check-runs to the same suite). A `gate` of another run on the same sha, a `workflow_dispatch` re-check or a PR
+     from a fork, neither vetoes nor approves the build;
    - the artifact is CI's, not only its commit (a build of a dirty tree at the head reports the head's sha:
      buildnumber `doCheck=false`; anyone with push access could publish it under a matching tag). The release's
      author is `github-actions[bot]` (CI publishes with `github.token`), and `BUILD-INFO.run_id` is a
@@ -20,7 +23,27 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
      `head_sha` the build's sha and `run_number` the tag's. A release published by hand is refused for good, so its
      run number cannot stall CI's (which are numbered far below it). A run not completed yet (the release job
      publishes before its run ends) is retried at the next poll;
-   - the tarball matches its `.sha256`, holds only `openpnp-il/`, and its jar matches `jar_sha256`.
+   - the tarball's bytes are what that run attested. CI's release job attests the tarball before publishing it
+     (`actions/attest-build-provenance`: a Sigstore signature from the run's own GitHub OIDC identity, which the
+     workflow cannot change). il_deploy runs
+     ```
+     gh attestation verify <tarball> --repo theinstancelabs/openpnp \
+       --signer-workflow theinstancelabs/openpnp/.github/workflows/ci.yml --source-ref refs/heads/il/integration \
+       --source-digest <BUILD-INFO.sha> --deny-self-hosted-runners --format json
+     ```
+     and from its JSON requires an attestation whose signing certificate names the run `BUILD-INFO.run_id`
+     (`runInvocationURI` `.../actions/runs/<run_id>/attempts/<n>`, with the provenance's `runDetails` invocationId
+     the same; the repository, ref, sha, signer workflow and `github-hosted` runner are checked again there).
+     Fail closed. A **definite mismatch** is refused for good, like a hand-published release: gh verifies an
+     attestation of these bytes in the repo, but of another run, workflow, ref, commit or a self-hosted runner (when
+     the policy fails, a second `gh attestation verify --repo` without it tells this apart, and gives the field that
+     differs). Anything else is refused and retried at the next poll, never marked bad: no `gh`, a `gh` without
+     `attestation verify` or one of the policy flags, `gh` not logged in, a network error, no attestation. `gh` is
+     checked before the tarball is downloaded. `GhAttestation` in il_deploy.py; tests pass one with a fake `gh`
+     through `main(argv, deps)` (no flag or environment variable can replace it, so the units always verify);
+   - the tarball matches its `.sha256`, holds only `openpnp-il/`, and its jar matches `jar_sha256`. It is
+     verified (sha256, then attestation) before it is unpacked, and kept in `releases/<tag>/` for the deploy's
+     re-check.
 
    Refusals go to `log/deploy.jsonl` with the reason. Unpacking happens in a temp dir that is renamed into
    place in one step.
@@ -79,9 +102,11 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
    - **Checks at deploy time.** The staged folder must agree with itself (BUILD-INFO, VERSION.txt, jar sha256)
      and with the GitHub release of its tag: the release's BUILD-INFO.json is downloaded again and its `sha` and
      `jar_sha256` and `run_id` compared, so a folder copied into `releases/` by hand is refused; the release's
-     author and CI run are checked again (a release can be deleted and published again under its tag). The sha is
-     re-checked on `il/integration` with a green `gate`. `--version` of a build older than the current one is refused: the
-     current build migrated the config one way; `rollback` goes back with the matching snapshot. While the
+     author and CI run are checked again (a release can be deleted and published again under its tag), and the kept
+     tarball's attestation is verified again (an attestation can be deleted, e.g. to revoke a build; a folder without
+     its tarball is refused). The sha is re-checked on `il/integration` with a green `gate` of its own CI run.
+     `--version` of a build older than the current one is refused: the current build migrated the config one way;
+     `rollback` goes back with the matching snapshot. While the
      current build is unverified (below), every deploy is refused (exit 2, so the timer unit fails visibly).
      With the systemd units, deploy and rollback are refused (exit 2) until the user manager may take long enough
      to stop at a reboot (below, "Installing").
@@ -303,10 +328,13 @@ The units:
 | `il-deploy.timer` | Starts the deploy service 2 min after the last run ended (and 5 min after boot). |
 
 GitHub access: `gh` when it is logged in, else unauthenticated urllib (60 requests/h). An idle poll costs one
-request.
+request. Attestations are verified with `gh` only (2.97 on this host; `gh attestation verify` needs the policy flags
+above), logged in for the user the units run as: without it every build is refused (and retried), never staged.
+Check from the unit's environment with `systemd-run --user --wait --pipe gh auth status` (gh keeps its token in the
+desktop keyring here).
 
 ## Tests
-From the repo root (about 2.5 min, 239 tests; starts fake OpenPnP processes on free loopback ports, never a serial port):
+From the repo root (about 2.5 min, 287 tests; starts fake OpenPnP processes on free loopback ports, never a serial port):
 ```
 python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
 ```
@@ -323,8 +351,12 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
   the 409 after the server's own limit while the home runs on (`home_cap_s`, 300 s like `MachineEndpoints`); a
   new `OpenPnP.log` at each start, and a link kept open across a STOP (`keep_alive`, true like the lab
   machine.xml), so only the first enable logs the connect line.
-- `tests/fakes.py` has a fake GitHub with a real commit graph, so the compare direction is tested, release authors
-  and CI workflow runs (`actions/runs/<id>`); CI-style
+- `tests/fakes.py` has a fake GitHub with a real commit graph, so the compare direction is tested, release authors,
+  CI workflow runs (`actions/runs/<id>`) with their check suites and `gate` check-runs per suite, and the
+  attestations GitHub stores per artifact digest; a fake `gh` (`FakeGhCli`) for `GhAttestation`: `attestation
+  verify` with gh's policy flags, exit codes and JSON (`tests/gh-attestation-verify-cli-2.97.0.json` is a real
+  output, of gh's own release, that the JSON check is tested on), `--help`, `auth status`, and no gh, an old gh, not
+  logged in, offline; CI-style
   release tarballs, or exactly what `infra/ci/make_release.py` writes (`Lab.ci_release`, published by
   `FakeGitHub.add_release_dir` as `gh release create` does); and a throwaway lab (root, STATE.md, lock,
   device, activity file). `Lab.start_service` starts the fake OpenPnP as a person did an hour ago: it waits for its
@@ -348,7 +380,13 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
   while copying, signalled, failing or killed inside its switch, OpenPnP killed mid-home and on its own, a lost
   claim at each check and at the hand-back, and releases not published by CI.
 - `test_ci_wiring.py`: `ci.yml` has one job that runs the end-to-end test below with `IL_DEPLOY_E2E=1`, and the
-  `gate` needs it.
+  `gate` needs it. It evaluates the concurrency expression (a small GitHub-expression evaluator): a PR's runs share
+  a group and the newer cancels the older; a push or manual run never shares one with any other run. The release job
+  needs the gate, runs only for a green push to `il/integration` (its `if:` evaluated per event, branch and gate
+  result), attests `openpnp-il-*.tar.gz` from the directory it publishes from before the publish step, and has
+  exactly `contents`, `id-token` and `attestations: write`. Each check is tested on a weakened copy of `ci.yml` too.
+- `test_attestation.py`: `GhAttestation` against the fake `gh` (the command line, accepted, definite mismatches
+  refused for good, everything else retried) and the real JSON shape.
 
 ## End to end with the real OpenPnP (`e2e/`)
 `e2e/test_deploy_openpnp.py` runs the deploy flow with the real jar instead of the fake OpenPnP, in front of
@@ -371,7 +409,9 @@ It needs no openpnp-uinav, so it runs on a stock GitHub runner. About 2 minutes 
   found with ID" (OpenPnpCaptureCamera.java:174), and the native library needs only libstdc++ and libc. But the
   fixture's unique-ids name the lab's real cameras, so the swap keeps the test camera-free on every host.
 - **Run:** lumen-sim, Xvfb on a free display in `:60`-`:69`, the API on a free port in 18930-18949. il_deploy
-  runs in-process (`main(argv, deps)`: only GitHub is faked) with `--service-manager subprocess` and the
+  runs in-process (`main(argv, deps)`: only GitHub and `gh` are faked: each tarball is attested by its run, and
+  il_deploy's real `GhAttestation` verifies it through `FakeGhCli`, at staging and at each deploy) with
+  `--service-manager subprocess` and the
   production OpenPnP command (flock, java, the unit's flags), with a temp root, STATE.md, lock and activity
   file. `--device` is the lumen-sim link, `--usb-sn ''` (a pty has no USB identity) and `--serial-match` names the
   link, so the serial step runs against the real connect line. lumen-sim gets `G92 B0` first: Marlin's boot

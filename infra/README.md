@@ -27,7 +27,7 @@ Runs on every pull request, on pushes to `il/integration`, and by hand (workflow
 | deploy-e2e | `infra/deploy/e2e/test_deploy_openpnp.py`: il_deploy with the build's jar on lumen-sim (deploy, deploy over a running OpenPnP, rollback, a power-cycled controller) | 3 min |
 | acceptance ×4 | `src/test/sim/il_sim_acceptance.py`, sharded; `ci/acceptance.py` fails the job unless every check passed (the script itself always exits 0) | 15 min each |
 | gate | green only if every job above succeeded; the one required status check | seconds |
-| release | push to `il/integration` only, after `gate`: a prerelease `il-build-<run>-<sha7>` with the build (`ci/make_release.py`) | 1 min |
+| release | push to `il/integration` only, after `gate`: a prerelease `il-build-<run>-<sha7>` with the build (`ci/make_release.py`), its tarball attested first (`actions/attest-build-provenance`; the deployer verifies it with `gh attestation verify`) | 1 min |
 
 The SIM jobs need read access to the private `theinstancelabs/openpnp-uinav` (Actions secret `UINAV_TOKEN` or
 `UINAV_DEPLOY_KEY`); without it they fail with a message saying so, never pass. uinav is pinned by `UINAV_REF`.

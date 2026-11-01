@@ -1123,6 +1123,51 @@ class Flow(unittest.TestCase):
         self.assertIn("jar", self.lab.last_out)
         self.assertIsNone(self.lab.link("current"))
 
+    def test_deploy_rechecks_the_attestation_of_the_kept_tarball(self):
+        """The attestation can be deleted after staging (a revoked build): the deploy verifies it again, on the tarball
+        the folder was unpacked from, with the run and sha of the release's BUILD-INFO."""
+        tag = self.release(5, self.lab.c)
+        tar = f"openpnp-il-{self.lab.c[:7]}.tar.gz"
+        data = self.gh.asset_bytes(tag, tar)
+        self.gh.unattest(data)
+        self.deploy(rc=2)
+        self.assertIn("no attestations found", self.lab.last_out)
+        self.assertIsNone(self.lab.link("current"))
+        self.gh.attest(data, 2001, self.lab.c)
+        self.deploy(rc=2)
+        self.assertIn("2001", self.lab.last_out)
+        self.assertIsNone(self.lab.link("current"))
+        self.gh.attest(data, 1005, self.lab.c)
+        self.lab.gh_cli.verified.clear()
+        self.deploy()
+        self.assertEqual(self.lab.link("current"), tag)
+        self.assertEqual(self.lab.gh_cli.verified, [(os.path.join(self.lab.root, "releases", tag, tar),
+                                                     hashlib.sha256(data).hexdigest())])
+
+    def test_a_staged_folder_without_its_tarball_is_refused(self):
+        tag = self.release(5, self.lab.c)
+        os.unlink(os.path.join(self.lab.root, "releases", tag, f"openpnp-il-{self.lab.c[:7]}.tar.gz"))
+        self.deploy(rc=2)
+        self.assertIn("tarball", self.lab.last_out)
+        self.assertIsNone(self.lab.link("current"))
+
+    def test_deploy_reads_the_gate_of_the_releases_own_run(self):
+        """After staging, a manual re-check of the commit fails: not a veto. The release's own run, re-run red:
+        refused."""
+        tag = self.release(5, self.lab.c)
+        self.gh.set_gate(self.lab.c, "failure", suite=777)
+        self.deploy()
+        self.assertEqual(self.lab.link("current"), tag)
+        d = self.gh.commit("d", self.lab.c)
+        self.gh.head = d
+        newer = self.release(6, d)
+        self.gh.set_gate(d, "failure")  # in run 1006's check suite: a re-run attempt that failed
+        self.gh.set_gate(d, "success", suite=778)
+        self.deploy(rc=2)
+        self.assertIn("gate", self.lab.last_out)
+        self.assertEqual(self.lab.link("current"), tag)
+        self.assertNotEqual(self.lab.link("current"), newer)
+
 
     # --- review round 3 ----------------------------------------------------------------------------------------------
     def test_run_waits_a_quiet_period_after_a_rollback_by_hand(self):

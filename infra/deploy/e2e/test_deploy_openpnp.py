@@ -8,7 +8,8 @@ jar, which connects over its real serial stack (jSerialComm) to lumen-sim's pty.
      build sha7 (manifest Implementation-Version, which OpenPnP reports at the end of server.version) starts both
      fake commits' shas, so il_deploy's version check runs unchanged.
   2. The fake GitHub of the unit tests (tests/fakes.py) serves them as `gh release create` publishes them, with
-     green `gate` checks on il/integration.
+     green `gate` checks in their runs' check suites and each tarball attested by its run, which il_deploy's real
+     GhAttestation verifies through the unit tests' fake `gh` (FakeGhCli: `gh attestation verify`'s policy and JSON).
   3. state/config comes from `il_deploy.py init --seed-from` a copy of infra/fixtures/lab-config (boards.xml empty)
      and the lab-instancelabs engine config, with one place, one surface and a needle anchor set two hours before
      (so /api/status shows their setAtMs keys). machine.xml is tools/instancelabs/make_machine_patch.py's output,
@@ -20,10 +21,10 @@ jar, which connects over its real serial stack (jSerialComm) to lumen-sim's pty.
      Java starts only if every port-name resolves to lumen-sim's /dev/pts/N and no USB identity or capture
      camera is left.
   4. lumen-sim on a link in the temp dir, and Xvfb on a free display in :60-:69.
-  5. il_deploy.py in-process (main(argv, deps): only GitHub is faked). It uses the production OpenPnP command line
-     (flock + java + the unit's flags) under --service-manager subprocess, a temp STATE.md (Holder: nobody), and a
-     temp lock, activity file and root. The device is the lumen-sim link. A pty has no USB identity, so --usb-sn ''
-     and --serial-match names the link: the health check's serial step runs against the real connect line
+  5. il_deploy.py in-process (main(argv, deps): only GitHub and gh are faked). It uses the production OpenPnP command
+     line (flock + java + the unit's flags) under --service-manager subprocess, a temp STATE.md (Holder: nobody), and a
+     temp lock, activity file and root. The device is the lumen-sim link. A pty has no USB identity, so --usb-sn '' and
+     --serial-match names the link: the health check's serial step runs against the real connect line
      (SerialPortCommunications.resolvePort, by port name).
   6. test_1: poll, deploy; OpenPnP started; run (poll + deploy of the newer build over the running OpenPnP);
      health by hand on that OpenPnP, whose link the STOP left open (connection-keep-alive): no new connect line, so
@@ -92,7 +93,7 @@ for p in (DEPLOY_DIR, os.path.join(DEPLOY_DIR, "tests"), LUMEN_SIM_DIR, os.path.
         sys.path.insert(0, p)
 import il_deploy  # noqa: E402
 import make_machine_patch  # noqa: E402
-from fakes import BRANCH, REPO as GH_REPO, STATE_MD, FakeGitHub  # noqa: E402
+from fakes import BRANCH, REPO as GH_REPO, STATE_MD, FakeGhCli, FakeGitHub  # noqa: E402
 from lumen_sim.hostclient import DriverClient  # noqa: E402
 
 E2E = os.environ.get("IL_DEPLOY_E2E") == "1"
@@ -404,6 +405,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         if not cls.sha7:
             raise RuntimeError("%s has no Implementation-Version ending in a sha7 (built outside git?)" % JAR)
         gh = cls.gh = FakeGitHub()
+        cls.gh_cli = FakeGhCli(gh)
         base = gh.commit("e2e-base")
         cls.sha_a = gh.commit("e2e-a", base, sha=cls.sha7 + hashlib.sha1(b"e2e-a").hexdigest()[:33])
         cls.sha_b = gh.commit("e2e-b", cls.sha_a, sha=cls.sha7 + hashlib.sha1(b"e2e-b").hexdigest()[:33])
@@ -493,11 +495,13 @@ class DeployRealOpenPnP(unittest.TestCase):
 
     # --- helpers --------------------------------------------------------------------------------
     def main(self, *cmd, expect=0):
-        """il_deploy in-process (only GitHub is faked); asserts its exit code, with the logs when it differs."""
+        """il_deploy in-process (only GitHub and gh are faked); asserts its exit code, with the logs when it differs."""
         t = time.monotonic()
         out, err = io.StringIO(), io.StringIO()
+        deps = il_deploy.Deps(github=self.gh, procs=ScopedProcs(self.dir),
+                              attestation=il_deploy.GhAttestation(gh="gh", runner=self.gh_cli))
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = il_deploy.main(self.argv(*cmd), deps=il_deploy.Deps(github=self.gh, procs=ScopedProcs(self.dir)))
+            rc = il_deploy.main(self.argv(*cmd), deps=deps)
         self.timings["%d %s" % (len(self.timings) + 1, cmd[0])] = round(time.monotonic() - t, 1)
         self.last_stdout = out.getvalue()
         self.last_out = out.getvalue() + err.getvalue()
@@ -620,6 +624,8 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertIn("poll: staged " + self.tag_a, self.main("poll"))
         lib_jar = sorted(n for n in os.listdir(LIB) if n.endswith(".jar"))[0]
         self.assertTrue(os.path.isfile(os.path.join(self.root, "releases", self.tag_a, "lib", lib_jar)))
+        staged = il_deploy.read_json(os.path.join(self.root, "releases", self.tag_a, "STAGED.json"))
+        self.assertIn("/actions/runs/9041/attempts/1", staged["attestation"])  # make_release's --run-id
         self.assertIn("deployed " + self.tag_a, self.main("deploy"))
         self.assert_deployed(self.tag_a, self.sha_a, "deploy", running=False)
         self.assertIsNone(self.link("previous"))

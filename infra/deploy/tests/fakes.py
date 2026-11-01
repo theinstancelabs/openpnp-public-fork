@@ -10,6 +10,7 @@ import re
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -45,8 +46,10 @@ class FakeGitHub:
         self.assets = {}
         self.checks = {}
         self.runs = {}  # workflow runs by id: GET repos/<repo>/actions/runs/<id>
+        self.attestations = {}  # sha256 of an artifact -> the attestations GitHub stores for it (FakeGhCli reads them)
         self.calls = []
         self.downloads = []
+        self._ids = 0
 
     # --- commit graph --------------------------------------------------------------------------
     def commit(self, name, *parents, sha=None):
@@ -75,24 +78,55 @@ class FakeGitHub:
             return "behind"
         return "diverged"
 
-    def set_gate(self, sha, conclusion="success", status="completed", name="gate"):
-        self.checks.setdefault(sha, []).append(
-            {"id": len(self.checks.get(sha, [])) + 1, "name": name, "status": status, "conclusion": conclusion})
+    def next_id(self):
+        self._ids += 1
+        return self._ids
+
+    def set_gate(self, sha, conclusion="success", status="completed", name="gate", suite=None):
+        """A check-run on sha, in a check suite: by default the one of the newest workflow run at sha (a re-run of the
+        CI run that built it adds its check-runs there), else a suite of its own (another workflow's run)."""
+        if suite is None:
+            runs = [r for r in self.runs.values() if r["head_sha"] == sha]
+            suite = max(runs, key=lambda r: r["id"])["check_suite_id"] if runs else 900000 + self.next_id()
+        self.checks.setdefault(sha, []).append({"id": self.next_id(), "name": name, "status": status,
+                                                "conclusion": conclusion, "head_sha": sha,
+                                                "check_suite": {"id": suite}})
 
     # --- releases ------------------------------------------------------------------------------
     def add_run(self, run_id, run_number, sha, branch=BRANCH, overrides=None):
         """The CI run that published a release: a successful push run of ci.yml on the branch, at sha."""
         self.runs[int(run_id)] = dict({"id": int(run_id), "run_number": int(run_number), "head_sha": sha,
                                        "head_branch": branch, "event": "push", "path": ".github/workflows/ci.yml",
-                                       "status": "completed", "conclusion": "success", "run_attempt": 1},
+                                       "status": "completed", "conclusion": "success", "run_attempt": 1,
+                                       "check_suite_id": 500000 + int(run_id)},
                                       **(overrides or {}))
         return self.runs[int(run_id)]
 
+    def attest(self, data, run, commit, **overrides):
+        """CI's release job attests the artifact (actions/attest-build-provenance): GitHub stores the attestation under
+        the artifact's sha256. overrides: repo, workflow, ref, runner ('self-hosted'), attempt, event, invocation (the
+        provenance's runDetails invocationId, if it differs from the certificate's run), and run_id or sha (another
+        run's or commit's attestation of the same bytes)."""
+        rec = dict({"repo": self.repo, "workflow": ".github/workflows/ci.yml", "ref": "refs/heads/" + self.branch,
+                    "sha": commit, "run_id": int(run), "attempt": 1, "runner": "github-hosted", "event": "push",
+                    "invocation": None}, **overrides)
+        self.attestations.setdefault(hashlib.sha256(data).hexdigest(), []).append(rec)
+        return rec
+
+    def unattest(self, data):
+        """The attestations of an artifact deleted (GitHub lets a repository admin delete them)."""
+        self.attestations.pop(hashlib.sha256(data).hexdigest(), None)
+
+    def asset_bytes(self, tag, name):
+        rel = next(r for r in self.releases if r["tag_name"] == tag)
+        return self.assets[next(a for a in rel["assets"] if a["name"] == name)["browser_download_url"]]
+
     def add_release(self, run_number, sha, branch=BRANCH, jar=None, corrupt_sha256=False, gate="success",
                     info_overrides=None, target=None, members=None, omit=(), author="github-actions[bot]", run=True,
-                    run_overrides=None, member_overrides=None):
-        """A release as CI's release job publishes it (author github-actions[bot], its run a successful push of ci.yml);
-        author, run=False (no such run) and run_overrides make the other kinds. members replaces the tarball's files,
+                    run_overrides=None, member_overrides=None, attest=True):
+        """A release as CI's release job publishes it (author github-actions[bot], its run a successful push of ci.yml,
+        the tarball attested by that run); author, run=False (no such run), run_overrides and attest (False: none, a
+        dict: FakeGitHub.attest's overrides) make the other kinds. members replaces the tarball's files,
         member_overrides changes or adds some of them ({name: bytes})."""
         sha7 = sha[:7]
         tag = f"il-build-{run_number}-{sha7}"
@@ -125,11 +159,14 @@ class FakeGitHub:
                  ("BUILD-INFO.json", info_bytes)]
         if run:
             self.add_run(1000 + run_number, run_number, sha, branch, run_overrides)
+        if attest:
+            self.attest(tar_bytes, 1000 + run_number, sha, **(attest if isinstance(attest, dict) else {}))
         return self._publish(run_number, sha, tag, [f for f in files if f[0] not in omit], target or sha, gate, author)
 
     def add_release_dir(self, out, gate="success"):
-        """Publish what infra/ci/make_release.py wrote into out, as CI's `gh release create "$TAG" --target "$SHA"`
-        does: the tarball, its .sha256 and BUILD-INFO.json, under the tag and sha that BUILD-INFO names."""
+        """Publish what infra/ci/make_release.py wrote into out, as CI's release job does: the tarball attested by the
+        run BUILD-INFO names, then `gh release create "$TAG" --target "$SHA"` with the tarball, its .sha256 and
+        BUILD-INFO.json, under the tag and sha that BUILD-INFO names."""
         with open(os.path.join(out, "BUILD-INFO.json"), "rb") as f:
             info_bytes = f.read()
         info = json.loads(info_bytes)
@@ -140,6 +177,7 @@ class FakeGitHub:
             with open(os.path.join(out, name), "rb") as f:
                 files.append((name, f.read()))
         self.add_run(info["run_id"], info["run_number"], sha, info["branch"])
+        self.attest(files[0][1], info["run_id"], sha)
         return self._publish(il_deploy.parse_tag(tag)[0], sha, tag, files + [("BUILD-INFO.json", info_bytes)], sha,
                              gate)
 
@@ -195,8 +233,13 @@ class FakeGitHub:
             q = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
             if "check_name" in q:
                 runs = [r for r in runs if r["name"] == q["check_name"]]
-            if q.get("filter", "latest") == "latest" and runs:
-                runs = [max(runs, key=lambda r: r["id"])]
+            if q.get("filter", "latest") == "latest":  # GitHub: the newest per check suite and name
+                newest = {}
+                for r in runs:
+                    k = (r["check_suite"]["id"], r["name"])
+                    if k not in newest or r["id"] > newest[k]["id"]:
+                        newest[k] = r
+                runs = sorted(newest.values(), key=lambda r: -r["id"])
             return {"total_count": len(runs), "check_runs": runs}
         raise il_deploy.GitHubError("Not Found: " + path, status=404)
 
@@ -204,6 +247,115 @@ class FakeGitHub:
         self.downloads.append(asset["name"])
         with open(dest, "wb") as f:
             f.write(self.assets[asset["browser_download_url"]])
+
+
+GH_HELP_FLAGS = ("--bundle", "--deny-self-hosted-runners", "--format", "--owner", "--repo", "--signer-workflow",
+                 "--source-digest", "--source-ref")
+
+
+def attestation_entry(rec, digest, name="artifact"):
+    """One entry of `gh attestation verify --format json` for an attestation FakeGitHub stores, in the real shape
+    (tests/gh-attestation-verify-cli-2.97.0.json is a real one)."""
+    gh = "https://github.com/"
+    signer = f"{gh}{rec['repo']}/{rec['workflow']}@{rec['ref']}"
+    run = f"{gh}{rec['repo']}/actions/runs/{rec['run_id']}/attempts/{rec['attempt']}"
+    return {"attestation": {"bundle": "(a Sigstore bundle)"}, "verificationResult": {
+        "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+        "signature": {"certificate": {
+            "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev", "subjectAlternativeName": signer,
+            "issuer": "https://token.actions.githubusercontent.com", "githubWorkflowTrigger": rec["event"],
+            "githubWorkflowSHA": rec["sha"], "githubWorkflowRepository": rec["repo"], "githubWorkflowRef": rec["ref"],
+            "buildSignerURI": signer, "buildSignerDigest": rec["sha"], "runnerEnvironment": rec["runner"],
+            "sourceRepositoryURI": gh + rec["repo"], "sourceRepositoryDigest": rec["sha"],
+            "sourceRepositoryRef": rec["ref"], "buildConfigURI": signer, "buildTrigger": rec["event"],
+            "runInvocationURI": run}},
+        "verifiedTimestamps": [{"type": "Tlog", "uri": "https://rekor.sigstore.dev",
+                                "timestamp": "2026-10-31T12:00:00Z"}],
+        "statement": {"_type": "https://in-toto.io/Statement/v1",
+                      "subject": [{"name": name, "digest": {"sha256": digest}}],
+                      "predicateType": "https://slsa.dev/provenance/v1",
+                      "predicate": {"buildDefinition": {"externalParameters": {"workflow": {
+                                        "path": rec["workflow"], "ref": rec["ref"], "repository": gh + rec["repo"]}}},
+                                    "runDetails": {"builder": {"id": signer},
+                                                   "metadata": {"invocationId": rec["invocation"] or run}}}}}}
+
+
+class FakeGhCli:
+    """`gh` as il_deploy.GhAttestation runs it (subprocess.run's signature), against FakeGitHub's attestations:
+    `attestation verify <file> --repo R [policy flags] --format json` finds the attestations of the file's sha256 in R
+    and keeps those that pass the policy flags (--signer-workflow, --source-ref, --source-digest,
+    --deny-self-hosted-runners), with gh's exit codes and messages; `attestation verify --help`; `auth status`.
+    installed=False (no gh), attestation_command=False (a gh before 2.49), flags (what --help lists: an older gh
+    lacks some), logged_in=False, offline=True (no network) and stdout (what verify prints) make the failures."""
+
+    def __init__(self, github, installed=True, attestation_command=True, flags=GH_HELP_FLAGS, logged_in=True,
+                 offline=False, stdout=None):
+        self.github = github
+        self.installed, self.attestation_command, self.flags = installed, attestation_command, flags
+        self.logged_in, self.offline, self.stdout = logged_in, offline, stdout
+        self.calls = []
+        self.verified = []  # (file, its sha256) of each `attestation verify`
+
+    @staticmethod
+    def done(argv, rc, out="", err=""):
+        return subprocess.CompletedProcess(argv, rc, out, err)
+
+    def __call__(self, argv, capture_output=False, text=False, timeout=None, **kw):
+        assert capture_output and text and timeout, "GhAttestation captures gh's output as text, with a timeout"
+        self.calls.append(list(argv))
+        if not self.installed:
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        args = argv[1:]
+        if args[:2] == ["auth", "status"]:
+            if self.logged_in:
+                return self.done(argv, 0, "github.com\n  ✓ Logged in to github.com account il-lab (keyring)\n")
+            return self.done(argv, 1, "", "You are not logged into any GitHub hosts. To log in, run: gh auth login\n")
+        if args[:1] == ["attestation"] and not self.attestation_command:
+            return self.done(argv, 1, "", f'unknown command "{args[0]}" for "gh"\n')
+        if args == ["attestation", "verify", "--help"]:
+            return self.done(argv, 0, "USAGE\n  gh attestation verify [<file-path>] [flags]\n\nFLAGS\n"
+                             + "".join(f"      {f} string\n" for f in self.flags))
+        if args[:2] == ["attestation", "verify"]:
+            return self.verify(argv, args[2:])
+        return self.done(argv, 1, "", f"unknown command {args!r}\n")
+
+    def verify(self, argv, args):
+        path, opts, i = args[0], {}, 1
+        while i < len(args):
+            flag = args[i]
+            if flag not in self.flags:
+                return self.done(argv, 1, "", f"unknown flag: {flag}\n")
+            if flag == "--deny-self-hosted-runners":
+                opts[flag], i = True, i + 1
+            else:
+                opts[flag], i = args[i + 1], i + 2
+        if not self.logged_in:
+            return self.done(argv, 4, "", "To get started with GitHub CLI, please run:  gh auth login\n")
+        if self.offline:
+            return self.done(argv, 1, "", "error creating Sigstore verifier: no valid Sigstore verifiers could be "
+                                          "initialized\n")
+        digest = il_deploy.sha256_file(path)
+        self.verified.append((path, digest))
+        found = [r for r in self.github.attestations.get(digest, []) if r["repo"] == opts["--repo"]]
+        if not found:
+            return self.done(argv, 1, "", "Error: no attestations found\n")
+        checks = [("--signer-workflow", lambda r, v: f"{r['repo']}/{r['workflow']}" == v, "verifying with issuer "
+                   '"sigstore.dev"'),
+                  ("--source-ref", lambda r, v: r["ref"] == v, "expected SourceRepositoryRef to be {v}, got {got}"),
+                  ("--source-digest", lambda r, v: r["sha"] == v,
+                   "expected SourceRepositoryDigest to be {v}, got {got}"),
+                  ("--deny-self-hosted-runners", lambda r, v: r["runner"] == "github-hosted",
+                   "expected RunnerEnvironment to be github-hosted, got {got}")]
+        for flag, ok, msg in checks:
+            if flag in opts:
+                kept = [r for r in found if ok(r, opts[flag])]
+                if not kept:
+                    got = found[0][{"--source-ref": "ref", "--source-digest": "sha"}.get(flag, "runner")]
+                    return self.done(argv, 1, "", "\nError: " + msg.format(v=opts[flag], got=got) + "\n")
+                found = kept
+        out = self.stdout if self.stdout is not None else json.dumps(
+            [attestation_entry(r, digest, os.path.basename(path)) for r in found])
+        return self.done(argv, 0, out)
 
 
 class FakeProcs(il_deploy.Procs):
@@ -266,6 +418,7 @@ class Lab:
         self.port = free_port()
         self.quiet_min = quiet_min
         self.gh = FakeGitHub()
+        self.gh_cli = FakeGhCli(self.gh)  # the `gh` il_deploy verifies attestations with
         self.requests_path = os.path.join(self.dir, "fake-requests.jsonl")
         self.procs = FakeProcs()
         with open(self.state_md, "w") as f:
@@ -325,6 +478,7 @@ class Lab:
     def deps(self, **kw):
         kw.setdefault("github", self.gh)
         kw.setdefault("procs", self.procs)
+        kw.setdefault("attestation", il_deploy.GhAttestation(gh="gh", runner=self.gh_cli))
         return il_deploy.Deps(**kw)
 
     def main(self, *cmd, deps=None, extra=()):

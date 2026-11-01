@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 # il_deploy is one level up: also when unittest imports this module by bare name (no -t)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -38,6 +40,28 @@ class Units(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.out)),
                          ["il-deploy.service", "il-deploy.timer", "il-openpnp-xvfb.service", "il-openpnp.service",
                           "system"])
+
+    def test_the_timers_run_verifies_attestations_with_gh_and_nothing_turns_that_off(self):
+        """The tests' fake gh goes in through main(argv, deps) only: no flag and no environment variable changes the
+        verifier. So the unit's run, with its own command line, verifies every build with gh and CI's policy, also with
+        the e2e's variables in the user manager's environment."""
+        line = [l for l in self.read("il-deploy.service").splitlines() if l.startswith("ExecStart=")][0]
+        argv = shlex.split(line[len("ExecStart="):])
+        self.assertEqual(argv[1:3], [os.path.join(self.lab.root, "bin", "il_deploy.py"), "run"])
+        e2e_env = {"IL_DEPLOY_E2E": "1", "IL_DEPLOY_E2E_JAR": "/x.jar", "IL_DEPLOY_E2E_LIB": "/lib"}
+        with mock.patch.dict(os.environ, e2e_env):
+            d = il_deploy.Deployer(il_deploy.config_from_args(argv[2:]))
+        self.assertIs(type(d.attest), il_deploy.GhAttestation)
+        self.assertIsNone(d.attest.gh)  # gh from PATH
+        self.assertIs(d.attest.runner, subprocess.run)
+        cmd = d.attest.command("t.tar.gz", d.cfg.repo, d.cfg.branch, "0" * 40)
+        for flag in ("--repo", "--signer-workflow", "--source-ref", "--source-digest", "--deny-self-hosted-runners"):
+            self.assertIn(flag, cmd)
+        for name in os.listdir(self.out):
+            if os.path.isfile(os.path.join(self.out, name)):
+                text = self.read(name)
+                for word in ("IL_DEPLOY_E2E", "attest"):
+                    self.assertNotIn(word, text, name)
 
     def test_openpnp_service(self):
         u = self.read("il-openpnp.service")

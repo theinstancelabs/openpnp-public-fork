@@ -1,13 +1,15 @@
 """poll: only green il/integration builds whose sha is on il/integration are staged, verified and atomic."""
+import hashlib
 import json
 import os
 import sys
 import unittest
+import unittest.mock
 
 # il_deploy is one level up: also when unittest imports this module by bare name (no -t)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import il_deploy  # noqa: E402
-from fakes import Lab  # noqa: E402
+from fakes import FakeGhCli, Lab  # noqa: E402
 
 
 class Poll(unittest.TestCase):
@@ -29,6 +31,9 @@ class Poll(unittest.TestCase):
 
     def refused(self):
         return {r["tag"]: r["reason"] for r in self.lab.journal() if r["event"] == "refused"}
+
+    def permanent(self, tag):
+        return il_deploy.read_json(os.path.join(self.lab.root, "log", "refused.json"))[tag]["permanent"]
 
     def test_head_build_is_staged(self):
         tag = self.gh.add_release(5, self.lab.c)
@@ -204,6 +209,106 @@ class Poll(unittest.TestCase):
         self.gh.runs[1005].update(status="completed", conclusion="success")
         self.poll()
         self.assertEqual(self.releases(), [tag])
+
+    # --- the gate is the publishing run's own: its check suite -----------------------------------------------------
+    def test_a_failed_gate_of_another_run_on_the_sha_does_not_veto(self):
+        """A workflow_dispatch re-check of the same commit fails (a flaky job): the release's own run passed."""
+        tag = self.gh.add_release(5, self.lab.c)
+        self.gh.set_gate(self.lab.c, "failure", suite=777)
+        self.poll()
+        self.assertEqual(self.releases(), [tag])
+
+    def test_a_green_gate_of_another_run_on_the_sha_does_not_approve(self):
+        """A PR run (a fork's, say) on the same commit is green: only the release's own run's gate counts."""
+        failed = self.gh.add_release(5, self.lab.c, gate="failure")
+        self.gh.set_gate(self.lab.c, "success", suite=777)
+        self.poll()
+        self.assertEqual(self.releases(), [])
+        self.assertIn("gate", self.refused()[failed])
+        self.assertFalse(self.permanent(failed))
+        none = self.gh.add_release(6, self.lab.c, gate=None)
+        self.poll()
+        self.assertEqual(self.releases(), [])
+        self.assertIn("no 'gate' check-run", self.refused()[none])
+
+    def test_a_run_without_a_check_suite_is_refused(self):
+        tag = self.gh.add_release(5, self.lab.c, run_overrides={"check_suite_id": None})
+        self.poll()
+        self.assertEqual(self.releases(), [])
+        self.assertIn("check suite", self.refused()[tag])
+
+    # --- attestation: the tarball's bytes are what CI's release job attested, in the run BUILD-INFO names ----------
+    def tarball(self, tag):
+        return f"openpnp-il-{tag[-7:]}.tar.gz"
+
+    def test_the_attested_tarball_is_kept_with_the_staged_build(self):
+        tag = self.gh.add_release(5, self.lab.c)
+        self.poll()
+        d = os.path.join(self.lab.root, "releases", tag)
+        data = self.gh.asset_bytes(tag, self.tarball(tag))
+        with open(os.path.join(d, self.tarball(tag)), "rb") as f:
+            self.assertEqual(f.read(), data)
+        self.assertEqual(self.lab.gh_cli.verified[-1][1], hashlib.sha256(data).hexdigest())
+        staged = il_deploy.read_json(os.path.join(d, "STAGED.json"))
+        self.assertIn("/actions/runs/1005/attempts/1", staged["attestation"])
+
+    def test_an_unattested_release_is_retried_until_it_is_attested(self):
+        tag = self.gh.add_release(5, self.lab.c, attest=False)
+        self.poll()
+        self.assertEqual(self.releases(), [])
+        self.assertIn("no attestations found", self.refused()[tag])
+        self.assertFalse(self.permanent(tag))
+        self.gh.attest(self.gh.asset_bytes(tag, self.tarball(tag)), 1005, self.lab.c)
+        self.poll()
+        self.assertEqual(self.releases(), [tag])
+
+    def test_a_release_attested_by_another_run_or_workflow_is_refused_for_good(self):
+        for attest, word in (({"run_id": 2001}, "2001"),
+                             ({"workflow": ".github/workflows/scratch.yml"}, "scratch.yml"),
+                             ({"ref": "refs/heads/il/scratch"}, "il/scratch"),
+                             ({"runner": "self-hosted"}, "self-hosted")):
+            with self.subTest(word=word):
+                lab = Lab()
+                try:
+                    tag = lab.gh.add_release(5, lab.c, attest=attest)
+                    self.assertEqual(lab.main("poll"), 0, lab.last_out)
+                    self.assertFalse(os.path.isdir(os.path.join(lab.root, "releases", tag)))
+                    refused = il_deploy.read_json(os.path.join(lab.root, "log", "refused.json"))[tag]
+                    self.assertIn(word, refused["reason"])
+                    self.assertTrue(refused["permanent"])
+                    lab.gh.downloads.clear()
+                    self.assertEqual(lab.main("poll"), 0, lab.last_out)
+                    self.assertEqual(lab.gh.downloads, [], "a definite mismatch is not downloaded again")
+                finally:
+                    lab.cleanup()
+
+    def test_without_a_usable_gh_the_tarball_is_not_downloaded(self):
+        for kw, word in (({"installed": False}, "gh"), ({"attestation_command": False}, "update gh"),
+                         ({"logged_in": False}, "logged in")):
+            with self.subTest(word=word):
+                lab = Lab()
+                try:
+                    lab.gh_cli = FakeGhCli(lab.gh, **kw)
+                    tag = lab.gh.add_release(5, lab.c)
+                    self.assertEqual(lab.main("poll"), 0, lab.last_out)
+                    self.assertFalse(os.path.isdir(os.path.join(lab.root, "releases", tag)))
+                    refused = il_deploy.read_json(os.path.join(lab.root, "log", "refused.json"))[tag]
+                    self.assertIn(word, refused["reason"])
+                    self.assertFalse(refused["permanent"])
+                    self.assertEqual(lab.gh.downloads, ["BUILD-INFO.json"])
+                    lab.gh_cli = FakeGhCli(lab.gh)
+                    self.assertEqual(lab.main("poll"), 0, lab.last_out)
+                    self.assertTrue(os.path.isdir(os.path.join(lab.root, "releases", tag)))
+                finally:
+                    lab.cleanup()
+
+    def test_attestation_is_checked_after_the_sha256_and_before_unpacking(self):
+        """gh verifies the bytes the .sha256 vouched for; a refused tarball is never unpacked."""
+        tag = self.gh.add_release(5, self.lab.c, attest={"run_id": 2001})
+        with unittest.mock.patch.object(il_deploy.tarfile, "open", side_effect=AssertionError("unpacked")):
+            self.poll()
+        self.assertIn("2001", self.refused()[tag])
+        self.assertEqual([n for n in os.listdir(os.path.join(self.lab.root, "releases"))], [])
 
     def test_newest_eligible_wins(self):
         good = self.gh.add_release(10, self.lab.c)
