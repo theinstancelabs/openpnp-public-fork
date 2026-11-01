@@ -676,26 +676,27 @@ public class PadCalibrationSimTest {
         checkPadsWhole(runPlan);
         checkDeposits(runPlan, store.deposits("board").subList(boardBefore, store.deposits("board").size()));
 
-        // a reconnect: the quarter-turn block refuses (I11) until the start angle is confirmed; the quarter
-        // camera records are stale, the weighings are not
+        // a controller reset (BR-02): the quarter-turn block refuses (I11) until the start angle is confirmed;
+        // the quarter camera records are stale, the weighings are not
         sim.machine.setEnabled(false);
+        sim.server.powerCycle();
         sim.enableAndHome();
         JsonObject runPlan2 = plan();
         Res i11 = call("POST", "/api/run", "{\"planId\":\"" + str(runPlan2, "planId") + "\"}");
         assertEquals(409, i11.status, i11.toString());
-        assertTrue(str(i11.json(), "reason").contains("I11: the controller (re)connected after the screw start angle "
-                + "was set"), i11.toString());
+        assertTrue(str(i11.json(), "reason").contains("I11: the controller was reset (or its position could not be "
+                + "read at a connect) after the screw start angle was set"), i11.toString());
         boolean quarterStale = false;
         for (JsonElement e : ok2(get("/api/dose-records?steps=400"))) {
             JsonObject r = e.getAsJsonObject();
             if ("optical".equals(str(r, "kind"))) {
                 assertFalse(r.get("fresh").getAsBoolean());
-                assertEquals("made before the controller last connected: the screw angle may have moved",
+                assertEquals("made before the controller was last reset: the screw angle may have moved",
                         str(r, "whyStale"));
                 quarterStale = true;
             }
             if ("mass".equals(str(r, "kind"))) {
-                assertTrue(r.get("fresh").getAsBoolean(), "a weighing survives a reconnect: " + r);
+                assertTrue(r.get("fresh").getAsBoolean(), "a weighing survives a reset: " + r);
             }
         }
         assertTrue(quarterStale);

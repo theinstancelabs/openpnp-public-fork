@@ -193,10 +193,10 @@ public class DoseRecordTest {
             for (int steps : new int[] {400, 800}) {
                 DispenseConfig c = setup();
                 DoseRecord r = record(kind, steps, c, NOW - H);
-                DoseRecord.Epochs reconnected = new DoseRecord.Epochs(NOW - H / 2, false);
-                assertEquals("made before the controller last connected: the screw angle may have moved",
-                        r.whyStale(NOW, c, reconnected), kind + " " + steps);
-                assertNull(r.whyStale(NOW, c, new DoseRecord.Epochs(null, false)), "connect time unknown");
+                DoseRecord.Epochs reset = new DoseRecord.Epochs(NOW - H / 2, false);
+                assertEquals("made before the controller was last reset: the screw angle may have moved",
+                        r.whyStale(NOW, c, reset), kind + " " + steps);
+                assertNull(r.whyStale(NOW, c, new DoseRecord.Epochs(null, false)), "no reset seen");
                 c.profile.startAngleSetAtMs = NOW - H / 2;
                 assertEquals("made before the screw start angle was set again", r.whyStale(NOW, c, MACHINE));
                 c.profile.startAngleSetAtMs = null;
@@ -205,9 +205,9 @@ public class DoseRecordTest {
         }
     }
 
-    /** Mass records (whole revolutions of dots) and records of whole turns survive a reconnect. */
+    /** Mass records (whole revolutions of dots) and records of whole turns survive a controller reset. */
     @Test
-    public void massRecordsAndWholeTurnsSurviveAReconnect() {
+    public void massRecordsAndWholeTurnsSurviveAReset() {
         DispenseConfig c = setup();
         c.profile.startAngleSetAtMs = null;
         DoseRecord.Epochs reconnected = new DoseRecord.Epochs(NOW - H / 2, false);

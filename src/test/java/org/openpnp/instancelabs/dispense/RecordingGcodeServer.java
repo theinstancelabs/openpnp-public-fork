@@ -31,8 +31,10 @@ import org.openpnp.instancelabs.sim.SimVacuum;
  * {@link #setBStepCount}) resets it. M114 reports {@code Count ... B:<round(machine x 4.44)>}.</p>
  *
  * <p>With a {@link #paste} model (whose scene has a paste block) the screw is the model's: the count
- * is its count, reported only when the scene's {@code reportCount} says so, and every new
- * connection is a controller power-up ({@link SimPaste#powerCycle}).</p>
+ * is its count, reported only when the scene's {@code reportCount} says so.</p>
+ *
+ * <p>A reconnect keeps every position and count, as a powered controller does; {@link #powerCycle} is
+ * the controller losing power (BR-02): it boots believing X 0, Y 0, Z 0 and A/B 720.</p>
  */
 public class RecordingGcodeServer implements AutoCloseable {
     private final ServerSocket server;
@@ -68,6 +70,8 @@ public class RecordingGcodeServer implements AutoCloseable {
     private static final Pattern WORD = Pattern.compile("([XYZAB])(-?\\d+(?:\\.\\d+)?)");
     /** Marlin M92 B (steps per degree), for the reported step count. */
     public static final double B_STEPS_PER_DEG = 4.44;
+    /** Where stock Marlin believes A and B are at power-up (J_MAX_POS, no G92 yet). */
+    public static final double BOOT_AB_DEG = 720;
 
     public RecordingGcodeServer() throws Exception {
         server = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
@@ -86,10 +90,6 @@ public class RecordingGcodeServer implements AutoCloseable {
     private void run() {
         while (!server.isClosed()) {
             try (Socket s = server.accept()) {
-                SimPaste connected = paste;
-                if (connected != null) {
-                    connected.powerCycle(); // a reconnect is a controller power-up
-                }
                 BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
                 OutputStream out = s.getOutputStream();
                 String line;
@@ -220,6 +220,24 @@ public class RecordingGcodeServer implements AutoCloseable {
         SimPaste p = paste;
         if (p != null) {
             p.setCount(steps);
+        }
+    }
+
+    /**
+     * The controller loses power and boots (BR-02): stock Marlin believes X 0, Y 0, Z 0 and A/B 720, with no
+     * workspace shift, and the step counts restart (the count is the machine position's, Marlin syncs it at boot;
+     * the paste model's restarts with {@link SimPaste#powerCycle}). Call it while OpenPnP is disconnected.
+     */
+    public synchronized void powerCycle() {
+        pos.put('X', 0.0);
+        pos.put('Y', 0.0);
+        pos.put('Z', 0.0);
+        pos.put('A', BOOT_AB_DEG);
+        pos.put('B', BOOT_AB_DEG);
+        bShift = 0;
+        SimPaste p = paste;
+        if (p != null) {
+            p.powerCycle();
         }
     }
 

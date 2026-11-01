@@ -248,12 +248,13 @@ public class MountTest {
             DispenseProfile now = svc.getConfig().profile;
             assertEquals(120, now.startAngleDeg, 0);
             assertEquals(live.startAngleSetAtMs, now.startAngleSetAtMs, "not stamped: no new measurement");
-            // after a controller reconnect the angle is stale (I11); a mount leaves it as it was
+            // after a controller reset (BR-02) the angle is stale (I11); a mount leaves it as it was
             f.sim.machine.setEnabled(false);
+            f.sim.server.powerCycle();
             f.sim.enableAndHome();
             f.mount(Tip.SEED_KEY);
             assertEquals(live.startAngleSetAtMs, svc.getConfig().profile.startAngleSetAtMs);
-            assertTrue(svc.getConfig().profile.startAngleSetAtMs < svc.getControllerConnectedAtMs(), "I11 still asks");
+            assertTrue(svc.getConfig().profile.startAngleSetAtMs < svc.getControllerResetAtMs(), "I11 still asks");
         }
     }
 

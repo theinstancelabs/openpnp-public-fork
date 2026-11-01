@@ -372,15 +372,16 @@ public class DispenseServiceSimTest {
 
     /**
      * I11: the B step count restarts at a controller power-up, so a start angle set before the last
-     * connect is refused until it is confirmed (or measured again).
+     * detected reset (BR-02) is refused until it is confirmed (or measured again).
      */
     @Test
-    public void startAngleFromBeforeTheLastConnectIsRefused() throws Exception {
+    public void startAngleFromBeforeTheLastResetIsRefused() throws Exception {
         DispensePlan plan = plan();
         Thread.sleep(5);
         sim.machine.setEnabled(false);
-        sim.enableAndHome();
-        assertTrue(svc.getControllerConnectedAtMs() > svc.getConfig().profile.startAngleSetAtMs);
+        sim.server.powerCycle();
+        sim.enableAndHome(); // OpenPnP's own home: G28 first
+        assertTrue(svc.getControllerResetAtMs() > svc.getConfig().profile.startAngleSetAtMs);
         // the home makes the Z data older than it: a run checks Z with one N1 touch at a stored point
         FlatVacuum.install(sim, FlatVacuum.scene(5.45, new double[] {90, 70, 120, 95}, 5.6));
         DispenseConfig fast = svc.getConfig();
@@ -393,14 +394,14 @@ public class DispenseServiceSimTest {
         assertNothingStreamed(sim.server.sinceMark());
         // confirmed (the controller was not power-cycled): the plan is still valid and runs
         DispenseProfile p = svc.setStartAngle(null, "not power-cycled");
-        assertTrue(p.startAngleSetAtMs >= svc.getControllerConnectedAtMs());
+        assertTrue(p.startAngleSetAtMs >= svc.getControllerResetAtMs());
         r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
         assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);
         assertTrue(r.zCheck != null && r.zCheck.pass, String.valueOf(r.zCheck));
         assertFalse(r.homedFirst, "homed by the test: no home of its own");
     }
 
-    /** A disable and a home (a new connect: the start angle is confirmed again, I11). */
+    /** A disable and a home (a reconnect; the start angle is confirmed again, as before BR-02: harmless). */
     void homeAgain() throws Exception {
         Thread.sleep(5);
         sim.machine.setEnabled(false);

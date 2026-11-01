@@ -180,6 +180,14 @@ public class ApiServerSimTest {
         sim.machine.home();
     }
 
+    /** The controller loses power and boots (BR-02), OpenPnP connects again, then OpenPnP's own home (G28 first). */
+    void powerCycle() throws Exception {
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.machine.setEnabled(true);
+        sim.machine.home();
+    }
+
     static List<String> bMoves(List<String> l) {
         List<String> b = new ArrayList<>();
         for (String s : l) {
@@ -720,16 +728,24 @@ public class ApiServerSimTest {
         assertTrue(staleProfile.body.contains("dispense profile"), staleProfile.toString());
     }
 
-    /** I11: the start angle is a calibration of the controller power-up; a reconnect asks for it again. */
+    /**
+     * I11: the start angle is a calibration of the controller power-up. A reconnect keeps the B step count; a reset
+     * (BR-02: the boot position at connect) asks for the angle again.
+     */
     @Test
-    public void boardRunNeedsTheStartAngleOfThisControllerConnection() throws Exception {
+    public void boardRunNeedsTheStartAngleOfThisControllerPowerUp() throws Exception {
         setUpBoardRuns();
         File board = writeBoard();
         ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         reconnect();
         JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
-        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
+        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), "a reconnect keeps the screw count: " + p);
         assertFalse(p.get("controllerConnectedAtMs").isJsonNull());
+        assertTrue(p.get("controllerResetAtMs").isJsonNull(), p.toString());
+        powerCycle();
+        p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
+        assertFalse(p.get("controllerResetAtMs").isJsonNull(), p.toString());
         JsonObject plan = planTied(board);
         assertTrue(plan.getAsJsonObject("interlocks").toString().contains("I11"), plan.toString());
         Res run = post("/api/run", "{\"planId\":\"" + plan.get("planId").getAsString() + "\"}");

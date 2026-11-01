@@ -30,7 +30,7 @@ public class InterlocksTest {
         in.boardRun = true;
         in.purgeDots = c.profile.purgeDots;
         in.opticalCheckAvailable = true;
-        in.controllerConnectedAtMs = 2500L;
+        in.controllerResetAtMs = 2500L;
         in.xyChecked = true; // tip setups §22.3: where the needle lands is checked
         return in;
     }
@@ -141,7 +141,7 @@ public class InterlocksTest {
 
     /**
      * I11: the start angle of a partial turn is a calibration of the controller's power-up (the B
-     * step count restarts there): set or confirmed after the last connect.
+     * step count restarts there): set or confirmed after the last detected reset (BR-02).
      */
     @Test
     public void i11StartAngleBelongsToTheCurrentPowerUp() {
@@ -150,13 +150,14 @@ public class InterlocksTest {
         InterlockReport r = Interlocks.check(in);
         assertTrue(r.has("I11"), r.toString());
         assertTrue(r.toString().contains("never been set"), r.toString());
-        in.cfg.profile.startAngleSetAtMs = 2000L; // before the connect at 2500
+        in.cfg.profile.startAngleSetAtMs = 2000L; // before the reset at 2500
         r = Interlocks.check(in);
         assertTrue(r.has("I11"), r.toString());
-        assertTrue(r.toString().contains("(re)connected after the screw start angle was set"), r.toString());
-        in.cfg.profile.startAngleSetAtMs = 2500L; // confirmed right at the connect: fine
+        assertTrue(r.toString().contains("the controller was reset (or its position could not be read at a connect) "
+                + "after the screw start angle was set"), r.toString());
+        in.cfg.profile.startAngleSetAtMs = 2500L; // confirmed right at the reset: fine
         assertFalse(Interlocks.check(in).has("I11"));
-        in.controllerConnectedAtMs = null; // connect time unknown: set at all is enough
+        in.controllerResetAtMs = null; // no reset seen: set at all is enough
         in.cfg.profile.startAngleSetAtMs = 1L;
         assertFalse(Interlocks.check(in).has("I11"));
         // a whole revolution per dot repeats the angle whatever it is (the plan's dots carry their turn)
@@ -165,6 +166,24 @@ public class InterlocksTest {
         in.cfg.profile.startAngleSetAtMs = null;
         in.plan = GcodeStreamTest.toyPlan(in.cfg);
         assertFalse(Interlocks.check(in).has("I11"), Interlocks.check(in).toString());
+    }
+
+    /**
+     * BR-02: after a controller reset no task homes by itself (the home needs the operator's word that nothing is
+     * below): the unknown position is a MACHINE violation, also for a task that would home first.
+     */
+    @Test
+    public void anUnknownPositionRefusesEvenATaskThatHomesFirst() {
+        Interlocks.Inputs in = ok();
+        in.machineHomed = false;
+        in.homeFirst = true;
+        assertFalse(Interlocks.check(in).has("MACHINE"), "not homed, homes first: a note");
+        in.positionUnknownWhy = "the controller was reset (a power cycle)";
+        InterlockReport r = Interlocks.check(in);
+        assertTrue(r.has("MACHINE"), r.toString());
+        assertTrue(r.toString().contains("the controller was reset (a power cycle): home first (Home), after checking "
+                + "that nothing is under either tool"), r.toString());
+        assertTrue(Interlocks.checkBasic(in).has("MACHINE"), "the tasks that never dispense too");
     }
 
     /** I9-I11 are board-run rules: calibration, shots and the hold do not lay a purge row. */
