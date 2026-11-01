@@ -146,6 +146,19 @@ class Poll(unittest.TestCase):
         self.assertIn(tag, self.refused())
         self.assertFalse(os.path.exists(os.path.join(self.lab.root, "evil")))
 
+    def test_a_tarball_with_more_than_openpnp_il_is_refused(self):
+        tag = self.gh.add_release(5, self.lab.c, member_overrides={"README": b"not part of a build"})
+        self.poll()
+        self.assertEqual(self.releases(), [])
+        self.assertIn("only openpnp-il/", self.refused()[tag])
+
+    def test_a_tarball_whose_version_txt_is_another_build_is_refused(self):
+        tag = self.gh.add_release(5, self.lab.c, member_overrides={
+            "openpnp-il/VERSION.txt": f"il-build-4-{self.lab.c[:7]}\n".encode()})
+        self.poll()
+        self.assertEqual(self.releases(), [])
+        self.assertIn("VERSION.txt", self.refused()[tag])
+
     # --- provenance: the artifact is CI's, not only the commit (a dirty tree built at the head reports the head's sha)
     def test_release_not_published_by_ci_is_refused(self):
         hand = self.gh.add_release(9999, self.lab.c, author="aabdel0181", run=False)

@@ -36,7 +36,10 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
      - no hold latch is set;
      - the serial flock can be taken, or only the OpenPnP service holds it;
      - no other process has the serial device open, and the device exists;
-     - no other OpenPnP runs with a real-machine config;
+     - no other OpenPnP runs with a real-machine config: one whose machine.xml is unreadable, or has a driver on
+       serial, unless that port is lumen-sim's (an absolute `ttyLUMEN*` link to an existing `/dev/pts/N`, no
+       `/dev/<name>`, and no `usb-serial-number` or `usb-description` anywhere in the file: uinav's
+       `--controller pty` sessions and the e2e), so SIM sessions on the lab computer do not stop deploys;
      - `runs/serial.log` (and any other `--activity` file) has been quiet for 15 min;
      - OpenPnP's own log (`state/config/log/OpenPnP.log`) has been quiet for 15 min, except what it wrote in
        il_deploy's own windows (below). OpenPnP logs each change through its API (`ApiServer ... POST ... -> 200`),
@@ -58,13 +61,19 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
          (`profile.controllerConnectedAtMs`).
 
        The paths are `ACTIVITY_FIELDS` in il_deploy.py. A missing field is skipped, so the e2e checks every path
-       il_deploy reads (`STATUS_FIELDS`) against the real build: a backend rename fails the gate instead of turning
-       a check off. What OpenPnP stamped or logged while il_deploy alone drove it does not count: each claim, start
+       il_deploy reads (`STATUS_FIELDS`, and `setAtMs` in each place and surface) against the real build: a
+       backend rename fails the gate instead of turning a check off. A path behind a null, or in an empty map, is
+       not there to check: the e2e seeds a place, a surface and a needle anchor, and requires the paths it still
+       cannot check (`unchecked_status_fields`) to be exactly the five that need an engine run or a pad
+       calibration (`run.*`, `lastRun.endedAtMs`, `padCalibration.*`; asked of Backend as a contract test). What OpenPnP stamped or logged while il_deploy alone drove it does not count: each claim, start
        and health check keeps its time window in `<root>/own-activity.json` (the health check's home; a build's
        first start can stamp the config itself, e.g. the needle landing "kept from before the update"). If OpenPnP
        is not running, nothing may answer on its port.
-     - `run` (the timer) only: no `il_deploy.py resume` or `health` by hand in the last 15 min (`<root>/person.json`):
-       the person who ran it may still be at the machine. A deploy by hand has its person there.
+     - `run` (the timer) only: no `il_deploy.py resume`, `health`, `deploy` or `rollback` by hand in the last 15
+       min, whatever its result (`<root>/person.json`): the person who ran it may still be at the machine, e.g.
+       checking the build a rollback went back to. What those commands made OpenPnP stamp or log (the start, the
+       connect, the home) is in il_deploy's own windows, so this is what says someone is there. A deploy by hand
+       has its person there, so it does not wait.
 
      If any check fails, it exits **3** with `not idle: <reasons>`.
    - **Checks at deploy time.** The staged folder must agree with itself (BUILD-INFO, VERSION.txt, jar sha256)
@@ -114,7 +123,11 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
         while busy (up to `--home-busy-wait`). The API answers 409 "the home did not start or did not end within
         5 min" after its own limit (`MachineEndpoints.home`) while the home may run on; il_deploy's
         `--home-timeout` (330 s) is longer. Such a home that then ends homed passes; one that ends unhomed is a
-        machine problem, one still busy is "a home that never ends" (below). Any other refusal or failure (`homing
+        machine problem, one still busy is "a home that never ends" (below). A home that failed on OpenPnP's own
+        timeout (`homing failed: ... timeout waiting for response to G28`: GcodeDriver sends G28 with
+        `infinity-timeout-milliseconds`, 60 s in the lab machine.xml, e.g. a stalled axis or a broken endstop) is a
+        home that never ends too: OpenPnP's task ended, so it is not busy, but the controller may still be in G28,
+        where a STOP's M410 kills the board. No STOP, OpenPnP is left alone. Any other refusal or failure (`homing
         failed`: fiducial covered, endstop, obstruction; or something else holds the machine: the pressure, an
         engine task, OpenPnP busy) is a machine problem: no second home unwatched. Only a 404 (no home endpoint)
         is the build's.
@@ -141,8 +154,8 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
        only if the previous build passes. If the previous build fails too, the machine is suspect: nothing goes
        on the bad list, the hold is set, and the previous build stays pending (deploys refused) until a health
        check passes.
-     - **A home that never ends**, or **the claim lost**: OpenPnP is left alone (running), the build stays
-       installed but NOT verified, the hold is set.
+     - **A home that never ends** (or that OpenPnP timed out on), or **the claim lost**: OpenPnP is left alone
+       (running), the build stays installed but NOT verified, the hold is set.
    - **At the end** it writes the `- **Deployed on the machine:**` line in STATE.md's `## Code` section,
      records the build as verified with a manifest of the config (file hashes, without `log/` and `-shm`)
      as the baseline for a later rollback, and puts OpenPnP back as it was (running or stopped). The Holder:
@@ -223,13 +236,17 @@ Exit codes:
 - Rollback restores the config snapshot together with the binary, because the schema migrations are one-way.
 - The Holder is handed back on every exit path: `nobody (...)`, or the held text above when a person must
   check. After an unexpected exception (SIGTERM included) the machine is stopped through `/api/stop` if that is
-  safe, the note says what actually happened, the exception is recorded and the hold is set. If STATE.md cannot
+  safe, the note says what actually happened, the exception is recorded and the hold is set. SIGINT (Ctrl-C) and
+  SIGHUP take the same path. SIGHUP is the terminal of a command by hand going away (closed, SSH dropped, tmux pane
+  killed): writes to it fail from then on, so il_deploy first points its terminal output at /dev/null (files and
+  pipes stay). Under `nohup` SIGHUP stays ignored. If STATE.md cannot
   be written, il_deploy says so on stderr, sets the hold and exits non-zero.
 - **Hold latch** (`<root>/hold.json`): set when a person must look at the machine. It blocks deploys until
-  `il_deploy.py resume`, which also hands back the Holder the hold left. The hold Holder is not free, so to
-  check the machine before `resume` use `il_deploy.py health --no-claim`. After `resume` (and after `health` by
-  hand) the timer waits the quiet period before it deploys and homes again: the person may still be at the
-  machine.
+  `il_deploy.py resume`, which also hands back the Holder the hold left. A hold set while one is set (OpenPnP dies
+  while a held deploy left it running) adds its reason: the Holder to hand back and the earlier reasons stay, and the
+  not-idle message lists them all. The hold Holder is not free, so to check the machine before `resume` use
+  `il_deploy.py health --no-claim`. After `resume` (and after `health`, `deploy` or `rollback` by hand) the timer
+  waits the quiet period before it deploys and homes again: the person may still be at the machine.
 - One `il_deploy` at a time per root (flock on `<root>/.il-deploy.lock`).
 
 ## Commands
@@ -360,12 +377,16 @@ It needs no openpnp-uinav, so it runs on a stock GitHub runner. About 2 minutes 
   link, so the serial step runs against the real connect line. lumen-sim gets `G92 B0` first: Marlin's boot
   position is the power-cycle signature, which is never homed. OpenPnP started by the test as a person would gets
   its OpenPnP.log dated back an hour (the quiet period).
-- **test_1:** poll and deploy; OpenPnP started; `run` (poll and deploy of the newer build over the running
-  OpenPnP); rollback. Checked: exit codes, links, deployed.json, bad.json, the `server.version` each health
+- **test_1:** poll and deploy; OpenPnP started; `run` (exit 3 within the quiet period after the deploy by hand,
+  then, with `person.json` dated back, poll and deploy of the newer build over the running OpenPnP); `health` by
+  hand on that OpenPnP, whose link the STOP left open (`connection-keep-alive`): the serial step takes its
+  kept-open fallback; rollback. Checked: exit codes, links, deployed.json, bad.json, the `server.version` each health
   check saw, STATE.md's Deployed line and Holder, deploy.jsonl. In lumen-sim's I/O log: one G28 per health check,
   each answered before any M410, and the DISABLE_COMMAND lines after each home. After `run`, the real
-  `/api/status` has every key path il_deploy reads (`STATUS_FIELDS`, null allowed), and `machine.zCheck.homeAtMs`
-  is the health check's home, inside il_deploy's own window.
+  `/api/status` has every key path il_deploy reads (`STATUS_FIELDS`, null allowed; `setAtMs` in each place and
+  surface), the only paths it could not check are the five engine-task ones (`ENGINE_TASK_FIELDS`; the seeded
+  place, surface and needle anchor cover the rest), and `machine.zCheck.homeAtMs` is the health check's home,
+  inside il_deploy's own window.
 - **test_2:** lumen-sim power-cycled, a third build: `run` exits 5 after reading X/Y/Z 0, B 720. Nothing moves
   (no G0/G1/G28), the previous build runs again unchecked, the new build is not marked bad, and the hold is set
   until `resume`.

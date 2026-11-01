@@ -11,8 +11,10 @@ on:
     branches: [il/integration]
   workflow_dispatch:
 
+# Push and manual (workflow_dispatch) runs of one branch in separate groups: a newer run cancels a pending one of its
+# group, and only push runs release, so a manual re-check must never replace the head's pending push run.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

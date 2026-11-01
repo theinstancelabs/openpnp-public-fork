@@ -47,6 +47,24 @@ def e2e_gate_problems(text):
     return out
 
 
+def concurrency_group(text, ctx):
+    """The workflow's concurrency group for a run with these contexts ({'github.event_name': ..., 'github.ref': ...};
+    a missing one is ''). Knows the expressions ci.yml uses: context paths joined by ||."""
+    m = re.search(r"^concurrency:\n  group: (.+)$", text, re.M)
+    if not m:
+        raise ValueError("no concurrency group")
+
+    def expr(e):
+        for operand in e.group(1).split("||"):
+            path = operand.strip()
+            if not re.fullmatch(r"[a-z_]+(\.[a-z_]+)+", path):
+                raise ValueError("unknown expression " + path)
+            if ctx.get(path):
+                return str(ctx[path])
+        return ""
+    return re.sub(r"\$\{\{(.*?)\}\}", expr, m.group(1).strip())
+
+
 class CiWiring(unittest.TestCase):
     def test_the_gate_needs_the_deploy_e2e(self):
         with open(CI_YML) as f:
@@ -58,6 +76,22 @@ class CiWiring(unittest.TestCase):
         gate = re.search(r"^    needs: \[[^\]]*\]", jobs(text)["gate"], re.M).group(0)
         self.assertTrue(e2e_gate_problems(text.replace(gate, "    needs: [build, infra]")))
         self.assertTrue(e2e_gate_problems(text.replace("IL_DEPLOY_E2E: '1'", "IL_DEPLOY_E2E: '0'")))
+
+    def test_a_manual_run_cannot_cancel_the_heads_push_run(self):
+        """GitHub cancels a pending run of a group when a newer one queues. Only push runs release (check_provenance
+        wants event push): a workflow_dispatch on il/integration must not replace the head's pending push run."""
+        with open(CI_YML) as f:
+            text = f.read()
+        ref = "refs/heads/il/integration"
+        push = concurrency_group(text, {"github.event_name": "push", "github.ref": ref})
+        manual = concurrency_group(text, {"github.event_name": "workflow_dispatch", "github.ref": ref})
+        self.assertNotEqual(push, manual)
+        self.assertEqual(push, concurrency_group(text, {"github.event_name": "push", "github.ref": ref}))
+        pr = {"github.event_name": "pull_request", "github.ref": "refs/pull/7/merge",
+              "github.event.pull_request.number": 7}
+        self.assertNotIn(concurrency_group(text, pr), (push, manual))
+        self.assertNotEqual(concurrency_group(text, pr), concurrency_group(
+            text, dict(pr, **{"github.event.pull_request.number": 8, "github.ref": "refs/pull/8/merge"})))
 
 
 if __name__ == "__main__":

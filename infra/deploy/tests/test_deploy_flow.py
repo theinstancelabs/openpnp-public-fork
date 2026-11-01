@@ -1,14 +1,17 @@
 """Full deploy / rollback / run flows into a temp root, with a fake OpenPnP started by the subprocess
 service manager. Every exit path hands the Holder back: 'nobody (...)', or held while a person must check."""
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -84,7 +87,7 @@ class Flow(unittest.TestCase):
         return [r["violation"] for r in self.lab.requests() if "violation" in r]
 
     def backdate_resume(self, seconds):
-        """Move the last resume or health check by hand back in time (the quiet period after it is wall-clock)."""
+        """Move the last command by hand (resume, health, deploy, rollback) back in time (wall-clock quiet period)."""
         p = os.path.join(self.lab.root, "person.json")
         r = il_deploy.read_json(p)
         self.assertTrue(r, "no person.json")
@@ -572,7 +575,8 @@ class Flow(unittest.TestCase):
         its log has the work."""
         self.release(4, self.lab.b)
         self.deploy()
-        self.age_own_windows(600)  # that deploy was 10 min ago
+        self.age_own_windows(16 * 60)  # that deploy by hand was 16 min ago: the person who ran it has left
+        self.backdate_resume(16 * 60)
         self.lab.start_service()
         b = self.gh.add_release(5, self.lab.c)
         with open(os.path.join(self.lab.config, "log", "OpenPnP.log"), "a") as f:
@@ -1116,6 +1120,208 @@ class Flow(unittest.TestCase):
             json.dump(info, f)
         self.assertEqual(self.lab.main("deploy"), 2, self.lab.last_out)
         self.assertIn("jar", self.lab.last_out)
+        self.assertIsNone(self.lab.link("current"))
+
+
+    # --- review round 3 ----------------------------------------------------------------------------------------------
+    def test_run_waits_a_quiet_period_after_a_rollback_by_hand(self):
+        """A person rolls back by hand because a build misbehaved and stays to check the machine: the timer's next run
+        must not deploy (and home) a newer build under their hands. Everything the rollback made OpenPnP stamp or log
+        is in il_deploy's own window, so only person.json says someone is there."""
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.release(5, self.lab.c)
+        self.deploy()
+        self.assertEqual(self.lab.main("rollback"), 0, self.lab.last_out + self.lab.last_err)
+        d = self.gh.commit("d", self.lab.c)
+        self.gh.head = d
+        newer = self.release(6, d)
+        seen = len(self.lab.requests())
+        self.assertEqual(self.lab.main("run"), 3, self.lab.last_out)
+        self.assertIn("a person ran il_deploy.py rollback", self.lab.last_out)
+        self.assertEqual(self.home_requests(seen), [])
+        self.backdate_resume(16 * 60)
+        self.assertEqual(self.lab.main("run"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), newer)
+
+    def test_run_waits_a_quiet_period_after_a_deploy_by_hand(self):
+        a = self.release(4, self.lab.b)
+        self.deploy("--version", a)
+        b = self.release(5, self.lab.c)
+        seen = len(self.lab.requests())
+        self.assertEqual(self.lab.main("run"), 3, self.lab.last_out)
+        self.assertIn("a person ran il_deploy.py deploy", self.lab.last_out)
+        self.assertEqual(self.home_requests(seen), [])
+        self.backdate_resume(16 * 60)
+        self.assertEqual(self.lab.main("run"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), b)
+
+    def test_a_refused_deploy_by_hand_still_notes_the_person(self):
+        """Whatever a deploy by hand ends with, the person who ran it is at the machine."""
+        self.release(5, self.lab.c)
+        il_deploy.edit_state_file(self.lab.state_md,
+                                  lambda t: il_deploy.replace_entry(t, "Holder", "Process role, since 19:00"))
+        self.deploy(rc=3)
+        self.assertEqual(il_deploy.read_json(os.path.join(self.lab.root, "person.json"))["cmd"], "deploy")
+
+    def test_a_hold_set_over_a_hold_keeps_its_holder_for_resume(self):
+        """A deploy ends held with OpenPnP running (the previous build restarted unchecked after a reset controller),
+        then OpenPnP dies: the hold that exit sets keeps the first hold's Holder, so resume hands it back, and keeps
+        the first hold's reason."""
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.start_service()
+        self.lab.machine(fail=["reset"])
+        self.release(5, self.lab.c)
+        self.deploy(rc=5)
+        self.assert_held()
+        self.assertTrue(self.lab.service().is_active(), "the previous build runs again, unchecked")
+        self.lab.kill_service()
+        self.assertEqual(self.lab.main("run"), 5, self.lab.last_out)
+        self.assertIn("exited on its own", self.lab.last_out)
+        hold = il_deploy.read_json(os.path.join(self.lab.root, "hold.json"))
+        self.assertIn("exited on its own", hold["reason"])
+        self.assertIn("controller was reset", json.dumps(hold), "the first hold's reason is kept")
+        self.assertIn("a person must check the machine", hold.get("holder") or "", hold)
+        self.assertEqual(self.lab.main("run"), 3, self.lab.last_out)
+        self.assertIn("controller was reset", self.lab.last_out, "the not-idle reason names every hold")
+        self.lab.machine()
+        self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
+        self.assert_released_by("resume")
+        self.assertFalse(self.hold())
+
+    def test_a_home_that_timed_out_in_openpnp_is_not_stopped(self):
+        """GcodeDriver sends G28 with its 'infinity' timeout (60 s in the lab machine.xml). A longer home (a stalled
+        axis, a broken endstop) throws there: the task ends, machine.busy is false at once and the API answers 409,
+        while the controller is still in G28. A STOP then puts M410 inside G28, which kills the board: no STOP, OpenPnP
+        left alone, the hold set, the build not marked bad."""
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.machine(fail=["home-timeout"])
+        b = self.release(5, self.lab.c)
+        seen = len(self.lab.requests())
+        self.deploy(rc=5)
+        health = [r for r in self.lab.journal() if r["event"] == "health"][-1]
+        self.assertEqual(health["kind"], "home-stuck", health)
+        self.assertNotIn("stopped", health["report"], "no STOP while the controller may be homing")
+        self.assertEqual([r for r in self.lab.requests()[seen:] if r.get("path") == "/api/stop"], [])
+        self.assertEqual(self.violations(), [])
+        self.assertEqual(len(self.home_requests(seen)), 1, "no second home without a person")
+        self.assertTrue(self.lab.service().is_active(), "OpenPnP left alone")
+        self.assertNotIn(b, self.bad())
+        self.assert_held("timeout")
+        self.assertEqual(self.lab.link("current"), b)
+        self.assertIn(f"{b} installed but NOT verified", self.deployed_line())
+
+    def test_a_hangup_takes_the_sigterm_path(self):
+        """The terminal of a deploy by hand goes away mid-home (closed, SSH dropped, tmux pane killed): SIGHUP, and
+        every write to it fails from then on. The exit path still runs: it waits out the home, STOPs and leaves the
+        Holder held, as after a SIGTERM."""
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.machine(home_s=1.0)
+        self.release(5, self.lab.c)
+        seen = len(self.lab.requests())
+        crash = os.path.join(self.lab.dir, "child-traceback.txt")
+        master, slave = os.openpty()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        pid = os.fork()
+        if pid == 0:
+            rc = 99
+            try:
+                os.close(master)
+                os.dup2(slave, 1)
+                os.dup2(slave, 2)
+                sys.stdout, sys.stderr = os.fdopen(1, "w", buffering=1), os.fdopen(2, "w", buffering=1)
+                il_deploy.install_signal_handlers()
+                rc = il_deploy.main(self.lab.argv("deploy"), deps=self.lab.deps())
+            except BaseException:
+                import traceback
+                with open(crash, "w") as f:
+                    traceback.print_exc(file=f)
+            finally:
+                os._exit(rc if isinstance(rc, int) else 98)
+        os.close(slave)
+        try:
+            end = time.monotonic() + 30
+            while not self.home_requests(seen) and time.monotonic() < end:
+                with contextlib.suppress(OSError):
+                    if select.select([master], [], [], 0)[0]:
+                        os.read(master, 65536)
+                time.sleep(0.02)
+            self.assertTrue(self.home_requests(seen), "the deploy never reached the home")
+        finally:
+            os.close(master)  # the terminal is gone: the child's writes to it fail with EIO from now on
+            os.kill(pid, signal.SIGHUP)
+            _, status = os.waitpid(pid, 0)
+        self.assertFalse(os.path.exists(crash), open(crash).read() if os.path.exists(crash) else "")
+        self.assertTrue(os.WIFEXITED(status), f"ended by signal {os.WTERMSIG(status)}" if os.WIFSIGNALED(status)
+                        else status)
+        self.assertEqual(os.WEXITSTATUS(status), 1)
+        self.assertEqual(self.violations(), [], "never a STOP during a home")
+        self.assert_held("machine stopped through /api/stop")
+        self.assertFalse(os.path.exists(os.path.join(self.lab.root, "claim.json")))
+
+    def test_a_hangup_ignored_at_start_stays_ignored(self):
+        """nohup il_deploy.py ...: the person asked for the run to outlive the terminal."""
+        pid = os.fork()
+        if pid == 0:
+            ok = False
+            try:
+                signal.signal(signal.SIGHUP, signal.SIG_IGN)
+                il_deploy.install_signal_handlers()
+                ok = (signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+                      and signal.getsignal(signal.SIGTERM) is il_deploy._terminate
+                      and signal.getsignal(signal.SIGINT) is il_deploy._terminate)
+            finally:
+                os._exit(0 if ok else 1)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.WEXITSTATUS(status), 0)
+
+    def test_the_lock_taken_at_the_new_builds_start_is_the_machines(self):
+        """flock exits 75 when a bench tool holds the serial lock as the new build starts: someone is at the machine.
+        Even if the tool lets go a moment later, the previous build goes back unchecked (no enable, no home), the hold
+        is set, and the new build is not marked bad."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c)
+        held = []
+        real_start, real_restore = il_deploy.SubprocessService.start, il_deploy.Deployer.restore_and_switch
+
+        def start(svc):
+            if not held:  # the new build's start
+                f = open(self.lab.lock, "w")
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(f)
+            return real_start(svc)
+
+        def restore(d, *a, **kw):
+            held[0].close()  # the bench tool is done
+            return real_restore(d, *a, **kw)
+        seen = len(self.lab.requests())
+        with mock.patch.object(il_deploy.SubprocessService, "start", start), \
+                mock.patch.object(il_deploy.Deployer, "restore_and_switch", restore):
+            self.deploy(rc=5)
+        health = [r for r in self.lab.journal() if r["event"] == "health"][-1]
+        self.assertEqual(health["kind"], "machine", health)
+        self.assertEqual([r for r in self.lab.requests()[seen:] if r.get("path") in ("/api/machine/enable",
+                                                                                     "/api/machine/home")], [])
+        self.assertEqual(self.bad(), {})
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertIn("not checked", self.deployed_line())
+        self.assert_held()
+        self.assertNotEqual(a, b)
+
+    def test_a_staged_folder_naming_another_ci_run_is_refused(self):
+        tag = self.release(5, self.lab.c)
+        path = os.path.join(self.lab.root, "releases", tag, "BUILD-INFO.json")
+        info = il_deploy.read_json(path)
+        info["run_id"] = info["run_id"] + 1
+        with open(path, "w") as f:
+            json.dump(info, f)
+        self.assertEqual(self.lab.main("deploy"), 2, self.lab.last_out)
+        self.assertIn("run_id", self.lab.last_out)
         self.assertIsNone(self.lab.link("current"))
 
 

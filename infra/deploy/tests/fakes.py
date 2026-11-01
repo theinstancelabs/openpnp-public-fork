@@ -90,9 +90,10 @@ class FakeGitHub:
 
     def add_release(self, run_number, sha, branch=BRANCH, jar=None, corrupt_sha256=False, gate="success",
                     info_overrides=None, target=None, members=None, omit=(), author="github-actions[bot]", run=True,
-                    run_overrides=None):
+                    run_overrides=None, member_overrides=None):
         """A release as CI's release job publishes it (author github-actions[bot], its run a successful push of ci.yml);
-        author, run=False (no such run) and run_overrides make the other kinds."""
+        author, run=False (no such run) and run_overrides make the other kinds. members replaces the tarball's files,
+        member_overrides changes or adds some of them ({name: bytes})."""
         sha7 = sha[:7]
         tag = f"il-build-{run_number}-{sha7}"
         jar_bytes = json.dumps(jar if jar is not None else {"sha": sha}).encode()
@@ -107,6 +108,7 @@ class FakeGitHub:
             "openpnp-il/VERSION.txt": (tag + "\n").encode(),
             "openpnp-il/BUILD-INFO.json": info_bytes,
         }
+        files = {**files, **(member_overrides or {})}
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
             for name, data in files.items():

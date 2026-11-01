@@ -10,7 +10,8 @@ jar, which connects over its real serial stack (jSerialComm) to lumen-sim's pty.
   2. The fake GitHub of the unit tests (tests/fakes.py) serves them as `gh release create` publishes them, with
      green `gate` checks on il/integration.
   3. state/config comes from `il_deploy.py init --seed-from` a copy of infra/fixtures/lab-config (boards.xml empty)
-     and the lab-instancelabs engine config. machine.xml is tools/instancelabs/make_machine_patch.py's output,
+     and the lab-instancelabs engine config, with one place, one surface and a needle anchor set two hours before
+     (so /api/status shows their setAtMs keys). machine.xml is tools/instancelabs/make_machine_patch.py's output,
      rewritten for the simulator:
      - the GcodeDriver's port-name is the lumen-sim link (ttyLUMEN*);
      - usb-serial-number and usb-description are removed everywhere;
@@ -23,10 +24,13 @@ jar, which connects over its real serial stack (jSerialComm) to lumen-sim's pty.
      (flock + java + the unit's flags) under --service-manager subprocess, a temp STATE.md (Holder: nobody), and a
      temp lock, activity file and root. The device is the lumen-sim link. A pty has no USB identity, so --usb-sn ''
      and --serial-match names the link: the health check's serial step runs against the real connect line
-     (SerialPortCommunications.resolvePort, by port name), its kept-open fallback included.
+     (SerialPortCommunications.resolvePort, by port name).
   6. test_1: poll, deploy; OpenPnP started; run (poll + deploy of the newer build over the running OpenPnP);
-     rollback. test_2: lumen-sim power-cycled and a third build: the deploy must not home the reset controller
-     (exit 5, the previous build back unchecked, the hold set), then `resume`.
+     health by hand on that OpenPnP, whose link the STOP left open (connection-keep-alive): no new connect line, so
+     the serial step takes its kept-open fallback; rollback. Before each `run`, the person who ran a command by
+     hand is taken to have left (person.json dated back past the quiet period).
+     test_2: lumen-sim power-cycled and a third build: the deploy must not home the reset controller (exit 5, the
+     previous build back unchecked, the hold set), then `resume`.
 
 Checked: rc of each step, the current/previous links, deployed.json, bad.json, the server.version each health check
 saw, STATE.md's "Deployed on the machine" line and Holder, the deploy.jsonl records, and lumen-sim's I/O log. The
@@ -34,7 +38,9 @@ log must show one G28 per health check, each answered before any M410 (a STOP in
 make_machine_patch's DISABLE_COMMAND lines after each home; after the power cycle no G0/G1/G28 at all. lumen-sim
 must end with no model errors and not halted. And the real /api/status has every key path il_deploy reads
 (il_deploy.STATUS_FIELDS; a missing time is skipped there, so a backend rename would silently turn a check off), with
-the health check's home in machine.zCheck.homeAtMs, inside il_deploy's own window.
+the health check's home in machine.zCheck.homeAtMs, inside il_deploy's own window. The paths it could not check
+(il_deploy.unchecked_status_fields: behind a null, or in an empty map) must be exactly ENGINE_TASK_FIELDS, which only an
+engine run or a pad calibration fills in; this test drives neither (Backend's contract test covers them).
 
 Why the cameras are swapped. With no camera device, OpenPnP would start with the fixture's OpenPnpCaptureCameras:
 open() only logs "No camera found with ID ..." and returns (OpenPnpCaptureCamera.java:174), and the native library
@@ -110,6 +116,11 @@ CAPTURE_ELEMENTS = ("back-light-compensation", "brightness", "contrast", "exposu
                     "power-line-frequency", "saturation", "sharpness", "white-balance", "zoom")
 IMAGE_SOURCE = "classpath://samples/pnp-test/pnp-test.png"
 DISABLE_LINES = make_machine_patch.DISABLE_LINES  # the Stop sequence OpenPnP sends on every disable
+# Key paths il_deploy reads that /api/status has only after an engine run (RunTracker.snapshot, DispenseService.lastRun)
+# or a pad calibration (PadCalibrationJob.view): null here, so not checked by this test (Backend's contract test)
+ENGINE_TASK_FIELDS = ("run.finishedAtMs", "lastRun.endedAtMs", "padCalibration.endedAtMs", "run.running",
+                      "padCalibration.state")
+SEEDED_AGO_S = 2 * 3600  # the seeded place, surface and anchor: set long before the quiet period
 
 
 def why_skip():
@@ -199,7 +210,20 @@ def make_seed_config(dest, link):
     rewrite_for_simulator(tree.getroot(), link)
     tree.write(machine, encoding="UTF-8", xml_declaration=True)
     os.makedirs(os.path.join(dest, "instancelabs"))
-    shutil.copy2(ENGINE_CONFIG, os.path.join(dest, "instancelabs", "dispense-config.json"))
+    with open(ENGINE_CONFIG) as f:
+        engine = json.load(f)
+    # one of each named or nullable entry il_deploy reads a time from (DispenseConfig: NamedLocation, SurfaceMap,
+    # NeedleAnchor), so the real /api/status shows their keys; set long ago, they are no one's recent work
+    at = int((time.time() - SEEDED_AGO_S) * 1000)
+    engine["locations"] = dict(engine.get("locations") or {}, e2e_place={"x": 100.0, "y": 100.0, "z": -5.0,
+                                                                         "setAtMs": at, "homeAtMs": None})
+    engine["surfaces"] = dict(engine.get("surfaces") or {}, e2e_surface={
+        "points": [{"x": 100.0, "y": 100.0, "z": -10.0}, {"x": 140.0, "y": 100.0, "z": -10.0},
+                   {"x": 100.0, "y": 140.0, "z": -10.0}], "setAtMs": at, "homeAtMs": None, "note": "deploy e2e",
+        "simulated": True})
+    engine["needleAnchor"] = {"surfaceZMm": -10.0, "needleContactZMm": -12.5, "xMm": 100.0, "yMm": 100.0, "setAtMs": at}
+    with open(os.path.join(dest, "instancelabs", "dispense-config.json"), "w") as f:
+        json.dump(engine, f, indent=1)
 
 
 def jar_build_sha7(jar):
@@ -538,14 +562,29 @@ class DeployRealOpenPnP(unittest.TestCase):
         os.utime(log, (old, old))
 
     def assert_status_fields(self):
-        """Every key path il_deploy reads in the real /api/status is there (null is fine), and the health check's home
-        is in machine.zCheck.homeAtMs, inside il_deploy's own window (what keeps it from counting as a person's)."""
+        """Every key path il_deploy reads in the real /api/status is there (null is fine), the only ones it could not
+        check are ENGINE_TASK_FIELDS, and the health check's home is in machine.zCheck.homeAtMs, inside il_deploy's own
+        window (what keeps it from counting as a person's)."""
         st = self.wait_api()
         self.assertEqual(il_deploy.status_field_problems(st), [], json.dumps(st)[:4000])
+        self.assertEqual(sorted(il_deploy.unchecked_status_fields(st)), sorted(ENGINE_TASK_FIELDS),
+                         "a key path il_deploy reads was not there to check: seed it (make_seed_config) or drive what "
+                         "sets it\n" + json.dumps(st.get("dispense"))[:3000])
+        seeded = [ms for what, ms in il_deploy.api_activity_times(st)
+                  if what in ("place 'e2e_place' set", "surface 'e2e_surface' probed", "a needle anchor set")]
+        self.assertEqual(len(seeded), 3, il_deploy.api_activity_times(st))
         homes = [ms for what, ms in il_deploy.api_activity_times(st) if what == "a home"]
         self.assertEqual(len(homes), 1, il_deploy.api_activity_times(st))
         since, until = il_deploy.read_json(os.path.join(self.root, "own-activity.json"))[-1]
         self.assertTrue(since * 1000 <= homes[0] <= until * 1000, (since, homes[0], until))
+
+    def person_left(self):
+        """The person who ran il_deploy by hand has left the machine: their note (person.json) is dated back past the
+        quiet period, so the timer's run may deploy."""
+        p = os.path.join(self.root, "person.json")
+        r = il_deploy.read_json(p)
+        self.assertTrue(r, "no person.json after a command by hand")
+        il_deploy.write_json(p, dict(r, ts=r["ts"] - 16 * 60))
 
     def assert_deployed(self, tag, sha, action, running):
         """After a passed deploy or rollback of tag: links, records, the version the health check saw, STATE.md."""
@@ -574,6 +613,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.main("init", "--seed-from", self.seed)
         cfg = os.path.join(self.root, "state", "config")
         self.assertEqual(config_problems(ET.parse(os.path.join(cfg, "machine.xml")).getroot(), self.sim.link), [])
+        self.assertFalse(il_deploy.config_is_real(cfg), "a lumen-sim config must not count as the real machine's")
 
         # the first green build: poll stages it, deploy installs it (OpenPnP was not running: it is stopped after)
         self.gh.add_release_dir(self.rel_a)
@@ -590,15 +630,31 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.age_openpnp_log()
         self.gh.head = self.sha_b
         self.gh.add_release_dir(self.rel_b)
-        out = self.main("run")
+        out = self.main("run", expect=3)  # within the quiet period after the deploy by hand
         self.assertIn("poll: staged " + self.tag_b, out)
-        self.assertIn("deployed %s (previous %s)" % (self.tag_b, self.tag_a), out)
+        self.assertIn("a person ran il_deploy.py deploy", out)
+        self.person_left()
+        self.assertIn("deployed %s (previous %s)" % (self.tag_b, self.tag_a), self.main("run"))
         self.assert_deployed(self.tag_b, self.sha_b, "deploy", running=True)
         self.assertEqual(self.link("previous"), self.tag_a)
         self.assertIn("; previous %s. Config state: %s." % (self.tag_a, cfg), self.state_text())
         stops = [r for r in self.journal() if r["event"] == "stop"]
         self.assertTrue(stops and stops[-1]["ok"] and stops[-1]["detail"] == il_deploy.STOP_DONE, stops)
         self.assert_status_fields()  # build B runs on after its health check
+
+        # a health check by hand on that OpenPnP: its link stayed open after the STOP (connection-keep-alive), so the
+        # enable logs no connect line and the serial step finds this OpenPnP's last one
+        self.main("health")
+        rep = self.last_health()
+        self.assertTrue(rep["ok"], rep)
+        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "enable", "serial", "axes", "home",
+                                                                        "homed", "stop"])
+        serial = rep["report"]["steps"][2]["detail"]
+        self.assertIn("Serial port: connecting to %s by " % self.sim.link, serial)
+        self.assertIn("the link is kept open", serial)
+        self.assertTrue(self.service().is_active())
+        self.assertTrue(self.holder().value.startswith("nobody (released by Infra health check at "),
+                        self.holder().value)
 
         # one step back, with the pre-deploy config snapshot
         self.assertIn("rolled back from %s to %s" % (self.tag_b, self.tag_a), self.main("rollback"))
@@ -609,7 +665,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertIn("rolled back from %s by Infra (il_deploy.py rollback)" % self.tag_b, self.state_text())
 
         results = [(r["action"], r["rc"]) for r in self.journal() if r["event"] == "result"]
-        self.assertEqual(results, [("deploy", 0), ("deploy", 0), ("rollback", 0)])
+        self.assertEqual(results, [("deploy", 0), ("deploy", 0), ("health check", 0), ("rollback", 0)])
         self.assertEqual([r for r in self.journal() if r["event"] in ("hold", "exception", "bad")
                           and r.get("tag") != self.tag_b], [])
 
@@ -617,7 +673,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         io_rows = self.sim.io(self.io_start)
         lines = sent(io_rows)
         homes = [i for i, line in lines if line == "G28"]
-        self.assertEqual(len(homes), 3, [line for _, line in lines])
+        self.assertEqual(len(homes), 4, [line for _, line in lines])
         for k, g in enumerate(homes):
             ok = next((j for j in range(g + 1, len(io_rows)) if io_rows[j][1] == "<" and io_rows[j][2] == "ok"), None)
             self.assertIsNotNone(ok, "G28 #%d never answered" % (k + 1))
@@ -643,6 +699,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         sha_c = self.gh.commit("e2e-c", self.sha_b, sha=self.sha7 + hashlib.sha1(b"e2e-c").hexdigest()[:33])
         self.gh.head = sha_c
         tag_c = self.gh.add_release_dir(self._make_release(43, sha_c))
+        self.person_left()  # test_1's rollback by hand
         out = self.main("run", expect=5)
         self.assertIn("poll: staged " + tag_c, out)
         self.assertIn("controller was reset", out)

@@ -33,8 +33,10 @@ Behaviour comes from two places:
   300 as MachineEndpoints' f.get(5, MINUTES)), "keep_alive" (default true, the lab machine.xml's
   connection-keep-alive: a STOP leaves the link open, so only the first enable logs the connect line)}.
 Failures (either list): version (wrong sha7 in server.version), crash (exit 1 at start), enable,
-reset (axes X/Y/Z 0 and B 720 after enable), no-sn (no serial log line), home, stop (machine stays
-enabled), busy, run (an engine run until a STOP ends it), pressure (the pressure held until a STOP vents it),
+reset (axes X/Y/Z 0 and B 720 after enable), no-sn (no serial log line), home, home-timeout (OpenPnP's G28 timed out:
+GcodeDriver sends it with its "infinity" timeout, 60 s in the lab machine.xml; the home's task ends and the API answers
+409 while the controller stays in G28 "g28_more_s" more, default 3), stop (machine stays enabled), busy, run (an
+engine run until a STOP ends it), pressure (the pressure held until a STOP vents it),
 vent-fail (a STOP cannot vent it: pressure.state 'vent_failed'), engine (the dispense engine did not start),
 unavailable (engine without its nozzle), machine-500 (GET /api/status and /api/machine answer 500), home-404 (no
 home endpoint).
@@ -42,7 +44,8 @@ As in the real API (PressureHold.java:77-78), pressure.lastEvent is "pressure of
 start until a real pressure event. A home sets machine.zCheck.homeAtMs (HomeTracker). Each start begins a new
 OpenPnP.log (the old one becomes OpenPnP.0.log), as tinylog's RollingFileWriter with its StartupPolicy.
 
-Every request is appended to --requests (default <config>/fake-requests.jsonl). A STOP while homing is recorded as
+Every request is appended to --requests (default <config>/fake-requests.jsonl). A STOP while homing (also while the
+controller is still in a G28 that OpenPnP timed out on) is recorded as
 {"violation": "stop-during-home"}; SIGTERM while the machine is enabled as
 {"violation": "sigterm-while-enabled"}.
 """
@@ -78,6 +81,7 @@ class FakeOpenPnP:
         self.homed = False
         self.homing = False
         self.home_at_ms = None
+        self.g28_until = 0.0  # the controller is in G28 until then (after OpenPnP timed out on it: "home-timeout")
         self.axes = {"X": 0.0, "Y": 0.0, "Z": 0.0, "B": 0.0}
         self.server = None
         self.connected = False  # the controller link (GcodeDriver.connected)
@@ -252,7 +256,12 @@ class FakeOpenPnP:
             time.sleep(float(self.machine.get("home_s", 0.05)))
             with self.lock:
                 self.homing = False
-                if "home" in self.fail:
+                if "home-timeout" in self.fail:
+                    # GcodeDriver.sendCommand: "<driver>:<port> timeout waiting for response to <command>"
+                    self.g28_until = time.time() + float(self.machine.get("g28_more_s", 3.0))
+                    result["error"] = ("homing failed: GcodeDriver:ttyACM0 timeout waiting for response to G28 ; "
+                                       "Home all axes")
+                elif "home" in self.fail:
                     result["error"] = "homing failed: fake endstop not reached"
                 else:
                     self.homed = True
@@ -272,7 +281,7 @@ class FakeOpenPnP:
 
     def stop(self):
         with self.lock:
-            if self.homing or (self.run_active and self.run_phase().startswith("home")):
+            if self.homing or time.time() < self.g28_until or (self.run_active and self.run_phase().startswith("home")):
                 self.record({"violation": "stop-during-home"})
             # MachineEndpoints.stop: PressureHold.emergencyStop (valve off, then pump off) at once; the engine's abort
             # sends its STOP_SEQUENCE before its next line, after the move in progress

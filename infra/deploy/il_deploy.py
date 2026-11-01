@@ -102,6 +102,10 @@ JAVA_OPENS = ["--add-opens=java.base/java.lang=ALL-UNNAMED", "--add-opens=java.d
 PAD_CAL_DONE = ("done", "stopped", "cancelled", "failed")
 # MachineEndpoints.home's 409 after its own f.get(5, MINUTES): the home may still run (or OpenPnP dropped it)
 HOME_GAVE_UP = "the home did not start or did not end within"
+# A home that failed on a timeout of OpenPnP's own (GcodeDriver.sendCommand: "<driver>:<port> timeout waiting for
+# response to G28 ..."; G28 goes out with infinity-timeout-milliseconds, 60 s in the lab machine.xml): the controller
+# may still be in G28, where a STOP's M410 kills the board
+HOME_TIMED_OUT = re.compile(r"\btime[ds]?[ -]?out\b", re.I)
 
 
 class Refused(Exception):
@@ -584,8 +588,32 @@ def _at(st, path):
 
 
 def status_field_problems(st):
-    """The key paths of STATUS_FIELDS that /api/status lacks (null is fine), in that order."""
-    return [p.replace("?", "") for p in STATUS_FIELDS if not _at(st, p)[0]]
+    """The key paths of STATUS_FIELDS that /api/status lacks (null is fine), in that order, then each place and surface
+    without its setAtMs."""
+    out = [p.replace("?", "") for p in STATUS_FIELDS if not _at(st, p)[0]]
+    for _, path in NAMED_ACTIVITY_FIELDS:
+        out += [f"{path}.{n}.setAtMs" for n, v in _named(_at(st, path)[1]) if "setAtMs" not in v]
+    return out
+
+
+def _behind_null(st, path):
+    """True if a 'key?' before the path's last key is null in st: the keys after it were not there to check."""
+    v = st
+    for key in path.split(".")[:-1]:
+        if not isinstance(v, dict):
+            return False
+        v = v.get(key.rstrip("?"))
+        if v is None and key.endswith("?"):
+            return True
+    return False
+
+
+def unchecked_status_fields(st):
+    """The key paths status_field_problems could not check in this /api/status: those behind a null 'key?' (no run, no
+    pad calibration, no anchor) and the setAtMs of places and surfaces when there are none. A check against the real
+    build must make each of them visible: a path that is never there to check is one a rename turns off silently."""
+    out = [p.replace("?", "") for p in STATUS_FIELDS if _behind_null(st, p)]
+    return out + [f"{path}.*.setAtMs" for _, path in NAMED_ACTIVITY_FIELDS if not _named(_at(st, path)[1])]
 
 
 def api_activity_times(st):
@@ -666,16 +694,37 @@ def openpnp_config_dir(cmd, cwd, home):
     return os.path.join(home, ".openpnp2")
 
 
+LUMEN_SIM_LINK = "ttyLUMEN"  # the names of lumen-sim's pty links (uinav --controller pty, the deploy e2e)
+PTS_RE = re.compile(r"^/dev/pts/\d+$")
+USB_IDENTITY = ("usb-serial-number", "usb-description")
+
+
+def lumen_sim_port(port):
+    """True if a serial port-name can open only lumen-sim's pty (uinav's pty_port_problems): an absolute ttyLUMEN* link
+    to a /dev/pts/N that exists, and neither /dev/<name> nor /dev/<port> exists (jSerialComm opens those while the link
+    is missing). Nothing is opened."""
+    if not port or not os.path.isabs(port) or not os.path.basename(port).startswith(LUMEN_SIM_LINK):
+        return False
+    real = os.path.realpath(port)
+    if not PTS_RE.match(real) or not os.path.exists(real):
+        return False
+    return not any(os.path.lexists(d) for d in ("/dev/" + os.path.basename(port), "/dev/" + port))
+
+
 def config_is_real(config_dir):
-    """True unless machine.xml provably drives no serial port (fail closed: unreadable = real)."""
+    """True unless machine.xml provably cannot reach the controller (fail closed: unreadable = real). A driver on serial
+    counts as real unless its port is lumen-sim's pty (lumen_sim_port) and no USB identity is left in the file (the port
+    matcher would look for the board by it)."""
     try:
         root = ET.parse(os.path.join(config_dir, "machine.xml")).getroot()
     except (OSError, ET.ParseError):
         return True
+    usb = any(a in el.attrib for el in root.iter() for a in USB_IDENTITY)
     for drv in root.iter("driver"):
-        comm = drv.get("communications")
-        if comm == "serial" or (comm is None and drv.find("serial") is not None):
-            return True
+        comm, serial = drv.get("communications"), drv.find("serial")
+        if comm == "serial" or (comm is None and serial is not None):
+            if usb or serial is None or not lumen_sim_port(serial.get("port-name")):
+                return True
     return False
 
 
@@ -1214,9 +1263,23 @@ class Deployer:
         return read_json(self.hold_path)
 
     def set_hold(self, reason):
-        write_json(self.hold_path, {"reason": reason, "at": self.iso()})
+        """Set the hold, or add reason to the one that is set: its Holder and previous value (what resume hands back)
+        stay, and so do its earlier reasons."""
+        hold = self.read_hold()
+        hold = hold if isinstance(hold, dict) else {}
+        if hold.get("reason") and hold["reason"] != reason:
+            hold["earlier"] = (hold.get("earlier") or []) + [{"reason": hold["reason"], "at": hold.get("at")}]
+        write_json(self.hold_path, dict(hold, reason=reason, at=self.iso()))
         self.record("hold", reason=reason)
         self.held = True
+
+    @staticmethod
+    def hold_reasons(hold):
+        """(since, text): when the hold was first set, and its reasons, the latest first."""
+        earlier = [e for e in hold.get("earlier") or [] if isinstance(e, dict)]
+        text = "; ".join([str(hold.get("reason"))] + [f"before that, at {e.get('at')}: {e.get('reason')}"
+                                                      for e in reversed(earlier)])
+        return (earlier[0].get("at") if earlier else hold.get("at")), text
 
     def read_deployed(self):
         return read_json(self.deployed_path)
@@ -1295,8 +1358,9 @@ class Deployer:
         if scope == "deploy":
             hold = self.read_hold()
             if hold:
-                reasons.append(f"deploys are on hold since {hold.get('at')}: {hold.get('reason')} (after a person "
-                               "has checked the machine: il_deploy.py resume)")
+                since, why = self.hold_reasons(hold if isinstance(hold, dict) else {})
+                reasons.append(f"deploys are on hold since {since}: {why} (after a person has checked the machine: "
+                               "il_deploy.py resume)")
             ours = self.svc.pids()
             reasons += self._lock_reasons(ours) + self._device_reasons(ours)
             for pid, d, real in self.procs.openpnp_processes():
@@ -1964,6 +2028,12 @@ class Deployer:
                 return fail("home", f"the home did not end ({answer}; still busy {cfg.home_busy_wait:g} s later): "
                                     "OpenPnP left alone, a person must check the machine", "home-stuck", stop=False)
             if not late:
+                if code != 404 and HOME_TIMED_OUT.search(str(body.get("reason", ""))):
+                    # OpenPnP gave up on G28 (its task ended, so busy is false) while the controller may still be in
+                    # it: no STOP (its M410 inside G28 kills the board), as for a home that does not end
+                    return fail("home", f"OpenPnP timed out on the home ({answer}): the controller may still be "
+                                        "homing; no STOP sent, OpenPnP left alone, a person must check the machine",
+                                "home-stuck", stop=False)
                 # A home that ran and failed (fiducial covered, endstop, obstruction) or was refused (something else
                 # holds the machine: the pressure, an engine task, OpenPnP busy) is the machine's: no second home
                 # unwatched. Only a missing endpoint is plainly the build's.
@@ -2217,6 +2287,15 @@ class Deployer:
         self.check_provenance(rel, remote, tag)
 
     def deploy(self, version=None, auto=False):
+        """The timer's deploy (auto, from run) or one by hand. By hand, whatever its result, a person is at the
+        machine: the timer's next deploy waits the quiet period after it."""
+        try:
+            return self._deploy_command(version, auto)
+        finally:
+            if not auto:
+                self.note_person("deploy")
+
+    def _deploy_command(self, version, auto):
         cur = self.current_tag()
         rec = (self.read_deployed() or {}).get("current") or {}
         if rec.get("pending") and rec.get("tag") == cur:
@@ -2393,6 +2472,14 @@ class Deployer:
         return 5, note
 
     def rollback(self, discard=False):
+        """Always by hand: whatever its result, a person is at the machine (they may stay to check the build it went
+        back to), so the timer's next deploy waits the quiet period after it."""
+        try:
+            return self._rollback_command(discard)
+        finally:
+            self.note_person("rollback")
+
+    def _rollback_command(self, discard):
         cur, prev, dep = self.current_tag(), self.previous_tag(), self.read_deployed() or {}
         rec = dep.get("current") or {}
         if not prev or rec.get("tag") != cur:
@@ -2699,20 +2786,22 @@ class Deployer:
         os.unlink(self.hold_path)
         self.note_person("resume")
         self.record("resume", hold=hold)
-        self.say(f"hold cleared (was: {hold.get('reason')}); the timer deploys again after {self.cfg.quiet_min:g} "
-                 "quiet minutes")
+        self.say(f"hold cleared (was: {self.hold_reasons(hold)[1]}); the timer deploys again after "
+                 f"{self.cfg.quiet_min:g} quiet minutes")
         return 0
 
     def note_person(self, cmd):
-        """A person at the machine ran resume or health by hand: the timer's next deploy (and its home) waits the
-        quiet period, so the head does not move by itself while they may still be at it."""
+        """A person at the machine ran resume, health, deploy or rollback by hand: the timer's next deploy (and its
+        home) waits the quiet period, so the head does not move by itself while they may still be at it. What those
+        commands made OpenPnP stamp or log is in il_deploy's own windows: this is what says someone is there."""
         try:
             write_json(self.person_path, {"ts": self.clock.now(), "at": self.iso(), "cmd": cmd})
         except OSError as e:
             self.record("person-not-noted", cmd=cmd, error=str(e))
 
     def _person_reasons(self):
-        """The quiet period after resume or health by hand (the timer's run only: a deploy by hand has its person)."""
+        """The quiet period after a command by hand (note_person; the timer's run only: a deploy by hand has its
+        person)."""
         r = read_json(self.person_path, {})
         ts = _ms(r.get("ts")) if isinstance(r, dict) else None
         if ts is None:
@@ -3027,8 +3116,8 @@ def _terminate(signum, frame):
 
 
 def _defer_term(on):
-    """While on, SIGTERM waits (a Holder claim or release must not be cut in half); turning it off raises a SIGTERM
-    that came meanwhile."""
+    """While on, SIGTERM (SIGINT, SIGHUP) waits (a Holder claim or release must not be cut in half); turning it off
+    raises one that came meanwhile."""
     _TERM["defer"] = on
     if not on and _TERM["pending"] is not None:
         signum, _TERM["pending"] = _TERM["pending"], None
@@ -3037,8 +3126,8 @@ def _defer_term(on):
 
 @contextlib.contextmanager
 def signals_deferred():
-    """SIGTERM and SIGINT wait while the block runs (a step that must not be cut in half); then one that came meanwhile
-    is raised, unless the block raised or an outer block defers too."""
+    """SIGTERM, SIGINT and SIGHUP wait while the block runs (a step that must not be cut in half); then one that came
+    meanwhile is raised, unless the block raised or an outer block defers too."""
     was = _TERM["defer"]
     _TERM["defer"] = True
     try:
@@ -3051,7 +3140,33 @@ def signals_deferred():
         _defer_term(False)
 
 
-if __name__ == "__main__":
+def _detach_terminal(fds=(1, 2)):
+    """Point the output fds that are terminals (character devices) at /dev/null: after a hangup every write to the
+    terminal fails (EIO), and the exit path prints. Files and pipes stay as they are."""
+    null = os.open(os.devnull, os.O_WRONLY)
+    try:
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                if stat.S_ISCHR(os.fstat(fd).st_mode):
+                    os.dup2(null, fd)
+    finally:
+        os.close(null)
+
+
+def _hangup(signum, frame):
+    """SIGHUP: the terminal of a command by hand went away (closed, SSH dropped, tmux pane killed). Its output goes to
+    /dev/null from now on, then the SIGTERM path: wait out a home, STOP, hand the Holder back."""
+    _detach_terminal()
+    _terminate(signum, frame)
+
+
+def install_signal_handlers():
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, _terminate)  # Ctrl-C at a deploy or rollback by hand: the same exit path, deferrable
+    if signal.getsignal(signal.SIGHUP) is not signal.SIG_IGN:  # nohup: the person asked it to outlive the terminal
+        signal.signal(signal.SIGHUP, _hangup)
+
+
+if __name__ == "__main__":
+    install_signal_handlers()
     sys.exit(main())
