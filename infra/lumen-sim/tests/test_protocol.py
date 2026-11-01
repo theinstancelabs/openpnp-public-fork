@@ -1,34 +1,13 @@
 """Line handling, parsing and per-command replies (fake clock)."""
-import contextlib
 import re
-import signal
 import unittest
 
 from lumen_sim.bench import Bench
+from tests.hang import within
 
 # OpenPnP POSITION_REPORT_REGEX from the real machine.xml (Java named groups -> Python)
 POSITION_RE = re.compile(r"^.*X:(?P<X>-?\d+\.\d+)\s*Y:(?P<Y>-?\d+\.\d+)\s*Z:(?P<Z>-?\d+\.\d+)\s*"
                          r"A:(?P<A>-?\d+\.\d+)\s*B:(?P<B>-?\d+\.\d+).*")
-
-
-class Hung(BaseException):
-    """Not an Exception: the firmware's model-error handlers must not swallow it."""
-
-
-@contextlib.contextmanager
-def within(test, seconds):
-    """Fail instead of hanging (and filling memory) when a bug makes the simulator loop for ever (SIGALRM)."""
-    def expired(signum, frame):
-        raise Hung()
-    old = signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    try:
-        yield
-    except Hung:
-        test.fail("the simulator was still looping after %s s of wall clock" % seconds)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
 
 
 BOOT_M114 = "X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197"
@@ -177,6 +156,18 @@ class Peripherals(unittest.TestCase):
 
 
 class Keepalive(unittest.TestCase):
+
+    def test_fan_history_keeps_the_last_1000(self):
+        """The state reply must not grow without limit (a slow control client would block on it)."""
+        b = Bench()
+        for i in range(1500):
+            b.send("M106 P2 S%d" % (i % 256))
+        hist = b.sim.state(b.t)["fan_history"]
+        self.assertEqual(len(hist), 1000)
+        self.assertEqual(hist[-1]["s"], 1499 % 256)
+        self.assertEqual(hist[0]["s"], 500 % 256)
+        b.sim.power_cycle(b.t)
+        self.assertEqual(b.sim.state(b.t)["fan_history"], [])
     def test_busy_every_two_seconds_while_blocking(self):
         r = Bench().send("G4 P7000")
         self.assertEqual([round(t, 3) for t in r.busy], [2.0, 4.0, 6.0])

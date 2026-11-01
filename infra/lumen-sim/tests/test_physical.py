@@ -3,10 +3,13 @@
 Home offset, lost steps, a Z shift of the whole frame, Z release with a drop, and the M18/M84 S idle timeout. The
 controller never sees these: M114 keeps its belief; the control state's `head` shows physical, logical and offset.
 """
+import random
 import re
 import unittest
 
 from lumen_sim.bench import Bench
+from lumen_sim.core import Simulator
+from tests.hang import within
 
 HOME_REPORT = "X:0.00 Y:0.00 Z:31.50 A:720.00 B:720.00 Count X:0 Y:0 Z:1260 A:3197 B:3197"
 ZERO = {"X": 0.0, "Y": 0.0, "Z": 0.0}
@@ -285,6 +288,14 @@ class ZRelease(unittest.TestCase):
         self.assertFalse(state(b)["enabled"]["Z"])
         self.assertEqual(head(b)["offset"], ZERO)
 
+
+    def test_clear_ends_the_drop(self):
+        b = homed(z_drop={"z": -0.4})
+        clear(b)
+        self.assertEqual(state(b)["z_drop"], 0.0)
+        b.send("M18 Z")
+        self.assertFalse(state(b)["enabled"]["Z"])
+        self.assertEqual(head(b)["offset"], ZERO)
     def test_m18_z_releases_z_and_the_head_drops(self):
         b = homed()
         self.assertTrue(state(b)["enabled"]["Z"])
@@ -489,12 +500,94 @@ class IdleTimeout(unittest.TestCase):
         b.sim.power_cycle(b.t)
         self.assertEqual(state(b)["stepper_timeout_s"], 3600.0)
 
+    # The idle deadline is previous_move + T/1000; at many non-round times (p + T/1000 - p) * 1000 < T in floating
+    # point. A wake at the deadline must still see the timeout run out, or the firmware loops at that instant for
+    # ever and the process ignores SIGTERM (review round 2).
+    def test_m84_s1_at_a_non_round_time_releases_a_second_later(self):
+        b = Bench()
+        b.send("M17")
+        b.run_until(3.1011751469749993)
+        b.send("M84 S1")
+        with within(self, 5):
+            b.run(5.0)
+        self.assertEqual(state(b)["enabled"], self.ALL_OFF)
+        self.assertFalse(state(b)["halted"])
+
+    def test_m18_s0_339_releases_at_0_839(self):
+        b = Bench()
+        b.send("M17")
+        b.run_until(0.5)
+        b.send("M18 S0.339")
+        with within(self, 5):
+            b.run_until(0.8389)
+            self.assertEqual(state(b)["enabled"], self.ALL_ON)
+            b.run_until(1.0)
+        self.assertEqual(state(b)["enabled"], self.ALL_OFF)
+
+    def test_the_default_hour_after_a_move_that_ends_late(self):
+        b = Bench()
+        b.run_until(777.7)
+        b.send("G1 X10 F6000")
+        b.send("M400")
+        t_end = b.t
+        with within(self, 5):
+            b.run_until(t_end + 3599.9)
+            self.assertTrue(state(b)["enabled"]["X"])
+            b.run_until(t_end + 3700.0)
+        self.assertEqual(state(b)["enabled"], self.ALL_OFF)
+
+    def test_the_release_lands_on_its_deadline_at_any_time(self):
+        """The timer starts at power-on: boot at many times (the bad ones are ~5-19 % past 500 s) and wait."""
+        rng = random.Random(2026)
+        times = [7887.233511355132] + [rng.uniform(500.0, 50000.0) for _ in range(300)]
+        with within(self, 30):
+            for t0 in times:
+                sim = Simulator(t0=t0)
+                sim.receive(b"M17\n", t0)
+                sim.run_until(t0 + 3599.999)
+                self.assertTrue(sim.fw.enabled["Z"], t0)
+                sim.run_until(t0 + 3600.001)
+                self.assertEqual(sim.fw.enabled, self.ALL_OFF, t0)
+                self.assertFalse(sim.fw.halted, (t0, sim.fw.halt_reason))
+
     def test_fractional_and_negative_seconds(self):
         b = Bench()
         b.send("M18 S0.25")
         self.assertEqual(state(b)["stepper_timeout_s"], 0.25)
         b.send("M18 S-5")  # float to unsigned on the STM32 saturates at 0: never
         self.assertEqual(state(b)["stepper_timeout_s"], 0.0)
+
+
+class NoProgress(unittest.TestCase):
+    """A model bug that leaves a wait due 'now' for ever must not spin the process (it would ignore SIGTERM and burn a
+    core): the board halts with a sim error instead, and the process stays up."""
+
+    def stuck(self):
+        b = Bench()
+        fw = b.sim.fw
+        fw._idle_timeout_change = lambda: fw.now  # due now, and nothing ever acts on it
+        return b
+
+    def test_idle_with_an_empty_ring(self):
+        b = self.stuck()
+        with within(self, 5):
+            r = b.send("M400")
+            b.run(1.0)
+        self.assertEqual(r.lines, ["ok"])
+        st = state(b)
+        self.assertTrue(st["halted"])
+        self.assertRegex(st["halt_reason"], r"^sim error: RuntimeError: no progress")
+        self.assertEqual(len(st["sim_errors"]), 1)
+
+    def test_inside_a_command_s_wait(self):
+        b = self.stuck()
+        with within(self, 5):
+            r = b.send("G4 P1000")
+            b.run(1.0)
+        self.assertEqual(r.lines, ["ok"])  # the line is acked as a model error, then the idle loop halts
+        st = state(b)
+        self.assertTrue(st["halted"])
+        self.assertEqual([e["line"] for e in st["sim_errors"]], ["G4 P1000", None])
 
 
 class NozzleTouch(unittest.TestCase):
@@ -553,6 +646,66 @@ class NozzleTouch(unittest.TestCase):
         self.assertTrue(b.sim.control({"cmd": "set", "surface_z": None}, b.t)["ok"])
         b.send("G28")
         self.assertIsNone(touch(b))
+
+    BLANK = {"x0": 150.0, "y0": 100.0, "x1": 250.0, "y1": 200.0}
+
+    def at(self, b, x, y):
+        b.send("G1 X%g Y%g F6000" % (x, y))
+        b.send("M400")
+
+    def test_a_surface_region_moves_alone(self):
+        """BR-10 'surface-moved': the blank is 0.3 mm higher, the fixed reference is not; only touches over the blank
+        read the change."""
+        b = self.surfaced()
+        reply = b.sim.control({"cmd": "set", "surfaces": [dict(self.BLANK, z=self.SURFACE + 0.3)]}, b.t)
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(state(b)["surfaces"], [dict(self.BLANK, z=self.SURFACE + 0.3)])
+        self.at(b, 50, 50)
+        self.assertEqual(touch(b), self.SURFACE)  # the fixed reference: surface_z
+        self.at(b, 200, 150)
+        self.assertEqual(touch(b), round(self.SURFACE + 0.3, 4))
+        self.at(b, 250, 200)  # edges belong to the region
+        self.assertEqual(touch(b), round(self.SURFACE + 0.3, 4))
+
+    def test_regions_follow_a_z_shift_and_the_first_listed_wins(self):
+        b = self.surfaced()
+        regions = [dict(self.BLANK, z=5.6), {"x0": 0, "y0": 0, "x1": 400, "y1": 400, "z": 4.8}]
+        self.assertTrue(b.sim.control({"cmd": "set", "surfaces": regions}, b.t)["ok"])
+        self.at(b, 200, 150)
+        self.assertEqual(touch(b), 5.6)
+        self.at(b, 50, 50)
+        self.assertEqual(touch(b), 4.8)
+        fault(b, fault="z_shift", z=0.1)  # 'z-moved': every reference reads it
+        b.send("G28")
+        self.at(b, 200, 150)
+        self.assertEqual(touch(b), 5.5)
+        self.at(b, 50, 50)
+        self.assertEqual(touch(b), 4.7)
+
+    def test_regions_alone_leave_open_air_elsewhere_and_can_be_removed(self):
+        b = homed()
+        self.assertTrue(b.sim.control({"cmd": "set", "surfaces": [dict(self.BLANK, z=5.3)]}, b.t)["ok"])
+        self.at(b, 50, 50)
+        self.assertIsNone(touch(b))
+        self.at(b, 200, 150)
+        self.assertEqual(touch(b), 5.3)
+        b.sim.power_cycle(b.t)  # the machine's: kept
+        self.assertEqual(len(state(b)["surfaces"]), 1)
+        self.assertTrue(b.sim.control({"cmd": "set", "surfaces": None}, b.t)["ok"])
+        self.assertEqual(state(b)["surfaces"], [])
+        b.send("G28")
+        self.at(b, 200, 150)
+        self.assertIsNone(touch(b))
+
+    def test_bad_regions_are_refused(self):
+        good = dict(self.BLANK, z=5.3)
+        for surfaces in ({"x0": 0}, [good, "x"], [dict(good, z="5")], [dict(good, z=float("nan"))],
+                         [dict(good, x0=300.0)], [dict(good, y1=50.0)], [{k: v for k, v in good.items() if k != "z"}],
+                         [dict(good, Z=5.0)], [dict(good, x0=True)]):
+            b = Bench()
+            reply = b.sim.control({"cmd": "set", "surfaces": surfaces}, b.t)
+            self.assertFalse(reply["ok"], surfaces)
+            self.assertEqual(state(b)["surfaces"], [], surfaces)
 
     def test_bad_values_are_refused(self):
         for req in ({"surface_z": "5.3"}, {"surface_z": float("nan")}, {"surface_z": True},

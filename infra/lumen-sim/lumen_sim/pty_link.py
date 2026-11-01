@@ -17,9 +17,15 @@ a link named like a device (ttyACM0) would open the real board whenever the link
 
 One lumen-sim per link path: each holds an flock on <link>.lock while it runs (the file stays; a killed process lets
 go of the lock), so a second one on the same path is refused instead of silently taking over the first one's host.
+
+A killed lumen-sim (SIGKILL: a stop that escalated, the OOM killer) cannot remove its link. A /dev/pts/N is no proof of
+a simulator: on the lab computer Klipper's G-code input (klippy.serial) is a pty too, so a host reconnecting through a
+stale link could stream G-code into a real machine. LinkGuard is a helper process that removes the links when
+lumen-sim dies, however it dies.
 """
 import errno
 import fcntl
+import json
 import os
 import select
 import struct
@@ -60,10 +66,113 @@ def lock_link(path):
     return fd
 
 
+def remove_stale_link(link, pts):
+    """Remove the link a dead lumen-sim left, if it still points at that one's pty and no lumen-sim holds its lock (one
+    may have taken the path since, and the kernel may have given it the same pts number)."""
+    try:
+        lock = os.open(link + ".lock", os.O_RDWR | os.O_CLOEXEC)
+    except FileNotFoundError:
+        lock = None
+    except OSError:
+        return
+    try:
+        if lock is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # held while the link is removed: nobody publishes there
+        if os.path.islink(link) and os.readlink(link) == pts:
+            os.unlink(link)
+    except OSError:  # BlockingIOError: a live lumen-sim has the path
+        pass
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+
+class LinkGuard:
+    """A helper process, forked before lumen-sim opens anything, that removes its links when it dies, however it dies.
+
+    It runs in a session of its own (a kill of lumen-sim's process group misses it), holds none of lumen-sim's files
+    (not the pty master, not the lock), and reads a pipe on which lumen-sim announces each link it publishes and
+    removes. When the pipe ends (lumen-sim exited or was killed) it removes the links still announced with
+    remove_stale_link() and exits; after a clean stop there are none."""
+
+    def __init__(self):
+        r, w = os.pipe()  # not inherited by anything lumen-sim might start
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(w)
+                _guard(r)
+            finally:
+                os._exit(0)
+        os.close(r)
+        os.set_blocking(w, False)  # lumen-sim never waits on its guardian
+        self.pid, self.w = pid, w
+
+    def published(self, link, pts):
+        self._say(["+", link, pts])
+
+    def removed(self, link):
+        self._say(["-", link])
+
+    def _say(self, msg):
+        if self.w is None:
+            return
+        try:
+            os.write(self.w, (json.dumps(msg) + "\n").encode())  # one write below PIPE_BUF: never split
+        except OSError:  # the guardian is gone, or not reading: nothing lumen-sim can do about it
+            pass
+
+    def close(self):
+        """lumen-sim stops: the guardian exits (it has nothing left to remove)."""
+        if self.w is not None:
+            os.close(self.w)
+            self.w = None
+            try:
+                os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+
+
+def _guard(r):
+    """The guardian's whole life (in the forked child)."""
+    os.setsid()
+    os.chdir("/")
+    os.closerange(3, r)
+    os.closerange(r + 1, os.sysconf("SC_OPEN_MAX"))
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    os.close(null)
+    links, buf = {}, b""
+    while True:
+        try:
+            data = os.read(r, 65536)
+        except InterruptedError:
+            continue
+        except OSError:
+            break
+        if not data:
+            break
+        buf += data
+        *lines, buf = buf.split(b"\n")
+        for line in lines:
+            try:
+                op, link, *pts = json.loads(line)
+            except ValueError:
+                continue
+            if op == "+":
+                links[link] = pts[0]
+            else:
+                links.pop(link, None)
+    for link, pts in links.items():
+        remove_stale_link(link, pts)
+
+
 class PtyLink:
-    def __init__(self, link):
+    def __init__(self, link, guard=None):
         self.link = check_link_path(link)
         self.lock = lock_link(self.link)
+        self.guard = guard  # a LinkGuard, told about each link published and removed
         self.master = None
         self.pts = None
         self.host_open = False
@@ -97,6 +206,8 @@ class PtyLink:
             os.close(self.lock)
             self.lock = lock
         self.link, self.master, self.pts, self.host_open = path, master, pts, False
+        if self.guard:
+            self.guard.published(path, pts)
         return pts
 
     def close(self):
@@ -105,6 +216,8 @@ class PtyLink:
             os.close(self.master)
         if self.pts and os.path.islink(self.link) and os.readlink(self.link) == self.pts:
             os.unlink(self.link)
+        if self.pts and self.guard:
+            self.guard.removed(self.link)
         self.master = self.pts = None
         self.host_open = False
 

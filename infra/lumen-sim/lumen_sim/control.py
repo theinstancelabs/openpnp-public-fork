@@ -4,6 +4,8 @@ import os
 import socket
 import stat
 
+MAX_REQUEST = 1 << 20  # a request line longer than this (with no newline yet) drops its client
+
 
 def _answers(path):
     """Whether something accepts connections at the socket path (anything but 'refused' counts as yes)."""
@@ -35,20 +37,35 @@ class ControlServer:
         self.ident = (st.st_dev, st.st_ino)  # close() removes the path only while it is still this socket
         self.sock.listen(8)
         self.sock.setblocking(False)
-        self.clients = {}  # socket -> pending bytes
+        self.clients = {}  # socket -> (request bytes not yet answered, reply bytes not yet sent)
 
-    def sockets(self):
-        return [self.sock, *self.clients]
+    def readers(self):
+        """Sockets to wait on for reading: the listener, and every client with nothing left to answer or send. A
+        client that does not read its replies is not read either, so it cannot pile up requests or replies here."""
+        return [self.sock] + [c for c, (inbuf, out) in self.clients.items() if not out and b"\n" not in inbuf]
+
+    def writers(self):
+        """Clients with replies waiting for room in their socket."""
+        return [c for c, (_, out) in self.clients.items() if out]
+
+    def service(self, readable, writable, handler):
+        """Everything select() found ready among readers() and writers()."""
+        for sock in writable:
+            if sock in self.clients:
+                self.flush(sock, handler)
+        for sock in readable:
+            if sock is self.sock or sock in self.clients:
+                self.handle(sock, handler)
 
     def handle(self, sock, handler):
-        """Service one readable socket; handler(request dict) -> reply dict."""
+        """Service one readable socket; handler(request dict) -> reply dict. Never blocks."""
         if sock is self.sock:
             try:
                 conn, _ = self.sock.accept()
             except BlockingIOError:
                 return
             conn.setblocking(False)
-            self.clients[conn] = b""
+            self.clients[conn] = (bytearray(), bytearray())
             return
         try:
             data = sock.recv(65536)
@@ -59,9 +76,25 @@ class ControlServer:
         if not data:
             self._drop(sock)
             return
-        buf = self.clients[sock] + data
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
+        inbuf = self.clients[sock][0]
+        inbuf += data
+        if b"\n" not in inbuf and len(inbuf) > MAX_REQUEST:
+            self._drop(sock)  # no request is this long
+            return
+        self._answer(sock, handler)
+
+    def flush(self, sock, handler):
+        """A writable client: send what waits, then answer the requests it held back."""
+        if self._send(sock):
+            self._answer(sock, handler)
+
+    def _answer(self, sock, handler):
+        """Answer request lines in order until none is left or a reply cannot be sent at once."""
+        inbuf, out = self.clients[sock]
+        while not out and b"\n" in inbuf:
+            i = inbuf.index(b"\n")
+            line = bytes(inbuf[:i])
+            del inbuf[:i + 1]
             if not line.strip():
                 continue
             try:
@@ -75,14 +108,23 @@ class ControlServer:
                     reply = handler(req)
                 except Exception as e:  # a bad request must never take the simulator (and its port) down
                     reply = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
-            try:
-                sock.setblocking(True)
-                sock.sendall((json.dumps(reply) + "\n").encode())
-                sock.setblocking(False)
-            except OSError:
-                self._drop(sock)
+            out += (json.dumps(reply) + "\n").encode()
+            if not self._send(sock):
                 return
-        self.clients[sock] = buf
+
+    def _send(self, sock):
+        """Send what the socket takes now; False if the client is gone (dropped)."""
+        out = self.clients[sock][1]
+        try:
+            while out:
+                n = sock.send(out)
+                del out[:n]
+        except BlockingIOError:
+            pass
+        except OSError:
+            self._drop(sock)
+            return False
+        return True
 
     def _drop(self, sock):
         self.clients.pop(sock, None)

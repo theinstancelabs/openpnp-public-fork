@@ -17,6 +17,9 @@ class Machine:
         self.vacuum = vacuum          # open-air reading: int, or callable(firmware) -> int (then used as it is)
         # N1 seals at this physical Z (mm in the head's true frame; N1 goes down as Z falls), or None: nothing under it
         self.surface_z = None
+        # regions with a height of their own, [{x0, y0, x1, y1, z}] in physical mm (edges included; the first listed
+        # that holds the head wins); surface_z is the height everywhere else
+        self.surfaces = []
         self.seal_drop = SEAL_DROP
         self.rs485 = dict(rs485 or {})  # request hex -> reply hex (upper case); missing -> TIMEOUT
         self.mcp3426 = None           # int value for M3426, or None: no chip answers
@@ -26,12 +29,21 @@ class Machine:
             return int(self.vacuum(fw))
         return int(self.vacuum) - (self.seal_drop if self.n1_sealed(fw) else 0)
 
+    def surface_at(self, x, y):
+        """The surface height under the head at physical X/Y, or None: nothing there."""
+        for r in self.surfaces:
+            if r["x0"] <= x <= r["x1"] and r["y0"] <= y <= r["y1"]:
+                return r["z"]
+        return self.surface_z
+
     def n1_sealed(self, fw):
-        """N1's tip on the surface with its pump and valve on. The reading changes at once (no time constant, no
-        partial seal): the touch's Z is exact to the step."""
-        if self.surface_z is None or callable(self.vacuum) or not (fw.fans[PUMP] and fw.fans[VALVE]):
+        """N1's tip on the surface under it with its pump and valve on. The reading changes at once (no time
+        constant, no partial seal): the touch's Z is exact to the step."""
+        if callable(self.vacuum) or not (fw.fans[PUMP] and fw.fans[VALVE]):
             return False
-        return fw.stepper.realtime_physical(fw.now)[2] <= self.surface_z + 1e-9
+        x, y, z = fw.stepper.realtime_physical(fw.now)[:3]
+        surface = self.surface_at(x, y)
+        return surface is not None and z <= surface + 1e-9
 
     def i2c_read(self, fw, address, count):
         """Bytes a read of `count` from `address` returns; [] when nothing answers."""

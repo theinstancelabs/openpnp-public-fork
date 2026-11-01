@@ -21,7 +21,7 @@ import sys
 from . import control
 from .core import Simulator
 from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM
-from .pty_link import check_link_path
+from .pty_link import LinkGuard, check_link_path
 from .runner import Runner
 
 
@@ -58,10 +58,12 @@ def run(argv):
                     seed=args.seed)
     if args.surface_z is not None:
         sim.machine.surface_z = args.surface_z
+    guard = LinkGuard()  # before anything is opened: it must hold none of it
     try:
         runner = Runner(sim, args.link, control=args.control, io_log=args.io_log, time_scale=args.time_scale,
-                        log=lambda msg: print(msg, file=sys.stderr, flush=True))
+                        log=lambda msg: print(msg, file=sys.stderr, flush=True), guard=guard)
     except (OSError, ValueError) as e:  # e.g. another lumen-sim on the same link or socket
+        guard.close()
         print("lumen-sim: %s" % e, file=sys.stderr)
         return 2
 
@@ -69,7 +71,10 @@ def run(argv):
         runner.running = False
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):  # SIGHUP: its terminal or ssh session closed
         signal.signal(sig, stop)
-    runner.run()
+    try:
+        runner.run()
+    finally:
+        guard.close()
     return 0
 
 

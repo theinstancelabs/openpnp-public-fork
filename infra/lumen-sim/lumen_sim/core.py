@@ -14,8 +14,30 @@ from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, Machine
 from .marlin import AXES, Firmware, f32
 
 INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": 'echo:Unknown command: "M999999"'}
+# The keys each request takes besides "cmd" (and a fault's "fault"): an unknown one (a misspelt "surfaceZ" or "downs")
+# is refused, not ignored. Ok faults check theirs in faults.KEYS; physical faults take their axes (PHYSICAL_FAULTS).
+REQUEST_KEYS = {"state": (), "clear": (), "stop": (), "power_cycle": ("link", "down_s"),
+                "set": ("kill_messages", "vacuum", "rs485", "mcp3426", "surface_z", "surfaces", "seal_drop")}
+FAULT_KEYS = {"inject": ("kind", "text", "after_s"), "inject_bytes": ("hex", "text", "after_s"),
+              "partial": ("text", "after_s"), "halt": ("reason",), "disconnect": ("down_s",), "frozen": ("on",)}
 # Faults of the physical machine (INF-08): fault -> the axis keys it takes (mm, signed; at least one)
 PHYSICAL_FAULTS = {"home_offset": ("x", "y"), "lost_steps": ("x", "y"), "z_shift": ("z",), "z_drop": ("z",)}
+REGION = ("x0", "y0", "x1", "y1", "z")  # a surface region of set's "surfaces" (physical mm)
+
+
+def only(req, keys, what):
+    """ValueError if req has a key outside keys."""
+    extra = sorted(set(req) - set(keys))
+    if extra:
+        raise ValueError("%s takes %s, not %s" % (what, ", ".join(k for k in keys if k not in ("cmd", "fault"))
+                                                  or "nothing else", ", ".join(map(str, extra))))
+
+
+def flag(value, name):
+    """A JSON true or false (bool("false") would be True), else ValueError."""
+    if not isinstance(value, bool):
+        raise ValueError("%s must be true or false, not %r" % (name, value))
+    return value
 
 
 def mm(value, name):
@@ -37,7 +59,7 @@ class Simulator:
         self._timed = []            # heap of (time, n, bytes) injections
         self._n = 0
         self._actions = []
-        self._dfu_reported = False
+        self._halt_seen = False
         self.seq = 0
         self.boots = 0
         self.sim_errors = deque(maxlen=100)  # lines the model could not run (kept across power cycles)
@@ -58,15 +80,16 @@ class Simulator:
     def receive(self, data, t):
         self.run_until(t)
         self.fw.feed(bytes(data), t)
-        self._check_dfu()
+        self._check_halt()
 
     def run_until(self, t):
         while self._timed and self._timed[0][0] <= t:
             when, _, data = heapq.heappop(self._timed)
             self.fw.advance(when)
+            self._check_halt()
             self._queue(when, data)
         self.fw.advance(t)
-        self._check_dfu()
+        self._check_halt()
 
     def next_event_time(self):
         nt = self.fw.next_wake()
@@ -91,6 +114,8 @@ class Simulator:
             self._queue(t + extra, payload)
 
     def _queue(self, t, data):
+        if self._halt_seen:  # a dead board sends nothing (reset before a power cycle boots the next one)
+            return
         t = max(t, self._last_release)
         self._last_release = t
         self.out.append((t, data))
@@ -100,9 +125,18 @@ class Simulator:
         self.faults.on_line(self.seq, text)
         return self.seq
 
-    def _check_dfu(self):
-        if self.fw.halted and self.fw.halt_reason == "DFU" and not self._dfu_reported:
-            self._dfu_reported = True
+    def _check_halt(self):
+        """Once the board stops dead (halt fault, kill, DFU, sim error) it sends nothing more: output it had not sent
+        by then (an ok a delay_ok holds, and all queued behind it) and pending injections are dropped. DFU also takes
+        the port away."""
+        fw = self.fw
+        if not fw.halted or self._halt_seen:
+            return
+        self._halt_seen = True
+        self.out = deque((when, data) for when, data in self.out if when <= fw.halt_time)
+        self._last_release = self.out[-1][0] if self.out else -math.inf
+        self._timed = []
+        if fw.halt_reason == "DFU":
             self._actions.append({"action": "disconnect", "down_s": None})
 
     # ------------------------------------------------------------------ power
@@ -120,7 +154,7 @@ class Simulator:
         self.out.clear()
         self._timed = []
         self._last_release = -math.inf
-        self._dfu_reported = False
+        self._halt_seen = False
         self.faults.lines_lost()
         self.fw = self._boot(t)
 
@@ -134,6 +168,8 @@ class Simulator:
 
     def _control(self, req, t):
         cmd = req.get("cmd")
+        if cmd in REQUEST_KEYS:
+            only(req, ("cmd",) + REQUEST_KEYS[cmd], cmd)
         self.run_until(t)
         if cmd == "state":
             return {"ok": True, "state": self.state(t)}
@@ -166,15 +202,23 @@ class Simulator:
     def _fault(self, req, t):
         kind = req.get("fault")
         spec = {k: v for k, v in req.items() if k != "cmd"}
+        if kind in FAULT_KEYS:
+            only(req, ("cmd", "fault") + FAULT_KEYS[kind], kind)
         if kind in OK_FAULTS:
             self.faults.add(spec)
         elif kind in ("inject", "inject_bytes", "partial"):
+            if self.fw.halted:
+                raise ValueError("the board is halted (%s): it sends nothing until a power cycle" % self.fw.halt_reason)
             for key in ("text", "hex"):
                 if key in req and not isinstance(req[key], str):
                     raise ValueError("%s must be a string, not %r" % (key, req[key]))
             if kind == "inject":
+                if "text" not in req and req.get("kind", "error") not in INJECT_KINDS:
+                    raise ValueError("kind must be one of %s, not %r" % (", ".join(INJECT_KINDS), req["kind"]))
                 text = req["text"] if "text" in req else INJECT_KINDS[req.get("kind", "error")]
                 data = text.encode("latin-1") + b"\n"
+            elif "hex" not in req and "text" not in req:
+                raise ValueError("%s needs %s" % (kind, "hex or text" if kind == "inject_bytes" else "text"))
             elif kind == "inject_bytes":
                 data = bytes.fromhex(req["hex"]) if "hex" in req else req["text"].encode("latin-1")
             else:
@@ -186,12 +230,16 @@ class Simulator:
             else:
                 self._queue(t, data)
         elif kind == "halt":
-            self.fw.halt(str(req.get("reason", "halt fault")), t)
+            reason = req.get("reason", "halt fault")
+            if not isinstance(reason, str):
+                raise ValueError("reason must be a string, not %r" % (reason,))
+            self.fw.halt(reason, t)
+            self._check_halt()
         elif kind == "disconnect":
             down = req.get("down_s", 0.0)
             self._actions.append({"action": "disconnect", "down_s": None if down is None else seconds(down, "down_s")})
         elif kind == "frozen":
-            self._actions.append({"action": "frozen", "on": bool(req.get("on", True))})
+            self._actions.append({"action": "frozen", "on": flag(req.get("on", True), "on")})
         elif kind in PHYSICAL_FAULTS:
             self._physical_fault(kind, {k: v for k, v in spec.items() if k != "fault"}, t)
         else:
@@ -231,14 +279,16 @@ class Simulator:
         vacuum = integer("vacuum") if "vacuum" in req else None
         mcp = integer("mcp3426") if req.get("mcp3426") is not None else None
         surface = mm(req["surface_z"], "surface_z") if req.get("surface_z") is not None else None
+        surfaces = self._regions(req["surfaces"]) if "surfaces" in req else None
         drop = req.get("seal_drop")
         if drop is not None and (isinstance(drop, bool) or not isinstance(drop, int) or drop < 0):
             raise ValueError("seal_drop must be an integer >= 0 (counts), not %r" % (drop,))
         rs485 = req.get("rs485", {})
         if not isinstance(rs485, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in rs485.items()):
             raise ValueError("rs485 must map request hex to reply hex (strings), not %r" % (rs485,))
-        if "kill_messages" in req:
-            self.kill_messages = self.fw.kill_messages = bool(req["kill_messages"])
+        kill = flag(req["kill_messages"], "kill_messages") if "kill_messages" in req else None
+        if kill is not None:
+            self.kill_messages = self.fw.kill_messages = kill
         if vacuum is not None:
             self.machine.vacuum = vacuum
         self.machine.rs485.update({k.upper(): v for k, v in rs485.items()})
@@ -246,9 +296,28 @@ class Simulator:
             self.machine.mcp3426 = mcp
         if "surface_z" in req:
             self.machine.surface_z = surface
+        if surfaces is not None:
+            self.machine.surfaces = surfaces
         if drop is not None:
             self.machine.seal_drop = drop
         return {"ok": True}
+
+    @staticmethod
+    def _regions(raw):
+        """set's "surfaces": a list of {x0, y0, x1, y1, z} (mm, x0 <= x1, y0 <= y1); null or [] removes them."""
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ValueError("surfaces must be a list of {x0, y0, x1, y1, z}, not %r" % (raw,))
+        regions = []
+        for r in raw:
+            if not isinstance(r, dict) or set(r) != set(REGION):
+                raise ValueError("a surface region takes x0, y0, x1, y1 and z (mm), not %r" % (r,))
+            v = {k: mm(r[k], k) for k in REGION}
+            if v["x0"] > v["x1"] or v["y0"] > v["y1"]:
+                raise ValueError("a surface region needs x0 <= x1 and y0 <= y1, not %r" % (r,))
+            regions.append(v)
+        return regions
 
     # ------------------------------------------------------------------ state
     def state(self, t):
@@ -271,6 +340,7 @@ class Simulator:
             "switches": {a: v for a, v in zip("XYZ", self.machine.switches)},
             "z_drop": self.machine.z_drop,
             "surface_z": self.machine.surface_z,
+            "surfaces": [dict(r) for r in self.machine.surfaces],
             "seal_drop": self.machine.seal_drop,
             "n1_sealed": self.machine.n1_sealed(fw),
             "stepper_timeout_s": fw.stepper_timeout_ms / 1000.0,

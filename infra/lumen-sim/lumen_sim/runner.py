@@ -12,9 +12,11 @@ RETRY_S = 1.0          # a port that could not come back anywhere is tried again
 
 
 class Runner:
-    def __init__(self, sim, link, control=None, io_log=None, time_scale=1.0, clock=time.monotonic, log=None):
+    def __init__(self, sim, link, control=None, io_log=None, time_scale=1.0, clock=time.monotonic, log=None,
+                 guard=None):
         self.sim = sim
-        self.link = PtyLink(link)
+        self.guard = guard  # pty_link.LinkGuard: removes the links if this process is killed
+        self.link = PtyLink(link, guard)
         try:
             self.control = ControlServer(control) if control else None
             self.io = IoLog(io_log) if io_log else None
@@ -77,12 +79,11 @@ class Runner:
             wait = min(wait, CLOSED_POLL_S)
         writers = [self.link.master] if self.pending and self.link.master is not None and self.link.host_open else []
         if self.control:
-            readers.extend(self.control.sockets())
-        r, _, _ = select.select(readers, writers, [], min(wait, 1.0))
+            readers.extend(self.control.readers())
+            writers.extend(self.control.writers())
+        r, w, _ = select.select(readers, writers, [], min(wait, 1.0))
         if self.control:
-            for s in r:
-                if s in self.control.sockets():
-                    self.control.handle(s, self._handle_control)
+            self.control.service(r, w, self._handle_control)
 
     def _read_host(self):
         while True:
@@ -140,7 +141,8 @@ class Runner:
 
     def transport_state(self):
         return {"link": self.link.link, "pts": self.link.pts, "host_open": self.link.host_open,
-                "frozen": self.frozen, "link_down": self.down_until is not None, "time_scale": self.scale}
+                "frozen": self.frozen, "link_down": self.down_until is not None, "time_scale": self.scale,
+                "guard_pid": self.guard.pid if self.guard else None}
 
     def _do_actions(self, t):
         """Carry out the simulator's transport actions; the errors, as text (a failure never stops the loop)."""

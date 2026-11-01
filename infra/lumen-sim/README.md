@@ -49,8 +49,14 @@ reconnect open the real board. Never name a link like a device.
 | `--seed N` | Seed for random fault delays. |
 
 It stops on SIGINT, SIGTERM, SIGHUP (its terminal or ssh session closed) or `ctl stop`, and removes its symlink and
-socket. SIGKILL leaves both behind: remove the link by hand, since its `/dev/pts/N` goes to the next pty opened on the
-host.
+socket. A SIGKILL (a stop that escalated, the OOM killer) gives it no chance to, and a link left behind names a freed
+`/dev/pts/N` that the kernel hands to the next pty opened on the host. A pts is no proof of a simulator: on the lab
+computer Klipper's G-code input (`~/printer_data/comms/klippy.serial`) is one, so a host reconnecting through a stale
+link could drive a real machine. So lumen-sim forks a guardian at start (`guard_pid` in the state): a process in a
+session of its own that holds none of lumen-sim's files and, when lumen-sim dies however it dies, removes each link
+still pointing at lumen-sim's pty whose `<link>.lock` nobody holds, then exits. The socket a SIGKILL leaves is
+harmless and replaced by the next start. Killing the guardian too (a whole cgroup) leaves the link: `uinav stop`
+removes such links in its sessions; elsewhere remove it by hand.
 
 One lumen-sim per path. Each holds an flock on `<link>.lock` while it runs (the file stays; the lock dies with the
 process), and a second one on the same link, or on a socket that still answers, exits with `... is in use` and changes
@@ -108,7 +114,9 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 - Fans P0-P3 with a timestamped history, LED, I2C mux and register, stepper enable flags.
 - Idle timeout (`DEFAULT_STEPPER_TIMEOUT_SEC` 3600, `DISABLE_IDLE_X/Y/Z/I/J`): once the planner has been empty that
   long, counted from the end of the last block, a `G28` or an `M18`/`M84 S`, every axis is released, silently. Once
-  only, until a block is queued again (`M17` alone does not re-arm it). It also runs inside waits such as `G4`.
+  only, until a block is queued again (`M17` alone does not re-arm it). It also runs inside waits such as `G4`. The
+  check and the firmware's wake for it use one expression (last move + timeout), so the release lands on its deadline
+  at any time; computed two ways, rounding once made the loop spin at that instant for ever.
 - The board compares the time as a signed 32-bit number (`ELAPSED`, `core/millis_t.h`). So `M18`/`M84 S` of
   2147484 s or more (2^31 ms; a bigger value saturates at 0xFFFFFFFF ms) has run out at once: every axis is released
   on the next pass and again each time the planner runs empty, and Z drops. Use `S0` for "never".
@@ -151,11 +159,14 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
   the pump (P0, `M106`) and the valve (P1, `M106 P1 S180`) are on. The reading is then lower by `seal_drop` (default
   329000 counts, the median of SimScene's seal drops; `set {"seal_drop": n}`). N1 goes down as Z falls; its contact
   reads `surface_z` after a true home.
-- The surface is flat (one height everywhere) and the change is instant: no partial seal, no time constant, no leaks.
-  The pump-off reading is the open-air value too. `surface_z: null` removes it; it is the machine's, so it outlives
-  a power cycle and `clear`.
+- `surface_z` is the height everywhere. Regions can have heights of their own: `set {"surfaces": [{"x0": 150,
+  "y0": 100, "x1": 250, "y1": 200, "z": 5.6}, ...]}` (physical mm, edges included; where regions overlap the first
+  listed wins; outside every region `surface_z` applies, or open air if it is null). A new list replaces the old one;
+  `null` or `[]` removes them. So one place (a blank) can move while another (a fixed reference) does not.
+- The change is instant: no partial seal, no time constant, no leaks. The pump-off reading is the open-air value too.
+  `surface_z: null` removes it. Surfaces are the machine's, so they outlive a power cycle and `clear`.
 - Because it follows the physical head, a `z_shift` or a `z_drop` moves the contact the backend's N1 touch reads.
-- The state shows `surface_z`, `seal_drop` and `n1_sealed`. The I2C mux and register are not checked.
+- The state shows `surface_z`, `surfaces`, `seal_drop` and `n1_sealed`. The I2C mux and register are not checked.
 - A callable `vacuum=(firmware) -> int` passed to `Simulator` replaces all of this.
 
 **Homing (`G28`).**
@@ -210,27 +221,33 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 
 Connect to `--control` and send one JSON object per line; each gets one JSON reply line with `"ok": true|false`.
 A malformed request (bad JSON, a bad regex, a `count` that is not an integer >= 1, a non-finite or negative time, a
-link that is not `ttyLUMEN*` or has no directory, an ok fault with a key it does not take, a physical fault with no
-axis key, another key, or a non-finite value) gets `"ok": false` with an `error` and changes nothing. An ok fault
-with no `nth` and no `match` hits every line, so a misspelt selector (`"Nth"`, `"line"`) is refused, not read as that.
+link that is not `ttyLUMEN*` or has no directory, a key the request does not take, a flag (`on`, `kill_messages`) that
+is not `true` or `false`, a physical fault with no axis key, or a non-finite value) gets `"ok": false` with an `error`
+and changes nothing. Every request refuses a key it does not take, so a misspelt one (`"surfaceZ"`, `"downs"`,
+`"Nth"`) is an error, not a silent default; the keys are those in the table below. An ok fault with no `nth` and no
+`match` hits every line.
+
+Replies never block the simulator: each client's replies wait in lumen-sim until its socket takes them, and a client
+with replies waiting is not read meanwhile (its own writes block instead). A client that pipelines requests and reads
+later gets every reply, in order. A request line over 1 MiB drops the client.
 
 The physical faults (`home_offset`, `lost_steps`, `z_shift`, `z_drop`) are the machine's, not the controller's: they
 outlive a power cycle and are not listed in `faults`. All values are signed mm along the axis.
 
 | Request | Effect |
 |---|---|
-| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, seal_drop, n1_sealed, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down. |
-| `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. Keys: `nth`, `match`, `count`. Several rules may hit one line; each is used up. A line a power cycle cuts off never gets its `ok`: a hit on it is used up. |
+| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
+| `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now; with `"count": 2`, the 3rd and 4th. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. Keys: `nth`, `match`, `count`. Several rules may hit one line; each is used up. A line a power cycle cuts off never gets its `ok`: a hit on it is used up. |
 | `{"cmd": "fault", "fault": "delay_ok", "s": 0.5, ...}` | Extra delay before that `ok`; `"random": [lo, hi]` for a seeded random delay. Later output queues behind it, until `clear`. |
 | `{"cmd": "fault", "fault": "dup_ok", ...}` | The `ok` is sent twice. |
-| `{"cmd": "fault", "fault": "inject", "kind": "error"\|"start"\|"unknown"}` | Sends `Error:simulated fault`, `start` or `echo:Unknown command: "M999999"`; `"text": "..."` for any line; `"after_s": 1.5` to delay. |
-| `{"cmd": "fault", "fault": "inject_bytes", "hex": "ff"}` | Raw bytes. A 0xFF kills OpenPnP's reader thread, which reads it as end of stream. |
-| `{"cmd": "fault", "fault": "partial", "text": "X:1"}` | Text with no newline. |
-| `{"cmd": "fault", "fault": "halt"}` | Dead MCU: no output, input discarded, until a power cycle. |
+| `{"cmd": "fault", "fault": "inject", "kind": "error"\|"start"\|"unknown"}` | Sends `Error:simulated fault`, `start` or `echo:Unknown command: "M999999"`; `"text": "..."` for any line; `"after_s": 1.5` to delay. Refused on a halted board. |
+| `{"cmd": "fault", "fault": "inject_bytes", "hex": "ff"}` | Raw bytes (or `"text"`; `"after_s"` as above). A 0xFF kills OpenPnP's reader thread, which reads it as end of stream. Refused on a halted board. |
+| `{"cmd": "fault", "fault": "partial", "text": "X:1"}` | Text with no newline (`"after_s"` as above). Refused on a halted board. |
+| `{"cmd": "fault", "fault": "halt"}` | Dead MCU: no output, input discarded, until a power cycle. Output it had not sent by then (an `ok` a `delay_ok` holds, and all queued behind it) and pending injections are dropped, as after any stop of the board (kill, DFU, sim error). `"reason": "..."` sets `halt_reason`. |
 | `{"cmd": "fault", "fault": "disconnect", "down_s": 1.0}` | Close the pty master (the host gets EIO) and remove the link, so the port is absent, as an unplugged one. After `down_s`, a new pty behind the link; the controller state is kept. `"down_s": null` stays down until a power cycle. |
-| `{"cmd": "fault", "fault": "frozen", "on": true}` | Stop reading the port. The host's writes block once the pty buffer fills. Ends with `clear`, `"on": false` or a power cycle. |
+| `{"cmd": "fault", "fault": "frozen", "on": true}` | Stop reading the port (`on` is `true` or `false`, default `true`). The host's writes block once the pty buffer fills. Ends with `clear`, `"on": false` or a power cycle. |
 | `{"cmd": "power_cycle", "link": null, "down_s": 0}` | Close the master, boot state, new pty behind the link, not frozen; output the old board had not sent and pending injections are dropped. The head stays put (a stock kill's last 0.6 s of motion ends at power off). `"link"` publishes it at a new path instead and removes the old link (the board's ttyACM0 becoming ttyACM1; here e.g. ttyLUMEN0 to ttyLUMEN1). `"down_s": 2` keeps the port absent for 2 s first, as while the board resets and USB re-enumerates (the board is reset at once; default 0). |
-| `{"cmd": "set", "kill_messages": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "seal_drop": 329000}` | Knobs (`surface_z: null` removes the surface). |
+| `{"cmd": "set", "kill_messages": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"). |
 | `{"cmd": "fault", "fault": "home_offset", "x": 0.5, "y": -0.2}` | The X/Y switches now trigger at these physical positions (mm), so every later home of that axis lands that far off while M114 says 0. Nothing moves until a home. A new value replaces the old one per axis. |
 | `{"cmd": "fault", "fault": "lost_steps", "x": 0.3, "y": 0}` | The head moves by this much now, with no command, also mid-move. M114 and the counts do not change. Calls add up; a home removes it. |
 | `{"cmd": "fault", "fault": "z_shift", "z": 0.1}` | The whole Z frame shifts: the head moves by z now and the Z switch moves with it, so later homes keep the shift. Calls add up. |
@@ -245,7 +262,7 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 |---|---|
 | BR-02 power cycle vs reconnect | `power_cycle`: M114 then reads `X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197` with nothing homed, and the head stays where it was (`head.offset`). A host close and reopen, or a `disconnect` fault, keeps every position and count. |
 | BR-09 controller reads | `M503` prints the board's lines and `M115` its capabilities (goldens `m503.txt`, `m115.txt`). Dead link: `halt` (no reply to anything, reopening does not help, a power cycle does), or `frozen` (the port is not read; a power cycle ends it too). |
-| BR-10 Z check | `set {"surface_z": ...}` near the config's N1 contact height first: without a surface N1 reads open air at every Z and the touch refuses ("no contact"). Then `z_shift` (e.g. 0.1, then a home) moves the contact the N1 touch reads by that much. The surface is flat, so every reference reads the same shift. |
+| BR-10 Z check | `set {"surface_z": ...}` near the config's N1 contact height first: without a surface N1 reads open air at every Z and the touch refuses ("no contact"). `z-moved`: `z_shift` (e.g. 0.1, then a home) moves the contact every touch reads by that much. `surface-moved`: give the blank a region of its own, `set {"surfaces": [{"x0": .., "y0": .., "x1": .., "y1": .., "z": <surface_z + 0.3>}]}` around its XY (physical mm), and only touches there read the change; the fixed references keep `surface_z`. |
 | BR-10 X/Y home faults | **Cannot pass yet.** `home_offset` (a G28 that lands off) and `lost_steps` move only X/Y, which the backend can see only through a camera. The homing fiducial in the top camera is INF-05 (not built yet), to be drawn from `head.physical`; until then only the control state's `head.offset` shows them. |
 | BR-12 Z release | `surface_z` set, `z_drop` (e.g. -0.4), then `M18 Z`: the next N1 touch reads 0.4 mm higher. `M84 S0` sets `stepper_timeout_s` to 0 and the line is in the I/O log. |
 
@@ -257,6 +274,9 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 - `M92` with a zero value is acked and ignored for that axis (recorded): on the board the axis would stop moving.
 - An error outside any command halts the board with `halt_reason` `sim error: <error>`. The process, the port and the
   control channel stay up, and a power cycle recovers.
+- A wait that never moves on (something due 'now' that no pass acts on, a model bug) would spin the process at one
+  instant and keep it from SIGTERM. After 10000 such passes it is a model error instead (`no progress: ...`): inside a
+  command the line is acked and recorded, and the idle loop then halts the board as above.
 
 ## I/O log
 
@@ -288,12 +308,12 @@ From the repository root:
 python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```
 
-- 208 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 11 s left).
+- 236 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 14 s left).
 - Most tests run on the fake clock and finish in milliseconds. The pty tests start a `lumen_sim` process each and
   take a few seconds.
 - `tests/golden/` holds excerpts of `runs/serial.log`; see its README.
 - `tests/test_physical.py` covers INF-08: the physical faults (also during a home), the Z release and drop, the idle
-  timeout and the N1 touch against a surface.
+  timeout (also at non-round times, under a hang guard, `tests/hang.py`) and the N1 touch against surfaces.
 - `tests/test_docs.py` checks the README's USB-identity instructions, including that its `sed` line works.
 - The golden tests compare reply text exactly and timing within 3 %.
 

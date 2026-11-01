@@ -2,7 +2,7 @@
 
 A rule picks lines by `nth` (the nth line the controller reads after the rule is set, 1 = the next one), by
 `match` (a regex searched in the line), or every line; `count` limits how many lines it hits (default: 1 for nth,
-unlimited otherwise).
+unlimited otherwise). With nth, the count lines in a row from the nth one.
 """
 import math
 import random
@@ -47,6 +47,7 @@ class Rule:
         self.left = count(spec["count"], "count") if spec.get("count") is not None else (
             1 if self.nth is not None else None)
         self.base = lines_seen
+        self.span = self.left  # nth: this many lines in a row
         self.targets = set()
         self.delay = self.random = None
         if self.kind == "delay_ok":
@@ -66,7 +67,7 @@ class Rule:
         if self.left is not None and self.left <= len(self.targets):
             return
         if self.nth is not None:
-            hit = lines_seen - self.base == self.nth
+            hit = 0 <= lines_seen - self.base - self.nth < self.span
         elif self.match is not None:
             hit = self.match.search(text) is not None
         else:

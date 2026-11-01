@@ -1,6 +1,7 @@
 """The pty transport, I/O log, control socket and CLI, through a real lumen-sim process (a few seconds)."""
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -14,9 +15,10 @@ import unittest
 from lumen_sim.control import ControlServer
 from lumen_sim.core import Simulator
 from lumen_sim.hostclient import ControllerError, DriverClient
-from lumen_sim.pty_link import PtyLink, check_link_path
+from lumen_sim.pty_link import PtyLink, check_link_path, lock_link, remove_stale_link
 from lumen_sim.runner import Runner
 from tests import goldens
+from tests.hang import within
 from tests.simproc import PKG_ROOT, SimProcess, open_raw, read_until_ok
 
 
@@ -217,7 +219,8 @@ class LinkFaults(unittest.TestCase):
         fd = open_raw(self.sim.link)
         os.write(fd, b"G92 X7\n")
         read_until_ok(fd)
-        self.assertTrue(self.sim.ctl({"cmd": "fault", "fault": "disconnect", "down_s": 0.3})["ok"])
+        # long enough that the checks below run while it is down, however loaded the host
+        self.assertTrue(self.sim.ctl({"cmd": "fault", "fault": "disconnect", "down_s": 2.0})["ok"])
         self.assertTrue(self.sim.ctl({"cmd": "state"})["state"]["link_down"])
         self.assertFalse(os.path.lexists(self.sim.link))  # gone, as an unplugged port: its pts number is free
         try:
@@ -225,10 +228,7 @@ class LinkFaults(unittest.TestCase):
         except OSError as e:
             self.assertEqual(e.errno, 5)
         os.close(fd)
-        end = time.monotonic() + 3
-        while self.sim.ctl({"cmd": "state"})["state"]["link_down"] and time.monotonic() < end:
-            time.sleep(0.05)
-        self.assertFalse(self.sim.ctl({"cmd": "state"})["state"]["link_down"])
+        self.assertTrue(wait_for(lambda: not self.sim.ctl({"cmd": "state"})["state"]["link_down"], 10.0))
         fd = open_raw(self.sim.link)
         try:
             os.write(fd, b"M114\n")
@@ -274,12 +274,16 @@ class HostClose(unittest.TestCase):
     def tearDownClass(cls):
         cls.sim.stop()
 
+    def host_open(self):
+        return self.sim.ctl({"cmd": "state"})["state"]["host_open"]
+
     def test_reply_left_unread_at_close_is_not_seen_by_the_next_host(self):
         fd = open_raw(self.sim.link)
+        self.assertTrue(wait_for(self.host_open))
         os.write(fd, b"M105\n")
-        time.sleep(0.1)  # 'ok T:0' is in the pty by now, unread
+        self.assertEqual(select.select([fd], [], [], 5.0)[0], [fd])  # 'ok T:0' is in the pty, unread
         os.close(fd)
-        time.sleep(0.1)
+        self.assertTrue(wait_for(lambda: not self.host_open()))  # lumen-sim saw the close (and flushed)
         fd = open_raw(self.sim.link)
         try:
             self.assertEqual(read_some(fd, 0.3), b"")
@@ -287,17 +291,23 @@ class HostClose(unittest.TestCase):
             self.assertEqual(read_until_ok(fd), ["ok"])
         finally:
             os.close(fd)
-        with open(self.sim.io_log, encoding="latin-1") as f:
-            self.assertRegex(f.read(), r"# host closed, 7 unread bytes dropped\n")
+        def logged():
+            with open(self.sim.io_log, encoding="latin-1") as f:
+                return re.search(r"# host closed, 7 unread bytes dropped\n", f.read())
+        self.assertTrue(wait_for(logged))
 
     def test_output_while_frozen_and_closed_is_dropped(self):
         fd = open_raw(self.sim.link)
+        read = self.sim.ctl({"cmd": "state"})["state"]["lines_read"]
         os.write(fd, b"G4 P300\n")
-        time.sleep(0.05)
+        self.assertTrue(wait_for(lambda: self.sim.ctl({"cmd": "state"})["state"]["lines_read"] == read + 1))
         self.assertTrue(self.sim.ctl({"cmd": "fault", "fault": "frozen", "on": True})["ok"])
         os.close(fd)
-        self.assertTrue(wait_for(lambda: not self.sim.ctl({"cmd": "state"})["state"]["host_open"], 1.0))
-        time.sleep(0.4)  # the G4's ok comes while no host has the port
+        self.assertTrue(wait_for(lambda: not self.host_open()))
+        # the G4's ok comes while no host has the port: wait until it is done, and one more request, so the
+        # loop has passed its output step (and dropped the ok) since
+        self.assertTrue(wait_for(lambda: self.sim.ctl({"cmd": "state"})["state"]["ring"] == []))
+        self.sim.ctl({"cmd": "state"})
         fd = open_raw(self.sim.link)
         try:
             self.assertTrue(self.sim.ctl({"cmd": "clear"})["ok"])
@@ -374,13 +384,13 @@ class LinkLifecycle(unittest.TestCase):
     def test_power_cycle_with_a_down_time_keeps_the_port_absent(self):
         boots = self.state()["boots"]
         t0 = time.monotonic()
-        self.assertTrue(self.sim.ctl({"cmd": "power_cycle", "down_s": 0.5})["ok"])
+        self.assertTrue(self.sim.ctl({"cmd": "power_cycle", "down_s": 1.5})["ok"])  # room for a loaded host
         self.assertFalse(os.path.lexists(self.sim.link))
         st = self.state()
         self.assertTrue(st["link_down"])
         self.assertEqual(st["boots"], boots + 1)
-        self.assertTrue(wait_for(lambda: os.path.lexists(self.sim.link)))
-        self.assertGreater(time.monotonic() - t0, 0.45)
+        self.assertTrue(wait_for(lambda: os.path.lexists(self.sim.link), 10.0))
+        self.assertGreater(time.monotonic() - t0, 1.45)
         fd = open_raw(self.sim.link)
         try:
             os.write(fd, b"M114\n")
@@ -481,6 +491,20 @@ class RunnerFaults(unittest.TestCase):
         self.assertEqual(r.link.link, old)
         self.assertEqual(os.path.realpath(old), r.link.pts)
         self.assertFalse(r.transport_state()["link_down"])
+
+    def test_a_power_cycle_with_a_new_link_and_a_down_time_comes_back_at_the_new_link(self):
+        r = self.runner()
+        r.link.open()
+        old = r.link.link
+        new = os.path.join(os.path.dirname(old), "ttyLUMEN1")
+        self.assertTrue(r._handle_control({"cmd": "power_cycle", "link": new, "down_s": 1.0})["ok"])
+        self.assertFalse(os.path.lexists(old))
+        self.assertFalse(os.path.lexists(new))  # absent while the board restarts
+        self.clock[0] = 1.5
+        r._service()
+        self.assertEqual(r.link.link, new)
+        self.assertEqual(os.path.realpath(new), r.link.pts)
+        self.assertFalse(os.path.lexists(old))
 
     def test_a_link_that_cannot_come_back_anywhere_is_retried(self):
         r = self.runner()
@@ -613,6 +637,68 @@ class OneInstancePerPath(unittest.TestCase):
         self.assertTrue(sim.ctl({"cmd": "state"})["ok"])
 
 
+def alive(pid):
+    """A process that exists and is not a zombie (its new parent may reap it late)."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
+class LinkGuardian(unittest.TestCase):
+    """A SIGKILLed lumen-sim cannot remove its link, which then names a freed /dev/pts/N. On the lab computer the next
+    pty may be a real machine's G-code input (Klipper's klippy.serial is one), and a host reconnecting through the
+    stale link would stream G-code into it. A guardian process removes the link (review round 2)."""
+
+    def killed(self, sim):
+        guard = sim.ctl({"cmd": "state"})["state"]["guard_pid"]
+        self.assertTrue(alive(guard))
+        sim.proc.kill()  # as the OOM killer, or a stop that escalated to SIGKILL
+        sim.proc.wait(timeout=5)
+        return guard
+
+    def test_a_sigkilled_lumen_sim_leaves_no_link(self):
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        guard = self.killed(sim)
+        self.assertTrue(wait_for(lambda: not os.path.lexists(sim.link)))
+        self.assertTrue(wait_for(lambda: not alive(guard)))
+
+    def test_nor_after_a_power_cycle_to_a_new_link(self):
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        new = os.path.join(sim.dir, "ttyLUMEN1")
+        self.assertTrue(sim.ctl({"cmd": "power_cycle", "link": new})["ok"])
+        self.assertTrue(os.path.islink(new))
+        guard = self.killed(sim)
+        self.assertTrue(wait_for(lambda: not os.path.lexists(new)))
+        self.assertFalse(os.path.lexists(sim.link))
+        self.assertTrue(wait_for(lambda: not alive(guard)))
+
+    def test_a_clean_stop_ends_the_guardian_too(self):
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        guard = sim.ctl({"cmd": "state"})["state"]["guard_pid"]
+        sim.ctl({"cmd": "stop"})
+        self.assertEqual(sim.proc.wait(timeout=5), 0)
+        self.assertTrue(wait_for(lambda: not alive(guard)))
+
+    def test_only_a_link_still_on_the_dead_one_s_pty_and_not_locked_is_removed(self):
+        tmp = temp_dir(self)
+        link = os.path.join(tmp, "ttyLUMEN")
+        os.symlink("/dev/pts/999999", link)  # never opened: only its name is compared
+        remove_stale_link(link, "/dev/pts/999998")  # another pty by now
+        self.assertTrue(os.path.islink(link))
+        lock = lock_link(link)  # another lumen-sim has the path
+        remove_stale_link(link, "/dev/pts/999999")
+        self.assertTrue(os.path.islink(link))
+        os.close(lock)
+        remove_stale_link(link, "/dev/pts/999999")
+        self.assertFalse(os.path.lexists(link))
+        remove_stale_link(link, "/dev/pts/999999")  # already gone: nothing to do
+
+
 class Signals(unittest.TestCase):
     def test_sighup_stops_it_cleanly(self):
         """A closed terminal or ssh session sends SIGHUP: the link to the freed /dev/pts/N must go too."""
@@ -661,8 +747,90 @@ class ControlServerErrors(unittest.TestCase):
         self.assertEqual(srv.clients, {})
 
 
+class SlowControlClients(unittest.TestCase):
+    """A control client that does not read its replies must never stall the loop that serves the serial port."""
+
+    def test_pipelined_requests_with_no_read_do_not_block_and_the_replies_come_in_order(self):
+        tmp = temp_dir(self)
+        srv = ControlServer(os.path.join(tmp, "ctl.sock"))
+        self.addCleanup(srv.close)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(c.close)
+        c.connect(srv.path)
+        srv.handle(srv.sock, None)  # accept
+        (conn,) = list(srv.clients)
+        pad = "x" * 4000  # 1000 replies of 4 kB: far more than a socket buffer
+        c.sendall(b"".join(b'{"cmd": "state", "n": %d}\n' % i for i in range(1000)))
+        with within(self, 2):
+            srv.handle(conn, lambda req: {"ok": True, "n": req["n"], "pad": pad})
+        self.assertIn(conn, srv.writers())     # its replies wait for the client
+        self.assertNotIn(conn, srv.readers())  # and it is not read meanwhile: it cannot pile up more
+        got, buf = [], b""
+        c.setblocking(False)
+        with within(self, 10):
+            while len(got) < 1000:
+                r, w, _ = select.select(srv.readers(), srv.writers(), [], 0.05)
+                srv.service(r, w, lambda req: {"ok": True, "n": req["n"], "pad": pad})
+                try:
+                    buf += c.recv(1 << 20)
+                except BlockingIOError:
+                    pass
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    got.append(json.loads(line)["n"])
+        self.assertEqual(got, list(range(1000)))
+        self.assertEqual(srv.writers(), [])
+
+    def test_an_endless_request_line_drops_the_client(self):
+        tmp = temp_dir(self)
+        srv = ControlServer(os.path.join(tmp, "ctl.sock"))
+        self.addCleanup(srv.close)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(c.close)
+        c.connect(srv.path)
+        srv.handle(srv.sock, None)
+        (conn,) = list(srv.clients)
+        c.setblocking(False)
+        chunk = b"x" * 65536
+        with within(self, 10):
+            while srv.clients:
+                try:
+                    c.send(chunk)
+                except (BlockingIOError, BrokenPipeError, ConnectionResetError):
+                    pass
+                for s in select.select(srv.readers(), [], [], 0.01)[0]:
+                    srv.handle(s, None)
+        self.assertEqual(srv.clients, {})
+
+    def test_the_serial_port_is_served_while_a_control_client_does_not_read(self):
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(c.close)
+        c.connect(sim.sock)
+        c.sendall(b'{"cmd": "state"}\n' * 1000)  # and never read
+        fd = open_raw(sim.link)
+        try:
+            os.write(fd, b"M400\n")
+            self.assertEqual(read_until_ok(fd, timeout=5.0), ["ok"])
+        finally:
+            os.close(fd)
+        sim.proc.terminate()
+        self.assertEqual(sim.proc.wait(timeout=5), 0)
+        self.assertFalse(os.path.lexists(sim.link))
+
+
 class TimeScale(unittest.TestCase):
+    def test_simulator_time_is_wall_time_times_the_scale(self):
+        clock = [100.0]
+        r = in_process_runner(self, clock=lambda: clock[0], time_scale=4)
+        self.assertEqual(r.now(), 0.0)
+        clock[0] = 100.4
+        self.assertAlmostEqual(r.now(), 1.6, places=9)
+
     def test_time_scale_speeds_up_the_simulator_clock(self):
+        """End to end through the CLI flag: 1.6 s of G4 at scale 4. Only the bounds a loaded host cannot break: not
+        before 0.4 s of wall clock, well before the 1.6 s it would take at scale 1."""
         sim = SimProcess("--time-scale", "4")
         try:
             fd = open_raw(sim.link)
@@ -670,7 +838,9 @@ class TimeScale(unittest.TestCase):
                 t0 = time.monotonic()
                 os.write(fd, b"G4 P1600\n")
                 self.assertEqual(read_until_ok(fd), ["ok"])
-                self.assertAlmostEqual(time.monotonic() - t0, 0.4, delta=0.1)
+                elapsed = time.monotonic() - t0
+                self.assertGreaterEqual(elapsed, 0.39)
+                self.assertLess(elapsed, 1.2)
             finally:
                 os.close(fd)
         finally:
