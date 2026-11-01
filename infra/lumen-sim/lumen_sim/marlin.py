@@ -36,7 +36,9 @@ NOT_BUSY, IN_HANDLER = 0, 1
 EP_RESET, EP_N, EP_M, EP_M1, EP_M10, EP_M11, EP_M4, EP_M41, EP_IGNORE, EP_M108, EP_M112, EP_M410 = range(12)
 ERROR_M990 = "Error:M990 S must be 0 or 100..3600000"
 
-NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+# No exponent: GCodeParser::value_float() cuts the number at e/E/x/X before strtof, and value_long() is strtol, so
+# "P1e999" reads as 1 on the board (parser.h:258-277).
+NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)")
 
 
 class Halted(Exception):
@@ -128,12 +130,13 @@ class Command:
 
 
 class Firmware:
-    def __init__(self, personality, machine, now, emit, on_line=None, kill_messages=False):
+    def __init__(self, personality, machine, now, emit, on_line=None, kill_messages=False, on_error=None):
         p = self.p = personality
         self.machine = machine
         self.now = now
         self._emit_cb = emit                # emit(t, bytes, kind, seq)
         self._on_line = on_line             # on_line(text, t) -> seq
+        self._on_error = on_error           # on_error({"t", "line", "error"}): a gap in this model, not a board reply
         self.kill_messages = kill_messages
         self._load_defaults()
         self.feedrate = 25.0                # mm/s (1500 mm/min)
@@ -219,6 +222,16 @@ class Firmware:
             self._wake = next(self._gen)
         except Halted:
             self._wake = math.inf
+        except Exception as e:  # a model error outside any command: stop dead with the reason, keep the process up
+            self._model_error(None, e)
+            self.stepper.freeze(self.now)
+            self.halted, self.halt_reason = True, "sim error: %s: %s" % (type(e).__name__, e)
+            self._wake = math.inf
+
+    def _model_error(self, line, error):
+        if self._on_error:
+            text = error if isinstance(error, str) else "%s: %s" % (type(error).__name__, error)
+            self._on_error({"t": self.now, "line": line, "error": text})
 
     # ------------------------------------------------------------------ output
     def _emit(self, text, kind="line"):
@@ -366,7 +379,13 @@ class Firmware:
         text, seq = self.ring[0]
         self.cur_seq = seq
         prev, self.busy_state = self.busy_state, IN_HANDLER
-        no_ok = yield from self._dispatch(Command(text))
+        try:
+            no_ok = yield from self._dispatch(Command(text))
+        except Halted:
+            raise
+        except Exception as e:  # the model cannot run this line; the board runs it and acks, so ack and record it
+            self._model_error(text, e)
+            no_ok = False
         if not no_ok:
             self._emit("ok", "ok")
         self.busy_state = prev
@@ -491,7 +510,7 @@ class Firmware:
 
     # ------------------------------------------------------------------ planner front end (planner.cpp)
     def _buffer_line(self, target, fr):
-        while self.stepper.full():
+        while self.stepper.full(self.now):  # Marlin: while (moves_free() < count) idle();
             yield from self._idle()
         if self.stepper.cleaning(self.now):
             return False  # dropped for 1 s after a quick-stop
@@ -728,8 +747,12 @@ class Firmware:
     def m92(self, cmd):
         for i, a in enumerate(AXES):
             if cmd.params.get(a) is not None:
-                self.steps[i] = f32(cmd.params[a])
-                self.mm_per_step[i] = f32(1.0 / self.steps[i])
+                v = f32(cmd.params[a])
+                if not v:  # the board takes it (mm_per_step becomes inf); the model would divide by zero
+                    self._model_error(cmd.text, "not modelled: zero steps/unit for %s, kept %s" % (a, self.steps[i]))
+                    continue
+                self.steps[i] = v
+                self.mm_per_step[i] = f32(1.0 / v)
         self._sync_plan_position()
 
     def m105(self, cmd):

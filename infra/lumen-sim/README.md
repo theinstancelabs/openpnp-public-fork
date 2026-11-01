@@ -17,9 +17,14 @@ Point the OpenPnP driver's `port-name` at the `--link` path (a symlink to `/dev/
 symlink and opens the pty. Either drop `usb-serial-number` and `usb-description` from the driver, or keep them and
 accept the "Falling back to the configured port name" warnings.
 
+**The link's name must start with `ttyLUMEN`**, and lumen-sim refuses any other (CLI and power cycle). When the
+path does not exist and is not a symlink, jSerialComm's `getCommPort` opens `/dev/<path>` or `/dev/<name>` instead.
+The link is missing whenever lumen-sim is stopped or its port is down, so a link named `ttyACM0` would make OpenPnP's
+reconnect open the real board. Never name a link like a device.
+
 | Option | Meaning |
 |---|---|
-| `--link PATH` | Where the pty slave is published. It is re-pointed atomically after a power cycle or reconnect. |
+| `--link PATH` | Where the pty slave is published (name `ttyLUMEN*`). The link exists only while the port does: it is removed when the port goes down (disconnect, DFU, a power cycle's down time) and on exit, and made again for the new pty. |
 | `--personality stock\|il-safety` | Firmware build (below). Default `stock`. |
 | `--control SOCK` | Unix socket for the control channel (JSON lines). |
 | `--io-log FILE` | Append the traffic in `serial.log` format. |
@@ -35,7 +40,7 @@ It stops on SIGINT, SIGTERM or `ctl stop`, and removes its symlink and socket.
 python3 -m lumen_sim ctl --control SOCK state
 python3 -m lumen_sim ctl --control SOCK fault '{"fault": "no_ok", "match": "^G4"}'
 python3 -m lumen_sim ctl --control SOCK set '{"vacuum": -1600000, "rs485": {"FF00": "0017"}}'
-python3 -m lumen_sim ctl --control SOCK power-cycle [--link NEW_PATH]
+python3 -m lumen_sim ctl --control SOCK power-cycle [--link NEW_PATH] [--down-s 2]
 python3 -m lumen_sim ctl --control SOCK clear
 python3 -m lumen_sim ctl --control SOCK stop
 ```
@@ -48,6 +53,8 @@ Everything below follows the stock source (`wt/marlin-stock-7776c73`), checked a
 - LF, CR and CRLF all end a line; empty lines are skipped. Replies end in LF only.
 - `;` comments are stripped, `\` escapes and quoted strings are handled, 95 characters are kept.
 - Upper-case letters only: `g4` is an unknown command.
+- Numbers have no exponent: Marlin's `value_float()` cuts a value at `e`/`E`/`x`/`X`, and integer values are
+  `strtol`, so `P1e999` and `X1e999` read as 1.
 - Unknown commands get `echo:Unknown command: "<text>"` and then `ok`.
 - A 4-slot command ring: the running command holds a slot, and reading stops while the ring is full.
 - Not modelled: `N` line numbers and checksums (the line number is skipped, the checksum is ignored).
@@ -56,7 +63,8 @@ Everything below follows the stock source (`wt/marlin-stock-7776c73`), checked a
 G28, M18 and a full planner. A busy line due at the very moment a wait ends comes before the `ok`, as in the log.
 
 **Planner and timing.**
-- 16 block slots (15 usable). Each `G0`/`G1` is acked when its block is planned, and blocks when the planner is full.
+- 16 block slots (15 usable). Each `G0`/`G1` is acked when its block is planned. When the planner is full it waits,
+  and is acked the moment the head block ends and frees a slot.
 - Each block is a trapezoid in steps:
   - nominal rate `ceil(steps x feed / distance)`;
   - acceleration `ceil(M204 T x steps/mm)`, capped per axis by `M201 x steps/unit`; speed capped by `M203`;
@@ -152,10 +160,12 @@ through the control channel.
 ## Faults and the control channel
 
 Connect to `--control` and send one JSON object per line; each gets one JSON reply line with `"ok": true|false`.
+A malformed request (bad JSON, a bad regex, a `count` that is not an integer >= 1, a non-finite or negative time, a
+link that is not `ttyLUMEN*` or has no directory) gets `"ok": false` with an `error` and changes nothing.
 
 | Request | Effect |
 |---|---|
-| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, and the transport: link, pts, host_open, frozen, link_down. |
+| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down. |
 | `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. |
 | `{"cmd": "fault", "fault": "delay_ok", "s": 0.5, ...}` | Extra delay before that `ok`; `"random": [lo, hi]` for a seeded random delay. Later output queues behind it. |
 | `{"cmd": "fault", "fault": "dup_ok", ...}` | The `ok` is sent twice. |
@@ -163,19 +173,30 @@ Connect to `--control` and send one JSON object per line; each gets one JSON rep
 | `{"cmd": "fault", "fault": "inject_bytes", "hex": "ff"}` | Raw bytes. A 0xFF kills OpenPnP's reader thread, which reads it as end of stream. |
 | `{"cmd": "fault", "fault": "partial", "text": "X:1"}` | Text with no newline. |
 | `{"cmd": "fault", "fault": "halt"}` | Dead MCU: no output, input discarded, until a power cycle. |
-| `{"cmd": "fault", "fault": "disconnect", "down_s": 1.0}` | Close the pty master (the host gets EIO). After `down_s`, a new pty and the symlink re-pointed; the controller state is kept. `"down_s": null` stays down until a power cycle. |
+| `{"cmd": "fault", "fault": "disconnect", "down_s": 1.0}` | Close the pty master (the host gets EIO) and remove the link, so the port is absent, as an unplugged one. After `down_s`, a new pty behind the link; the controller state is kept. `"down_s": null` stays down until a power cycle. |
 | `{"cmd": "fault", "fault": "frozen", "on": true}` | Stop reading the port. The host's writes block once the pty buffer fills. |
-| `{"cmd": "power_cycle", "link": null}` | Close the master, boot state, new pty, symlink re-pointed (optionally to a new path, as ttyACM0 becomes ttyACM1). The head stays put. |
+| `{"cmd": "power_cycle", "link": null, "down_s": 0}` | Close the master, boot state, new pty behind the link. The head stays put. `"link"` publishes it at a new path instead and removes the old link (the board's ttyACM0 becoming ttyACM1; here e.g. ttyLUMEN0 to ttyLUMEN1). `"down_s": 2` keeps the port absent for 2 s first, as while the board resets and USB re-enumerates (the board is reset at once; default 0). |
 | `{"cmd": "set", "kill_messages": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234}` | Knobs. |
 | `{"cmd": "clear"}` | Drop all ok faults and pending injections, unfreeze. |
 | `{"cmd": "stop"}` | Exit. |
+
+**Model errors.** The board answers whatever the values; the simulator must not die on one stray line either.
+- A line the model cannot run (for example `M203 X0` then `G1 X10`, a division by zero) is acked as the board would
+  ack it. It is recorded in the state's `sim_errors` (`t`, `line`, `error`; the last 100, kept across power cycles),
+  on stderr and as a `#` line in the I/O log. Check `sim_errors` after a test: an entry is a gap in the model, not
+  a board reply.
+- `M92` with a zero value is acked and ignored for that axis (recorded): on the board the axis would stop moving.
+- An error outside any command halts the board with `halt_reason` `sim error: <error>`. The process, the port and the
+  control channel stay up, and a power cycle recovers.
 
 ## I/O log
 
 `--io-log` appends `<epoch seconds, 3 decimals> > <line>` for every line the host wrote (CR or LF ends a line) and
 `<epoch> < <line>` for every line sent. This is the format of `runs/serial.log`, except that lines are not stripped
 and non-printable bytes are written as `\xNN`. Transport events are `<epoch> # <text>`. Output while no host has the
-port open is dropped, as on the closed USB port, and not logged.
+port open is dropped, as on the closed USB port, and not logged. Bytes the host left unread when it closed are dropped
+too, as a USB port's buffers go with the last close (`# host closed, 7 unread bytes dropped`); the `<` lines they
+came from were logged when they were written.
 
 ## Python API
 
@@ -198,7 +219,7 @@ From the repository root:
 python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```
 
-- 104 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 8 s left).
+- 125 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 10 s left).
 - Most tests run on the fake clock and finish in milliseconds. The pty tests start a `lumen_sim` process each and
   take a few seconds.
 - `tests/golden/` holds excerpts of `runs/serial.log`; see its README.

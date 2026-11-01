@@ -4,29 +4,57 @@ A rule picks lines by `nth` (the nth line the controller reads after the rule is
 `match` (a regex searched in the line), or every line; `count` limits how many lines it hits (default: 1 for nth,
 unlimited otherwise).
 """
+import math
 import random
 import re
 
 OK_FAULTS = ("no_ok", "delay_ok", "dup_ok")
 
 
+def seconds(value, name):
+    """A finite number >= 0 (JSON allows NaN and Infinity; a bool is not a number here), else ValueError."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError("%s must be a finite number >= 0, not %r" % (name, value))
+    return float(value)
+
+
+def count(value, name):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("%s must be an integer >= 1, not %r" % (name, value))
+    return value
+
+
 class Rule:
+    """One ok fault; the spec is checked here, so a bad one is refused before it can fail on a later line."""
+
     def __init__(self, spec, lines_seen):
         self.kind = spec["fault"]
         self.spec = dict(spec)
-        self.nth = spec.get("nth")
-        self.match = re.compile(spec["match"]) if spec.get("match") else None
-        if self.nth is not None and (not isinstance(self.nth, int) or self.nth < 1):
-            raise ValueError("nth must be an integer >= 1")
-        self.left = spec.get("count", 1 if self.nth is not None else None)
+        self.nth = None if spec.get("nth") is None else count(spec["nth"], "nth")
+        match = spec.get("match")
+        if match is not None and not isinstance(match, str):
+            raise ValueError("match must be a regex string, not %r" % (match,))
+        try:
+            self.match = re.compile(match) if match else None
+        except re.error as e:  # not a ValueError
+            raise ValueError("bad match regex %r: %s" % (match, e)) from None
+        self.left = count(spec["count"], "count") if spec.get("count") is not None else (
+            1 if self.nth is not None else None)
         self.base = lines_seen
         self.targets = set()
+        self.delay = self.random = None
         if self.kind == "delay_ok":
             rnd = spec.get("random")
-            if rnd is not None and (len(rnd) != 2 or rnd[0] > rnd[1]):
-                raise ValueError("random must be [low, high]")
-            if rnd is None and not isinstance(spec.get("s"), (int, float)):
+            if rnd is not None:
+                if not isinstance(rnd, (list, tuple)) or len(rnd) != 2:
+                    raise ValueError("random must be [low, high], not %r" % (rnd,))
+                self.random = (seconds(rnd[0], "random low"), seconds(rnd[1], "random high"))
+                if self.random[0] > self.random[1]:
+                    raise ValueError("random must be [low, high], not %r" % (rnd,))
+            elif "s" not in spec:
                 raise ValueError("delay_ok needs s (seconds) or random [low, high]")
+            else:
+                self.delay = seconds(spec["s"], "s")
 
     def observe(self, seq, text, lines_seen):
         if self.left is not None and self.left <= len(self.targets):
@@ -79,8 +107,7 @@ class Faults:
             if r.kind == "no_ok":
                 return []
             if r.kind == "delay_ok":
-                lo_hi = r.spec.get("random")
-                extra = self.rng.uniform(*lo_hi) if lo_hi else float(r.spec["s"])
+                extra = self.rng.uniform(*r.random) if r.random else r.delay
                 out = [(d + extra, b) for d, b in out]
             elif r.kind == "dup_ok":
                 out = out + [out[-1]]

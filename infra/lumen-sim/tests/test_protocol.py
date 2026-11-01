@@ -164,5 +164,60 @@ class Keepalive(unittest.TestCase):
         self.assertEqual(b.rx, [])
 
 
+class OutOfRangeValues(unittest.TestCase):
+    """Real Marlin keeps answering whatever the values; the simulator must not die on one stray line."""
+
+    def test_values_stop_at_an_exponent_as_in_marlin(self):
+        # GCodeParser::value_float() cuts the number at 'e'/'E'; value_long() is strtol: both read "1e999" as 1
+        b = Bench()
+        b.send("G1 X1e999 F6000")
+        self.assertTrue(b.send("M114").lines[0].startswith("X:1.00 Y:0.00 "))
+        b.send("M400")
+        self.assertLess(b.send("G4 P1e999").ok_at, 0.01)
+        self.assertTrue(b.send("M261 A109 B1e999 S1").lines[0].startswith("echo:i2c-reply: from:109 bytes:1 "))
+
+    def test_zero_steps_per_unit_keeps_answering(self):
+        b = Bench()
+        self.assertEqual(b.send("M92 X0").lines, ["ok"])
+        self.assertEqual(b.send("G1 X10 F6000").lines, ["ok"])
+        self.assertEqual(b.send("M400").lines[-1], "ok")
+        self.assertEqual(b.send("M114").lines[-1], "ok")
+        self.assertTrue(b.sim.state(b.t)["sim_errors"])
+
+    def test_zero_max_feedrate_keeps_answering(self):
+        b = Bench()
+        b.send("M203 X0")
+        self.assertEqual(b.send("G1 X10 F6000").lines, ["ok"])
+        self.assertEqual(b.send("M114").lines[-1], "ok")
+        errors = b.sim.state(b.t)["sim_errors"]
+        self.assertEqual(errors[0]["line"], "G1 X10 F6000")
+
+    def test_a_command_the_model_cannot_run_is_acked_and_recorded(self):
+        b = Bench()
+
+        def broken(cmd):
+            raise RuntimeError("model gap")
+        b.sim.fw.m119 = broken
+        self.assertEqual(b.send("M119").lines, ["ok"])
+        self.assertEqual(b.send("M114").lines, [BOOT_M114, "ok"])
+        err = b.sim.state(b.t)["sim_errors"][0]
+        self.assertEqual((err["line"], err["error"]), ("M119", "RuntimeError: model gap"))
+        self.assertFalse(b.sim.state(b.t)["halted"])
+
+    def test_an_error_outside_a_command_halts_with_a_reason(self):
+        b = Bench()
+
+        def broken():
+            raise RuntimeError("loop gap")
+        b.sim.fw._keepalive = broken
+        b.write("M400\n")
+        b.run(0.1)
+        st = b.sim.state(b.t)
+        self.assertTrue(st["halted"])
+        self.assertEqual(st["halt_reason"], "sim error: RuntimeError: loop gap")
+        b.sim.power_cycle(b.t)
+        self.assertEqual(b.send("M400").lines, ["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

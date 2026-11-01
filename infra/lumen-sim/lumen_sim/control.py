@@ -46,9 +46,13 @@ class ControlServer:
                 req = json.loads(line)
                 if not isinstance(req, dict):
                     raise ValueError("request must be a JSON object")
-                reply = handler(req)
             except ValueError as e:
                 reply = {"ok": False, "error": "bad request: %s" % e}
+            else:
+                try:
+                    reply = handler(req)
+                except Exception as e:  # a bad request must never take the simulator (and its port) down
+                    reply = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
             try:
                 sock.setblocking(True)
                 sock.sendall((json.dumps(reply) + "\n").encode())

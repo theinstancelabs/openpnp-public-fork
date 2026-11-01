@@ -6,10 +6,11 @@ usage:
   python3 -m lumen_sim ctl --control SOCK state
   python3 -m lumen_sim ctl --control SOCK fault '{"fault": "no_ok", "match": "^G4"}'
   python3 -m lumen_sim ctl --control SOCK set '{"vacuum": -1600000}'
-  python3 -m lumen_sim ctl --control SOCK power-cycle [--link NEW_PATH]
+  python3 -m lumen_sim ctl --control SOCK power-cycle [--link NEW_PATH] [--down-s SECONDS]
   python3 -m lumen_sim ctl --control SOCK clear | stop
 
-Point OpenPnP's serial port-name at the --link path (a symlink to /dev/pts/N). Stop with SIGINT/SIGTERM or `ctl stop`.
+Point OpenPnP's serial port-name at the --link path (a symlink to /dev/pts/N). Its name must start with ttyLUMEN:
+while the link is missing, jSerialComm opens /dev/<name> instead. Stop with SIGINT/SIGTERM or `ctl stop`.
 """
 import argparse
 import json
@@ -19,6 +20,7 @@ import sys
 from . import control
 from .core import Simulator
 from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM
+from .pty_link import check_link_path
 from .runner import Runner
 
 
@@ -31,7 +33,7 @@ def _park(text):
 
 def run(argv):
     ap = argparse.ArgumentParser(prog="python3 -m lumen_sim", description="Simulated LumenPnP Marlin controller")
-    ap.add_argument("--link", required=True, help="symlink to publish the pty slave at")
+    ap.add_argument("--link", required=True, help="symlink to publish the pty slave at (name ttyLUMEN*)")
     ap.add_argument("--personality", default="stock", choices=["stock", "il-safety"])
     ap.add_argument("--control", help="Unix socket for the JSON control channel")
     ap.add_argument("--io-log", help="append the serial traffic here, serial.log style")
@@ -45,6 +47,10 @@ def run(argv):
     args = ap.parse_args(argv)
     if args.time_scale <= 0:
         ap.error("--time-scale must be > 0")
+    try:
+        check_link_path(args.link)
+    except ValueError as e:
+        ap.error("--link: %s" % e)
     sim = Simulator(args.personality, park=args.park, vacuum=args.vacuum, kill_messages=args.kill_messages,
                     seed=args.seed)
     runner = Runner(sim, args.link, control=args.control, io_log=args.io_log, time_scale=args.time_scale,
@@ -64,6 +70,7 @@ def ctl(argv):
     ap.add_argument("what", choices=["state", "fault", "set", "power-cycle", "clear", "stop"])
     ap.add_argument("json", nargs="?", help="the fault or set request, as a JSON object")
     ap.add_argument("--link", help="power-cycle: publish the new pty at this path instead")
+    ap.add_argument("--down-s", type=float, help="power-cycle: the port is absent this long before it is back")
     args = ap.parse_args(argv)
     if args.what in ("fault", "set"):
         if not args.json:
@@ -71,7 +78,7 @@ def ctl(argv):
         req = json.loads(args.json)
         req["cmd"] = args.what
     elif args.what == "power-cycle":
-        req = {"cmd": "power_cycle", "link": args.link}
+        req = {"cmd": "power_cycle", "link": args.link, "down_s": args.down_s}
     else:
         req = {"cmd": args.what}
     reply = control.request(args.control, req)

@@ -94,6 +94,28 @@ class Planner(unittest.TestCase):
         self.assertTrue(all(t < 0.001 for t in oks[:15]), oks)  # 16 slots, 15 usable
         self.assertGreater(oks[15], 0.9)  # waits for the first block to finish
 
+    def test_full_planner_acks_when_the_head_block_ends(self):
+        """Marlin re-checks moves_free() in its idle() loop: the ok comes as the slot frees, not at a later wake."""
+        b = Bench()
+        b.send("M204 S2000")
+        for i in range(1, 16):
+            b.send("G1 X%d F600" % (i * 10))  # 15 blocks of 1 s, started at once (3+ queued)
+        head_end = b.sim.fw.stepper.blocks[0].t_end
+        r = b.send("G1 X160 F600")
+        self.assertAlmostEqual(r.ok_at, head_end, delta=0.01)
+        self.assertEqual(r.busy, [])
+
+    def test_full_planner_wait_longer_than_the_keepalive(self):
+        b = Bench()
+        b.send("M204 S2000")
+        for i in range(1, 16):
+            b.send("G1 X%d F60" % (i * 3))  # 15 blocks of about 3 s
+        head_end = b.sim.fw.stepper.blocks[0].t_end
+        self.assertGreater(head_end, 2.5)
+        r = b.send("G1 X48 F60")
+        self.assertAlmostEqual(r.ok_at, head_end, delta=0.01)
+        self.assertEqual(r.busy, [2.0])  # one keepalive while waiting, none after the slot frees
+
     def test_m18_waits_for_motion(self):
         b = Bench()
         b.send("G1 B1720 F6000")  # 1000 deg from the boot B=720 at 100 deg/s

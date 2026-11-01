@@ -5,9 +5,9 @@ import time
 
 from .control import ControlServer
 from .iolog import IoLog
-from .pty_link import PtyLink
+from .pty_link import PtyLink, check_link_path
 
-CLOSED_POLL_S = 0.01   # how often a closed (or frozen) port is checked for the host opening it
+CLOSED_POLL_S = 0.01   # how often a closed (or frozen) port is checked for the host opening (or closing) it
 
 
 class Runner:
@@ -23,7 +23,9 @@ class Runner:
         self.pending = b""
         self.frozen = False
         self.down_until = None      # link closed by a fault: reopen at this sim time (inf: at the next power cycle)
+        self.next_link = None       # a power cycle's new link path, published when the link comes back
         self.running = True
+        sim.on_error = self._sim_error
 
     def now(self):
         return (self.clock() - self.t0) * self.scale
@@ -34,28 +36,34 @@ class Runner:
         self.log("lumen-sim %s on %s (link %s)" % (self.sim.personality.name, self.link.pts, self.link.link))
         try:
             while self.running:
-                self._step()
+                self._service()
+                self._wait()
         finally:
             self.shutdown()
 
-    def _step(self):
+    def _service(self):
+        """Everything due now: link back, host input, host open/close, simulator time, actions, output."""
         t = self.now()
         if self.down_until is not None and t >= self.down_until:
-            self._reopen(None, "link back")
-        if self.link.master is not None and not self.frozen:
-            self._read_host()
+            self._reopen(self.next_link, "link back")
+        if self.link.master is not None:
+            if not self.frozen:
+                self._read_host()
+            self._watch_host()
         t = self.now()
         self.sim.run_until(t)
         self._do_actions(t)
         self._write_out(t)
 
+    def _wait(self):
+        """Sleep until the next simulator event, host input, a control request, or the next check of the port."""
         wait = self.sim.next_event_time() - self.now()
         if self.down_until is not None:
             wait = min(wait, self.down_until - self.now())
         wait = max(0.0, wait / self.scale)
         readers = []
         if self.link.master is not None and self.link.host_open and not self.frozen:
-            readers.append(self.link.master)
+            readers.append(self.link.master)  # readable on input and on the host's close (POLLHUP)
         else:
             wait = min(wait, CLOSED_POLL_S)
         writers = [self.link.master] if self.pending and self.link.master is not None and self.link.host_open else []
@@ -76,6 +84,17 @@ class Runner:
                 self.io.host(data)
             self.sim.receive(data, self.now())
 
+    def _watch_host(self):
+        """On the host's close, drop what it did not read: the next host starts clean, as on a USB port."""
+        was, self.link.host_open = self.link.host_open, self.link.host_present()
+        if was and not self.link.host_open:
+            unread = self.link.flush_unread()
+            self.pending = b""
+            if unread is None:
+                self._note("host closed (its unread bytes could not be dropped)")
+            else:
+                self._note("host closed" + (", %d unread bytes dropped" % unread if unread else ""))
+
     def _write_out(self, t):
         for _, data in self.sim.take_output(t):
             if self.link.host_open:  # nobody listening: the bytes are lost, as on a closed USB port
@@ -93,9 +112,17 @@ class Runner:
     # ------------------------------------------------------------------ control and transport faults
     def _handle_control(self, req):
         t = self.now()
+        link = req.get("link") if req.get("cmd") == "power_cycle" else None
+        if isinstance(link, str):
+            try:
+                check_link_path(link)  # refused before the controller is reset
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
         reply = self.sim.control(req, t)
         if reply.get("ok"):
-            self._do_actions(t)
+            errors = self._do_actions(t)
+            if errors:
+                return {"ok": False, "error": "; ".join(errors), **self.transport_state()}
             if req.get("cmd") == "state":
                 reply["state"].update(self.transport_state())
             elif req.get("cmd") == "power_cycle":
@@ -107,30 +134,61 @@ class Runner:
                 "frozen": self.frozen, "link_down": self.down_until is not None, "time_scale": self.scale}
 
     def _do_actions(self, t):
+        """Carry out the simulator's transport actions; the errors, as text (a failure never stops the loop)."""
+        errors = []
         for a in self.sim.take_transport_actions():
-            kind = a["action"]
-            if kind == "power_cycle":
-                self._reopen(a.get("link"), "power cycle")
-            elif kind == "disconnect":
-                self.link.close()
-                self.pending = b""
-                self.down_until = math.inf if a.get("down_s") is None else t + a["down_s"]
-                self._note("disconnect")
-            elif kind == "frozen":
-                self.frozen = bool(a["on"])
-                self._note("frozen %s" % ("on" if self.frozen else "off"))
-            elif kind == "clear":
-                self.frozen = False
-            elif kind == "stop":
-                self.running = False
+            try:
+                self._do_action(a, t)
+            except (OSError, ValueError) as e:
+                errors.append("%s: %s: %s" % (a["action"], type(e).__name__, e))
+                self.log("lumen-sim %s" % errors[-1])
+                self._note(errors[-1])
+        return errors
+
+    def _do_action(self, a, t):
+        kind = a["action"]
+        if kind == "power_cycle":
+            if a.get("down_s"):
+                self._go_down(t, a["down_s"], "power cycle")
+                self.next_link = a.get("link") or self.next_link
+            else:
+                self._reopen(a.get("link") or self.next_link, "power cycle")
+        elif kind == "disconnect":
+            self._go_down(t, a.get("down_s"), "disconnect")
+        elif kind == "frozen":
+            self.frozen = bool(a["on"])
+            self._note("frozen %s" % ("on" if self.frozen else "off"))
+        elif kind == "clear":
+            self.frozen = False
+        elif kind == "stop":
+            self.running = False
+
+    def _go_down(self, t, down_s, why):
+        """The port goes away (master closed, link removed) for down_s, or until a power cycle if None."""
+        self.link.close()
+        self.pending = b""
+        self.down_until = math.inf if down_s is None else t + down_s
+        self._note("%s: port gone" % why)
 
     def _reopen(self, link, why):
+        old = self.link.link
         self.link.close()
         self.pending = b""
         self.down_until = None
-        self.link.open(link)
+        self.next_link = None
+        try:
+            self.link.open(link)
+        except (OSError, ValueError):
+            self.link.open()  # come back where the port was, so the controller stays reachable
+            self._note("%s: %s (back at %s)" % (why, self.link.pts, old))
+            raise
         self._note("%s: %s" % (why, self.link.pts))
         self.log("lumen-sim %s: %s (link %s)" % (why, self.link.pts, self.link.link))
+
+    def _sim_error(self, rec):
+        text = "sim error%s: %s" % (" in %r" % rec["line"] if rec["line"] else "", rec["error"])
+        self.log("lumen-sim " + text)
+        self._note(text)
 
     def _note(self, text):
         if self.io:
@@ -138,7 +196,6 @@ class Runner:
 
     def shutdown(self):
         self.link.close()
-        self.link.remove_link()
         if self.control:
             self.control.close()
         if self.io:

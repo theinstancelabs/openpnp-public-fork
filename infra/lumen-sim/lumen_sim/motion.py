@@ -135,7 +135,8 @@ class Stepper:
     def cleaning(self, now):
         return now < self.cleaning_until
 
-    def full(self):
+    def full(self, now):
+        self.update(now)  # a block that ended by now has freed its slot
         return len(self.blocks) >= BLOCK_BUFFER_SIZE - 1
 
     def moving(self, now):

@@ -9,7 +9,7 @@ import math
 from collections import deque
 
 from . import personality as personalities
-from .faults import OK_FAULTS, Faults
+from .faults import OK_FAULTS, Faults, seconds
 from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, Machine
 from .marlin import AXES, Firmware, f32
 
@@ -31,12 +31,19 @@ class Simulator:
         self._dfu_reported = False
         self.seq = 0
         self.boots = 0
+        self.sim_errors = deque(maxlen=100)  # lines the model could not run (kept across power cycles)
+        self.on_error = None                 # optional callback(record), e.g. the runner's log
         self.fw = self._boot(t0)
 
     def _boot(self, t):
         self.boots += 1
         return Firmware(self.personality, self.machine, t, emit=self._emit, on_line=self._on_line,
-                        kill_messages=self.kill_messages)
+                        kill_messages=self.kill_messages, on_error=self._sim_error)
+
+    def _sim_error(self, record):
+        self.sim_errors.append(record)
+        if self.on_error:
+            self.on_error(record)
 
     # ------------------------------------------------------------------ clock and I/O
     def receive(self, data, t):
@@ -103,9 +110,10 @@ class Simulator:
 
     # ------------------------------------------------------------------ control protocol
     def control(self, req, t):
+        """One control request; a bad one gets ok:false (requests are checked before anything changes)."""
         try:
             return self._control(req, t)
-        except (KeyError, TypeError, ValueError) as e:
+        except Exception as e:
             return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
     def _control(self, req, t):
@@ -121,8 +129,12 @@ class Simulator:
             self._actions.append({"action": "clear"})
             return {"ok": True}
         if cmd == "power_cycle":
+            link = req.get("link")
+            if link is not None and not isinstance(link, str):
+                raise ValueError("link must be a path, not %r" % (link,))
+            down = 0.0 if req.get("down_s") is None else seconds(req["down_s"], "down_s")
             self.power_cycle(t)
-            self._actions.append({"action": "power_cycle", "link": req.get("link")})
+            self._actions.append({"action": "power_cycle", "link": link, "down_s": down})
             return {"ok": True}
         if cmd == "set":
             return self._set(req)
@@ -137,6 +149,9 @@ class Simulator:
         if kind in OK_FAULTS:
             self.faults.add(spec)
         elif kind in ("inject", "inject_bytes", "partial"):
+            for key in ("text", "hex"):
+                if key in req and not isinstance(req[key], str):
+                    raise ValueError("%s must be a string, not %r" % (key, req[key]))
             if kind == "inject":
                 text = req["text"] if "text" in req else INJECT_KINDS[req.get("kind", "error")]
                 data = text.encode("latin-1") + b"\n"
@@ -144,17 +159,17 @@ class Simulator:
                 data = bytes.fromhex(req["hex"]) if "hex" in req else req["text"].encode("latin-1")
             else:
                 data = req["text"].encode("latin-1")
-            after = float(req.get("after_s", 0.0))
+            after = seconds(req.get("after_s", 0.0), "after_s")
             if after > 0:
                 self._n += 1
                 heapq.heappush(self._timed, (t + after, self._n, data))
             else:
                 self._queue(t, data)
         elif kind == "halt":
-            self.fw.halt(req.get("reason", "halt fault"), t)
+            self.fw.halt(str(req.get("reason", "halt fault")), t)
         elif kind == "disconnect":
             down = req.get("down_s", 0.0)
-            self._actions.append({"action": "disconnect", "down_s": None if down is None else float(down)})
+            self._actions.append({"action": "disconnect", "down_s": None if down is None else seconds(down, "down_s")})
         elif kind == "frozen":
             self._actions.append({"action": "frozen", "on": bool(req.get("on", True))})
         else:
@@ -162,14 +177,24 @@ class Simulator:
         return {"ok": True}
 
     def _set(self, req):
+        def integer(key):
+            v = req[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError("%s must be a number, not %r" % (key, v))
+            return int(v)
+        # check everything first: a bad request changes nothing
+        vacuum = integer("vacuum") if "vacuum" in req else None
+        mcp = integer("mcp3426") if req.get("mcp3426") is not None else None
+        rs485 = req.get("rs485", {})
+        if not isinstance(rs485, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in rs485.items()):
+            raise ValueError("rs485 must map request hex to reply hex (strings), not %r" % (rs485,))
         if "kill_messages" in req:
             self.kill_messages = self.fw.kill_messages = bool(req["kill_messages"])
-        if "vacuum" in req:
-            self.machine.vacuum = int(req["vacuum"])
-        if "rs485" in req:
-            self.machine.rs485.update({k.upper(): v for k, v in req["rs485"].items()})
+        if vacuum is not None:
+            self.machine.vacuum = vacuum
+        self.machine.rs485.update({k.upper(): v for k, v in rs485.items()})
         if "mcp3426" in req:
-            self.machine.mcp3426 = None if req["mcp3426"] is None else int(req["mcp3426"])
+            self.machine.mcp3426 = mcp
         return {"ok": True}
 
     # ------------------------------------------------------------------ state
@@ -210,4 +235,5 @@ class Simulator:
             "kill_messages": self.kill_messages,
             "faults": self.faults.describe(),
             "lines_read": self.seq,
+            "sim_errors": list(self.sim_errors),
         }

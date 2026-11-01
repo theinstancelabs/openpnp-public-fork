@@ -102,7 +102,7 @@ class LinkAndPower(unittest.TestCase):
         b.send("M400")
         reply = b.sim.control({"cmd": "power_cycle"}, b.t)
         self.assertTrue(reply["ok"])
-        self.assertEqual(b.sim.take_transport_actions(), [{"action": "power_cycle", "link": None}])
+        self.assertEqual(b.sim.take_transport_actions(), [{"action": "power_cycle", "link": None, "down_s": 0.0}])
         self.assertEqual(b.send("M114").lines[0],
                          "X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197")
         self.assertEqual(b.sim.state(b.t)["fans"], [0, 0, 0, 0])
@@ -115,6 +115,13 @@ class LinkAndPower(unittest.TestCase):
         line = b.send("M114").lines[0]
         self.assertTrue(line.endswith("B:4795"), line)  # 720 + 360 deg = 1080 deg * 4.44
 
+
+    def test_power_cycle_with_a_down_time_is_handed_to_the_transport(self):
+        b = Bench()
+        reply = b.sim.control({"cmd": "power_cycle", "down_s": 1.5}, b.t)
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(b.sim.take_transport_actions(), [{"action": "power_cycle", "link": None, "down_s": 1.5}])
+        self.assertEqual(b.sim.state(b.t)["boots"], 2)  # the board resets at once; the port stays away 1.5 s
 
 class Set(unittest.TestCase):
     def test_set_vacuum_rs485_kill_messages(self):
@@ -130,6 +137,46 @@ class Set(unittest.TestCase):
         b = Bench()
         self.assertFalse(b.sim.control({"cmd": "nope"}, b.t)["ok"])
         self.assertFalse(b.sim.control({"cmd": "fault", "fault": "nope"}, b.t)["ok"])
+
+
+class MalformedRequests(unittest.TestCase):
+    """A bad control request is refused with ok:false and nothing changes; none of them may break the next line."""
+
+    BAD = [
+        {"cmd": "fault", "fault": "no_ok", "match": "^G4("},          # re.error is not a ValueError
+        {"cmd": "fault", "fault": "no_ok", "match": 5},
+        {"cmd": "fault", "fault": "no_ok", "count": "2"},
+        {"cmd": "fault", "fault": "no_ok", "count": 0},
+        {"cmd": "fault", "fault": "no_ok", "count": True},
+        {"cmd": "fault", "fault": "no_ok", "nth": True},
+        {"cmd": "fault", "fault": "delay_ok", "random": "ab"},
+        {"cmd": "fault", "fault": "delay_ok", "random": [0.1, "x"]},
+        {"cmd": "fault", "fault": "delay_ok", "random": [-1, 1]},
+        {"cmd": "fault", "fault": "delay_ok", "s": float("nan")},
+        {"cmd": "fault", "fault": "delay_ok", "s": -0.5},
+        {"cmd": "fault", "fault": "inject", "text": 5},
+        {"cmd": "fault", "fault": "inject", "text": "x", "after_s": float("nan")},
+        {"cmd": "fault", "fault": "disconnect", "down_s": float("nan")},
+        {"cmd": "fault", "fault": "disconnect", "down_s": -1},
+        {"cmd": "set", "rs485": ["FF00", "0017"]},
+        {"cmd": "set", "rs485": {"FF00": 17}},
+        {"cmd": "set", "vacuum": float("inf")},
+        {"cmd": "power_cycle", "down_s": "x"},
+        {"cmd": "power_cycle", "down_s": float("nan")},
+        {"cmd": "power_cycle", "link": 5},
+    ]
+
+    def test_each_is_refused_and_the_controller_keeps_answering(self):
+        for req in self.BAD:
+            b = Bench()
+            reply = b.sim.control(dict(req), b.t)
+            self.assertFalse(reply["ok"], req)
+            self.assertIn("error", reply)
+            self.assertEqual(b.sim.take_transport_actions(), [], req)
+            self.assertEqual(b.sim.state(b.t)["faults"], [], req)
+            self.assertEqual(b.sim.state(b.t)["boots"], 1, req)
+            self.assertEqual(b.send("G4 P10").lines, ["ok"], req)
+            self.assertEqual(b.send("M400").lines, ["ok"], req)
 
 
 if __name__ == "__main__":
