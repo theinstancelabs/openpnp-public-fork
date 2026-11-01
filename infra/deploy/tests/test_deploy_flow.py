@@ -110,8 +110,7 @@ class Flow(unittest.TestCase):
     def test_deploy_over_running_openpnp_keeps_it_running(self):
         a = self.release(4, self.lab.b)
         self.deploy()
-        svc = self.lab.service()
-        svc.start()
+        self.lab.start_service()
         b = self.release(5, self.lab.c)
         self.deploy()
         self.assertEqual(self.lab.link("current"), b)
@@ -125,7 +124,7 @@ class Flow(unittest.TestCase):
     def test_failed_health_rolls_back_automatically(self):
         a = self.release(4, self.lab.b)
         self.deploy()
-        self.lab.service().start()
+        self.lab.start_service()
         b = self.release(5, self.lab.c, schema=5, fail=["enable"])
         self.deploy(rc=4)
         self.assertEqual(self.lab.link("current"), a)
@@ -180,7 +179,7 @@ class Flow(unittest.TestCase):
     def test_failed_home_holds_and_never_homes_again(self):
         a = self.release(4, self.lab.b)
         self.deploy()
-        self.lab.service().start()
+        self.lab.start_service()
         self.lab.machine(fail=["home"])  # e.g. the homing fiducial covered, an obstruction
         b = self.release(5, self.lab.c, schema=5)
         seen = len(self.lab.requests())
@@ -199,10 +198,18 @@ class Flow(unittest.TestCase):
         a = self.release(4, self.lab.b)
         self.deploy()
         b = self.release(5, self.lab.c, fail=["engine"])
-        self.deploy(rc=4)
+        self.assertEqual(self.lab.main("deploy", extra=("--status-timeout", "1")), 4, self.lab.last_out)
         self.assertEqual(self.lab.link("current"), a)
         self.assertIn(b, self.bad())
         self.assertIn("dispense", self.bad()[b]["reason"])
+
+    def test_engine_starting_after_the_api_is_not_a_failure(self):
+        """The real OpenPnP can answer /api/status before its dispense engine runs (e2e): a deploy waits for it."""
+        self.lab.machine(engine_start_s=0.5)
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertEqual(self.bad(), {})
 
     def test_rollback_command(self):
         a = self.release(4, self.lab.b)
@@ -268,7 +275,7 @@ class Flow(unittest.TestCase):
     def test_unexpected_exception_after_claim(self):
         self.release(4, self.lab.b)
         self.deploy()
-        self.lab.service().start()
+        self.lab.start_service()
         self.release(5, self.lab.c)
         with mock.patch.object(il_deploy.Deployer, "snapshot", side_effect=OSError("disk full")):
             self.deploy(rc=1)

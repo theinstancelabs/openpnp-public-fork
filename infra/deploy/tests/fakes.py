@@ -14,9 +14,12 @@ import tarfile
 import tempfile
 import time
 
-# il_deploy is one level up: also when unittest imports this module by bare name (no -t)
+# il_deploy is one level up: also when unittest imports this module by bare name (no -t); make_release (CI's
+# release packager) is in infra/ci
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "ci"))
 import il_deploy  # noqa: E402
+import make_release  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE_OPENPNP = os.path.join(HERE, "fake_openpnp.py")
@@ -44,8 +47,8 @@ class FakeGitHub:
         self.downloads = []
 
     # --- commit graph --------------------------------------------------------------------------
-    def commit(self, name, *parents):
-        sha = sha_of(name)
+    def commit(self, name, *parents, sha=None):
+        sha = sha or sha_of(name)
         self.parents[sha] = list(parents)
         return sha
 
@@ -103,18 +106,34 @@ class FakeGitHub:
         digest = hashlib.sha256(tar_bytes).hexdigest()
         if corrupt_sha256:
             digest = hashlib.sha256(b"something else").hexdigest()
+        files = [(tar_name, tar_bytes), (tar_name + ".sha256", f"{digest}  {tar_name}\n".encode()),
+                 ("BUILD-INFO.json", info_bytes)]
+        return self._publish(run_number, sha, tag, [f for f in files if f[0] not in omit], target or sha, gate)
+
+    def add_release_dir(self, out, gate="success"):
+        """Publish what infra/ci/make_release.py wrote into out, as CI's `gh release create "$TAG" --target "$SHA"`
+        does: the tarball, its .sha256 and BUILD-INFO.json, under the tag and sha that BUILD-INFO names."""
+        with open(os.path.join(out, "BUILD-INFO.json"), "rb") as f:
+            info_bytes = f.read()
+        info = json.loads(info_bytes)
+        tag, sha = info["version"], info["sha"]
+        tar_name = f"openpnp-il-{sha[:7]}.tar.gz"
+        files = []
+        for name in (tar_name, tar_name + ".sha256"):
+            with open(os.path.join(out, name), "rb") as f:
+                files.append((name, f.read()))
+        return self._publish(il_deploy.parse_tag(tag)[0], sha, tag, files + [("BUILD-INFO.json", info_bytes)], sha,
+                             gate)
+
+    def _publish(self, run_number, sha, tag, files, target, gate):
         assets = []
-        for i, (name, data) in enumerate([(tar_name, tar_bytes),
-                                          (tar_name + ".sha256", f"{digest}  {tar_name}\n".encode()),
-                                          ("BUILD-INFO.json", info_bytes)]):
-            if name in omit:
-                continue
+        for i, (name, data) in enumerate(files):
             aid = run_number * 10 + i
             url = f"https://github.com/{self.repo}/releases/download/{tag}/{name}"
             self.assets[url] = data
             assets.append({"id": aid, "name": name, "size": len(data), "browser_download_url": url,
                            "url": f"{API}repos/{self.repo}/releases/assets/{aid}"})
-        self.releases.insert(0, {"id": run_number, "tag_name": tag, "target_commitish": target or sha,
+        self.releases.insert(0, {"id": run_number, "tag_name": tag, "target_commitish": target,
                                  "draft": False, "prerelease": True,
                                  "created_at": f"2026-10-31T12:{run_number % 60:02d}:00Z",
                                  "html_url": f"https://github.com/{self.repo}/releases/tag/{tag}", "assets": assets})
@@ -264,6 +283,21 @@ class Lab:
             "--stop-timeout", "5", "--poll-interval", "0.05", "--serial-wait", "1",
         ] + list(extra)
 
+    def ci_release(self, run_number, sha, jar=None):
+        """A release exactly as CI's release job makes it (infra/ci/make_release.py), into a fresh directory; the jar
+        is the fake OpenPnP's JSON (default {"sha": sha})."""
+        d = tempfile.mkdtemp(prefix=f"ci-release-{run_number}-", dir=self.dir)
+        jar_path, lib = os.path.join(d, "openpnp-gui-0.0.1-alpha-SNAPSHOT.jar"), os.path.join(d, "lib")
+        os.makedirs(lib)
+        with open(jar_path, "w") as f:
+            json.dump(jar if jar is not None else {"sha": sha}, f)
+        with open(os.path.join(lib, "dep-1.0.jar"), "wb") as f:
+            f.write(b"dependency")
+        out = os.path.join(d, "rel")
+        make_release.make(jar_path, lib, f"il-build-{run_number}-{sha[:7]}", sha, BRANCH, 1000 + run_number,
+                          run_number, f"https://github.com/{REPO}/actions/runs/{1000 + run_number}", out)
+        return out
+
     def deps(self, **kw):
         kw.setdefault("github", self.gh)
         kw.setdefault("procs", self.procs)
@@ -299,6 +333,21 @@ class Lab:
     def service(self):
         cfg = il_deploy.config_from_args(self.argv("status"))
         return il_deploy.make_service(cfg)
+
+    def start_service(self, timeout=15):
+        """Start OpenPnP (the fake) as a person would, and wait until its API answers: a deploy over an OpenPnP
+        that is still starting is 'not idle' (fail closed), which is not what these tests are about."""
+        svc = self.service()
+        svc.start()
+        api, end = il_deploy.Api(self.port), time.monotonic() + timeout
+        while True:
+            try:
+                api.get("/api/status", timeout=2)
+                return svc
+            except il_deploy.ApiDown:
+                if time.monotonic() > end:
+                    raise
+                time.sleep(0.02)
 
     def link(self, name):
         p = os.path.join(self.root, name)

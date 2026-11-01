@@ -496,14 +496,14 @@ def reset_signature(axes):
 # Processes: who holds the lock / the device, which OpenPnPs run
 # ------------------------------------------------------------------------------------------------
 def _proc_stat(pid):
-    """(state, ppid, starttime) of a process, or None."""
+    """(state, ppid, starttime, pgrp) of a process, or None."""
     try:
         with open(f"/proc/{pid}/stat") as f:
             s = f.read()
     except OSError:
         return None
     rest = s[s.rindex(")") + 2:].split()
-    return rest[0], int(rest[1]), rest[19]
+    return rest[0], int(rest[1]), rest[19], int(rest[2])
 
 
 def openpnp_config_dir(cmd, cwd, home):
@@ -695,9 +695,31 @@ class SubprocessService:
             return False
         return True
 
+    @staticmethod
+    def _group(rec):
+        """Live processes of the service's process group (its own session: pgid = the started pid), started no
+        earlier than it. flock dies on SIGTERM at once, the java it runs takes seconds to exit and holds the serial
+        lock and the API port until then: the service runs while any of them does, as a unit while its cgroup has
+        processes."""
+        pgid, born = rec.get("pid"), rec.get("starttime")
+        out = set()
+        if not isinstance(pgid, int) or born is None:
+            return out
+        lead = _proc_stat(pgid)
+        if lead is not None and str(lead[2]) != str(born):
+            return out  # the pid is another process now: a pgid is not reused while its group has members
+        for pid in Procs()._pids():
+            st = _proc_stat(pid)
+            if st and st[3] == pgid and st[0] not in ("Z", "X") and int(st[2]) >= int(born):
+                out.add(pid)
+        return out
+
+    def _running(self, rec):
+        return self._alive(rec) or bool(self._group(rec))
+
     def is_active(self):
         rec = self._record()
-        return bool(rec) and self._alive(rec)
+        return bool(rec) and self._running(rec)
 
     def start(self):
         if self.is_active():
@@ -721,23 +743,28 @@ class SubprocessService:
 
     def pids(self):
         rec = self._record()
-        if not rec or not self._alive(rec):
+        if not rec:
             return set()
-        return {rec["pid"]} | Procs().descendants(rec["pid"])
+        out = self._group(rec)
+        if self._alive(rec):
+            out |= {rec["pid"]} | Procs().descendants(rec["pid"])
+        return out
 
     def _wait_gone(self, rec, timeout):
         end = time.monotonic() + timeout
-        while self._alive(rec):
+        while self._running(rec):
             if time.monotonic() > end:
                 return False
             time.sleep(0.05)
         return True
 
     def stop(self):
+        """pre_stop (the STOP sequence), SIGTERM to the process group, and wait until all of it is gone (SIGKILL after
+        stop_timeout), as `systemctl stop` waits for the unit's cgroup."""
         rec = self._record()
         if not rec:
             return
-        if self._alive(rec):
+        if self._running(rec):
             if self.pre_stop:
                 with contextlib.suppress(Exception):
                     self.pre_stop()
@@ -1296,8 +1323,11 @@ class Deployer:
 
     # --- health ----------------------------------------------------------------------------------
     def _wait_status(self, watch_service):
+        """/api/status of a started OpenPnP: 200 with the dispense engine running. OpenPnP starts its web API and the
+        engine on configurationComplete in no fixed order (its listeners are a HashSet), so a 200 without the engine
+        is waited out too; at the timeout that 200 is returned, and the engine check fails on it."""
         end = self.clock.monotonic() + self.cfg.status_timeout
-        last = "no answer"
+        last, started = "no answer", None
         while True:
             if watch_service and not self.svc.is_active():
                 code = self.svc.exit_status()
@@ -1307,11 +1337,17 @@ class Deployer:
             try:
                 code, st = self.api.get("/api/status", timeout=5)
                 if code == 200:
-                    return st, None, None
-                last = f"HTTP {code}"
+                    d = st.get("dispense")
+                    if isinstance(d, dict) and d.get("running") is True:
+                        return st, None, None
+                    started, last = st, "the dispense engine is not running yet"
+                else:
+                    last = f"HTTP {code}"
             except ApiDown as e:
                 last = str(e)
             if self.clock.monotonic() >= end:
+                if started is not None:
+                    return started, None, None
                 return None, f"/api/status did not answer 200 within {self.cfg.status_timeout:g} s ({last})", "build"
             self.clock.sleep(self.cfg.poll_interval)
 

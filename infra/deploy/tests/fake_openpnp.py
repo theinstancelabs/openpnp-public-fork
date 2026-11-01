@@ -14,7 +14,9 @@ Behaviour comes from two places:
   at start, and the db WAL gets a line, so a rollback can be checked to restore the snapshot.
 - <config>/fake-machine.json (machine-level, survives a version change): {"fail": [...],
   "usb_sn": "387932683335", "simulated": false, "home_s": 0.05, "fail_for": {sha7: [...]} (failures for
-  one build only), "run_phase": "dots" (the engine run's phase with fail "run"), and activity N s before
+  one build only), "run_phase": "dots" (the engine run's phase with fail "run"), "engine_start_s": N (the
+  dispense engine runs only N s after the API: OpenPnP starts both on configurationComplete, in no fixed
+  order, so the real /api/status can answer 200 before the engine runs), and activity N s before
   the request: "last_run_ended_s_ago" (lastRun.endedAtMs), "run_finished_s_ago" (run.finishedAtMs),
   "pad_cal_ended_s_ago" (padCalibration.endedAtMs), "pressure_event_s_ago" (pressure.lastEventAtMs)}.
 Failures (either list): version (wrong sha7 in server.version), crash (exit 1 at start), enable,
@@ -148,8 +150,9 @@ class FakeOpenPnP:
             "padCalibration": pad,
             "boardImport": {"reading": False},
         }
-        if "engine" in self.fail:
-            # DispenseEndpoints.status: no engine, so no lastRun either
+        starting = time.time() * 1000 - self.started_ms < float(self.machine.get("engine_start_s", 0)) * 1000
+        if "engine" in self.fail or starting:
+            # DispenseEndpoints.status: no engine (failed or not started yet), so no lastRun either
             out["dispense"] = {"running": False, "available": False,
                                "unavailableReason": "the dispense engine is not running"}
             return out

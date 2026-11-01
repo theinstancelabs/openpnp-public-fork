@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 
 # il_deploy is one level up: also when unittest imports this module by bare name (no -t)
@@ -144,12 +145,31 @@ class Health(unittest.TestCase):
         self.assertTrue(rep["ok"], rep)
         self.assertNotIn("serial", [s["step"] for s in rep["steps"]])
 
+    def test_engine_starting_after_the_api_is_waited_for(self):
+        """OpenPnP starts its web API and the dispense engine on configurationComplete, in no fixed order (its
+        listeners are a HashSet), so /api/status can answer 200 before the engine runs (seen with the real build,
+        e2e/test_deploy_openpnp.py). That is OpenPnP still starting, not a failed build."""
+        self.start(engine_start_s=0.6)
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertGreaterEqual(len([p for p in self.paths() if p == ("GET", "/api/status")]), 2)
+
+    def test_engine_that_never_starts_fails_at_the_status_timeout(self):
+        self.start(jar_fail=["engine"])
+        t = time.monotonic()
+        rep = self.check("--status-timeout", "1")
+        self.assertGreaterEqual(time.monotonic() - t, 1.0)
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "build")
+        self.assertIn("the dispense engine is not usable (dispense.running False, available False", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
+
     def test_dispense_engine_must_run(self):
         for fail in ("engine", "unavailable"):
             with self.subTest(fail=fail):
                 self.start(jar_fail=[fail])
                 try:
-                    rep = self.check()
+                    rep = self.check("--status-timeout", "1")
                     self.assertFalse(rep["ok"])
                     self.assertEqual(rep["kind"], "build")
                     self.assertEqual(rep["steps"][-1]["step"], "status")
