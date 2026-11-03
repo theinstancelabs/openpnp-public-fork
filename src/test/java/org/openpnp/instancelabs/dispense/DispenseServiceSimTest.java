@@ -371,6 +371,47 @@ public class DispenseServiceSimTest {
     }
 
     /**
+     * BR-42: the recovery after a stopped stream reads the position back behind an M400. With the controller silent
+     * (an ok lost to a second sender, a hung board) that M400 waited OpenPnP's infinity timeout (60 s) and the engine
+     * stayed busy; it waits the command timeout now, as every other engine line.
+     */
+    @Test
+    public void theRecoveryM400WaitsTheCommandTimeoutNotOpenPnpsInfinity() throws Exception {
+        DispensePlan plan = plan();
+        DispenseConfig c = svc.getConfig();
+        c.commandTimeoutMs = 1500;
+        svc.updateConfig(c);
+        // the stream waits at its valve-on line until the STOP is in: a STOP mid-stream, not after the last dot
+        java.util.concurrent.CountDownLatch valveOn = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch silent = new java.util.concurrent.CountDownLatch(1);
+        sim.server.holdOkUntil.put(ControllerCommands.VALVE_ON, valveOn);
+        sim.server.mark();
+        Future<RunResult> run = svc.runPlan(plan);
+        try {
+            long t0 = System.currentTimeMillis();
+            while (!sim.server.sinceMark().contains(ControllerCommands.VALVE_ON)) {
+                assertTrue(System.currentTimeMillis() - t0 < 30000, "the run opens the valve");
+                Thread.sleep(5);
+            }
+            sim.server.holdOkUntil.put("M400", silent); // from here the controller does not answer M400
+            long t1 = System.currentTimeMillis();
+            svc.abort("STOP pressed in the web UI");
+            valveOn.countDown();
+            RunResult r = run.get(20, TimeUnit.SECONDS);
+            assertEquals(RunResult.Status.ABORTED, r.status, r.toString());
+            assertTrue(System.currentTimeMillis() - t1 < 8000, "idle after the command timeout, not OpenPnP's 60 s");
+            assertTrue(r.warnings.stream().anyMatch(w -> w.startsWith("position read-back after stop failed")),
+                    r.warnings.toString());
+            assertFalse(svc.isBusy());
+            assertFalse(sim.machine.isHomed(), "a home before the next motion");
+        }
+        finally {
+            valveOn.countDown();
+            silent.countDown();
+        }
+    }
+
+    /**
      * I11: the B step count restarts at a controller power-up, so a start angle set before the last
      * connect is refused until it is confirmed (or measured again).
      */

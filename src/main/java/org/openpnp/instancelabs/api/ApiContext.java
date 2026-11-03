@@ -27,11 +27,14 @@ final class ApiContext {
     final PressureHold pressure;
     /** The pad calibrations (PROFILE_CALIBRATION_DESIGN.md §7): one at a time, its lock on the other tasks. */
     final PadCalibrationJobs padCalJobs = new PadCalibrationJobs(this);
+    /** OpenPnP switching the machine off (BR-52): Start waits for it, nothing else starts meanwhile. */
+    final SwitchOff switchOff = new SwitchOff();
     private DispenseService listened;
 
     ApiContext(Configuration configuration) {
         this.configuration = configuration;
         this.pressure = new PressureHold(this);
+        switchOff.attach(configuration.getMachine());
     }
 
     Machine machine() throws ApiException {
@@ -39,6 +42,7 @@ final class ApiContext {
         if (m == null) {
             throw ApiException.unavailable("OpenPnP has no machine configured");
         }
+        switchOff.attach(m);
         return m;
     }
 
@@ -117,8 +121,19 @@ final class ApiContext {
      * tasks that home or move refuse while OpenPnP is busy.
      */
     void requireMachineIdle() throws ApiException {
+        requireNotSwitchingOff();
         if (machine().isBusy()) {
             throw ApiException.refused("OpenPnP is busy (homing or moving): wait for it to finish");
+        }
+    }
+
+    /**
+     * BR-52: while OpenPnP switches the machine off (a STOP's DISABLE_COMMAND, the link closing) it still reads started:
+     * nothing that moves or switches an output starts then.
+     */
+    void requireNotSwitchingOff() throws ApiException {
+        if (switchOff.inProgress()) {
+            throw ApiException.refused(SwitchOff.REFUSAL);
         }
     }
 
@@ -176,6 +191,7 @@ final class ApiContext {
     void shutdown() {
         padCalJobs.shutdown();
         pressure.shutdown();
+        switchOff.detach();
         synchronized (this) {
             if (listened != null) {
                 listened.removeListener(tracker);

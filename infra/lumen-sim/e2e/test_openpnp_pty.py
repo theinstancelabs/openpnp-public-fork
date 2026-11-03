@@ -417,7 +417,12 @@ class StopDuringHomingTest(SessionTest):
         m410 = [i for i, (t, d, l) in enumerate(io) if d == ">" and l == "M410"]
         self.assertEqual(len(m410), 1)
         self.assertFalse([l for t, d, l in io[m410[0] + 1:] if d == "<"], "the halted board answered")
-        self.assertFalse(lines_sent(io, "M107 P3"), "the rest of DISABLE_COMMAND is never sent")
+        # BR-66 (PR #10): every DISABLE_COMMAND line still goes out, in order, although the halted board answers
+        # none; after the M410's timeout each of the next lines waits at most 1 s (before #10: none was sent)
+        sent = [lines_sent(io[m410[0] + 1:], l) for l in ("M107 P3", "M107 P2", "M107 P1", "M107 P0", "M18 B")]
+        self.assertTrue(all(len(t) == 1 for t in sent), sent)
+        self.assertEqual([t[0] for t in sent], sorted(t[0] for t in sent), "in DISABLE_COMMAND's order")
+        self.assertLess(sent[-1][0] - sent[0][0], 5.5, "about a second per line after the M410")
         self.assertNotEqual(code_re, 200, reconnect)
         self.assertIn("timeout waiting for response to G21", json.dumps(reconnect))
         self.assertTrue(still_halted)

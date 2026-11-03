@@ -121,6 +121,23 @@ public class SimGuardTest {
         assertTrue(SimGuard.isSimulated(sim.machine));
     }
 
+    /**
+     * BR-52: OpenPnP's own Stop may fire its last machineDisabled listeners on its own thread after the machine was
+     * started again; the new connection's identity stays. A machine that reads off forgets it, as before.
+     */
+    @Test
+    public void aLateMachineDisabledKeepsTheIdentityOfAMachineStartedAgain() throws Exception {
+        sim = new SimMachine(false);
+        sim.server.firmwareName = "GcodeServer (RecordingGcodeServer)";
+        SimGuard.askAtConnect(sim.machine, () -> new DriverGcodeChannel(sim.driver).sendAndCollect("M115", 5000));
+        sim.machine.setEnabled(true);
+        assertTrue(SimGuard.isSimulated(sim.machine));
+        sim.machine.fireMachineDisabled("the last listeners of an earlier switch-off");
+        assertTrue(SimGuard.isSimulated(sim.machine), "kept: the machine is started");
+        sim.machine.setEnabled(false);
+        assertFalse(SimGuard.isSimulated(sim.machine), "forgotten on disable");
+    }
+
     @Test
     public void serialWithAnUnusedLoopbackTcpEntryIsNotSimulated() throws Exception {
         sim = new SimMachine(false);

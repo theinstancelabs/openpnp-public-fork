@@ -169,7 +169,7 @@ public final class SimGuard {
 
         @Override
         public void machineDisabled(Machine machine, String reason) {
-            forget(machine);
+            forgetUnlessStarted(machine);
         }
     };
 
@@ -220,7 +220,8 @@ public final class SimGuard {
             }
         }
         catch (Exception e) {
-            Logger.debug("controller identity not read at connect: {}", e.getMessage());
+            // records made on the simulator are refused until an engine task reads M115 again (BR-52)
+            Logger.warn("controller identity not read at connect: {}", e.getMessage());
         }
     }
 
@@ -257,6 +258,17 @@ public final class SimGuard {
 
     static synchronized void forget(Machine m) {
         confirmed.remove(m);
+    }
+
+    /**
+     * OpenPnP's own Stop may fire its last machineDisabled listeners on its own thread after the machine was started
+     * again (BR-52): the new connection's identity stays then. Under this lock, as noteIdentity, so a machine started
+     * again is seen as started.
+     */
+    private static synchronized void forgetUnlessStarted(Machine m) {
+        if (!m.isEnabled()) {
+            confirmed.remove(m);
+        }
     }
 
     /** {@code <configDir>/instancelabs/sim-scene.json}; only the sim scripts write it (into a config copy). */
