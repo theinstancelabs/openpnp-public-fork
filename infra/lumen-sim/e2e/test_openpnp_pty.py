@@ -351,7 +351,10 @@ class HomeAndPrimeTest(SessionTest):
         moves = [(t, l) for t, d, l in io if d == ">" and l.startswith("G1 B")]
         self.assertEqual(len(moves), 1, moves)
         self.assertRegex(moves[0][1], r"^G1 B108\d\d\.\d+ F64800$")
-        g4 = [i for i, (t, d, l) in enumerate(io) if d == ">" and l == "G4 P250"]
+        # the dwell after the screw move (the pump and valve settles before it also go out as G4 P250 pieces since
+        # PR #15: a STOP's valve-off waits behind at most one piece)
+        i_move = next(i for i, (t, d, l) in enumerate(io) if d == ">" and l.startswith("G1 B"))
+        g4 = [i for i, (t, d, l) in enumerate(io) if i > i_move and d == ">" and l == "G4 P250"]
         self.assertEqual(len(g4), 1)
         t_g4, after = io[g4[0]][0], io[g4[0] + 1:]  # by position: the G1's ok can share the G4's millisecond
         i_abort = next(i for i, (t, d, l) in enumerate(after) if d == ">" and l == "M410")
