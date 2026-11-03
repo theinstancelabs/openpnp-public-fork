@@ -153,6 +153,24 @@ class Health(unittest.TestCase):
         axes[0]["driverCoordinate"] = 0.5
         self.assertFalse(il_deploy.reset_signature(axes))
 
+    def test_reset_signature_is_A_or_B_at_720(self):
+        """BR-02's rule (INF-10): X, Y, Z at 0 with A or B at 720. Marlin boots both rotation axes at 720; a G92 B0 alone
+        (what a dry run once did) leaves A at 720 and the controller still unhomed."""
+        def axes(a, b):
+            out = [{"letter": "X", "driverCoordinate": 0.0}, {"letter": "Y", "driverCoordinate": 0.0},
+                   {"letter": "Z", "driverCoordinate": 0.0}, {"letter": "B", "driverCoordinate": b}]
+            return out if a is None else out + [{"letter": "A", "driverCoordinate": a}]
+        self.assertTrue(il_deploy.reset_signature(axes(720.0, 0.0)))
+        self.assertTrue(il_deploy.reset_signature(axes(0.0, 720.0)))
+        self.assertTrue(il_deploy.reset_signature(axes(720.0, 720.0)))
+        self.assertTrue(il_deploy.reset_signature(axes(None, 720.0)))
+        self.assertFalse(il_deploy.reset_signature(axes(0.0, 0.0)))
+        self.assertFalse(il_deploy.reset_signature(axes(None, 0.0)))
+        homed = axes(0.0, 0.0)
+        homed[2]["driverCoordinate"] = 31.5  # Z after G28 (Z_AFTER_HOMING)
+        homed[4]["driverCoordinate"] = 720.0
+        self.assertFalse(il_deploy.reset_signature(homed), "a homed head is not a reset, whatever A reads")
+
     def test_controller_position_not_read_is_never_homed(self):
         """reset_signature needs B too: a power-cycled controller (X/Y/Z 0) whose B is not reported (its letter changed
         in machine.xml, no driverCoordinate) must not pass as 'not reset' and be homed."""
