@@ -1265,7 +1265,10 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         // TODO: true queued reporting. For now it is sufficient to poll one for one.
         // Instance Labs (BR-42): only a sender alone drops stale confirmations. With another sender waiting (OpenPnP's
         // Stop beside the dispense engine's line in flight) its ok may be in the queue already, and clearing it made
-        // that sender wait its whole timeout. Each line still gets one ok, and each waiting sender takes one.
+        // that sender wait its whole timeout. Each line still gets one ok, and each waiting sender takes one; at a STOP
+        // which sender takes which is harmless (both only wait for an acknowledgement). Elsewhere (a vent from a timer
+        // thread beside a motion-complete M400) the M400 could take the vent's ok in a window of microseconds and
+        // return early, where before the vent lost it and timed out. Follow-up: each ok to the oldest writer.
         synchronized (confirmationLock) {
             if (confirmationWaiters == 0) {
                 receivedConfirmationsQueue.clear();

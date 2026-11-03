@@ -5872,8 +5872,9 @@ public final class DispenseService {
         void recover() {
             bZeroed.set(false);
             try {
-                // the I1 shutdown's M410 flushed the planner: this returns at once; a silent controller (BR-42: an ok
-                // lost to OpenPnP's Stop sending beside the engine) ends it after the command timeout, not 60 s
+                // the I1 shutdown's M410 flushed the planner: this returns at once. A silent controller ends the
+                // recovery here after the command timeout (it waited OpenPnP's 60 s, BR-42); the read-back below is
+                // then not sent (its M114 ok still waits OpenPnP's infinity, as OpenPnP's own position reads)
                 channel.send("M400", c.commandTimeoutMs);
                 // A stop between the screw's M204 S and the restore leaves the screw acceleration in force.
                 channel.send("M204 S" + GcodeStreamBuilder.f0(c.travelAccelMmS2), c.commandTimeoutMs);

@@ -110,8 +110,10 @@ public class GcodeDriverTwoSendersTest {
         catch (Exception e) {
             timedOut = e;
         }
+        finally {
+            answer.countDown();
+        }
         assertTrue(timedOut != null && String.valueOf(timedOut.getMessage()).contains("timeout"), "timed out");
-        answer.countDown();
         long t0 = System.currentTimeMillis();
         while (driver.confirmationsWaiting() == 0 && System.currentTimeMillis() - t0 < 5000) {
             Thread.sleep(2);

@@ -1002,6 +1002,7 @@ public class ApiServerSimTest {
             } while ((s.get("run").isJsonNull() || s.getAsJsonObject("run").get("dotsDone").getAsInt() < 2)
                     && System.currentTimeMillis() - t0 < 30000);
             sim.server.delayBeforeOkMs.put("M410", 1000L);
+            sim.server.mark();
             JsonObject stop = ok(post("/api/stop", null));
             long t1 = System.currentTimeMillis();
             do {
@@ -1017,6 +1018,10 @@ public class ApiServerSimTest {
             assertTrue(took < 15000, "idle and off " + took + " ms after the STOP: " + stop);
             JsonObject last = ok(get("/api/runs/last")).getAsJsonObject("run");
             assertFalse(last.toString().contains("timeout"), "no line timed out: " + last);
+            // CI's symptom: OpenPnP's Stop lost an ok, waited the driver's timeout and skipped its last lines
+            List<String> after = commands(sim.server.sinceMark());
+            assertTrue(Collections.frequency(after, "M107 P0") >= 2 && Collections.frequency(after, "M18 B") >= 2,
+                    "the engine's F9 lines and OpenPnP's whole DISABLE_COMMAND: " + after);
         }
         finally {
             sim.server.delayBeforeOkMs.clear();
