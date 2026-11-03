@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.awt.image.BufferedImage;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -19,7 +20,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.DotImager;
 import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.instancelabs.dispense.TipCamera;
 import org.openpnp.machine.reference.camera.SimulatedUpCamera;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.LengthUnit;
@@ -351,14 +354,40 @@ public class OutputZonesSimTest {
         assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
     }
 
+    /** The bottom camera as the tip picture sees it: OpenPnP's up-looking camera's X/Y, a plain frame. */
+    static final class TipCam implements TipCamera {
+        @Override
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @Override
+        public double[] locationMm() {
+            return new double[] {CAM_X, CAM_Y, 20};
+        }
+
+        @Override
+        public DotImager.Frame capture() {
+            return new DotImager.Frame(new BufferedImage(320, 240, BufferedImage.TYPE_INT_RGB), 0.02, 0.02, CAM_X,
+                    CAM_Y);
+        }
+    }
+
+    /**
+     * BR-03's acceptance (the review's gap: it moved the needle by hand): a tip picture leaves the needle over the
+     * bottom camera, and the hold is then refused; a park or a place over the camera does not make it allowed.
+     */
     @Test
     public void theBottomCameraIsForbiddenEvenAsAParkOrAPlace() throws Exception {
-        needleTo(CAM_X + 3, CAM_Y);
+        svc.setTipCamera(new TipCam());
+        JsonObject pic = ok("POST", "/api/tip-setups/" + svc.mountedKey() + "/picture", "{\"wait\":true}");
+        assertTrue(pic.getAsJsonObject("result").get("ok").getAsBoolean(), pic.toString());
         assertEquals("forbidden: bottom camera", i12().get("zone").getAsString());
         sim.server.mark();
         call("POST", "/api/pressure/start", "{}");
         assertEquals(409, lastStatus, lastBody);
-        assertTrue(lastBody.contains("bottom camera"), lastBody);
+        assertTrue(lastBody.contains("I12: the needle (250.0, 150.0) is over the bottom camera, where the valve and the "
+                + "screw stay off: park first (or start it with park: 'waste')"), lastBody);
         // a place over the camera does not make it allowed
         ok("PUT", "/api/locations/towel", "{\"x\":" + (CAM_X + 2) + ",\"y\":" + CAM_Y + ",\"z\":5.5}");
         call("POST", "/api/pressure/start", "{\"park\":\"towel\"}");
