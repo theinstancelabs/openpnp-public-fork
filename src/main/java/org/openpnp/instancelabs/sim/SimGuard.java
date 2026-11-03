@@ -170,7 +170,8 @@ public final class SimGuard {
             }
         }
         catch (Exception e) {
-            Logger.debug("controller identity not read at connect: {}", e.getMessage());
+            // records made on the simulator are refused until an engine task reads M115 again (BR-52)
+            Logger.warn("controller identity not read at connect: {}", e.getMessage());
         }
     }
 

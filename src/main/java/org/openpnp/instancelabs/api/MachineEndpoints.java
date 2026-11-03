@@ -48,6 +48,11 @@ final class MachineEndpoints {
      * ({@code machineEnabled} true then); the status shows when the machine is off.
      */
     static final long STOP_ANSWER_MS = 1500;
+    /**
+     * Longest Start waits for a switch-off still running (BR-52): its DISABLE_COMMAND lines (each up to the driver's
+     * timeout) and the link's reader join (3 s).
+     */
+    static final long START_WAITS_FOR_SWITCH_OFF_MS = 20000;
 
     private final ApiContext ctx;
     private final ExecutorService cameraExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -115,14 +120,7 @@ final class MachineEndpoints {
             }
         }
         if (m.isEnabled()) {
-            Runnable task = () -> {
-                try {
-                    m.setEnabled(false);
-                }
-                catch (Exception e) {
-                    Logger.warn(e, "web STOP: disabling the machine failed");
-                }
-            };
+            Runnable task = () -> ctx.switchOff.stop(m);
             if (m.isBusy()) {
                 // As OpenPnP's own Stop button: bypass the busy machine thread (emergency path).
                 Thread t = new Thread(task, "il-api-stop");
@@ -165,6 +163,12 @@ final class MachineEndpoints {
 
     Object enable() throws Exception {
         Machine m = ctx.machine();
+        // BR-52: a machine switching off still reads started; connect anew once the switch-off has ended
+        if (!ctx.switchOff.awaitEnd(START_WAITS_FOR_SWITCH_OFF_MS)) {
+            throw ApiException.refused("OpenPnP is still switching the machine off after "
+                    + START_WAITS_FOR_SWITCH_OFF_MS / 1000 + " s (it waits for the controller's answers): press Start "
+                    + "again in a moment; if it stays, switch the controller off and on");
+        }
         if (m.isEnabled()) {
             return Views.map("enabled", true, "homed", m.isHomed(), "note", "the machine was already started");
         }
