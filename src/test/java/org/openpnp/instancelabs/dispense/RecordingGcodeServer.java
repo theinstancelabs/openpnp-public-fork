@@ -59,6 +59,9 @@ public class RecordingGcodeServer implements AutoCloseable {
     public volatile String firmwareName = "Marlin (RecordingGcodeServer)";
     /** Wait before the "ok" of lines starting with a prefix, e.g. "G28" -> 3000 (a slow home). */
     public final Map<String, Long> delayBeforeOkMs = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The "ok" of lines starting with a prefix waits until the latch opens (30 s at most): a controller the test answers. */
+    public final Map<String, java.util.concurrent.CountDownLatch> holdOkUntil =
+            new java.util.concurrent.ConcurrentHashMap<>();
     /** Machine B minus logical B (deg): the G92 workspace shift. */
     private double bShift = 0;
     /** If >= 0, reply "Error: simulated" to the n-th received line (0-based) after mark(). */
@@ -145,6 +148,11 @@ public class RecordingGcodeServer implements AutoCloseable {
                     for (Map.Entry<String, Long> d : delayBeforeOkMs.entrySet()) {
                         if (line.startsWith(d.getKey())) {
                             Thread.sleep(d.getValue());
+                        }
+                    }
+                    for (Map.Entry<String, java.util.concurrent.CountDownLatch> h : holdOkUntil.entrySet()) {
+                        if (line.startsWith(h.getKey())) {
+                            h.getValue().await(30, java.util.concurrent.TimeUnit.SECONDS);
                         }
                     }
                     reply.append("ok\n");
