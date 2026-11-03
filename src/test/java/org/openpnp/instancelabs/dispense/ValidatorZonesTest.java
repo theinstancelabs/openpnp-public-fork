@@ -59,22 +59,49 @@ public class ValidatorZonesTest {
         assertTrue(v.get(0).contains("I12") && v.get(0).contains("bottom camera"), v.toString());
     }
 
+    /**
+     * Review (MINOR): a program's lines get one I12 entry, the first line with where its paste would land and what to
+     * do; never "park first" (a program does not park).
+     */
     @Test
     public void aScrewTurnAtTheCameraIsRefusedEvenWithTheValveOpenedElsewhere() {
         DispenseConfig c = config();
         List<String> v = check(c, prog("M106 P2 S255", "M106 P3 S255", "M107 P3", "M107 P2", "G1 " + xy(205, 32)
                 + " F6000", "M106 P2 S255", "M106 P3 S255", "G1 B90.0000 F21600", "M107 P3", "M107 P2"), 100, 50);
-        assertEquals(2, v.size(), "the valve and the B move, both at the camera: " + v);
-        assertTrue(v.get(1).contains("'G1 B90.0000 F21600'"), v.toString());
+        assertEquals(1, v.size(), "one entry for the valve and the B move, both at the camera: " + v);
+        assertTrue(v.get(0).startsWith("I12: 2 valve or screw lines put paste where it may not go; the first: the "
+                + "valve ON at line 7 puts paste at (205.0, 32.0), over the bottom camera"), v.toString());
+        assertTrue(v.get(0).endsWith(": set that place or surface 15 mm or more away from it"), v.toString());
     }
 
+    /** Review (MINOR): the crossing says what to do. */
     @Test
     public void aMoveWithTheValveOnMayNotCrossTheCamera() {
         DispenseConfig c = config();
         // from the waste to the towel, straight over the camera, with the valve on
         List<String> v = check(c, prog("M106 P2 S255", "M106 P3 S255", "G1 " + xy(250, 30) + " F6000", "M107 P3",
                 "M107 P2"), 150, 30);
-        assertTrue(v.stream().anyMatch(s -> s.contains("crosses the bottom camera")), v.toString());
+        assertTrue(v.stream().anyMatch(s -> s.startsWith("I12: line 3 moves the needle from (150.0, 30.0) to (250.0, "
+                + "30.0) with the valve on, across the bottom camera (15 mm around it): set the places or boards at "
+                + "its ends so that the path between them misses it")), v.toString());
+    }
+
+    /**
+     * Review (MINOR): a dot beyond a probed surface names its pad, how far beyond the points it lands and the remedy:
+     * ZFrameTest's ftp board with R16.1 beyond the margin (a run is refused by I4 first, with the same rule).
+     */
+    @Test
+    public void aDotBeyondAProbedSurfaceNamesItsPad() throws Exception {
+        DispenseConfig c = ZFrameTest.cfg();
+        ToyMapper m = new ToyMapper(290, 125, 31.5, 0);
+        GcodeProgram prog = GcodeStreamBuilder.forPlan(c, m, OutputZonesTest.ftp(c, 367.3, 151.3),
+                java.util.Collections.emptyList(), false, false, 0L);
+        List<String> v = GcodeStreamValidator.validate(prog, c, "B", null,
+                GcodeStreamValidator.ZoneCheck.of(OutputZones.of(c, OutputZonesTest.CAMERA), m));
+        assertEquals(1, v.size(), v.toString());
+        assertTrue(v.get(0).matches("I12: \\d+ valve or screw lines put paste where it may not go; the first: dot "
+                + "'R16\\.1' at line \\d+ puts paste at \\(367\\.3, 151\\.3\\), 4\\.\\d mm beyond the probed 'board' "
+                + "surface's points \\(margin 3\\.5 mm\\): probe around it"), v.get(0));
     }
 
     /** One dot whose paste lands at (x, 30), built (ToyMapper) with the tip's landing + trim (landingX, 0), checked. */

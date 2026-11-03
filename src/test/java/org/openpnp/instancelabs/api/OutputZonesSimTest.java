@@ -301,8 +301,54 @@ public class OutputZonesSimTest {
         assertTrue(l.contains("M106 P2 S255"), l.toString());
         assertFalse(l.contains("M106 P3 S255"), "no valve line: " + l);
         stopPressure();
+        assertTrue(pressure().get("mode").isJsonNull(), "review (MINOR): no mode while off: " + pressure());
         call("POST", "/api/pressure/start", "{\"mode\":\"pump\",\"park\":\"waste\"}");
         assertEquals(400, lastStatus, lastBody);
+    }
+
+    void n2To(double x, double y, double z) throws Exception {
+        sim.machine.execute(() -> {
+            MovableUtils.moveToLocationAtSafeZ(sim.n2, new Location(LengthUnit.Millimeters, x, y, z, 0));
+            return null;
+        });
+    }
+
+    /**
+     * Review (MINOR): the park ends at the travel height, not at the Z the needle had; a travel height outside N2's
+     * safe Z zone (the see-saw would move N1 down) refuses it before it moves.
+     */
+    @Test
+    public void theParkEndsAtTravelHeight() throws Exception {
+        n2To(120, 60, 28); // N2 low (z1 35, inside its safe zone 26.5..36.5)
+        ok("PUT", "/api/config", "{\"travelSafeZMm\":25}"); // z1 38
+        call("POST", "/api/pressure/start", "{\"park\":\"waste\"}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("safe Z zone"), lastBody);
+        assertEquals(120, sim.n2.getLocation().getX(), 0.01, "not moved");
+        ok("PUT", "/api/config", "{\"travelSafeZMm\":31.5}");
+        ok("POST", "/api/pressure/start", "{\"park\":\"waste\"}");
+        Location at = sim.n2.getLocation();
+        assertEquals(80, at.getX(), 0.01);
+        assertEquals(31.5, at.getZ(), 0.01, "at travel height");
+        stopPressure();
+    }
+
+    /**
+     * The review's gap: the zones apply to every engine program (runSegment). The prime with the waste set over the
+     * camera is refused before a line is sent, in one entry that names the line and says what to do (not "park").
+     */
+    @Test
+    public void aPrimeOverTheCameraIsRefusedBeforeALine() throws Exception {
+        ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        ok("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}");
+        ok("PUT", "/api/locations/waste", "{\"x\":" + (CAM_X + 2) + ",\"y\":" + CAM_Y + ",\"z\":5.5}");
+        sim.server.mark();
+        JsonObject run = ok("POST", "/api/prime", "{\"rotationDeg\":360,\"wait\":true}").getAsJsonObject("result");
+        assertFalse("OK".equals(run.get("status").getAsString()), run.toString());
+        String why = run.get("message").getAsString();
+        assertTrue(why.contains("I12: 3 valve or screw lines put paste where it may not go; the first: the valve ON "
+                + "at line ") && why.contains("over the bottom camera") && !why.contains("park"), why);
+        assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
     }
 
     @Test
@@ -317,7 +363,9 @@ public class OutputZonesSimTest {
         ok("PUT", "/api/locations/towel", "{\"x\":" + (CAM_X + 2) + ",\"y\":" + CAM_Y + ",\"z\":5.5}");
         call("POST", "/api/pressure/start", "{\"park\":\"towel\"}");
         assertEquals(409, lastStatus, lastBody);
-        assertTrue(lastBody.contains("bottom camera"), lastBody);
+        // review (MINOR): with a park, the text is about the park target
+        assertTrue(lastBody.contains("I12: the park over 'towel' (252.0, 150.0) is over the bottom camera")
+                && lastBody.contains("park over another place") && !lastBody.contains("park first"), lastBody);
         assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
     }
 }
