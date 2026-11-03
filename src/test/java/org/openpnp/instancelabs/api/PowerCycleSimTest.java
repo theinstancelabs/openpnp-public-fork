@@ -158,6 +158,48 @@ public class PowerCycleSimTest {
         assertEquals(pc.get("atMs").getAsLong(), pc2.get("atMs").getAsLong(), "the last reset stays on record");
     }
 
+    /**
+     * #11 re-review MAJOR (CI's deploy dry run): after a power cycle a bench tool zeroed the screw (G92 B0) and nobody
+     * homed. X, Y, Z and A still read their boot values: the home needs the operator's word, and no Z move goes out on
+     * the boot belief before G28.
+     */
+    @Test
+    public void aBootWithTheScrewZeroedNeedsTheOperatorsWord() throws Exception {
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.server.lineFromAnotherTool("G92 B0");
+        sim.machine.setEnabled(true);
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.get("positionKnown").getAsBoolean(), m.toString());
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "no Z raise on the boot belief");
+        sim.server.mark();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        List<String> l = motionAndOutputs();
+        assertTrue(!l.isEmpty() && l.get(0).startsWith("G28"), "G28 first: " + l);
+    }
+
+    /**
+     * #11 re-review MINOR: after a detected reset the screw count restarted for sure, so a bare confirm cannot keep an
+     * angle set before it, also once a later Stop and Start reads detected false; a new angle can be set.
+     */
+    @Test
+    public void aConfirmCannotKeepAnAngleSetBeforeADetectedReset() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":298}");
+        Thread.sleep(5);
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        reconnect();
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("measure"), lastBody);
+        JsonObject p = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), "a new angle after the reset: " + p);
+        ok("POST", "/api/screw/start-angle", "{}"); // and a confirm of that one is fine
+    }
+
     @Test
     public void aG92InTheConnectCommandIsWarnedAbout() throws Exception {
         // it would set the position before the engine's M114 reads it, hiding a reset's boot position

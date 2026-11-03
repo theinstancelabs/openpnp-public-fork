@@ -58,6 +58,26 @@ public class ControllerResetTest {
                 reply("X:0.0000 Y:0.0000 Z:0.0000 A:720.0000 B:0.0000 Count X:0 Y:0 Z:0")), 'A'));
     }
 
+    /**
+     * #11 re-review MAJOR: a tool zeroed the screw after the power-up (G92 B0) and nobody homed: X, Y and Z still read
+     * their boot values and A its 720 (CI's deploy dry run, where the home then raised Z 31.5 on the boot belief).
+     */
+    @Test
+    public void aBootWithTheScrewZeroedIsStillAReset() {
+        String zeroed = "X:0.00 Y:0.00 Z:0.00 A:720.00 B:0.00 Count X:0 Y:0 Z:0 A:3197 B:3197";
+        assertTrue(ControllerReset.isBootPosition(ControllerReset.parsePosition(reply(zeroed)), 'B'));
+        assertTrue(ControllerReset.isBootPosition(ControllerReset.parsePosition(
+                reply("X:0.00 Y:0.00 Z:0.00 A:0.00 B:720.00 Count X:0 Y:0 Z:0")), 'B'), "N1's rotation zeroed instead");
+        ControllerReset r = reset(false, false);
+        now = 1000;
+        r.connected(reply(zeroed), 'B', null);
+        assertFalse(r.isPositionKnown());
+        assertTrue(r.isDetected());
+        assertEquals(Long.valueOf(1000), r.countEpochMs());
+        assertTrue(r.unknownWhy().contains("A 720"), r.unknownWhy());
+        assertEquals(0.0, r.reported().get("b"), 1e-9, "what the screw read");
+    }
+
     @Test
     public void aResetMakesThePositionUnknownUntilAHome() {
         ControllerReset r = reset(false, false);
@@ -145,6 +165,7 @@ public class ControllerResetTest {
         assertTrue(second.isPositionKnown(), "the attested home followed the reset");
         assertFalse(second.isDetected(), "no connection yet in this run");
         assertEquals(Long.valueOf(1000), second.detectedAtMs(), "the last reset stays on record");
+        assertNull(second.reported(), "what it reported is not journaled");
         now = 6000;
         second.connected(reply(PARKED), 'B', null);
         assertEquals(Long.valueOf(1000), second.countEpochMs());
@@ -204,6 +225,21 @@ public class ControllerResetTest {
         assertEquals(Long.valueOf(1000), second.countEpochMs());
         assertEquals(ControllerReset.EVENT_KNOWN, journal.get(journal.size() - 1).code, "the home goes on record");
         assertEquals(5000, journal.get(journal.size() - 1).atMs);
+    }
+
+    /**
+     * The first start on a database from before the journal (the cutover from a build that asked for the start angle
+     * after every connect): the engine cannot know what happened, so the screw count may have restarted. The position
+     * is not affected (the deployer's health check homes without the operator).
+     */
+    @Test
+    public void aScrewCountEpochDatesTheCountButNotThePosition() {
+        journal.add(new ControllerReset.Event(ControllerReset.EVENT_COUNT_EPOCH, 3000, "first start with a journal"));
+        now = 5000;
+        ControllerReset r = run(false, false);
+        assertEquals(Long.valueOf(3000), r.countEpochMs());
+        assertTrue(r.isPositionKnown());
+        assertNull(r.detectedAtMs(), "not a detected reset");
     }
 
     @Test

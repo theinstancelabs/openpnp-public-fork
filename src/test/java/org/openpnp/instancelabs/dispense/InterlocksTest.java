@@ -155,8 +155,16 @@ public class InterlocksTest {
         assertTrue(r.has("I11"), r.toString());
         assertTrue(r.toString().contains("the controller was reset (or its position could not be read at a connect) "
                 + "after the screw start angle was set"), r.toString());
-        in.cfg.profile.startAngleSetAtMs = 2500L; // confirmed right at the reset: fine
+        assertTrue(r.toString().contains("confirm it if the controller was not switched off"), r.toString());
+        // a detected reset: the count restarted for sure, so a confirm cannot keep the angle (#11 re-review)
+        in.controllerResetDetectedAtMs = 2500L;
+        r = Interlocks.check(in);
+        assertTrue(r.toString().contains("the controller was reset after the screw start angle was set"), r.toString());
+        assertTrue(r.toString().contains("the angle is lost: measure it again"), r.toString());
+        assertFalse(r.toString().contains("confirm it"), r.toString());
+        in.cfg.profile.startAngleSetAtMs = 2500L; // set right at the reset: fine
         assertFalse(Interlocks.check(in).has("I11"));
+        in.controllerResetDetectedAtMs = null;
         in.controllerResetAtMs = null; // no reset seen: set at all is enough
         in.cfg.profile.startAngleSetAtMs = 1L;
         assertFalse(Interlocks.check(in).has("I11"));

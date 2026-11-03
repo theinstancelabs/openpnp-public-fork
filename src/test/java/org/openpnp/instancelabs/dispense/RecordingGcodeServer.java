@@ -228,6 +228,14 @@ public class RecordingGcodeServer implements AutoCloseable {
      * workspace shift, and the step counts restart (the count is the machine position's, Marlin syncs it at boot;
      * the paste model's restarts with {@link SimPaste#powerCycle}). Call it while OpenPnP is disconnected.
      */
+    /**
+     * A line another tool sent while OpenPnP was not connected (a bench script's G92 B0): it acts on the controller's
+     * state as if received, but is not recorded among the lines OpenPnP sent.
+     */
+    public synchronized void lineFromAnotherTool(String line) {
+        track(line);
+    }
+
     public synchronized void powerCycle() {
         pos.put('X', 0.0);
         pos.put('Y', 0.0);
