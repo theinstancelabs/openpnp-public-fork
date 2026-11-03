@@ -752,10 +752,14 @@ public class ApiServerSimTest {
         assertEquals(409, run.status, run.toString());
         assertTrue(run.body.contains("I11"), run.toString());
 
-        // "still valid": the controller was not power-cycled
+        // a detected reset restarted the count for sure: a confirm cannot keep the old angle (#11 re-review)
+        Res confirm = post("/api/screw/start-angle", "{}");
+        assertEquals(409, confirm.status, confirm.toString());
+        assertTrue(confirm.body.contains("measure it again"), confirm.toString());
+        // measured again, the same angle: the plan stays valid
         long t0 = System.currentTimeMillis();
-        JsonObject conf = ok(post("/api/screw/start-angle", "{}"));
-        assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9, "a confirm keeps the angle");
+        JsonObject conf = ok(post("/api/screw/start-angle", "{\"startAngleDeg\":298,\"note\":\"measured again\"}"));
+        assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9);
         assertTrue(conf.get("startAngleSetAtMs").getAsLong() >= t0);
         assertFalse(conf.get("startAngleNeedsConfirm").getAsBoolean());
         assertTrue(ok(get("/api/plan/" + plan.get("planId").getAsString())).getAsJsonObject("interlocks").get("ok")

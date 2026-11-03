@@ -684,8 +684,9 @@ public class PadCalibrationSimTest {
         JsonObject runPlan2 = plan();
         Res i11 = call("POST", "/api/run", "{\"planId\":\"" + str(runPlan2, "planId") + "\"}");
         assertEquals(409, i11.status, i11.toString());
-        assertTrue(str(i11.json(), "reason").contains("I11: the controller was reset (or its position could not be "
-                + "read at a connect) after the screw start angle was set"), i11.toString());
+        // a detected reset: the count restarted for sure, so I11 asks for a new angle, not a confirm (#11 re-review)
+        assertTrue(str(i11.json(), "reason").contains("I11: the controller was reset after the screw start angle was "
+                + "set; the B step count restarts at power-up, so the angle is lost: measure it again"), i11.toString());
         boolean quarterStale = false;
         for (JsonElement e : ok2(get("/api/dose-records?steps=400"))) {
             JsonObject r = e.getAsJsonObject();

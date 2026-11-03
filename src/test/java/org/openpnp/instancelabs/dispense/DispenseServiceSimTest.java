@@ -392,8 +392,10 @@ public class DispenseServiceSimTest {
         assertEquals(RunResult.Status.REFUSED, r.status, r.toString());
         assertTrue(r.interlocks.has("I11"), r.interlocks.toString());
         assertNothingStreamed(sim.server.sinceMark());
-        // confirmed (the controller was not power-cycled): the plan is still valid and runs
-        DispenseProfile p = svc.setStartAngle(null, "not power-cycled");
+        // the count restarted for sure: a confirm cannot keep the old angle (#11 re-review); measured again, the
+        // same angle: the plan is still valid and runs
+        assertThrows(EngineRefusal.class, () -> svc.setStartAngle(null, "not power-cycled"));
+        DispenseProfile p = svc.setStartAngle(svc.getConfig().profile.startAngleDeg, "measured again");
         assertTrue(p.startAngleSetAtMs >= svc.getControllerResetAtMs());
         r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
         assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);
