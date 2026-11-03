@@ -79,6 +79,12 @@ final class PressureHold implements DispenseListener {
     private volatile String lastError;
     /** BR-03: the current session switches the pump only (no valve line). */
     private volatile boolean pumpOnly;
+    /**
+     * Which start owns the hold (counts the starts; guarded by {@code this}). A start's machine task acts only while it
+     * owns it: one switched off before it switched on (e.g. during its park) and then followed by a newer start sends
+     * no line and leaves the state to the newer one.
+     */
+    private long generation;
 
     /**
      * BR-03: how the pressure goes on. {@code pumpOnly}: the pump only, never a valve line (allowed anywhere: the
@@ -139,6 +145,7 @@ final class PressureHold implements DispenseListener {
 
     Map<String, Object> start(DispenseService svc, Options o) throws Exception {
         Machine m = ctx.machine();
+        long gen;
         synchronized (this) {
             if (state != State.OFF) {
                 throw ApiException.refused("pressure is already " + state.name().toLowerCase());
@@ -146,15 +153,16 @@ final class PressureHold implements DispenseListener {
             state = State.STARTING;
             lastError = null;
             pumpOnly = o.pumpOnly;
+            gen = ++generation;
         }
         attach(m);
         DispenseConfig c = svc.getConfig();
         Future<String> f;
         try {
-            f = m.submit(() -> doStart(m, svc, c, o));
+            f = m.submit(() -> doStart(m, svc, c, o, gen));
         }
         catch (RuntimeException e) {
-            markOff("could not queue the pressure start: " + e.getMessage());
+            markOff(gen, "could not queue the pressure start: " + e.getMessage());
             throw e;
         }
         long timeout = c.pumpToValveSettleMs + c.valveSettleMs + 4L * c.commandTimeoutMs + 5000
@@ -180,64 +188,72 @@ final class PressureHold implements DispenseListener {
     }
 
     /**
-     * Machine thread. One line at a time, and every line only while the state is still STARTING:
-     * a Stop or Pressure off during the switch-on is seen before the next line (in particular
-     * before valve ON), and the waits are host-side, so no lock is held across them. Returns why it
-     * did not start before any G-code was sent, else null: those refusals return rather than throw,
-     * because OpenPnP drops every task queued behind one that throws, and an engine task dropped so
-     * would never end (its busy flag would stay set).
+     * Machine thread. One line at a time, and every line only while this start still owns the hold
+     * and is STARTING ({@link #starting}): a Stop or Pressure off during the park or the switch-on is
+     * seen before the next line (in particular before valve ON), a start switched off and followed
+     * by a newer one sends nothing more and leaves the state alone, and the waits are host-side, so no
+     * lock is held across them. Returns why it did not start, else null: those refusals return rather
+     * than throw, because OpenPnP drops every task queued behind one that throws (a newer start, or
+     * an engine task, whose busy flag would then stay set).
      */
-    private String doStart(Machine m, DispenseService svc, DispenseConfig c, Options o) throws Exception {
-        if (state != State.STARTING) {
-            String why = lastEvent;
-            markOff("pressure start cancelled before any G-code was sent (" + why + ")");
-            return "cancelled before it started (" + why + ")";
+    private String doStart(Machine m, DispenseService svc, DispenseConfig c, Options o, long gen) throws Exception {
+        String cancelled = cancelled(gen);
+        if (cancelled != null) {
+            return cancelled;
         }
         // On the machine thread, serialised with the engine's tasks: a task queued at the same time
         // (its busy flag is set before it is queued) refuses or runs, never both with the hold.
         if (svc.isBusy()) {
-            markOff("pressure start refused: a dispense task is starting or running");
+            markOff(gen, "pressure start refused: a dispense task is starting or running");
             return "a dispense task is starting or running: wait for it or press STOP";
         }
         // BR-03, on the machine thread and before any line: park first, then the valve only where paste may go
-        if (o.park != null) {
-            try {
+        try {
+            if (o.park != null) {
                 svc.parkNeedle(o.park[0], o.park[1]);
             }
-            catch (Exception e) {
-                markOff("pressure start refused: the park failed (" + e.getMessage() + ")");
-                return "the park over " + (o.parkName != null ? o.parkName : "the place") + " failed: " + e.getMessage();
-            }
+            m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+        }
+        catch (Exception e) {
+            String what = o.park != null ? "the park over " + (o.parkName != null ? o.parkName : "the place")
+                    : "waiting for the head to stop";
+            markOff(gen, "pressure start refused: " + what + " failed (" + e.getMessage() + ")");
+            return what + " failed: " + e.getMessage();
+        }
+        // a Stop or Pressure off during the park or the wait, or a newer start since: not a line
+        cancelled = cancelled(gen);
+        if (cancelled != null) {
+            return cancelled;
         }
         if (!o.pumpOnly) {
-            m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
             double[] at = svc.needleXY();
             String out = at == null ? "the needle's position is unknown" : svc.outputZones().refusal(at[0], at[1]);
             if (out != null) {
-                markOff("pressure start refused: I12: " + out);
+                markOff(gen, "pressure start refused: I12: " + out);
                 return "I12: " + out;
             }
         }
         boolean completed;
         try {
-            m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
             OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) m, svc.getDispenserNozzle(),
                     c.bAxisName);
             GcodeChannel ch = new DriverGcodeChannel(mapper.getDriver());
             synchronized (this) {
-                cfg = c;
-                channel = ch; // from here on a Stop vents through this channel
+                if (generation == gen) {
+                    cfg = c;
+                    channel = ch; // from here on a Stop vents through this channel
+                }
             }
-            completed = switchOn(ch, c, o.pumpOnly);
+            completed = switchOn(ch, c, o.pumpOnly, gen);
         }
         catch (Exception e) {
             lastError = e.getMessage();
-            ventNow("pressure start failed: " + e.getMessage());
+            ventNow(gen, "pressure start failed: " + e.getMessage());
             throw e;
         }
         if (completed) {
             synchronized (this) {
-                completed = state == State.STARTING;
+                completed = state == State.STARTING && generation == gen;
                 if (completed) {
                     state = State.ON;
                     long limitMs = Math.round(c.maxContinuousOnTimeS * 1000);
@@ -255,10 +271,12 @@ final class PressureHold implements DispenseListener {
             }
         }
         if (!completed) {
+            // the Stop or Pressure off vents what was sent (again here while that is under way); a newer start came
+            // only after that vent
             if (state != State.OFF) {
-                ventNow("stop requested while the pressure was switching on");
+                ventNow(gen, "stop requested while the pressure was switching on");
             }
-            throw new Exception("stopped while switching on");
+            return "stopped while switching on";
         }
         event(o.pumpOnly ? "pump on (no valve): " + ControllerCommands.PUMP_ON
                 + (keepaliveArmed ? "; host watchdog armed" : "")
@@ -268,42 +286,42 @@ final class PressureHold implements DispenseListener {
         return null;
     }
 
-    /** The switch-on lines and waits; false as soon as a stop was requested. */
-    private boolean switchOn(GcodeChannel ch, DispenseConfig c, boolean pumpOnly) throws Exception {
+    /** The switch-on lines and waits of start {@code gen}; false as soon as a stop was requested. */
+    private boolean switchOn(GcodeChannel ch, DispenseConfig c, boolean pumpOnly, long gen) throws Exception {
         boolean ka;
         synchronized (io) {
-            if (state != State.STARTING) {
+            if (!starting(gen)) {
                 return false;
             }
             ka = c.keepaliveEnabled && hasWatchdog(ch, c);
         }
         if (ka) {
-            if (!sendWhileStarting(ch, ControllerCommands.keepaliveArm(c.keepaliveWindowMs), c)) {
+            if (!sendWhileStarting(ch, ControllerCommands.keepaliveArm(c.keepaliveWindowMs), c, gen)) {
                 return false;
             }
             keepaliveArmed = true;
             lastPingMs = System.currentTimeMillis();
         }
-        if (!sendWhileStarting(ch, ControllerCommands.PUMP_ON, c)) {
+        if (!sendWhileStarting(ch, ControllerCommands.PUMP_ON, c, gen)) {
             return false;
         }
         onSinceMs = System.currentTimeMillis(); // I7 counts from the pump
         if (pumpOnly) {
             return true; // BR-03: never a valve line
         }
-        if (!waitWhileStarting(ch, c, c.pumpToValveSettleMs)) {
+        if (!waitWhileStarting(ch, c, c.pumpToValveSettleMs, gen)) {
             return false;
         }
-        if (!sendWhileStarting(ch, ControllerCommands.VALVE_ON, c)) {
+        if (!sendWhileStarting(ch, ControllerCommands.VALVE_ON, c, gen)) {
             return false;
         }
-        return waitWhileStarting(ch, c, c.valveSettleMs);
+        return waitWhileStarting(ch, c, c.valveSettleMs, gen);
     }
 
-    /** Sends one line under {@code io} if the switch-on has not been cancelled. */
-    private boolean sendWhileStarting(GcodeChannel ch, String line, DispenseConfig c) throws Exception {
+    /** Sends one line under {@code io} if start {@code gen} has not been cancelled. */
+    private boolean sendWhileStarting(GcodeChannel ch, String line, DispenseConfig c, long gen) throws Exception {
         synchronized (io) {
-            if (state != State.STARTING) {
+            if (!starting(gen)) {
                 return false;
             }
             ch.send(line, c.commandTimeoutMs);
@@ -312,15 +330,15 @@ final class PressureHold implements DispenseListener {
     }
 
     /** Host-side wait (no lock held), keepalive pings when armed; false when cancelled. */
-    private boolean waitWhileStarting(GcodeChannel ch, DispenseConfig c, long ms) throws Exception {
+    private boolean waitWhileStarting(GcodeChannel ch, DispenseConfig c, long ms, long gen) throws Exception {
         long end = System.currentTimeMillis() + ms;
-        while (state == State.STARTING) {
+        while (starting(gen)) {
             long now = System.currentTimeMillis();
             if (now >= end) {
                 return true;
             }
             if (keepaliveArmed && now - lastPingMs >= c.keepaliveIntervalMs) {
-                if (!sendWhileStarting(ch, ControllerCommands.KEEPALIVE_PING, c)) {
+                if (!sendWhileStarting(ch, ControllerCommands.KEEPALIVE_PING, c, gen)) {
                     return false;
                 }
                 lastPingMs = System.currentTimeMillis();
@@ -387,6 +405,31 @@ final class PressureHold implements DispenseListener {
         catch (RuntimeException e) {
             pingQueued.set(false);
         }
+    }
+
+    /** Start {@code gen} owns the hold and nothing has stopped it. */
+    private synchronized boolean starting(long gen) {
+        return state == State.STARTING && generation == gen;
+    }
+
+    /**
+     * Null while start {@code gen} may go on ({@link #starting}); else why not. A start that still owns the hold is
+     * marked off with it; a newer start's state is left alone.
+     */
+    private String cancelled(long gen) {
+        String why = lastEvent;
+        synchronized (this) {
+            if (generation != gen) {
+                Logger.info("Instance Labs pressure hold: an earlier start ends without a line: it was switched off "
+                        + "before it switched on, and a newer start has the pressure");
+                return "switched off before it switched on (a newer Pressure on has the pressure now)";
+            }
+            if (state == State.STARTING) {
+                return null;
+            }
+        }
+        markOff(gen, "pressure start cancelled before any G-code was sent (" + why + ")");
+        return "cancelled before it started (" + why + ")";
     }
 
     /** Marks a stop as requested (a switch-on in progress sees it before its next line). */
@@ -461,22 +504,35 @@ final class PressureHold implements DispenseListener {
      * {@link GcodeChannel#sendCritical}, so a controller error that is still pending cannot
      * swallow it. The hold is marked OFF only once the valve OFF has been sent; otherwise it stays
      * VENT_FAILED, the watchdog stays armed and its pings stop (an armed firmware watchdog then
-     * vents by itself).
+     * vents by itself). Both marks are the vented start's: a newer start's state is left alone.
      *
      * @return true if the valve OFF was sent (or nothing had been switched on)
      */
     private boolean ventNow(String reason) {
+        return ventNow(null, reason);
+    }
+
+    /**
+     * As above for start {@code of} only (null: the start that has the hold): nothing once a newer start has it, since
+     * the switch-off that let the newer one begin vented what this one had sent.
+     */
+    private boolean ventNow(Long of, String reason) {
         List<String> errors = new ArrayList<>();
         List<String> notes = new ArrayList<>();
         boolean valveOff;
         boolean ka;
+        long gen;
         synchronized (io) {
             GcodeChannel ch;
             DispenseConfig c;
             synchronized (this) {
+                if (of != null && generation != of) {
+                    return true;
+                }
                 ch = channel;
                 c = cfg;
                 ka = keepaliveArmed;
+                gen = generation;
             }
             valveOff = ch == null || c == null; // nothing was sent yet: nothing to vent
             if (!valveOff) {
@@ -492,15 +548,17 @@ final class PressureHold implements DispenseListener {
         }
         if (!valveOff) {
             synchronized (this) {
-                state = State.VENT_FAILED;
-                cancelTimers();
+                if (generation == gen) {
+                    state = State.VENT_FAILED;
+                    cancelTimers();
+                }
             }
             event("VALVE OFF FAILED (" + reason + "): " + errors + ". The barrel may still be pressurised: press "
                     + "Pressure off or STOP again" + (ka ? "; the firmware host watchdog vents on its own when its "
                             + "window ends (pings stopped)" : "; if that fails, switch the machine off"));
             return false;
         }
-        markOff("pressure off (valve, then pump): " + reason + (notes.isEmpty() ? "" : " - " + notes)
+        markOff(gen, "pressure off (valve, then pump): " + reason + (notes.isEmpty() ? "" : " - " + notes)
                 + (errors.isEmpty() ? "" : " - FAILED lines: " + errors));
         return true;
     }
@@ -523,14 +581,29 @@ final class PressureHold implements DispenseListener {
 
     private void markOff(String why) {
         synchronized (this) {
-            state = State.OFF;
-            cancelTimers();
-            channel = null;
-            keepaliveArmed = false;
-            onSinceMs = 0;
-            autoOffAtMs = 0;
+            off();
         }
         event(why);
+    }
+
+    /** {@link #markOff} for start {@code gen}: nothing when a newer start owns the hold. */
+    private void markOff(long gen, String why) {
+        synchronized (this) {
+            if (generation != gen) {
+                return;
+            }
+            off();
+        }
+        event(why);
+    }
+
+    private void off() {
+        state = State.OFF;
+        cancelTimers();
+        channel = null;
+        keepaliveArmed = false;
+        onSinceMs = 0;
+        autoOffAtMs = 0;
     }
 
     private void cancelTimers() {
