@@ -147,6 +147,14 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     check('(5) the drip test is by hand until the machine has it; exact height, short dot check and accept are not built yet',
       (steps5.find((x) => x.k === 'drip') || {}).s === 'hand' && ['exact', 'short', 'accept'].every((k) => (steps5.find((x) => x.k === k) || {}).s === 'notyet'), steps5);
     const pics0 = (await page.evaluate((k) => IL.api('GET', '/api/tip-setups').then((r) => (r.setups || r).find((x) => x.key === k)), other.key)) || {};
+    // the height is a by-hand step today (Machine › By hand › Setup › Needle Z frame): done here as the operator would,
+    // both tips touching the blank, with the heights the session's frame had before the mount
+    const a0 = st0.dispense.needle.anchor;
+    check('(5) the height is by hand first, with a link to the needle card', (steps5.find((x) => x.k === 'height') || {}).s === 'hand' && !!(await page.$('#tip-height-hand')), steps5);
+    if (a0) await page.evaluate(([n1, n2, t]) => IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2, note: 'tip-flow test: both tips, by hand', needleChangedAtMs: t }),
+      [a0.surfaceZMm, a0.needleContactZMm, st4.dispense.needle.changedAtMs]);
+    await page.waitForFunction(() => { const l = document.querySelector('#tip-checks li[data-k="height"]'); return l && l.dataset.state === 'done'; }, null, { timeout: 10000 }).catch(() => null);
+    check('(5) after the frame by hand, the height is done', (await page.evaluate(() => (document.querySelector('#tip-checks li[data-k="height"]') || {}).dataset.state)) === 'done', a0);
     // the checks lay dots: the paste question of the session (same barrel or new) comes first when nobody answered it
     if (await page.$('#tip-barrel-same')) await page.click('#tip-barrel-same');
     await page.waitForSelector('#btn-tip-checks-start:enabled', { timeout: 10000 }).catch(() => null);

@@ -193,7 +193,7 @@
     st.below = W.below === 'running' ? ['now', 'taking the picture from below…'] : W.below === 'done' ? ['done', 'picture taken ' + t(W.belowAt)]
       : W.below && W.below.error ? ['todo', W.below.error] : ['todo', 'the machine takes a picture from below (it moves to the bottom camera)'];
     st.height = nd.anchor && nd.anchored ? ['done', (isNum(nd.anchor.rawSumMm) ? 'from K, the side camera' : 'both tips touching') + ', ' + t(nd.anchor.setAtMs) + '; the bed switch once fitted']
-      : ['hand', 'By hand today: the needle height frame in Machine › By hand › Setup. The machine measures it itself with the bed switch (requested).'];
+      : ['hand', 'By hand first: record the needle height frame (Machine › By hand › Setup › Needle Z frame); where it lands waits for it. The machine measures it itself with the bed switch (requested).'];
     st.prime = ['hand', 'By hand today: Setup › Pressure and prime. The machine primes by itself once it can see the flow (requested).'];
     st.drip = ['hand', 'By hand today: watch the tip for a minute with the screw still. The machine checks it itself once built (requested).'];
     const job = W.job;
@@ -221,6 +221,11 @@
         IL.tips.load();
       } catch (e) { W.below = { error: e.message || String(e) }; }
       IL.render();
+      const nd = ((S.status || {}).dispense || {}).needle || {};
+      if (!(nd.anchor && nd.anchored)) {   // the engine refuses the landing check before the height (I4): say so first
+        W.lands = { error: 'Waits for the height: record the needle height frame by hand first (Machine › By hand › Setup), then start the checks again.' };
+        return;
+      }
       W.lands = 'running';
       IL.render();
       const reg = IL.attest.valid('regulator', s), life = IL.attest.valid('paste-life', s);
@@ -343,8 +348,9 @@
       const [state, detail] = st[k];
       const g = state === 'done' ? IL.glyph('ok', 'xs') : state === 'now' ? el('span', { class: 'st st--xs st--live' }, el('span', { class: 'pulse', style: 'width:6px;height:6px' }))
         : state === 'hand' ? el('span', { class: 'st st--xs st--you', text: '' }) : el('span', { class: 'st st--xs st--wait', text: '' });
+      const go = k === 'height' && state === 'hand' ? el('a', { class: 'link', href: '#setup/needle', id: 'tip-height-hand', text: 'Record it…' }) : null;
       return el('li', { class: { done: '', now: 'now', todo: 'todo', hand: 'hand', notyet: 'notyet' }[state], 'data-k': k, 'data-state': state }, g,
-        el('div', {}, el('div', { class: 'ph__t', text: name + (state === 'hand' ? ' · by hand' : state === 'notyet' ? ' · not built yet' : '') }), el('div', { class: 'ph__d', text: detail || d })), el('span', { class: 'ph__v' }));
+        el('div', {}, el('div', { class: 'ph__t', text: name + (state === 'hand' ? ' · by hand' : state === 'notyet' ? ' · not built yet' : '') }), el('div', { class: 'ph__d', text: detail || d })), el('span', { class: 'ph__v' }, go));
     }));
     const life = IL.attest.valid('paste-life', s);
     IL.keyed(V.pBarrel, String(!!life), () => (life ? null : (() => {
