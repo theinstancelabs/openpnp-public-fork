@@ -50,8 +50,8 @@
   function fld(input, o) {
     const kind = input.type === 'checkbox' ? 'check' : input.tagName === 'SELECT' ? 'select' : input.tagName === 'TEXTAREA' ? 'text' : 'num';
     const f = Object.assign({ el: input, kind, d: undefined, edited: false, server: kind === 'check' ? false : '' }, o || {});
-    input.addEventListener(kind === 'check' || kind === 'select' ? 'change' : 'input', () => { f.edited = true; paint(f); IL.render(); });
-    input.addEventListener('blur', () => { if (f.edited && same(f)) f.edited = false; paint(f); });
+    input.addEventListener(kind === 'check' || kind === 'select' ? 'change' : 'input', () => { f.edited = true; f.tok = curToken(); paint(f); IL.render(); });
+    input.addEventListener('blur', () => { if (f.edited && same(f)) unedit(f); paint(f); });
     ALL.push(f);
     return f;
   }
@@ -77,9 +77,13 @@
     return Number.isFinite(x) && Math.abs(x - Number(b)) < 1e-9;
   }
   const dirty = (f) => !!f && f.edited && !same(f);
+  /** The needle token now (§22.3): status dispense.needle.changedAtMs, null when no needle change is recorded. */
+  const curToken = () => (IL.tips ? IL.tips.token() : null);
+  /** The edit is over: the field follows the server again and forgets the token its edit was taken under. */
+  function unedit(f) { f.edited = false; f.tok = undefined; }
   function sync(f, v) {
     f.server = serverStr(f, v);
-    if (f.edited && same(f) && document.activeElement !== f.el) f.edited = false;
+    if (f.edited && same(f) && document.activeElement !== f.el) unedit(f);
     if (!f.edited && document.activeElement !== f.el) {
       if (f.kind === 'check') { if (f.el.checked !== f.server) f.el.checked = f.server; }
       else if (f.el.value !== f.server) f.el.value = f.server;
@@ -94,10 +98,11 @@
   function setVal(f, v) {
     if (f.kind === 'check') f.el.checked = !!v; else f.el.value = v;
     f.edited = true;
+    f.tok = curToken();
     paint(f);
     IL.render();
   }
-  const clean = (...fs) => { for (const f of fs) if (f) { f.edited = false; paint(f); } };
+  const clean = (...fs) => { for (const f of fs) if (f) { unedit(f); paint(f); } };
   /** The number in a field, or a 400-style error naming it. */
   function need(f, what) {
     const t = val(f);
@@ -546,7 +551,7 @@
     c.root.insertBefore(el('div', { class: 'su-trim' }, el('div', { class: 'su-trim__t' }, el('b', { text: 'Needle XY trim' }), c.trimState), c.bTrim), c.ref);
 
     const opts = { refusalIn: c.ref };
-    // every needle value carries the needle token it was taken under (§22.3): the one of the first edit, else now
+    // every needle value carries the needle token it was taken under (§22.3): its field's last edit, else now (tokenOf)
     c.bK.addEventListener('click', () => IL.act(c.bK, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), k = need(F.k, 'K');
       const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k, needleChangedAtMs: tokenOf('frame', [F.n1, F.k, F.n2]) });
@@ -582,19 +587,16 @@
     return c.root;
   }
   /**
-   * The needle token a needle value was taken under (§22.3): status dispense.needle.changedAtMs when the first of these
-   * fields was edited (or captured), else now (the press takes the values shown). Tokens are compared by equality.
+   * The needle token a press posts (§22.3): each edited field keeps the token of its last edit (typed or captured), and
+   * a field edited under another needle than now gives its token, which the engine refuses (409 needle-changed);
+   * else now (the press takes the values shown). So a value typed before a needle change never goes out under the new
+   * needle's token, also when it only differs from the server's after the change (a focused field keeps it). Tokens
+   * are compared by equality.
    */
-  const toks = {};
   function tokenOf(group, fs) {
-    const now = IL.tips ? IL.tips.token() : null;
-    return fs.some(dirty) && toks[group] !== undefined ? toks[group] : now;
-  }
-  function trackTokens() {
-    for (const [g, fs] of [['frame', [F.n1, F.k, F.n2]], ['offset', [F.off]], ['trim', [F.dx, F.dy, F.note]]]) {
-      if (!fs.some(dirty)) delete toks[g];
-      else if (toks[g] === undefined) toks[g] = IL.tips ? IL.tips.token() : null;
-    }
+    const now = curToken();
+    const old = fs.find((f) => f.edited && f.tok !== undefined && f.tok !== now);
+    return old ? old.tok : now;
   }
   /** The frame or offset answer's question ("is the {S} on the dispenser?") and the I4 offset warning, kept until the next. */
   function frameAnswer(r) {
@@ -623,7 +625,6 @@
   function renderNeedle(s, m) {
     const c = C.needle;
     const d = disp(s), nd = d.needle || {}, a = nd.anchor;
-    trackTokens();
     // K belongs to the needle on the dispenser (§22.7): prefilled only from the mounted tip's own frame (the seeded 22G
     // bent taper without one: its bench value); a tip that was never on has none: Both tips touch is preselected
     const mt = IL.tips ? IL.tips.mountedSetup() : null;

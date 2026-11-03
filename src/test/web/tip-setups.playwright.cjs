@@ -831,6 +831,34 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     await shoot(page, 'edit-tip-correction');
     await page.evaluate(() => { const d = IL.dialog.top(); if (d) d.close('test'); });
 
+    // ---- (11d) a contact typed before a needle change keeps that needle's token (PR #5 review, setup.js:683/685) -------
+    // The operator retypes the shown N2 contact and keeps the field focused; another browser records a needle change; only
+    // N1 is captured again. Record needle frame must not post the old contact under the new needle's token.
+    await closePanels(page);
+    await page.evaluate(() => IL.go('#setup'));
+    await page.waitForSelector('#anchor-n2', { timeout: 10000 });
+    const tokA = (await status(page)).dispense.needle.changedAtMs;
+    const fr11 = await page.evaluate((t) => IL.api('POST', '/api/needle/anchor', { surfaceZ: 5.5, needleContactZ: 2.91, needleChangedAtMs: t }), tokA);
+    await page.waitForFunction(() => document.getElementById('anchor-n2').value !== '', null, { timeout: 5000 });
+    const shown11 = await page.evaluate(() => document.getElementById('anchor-n2').value);
+    await page.click('#anchor-n2', { clickCount: 3 });
+    await page.keyboard.type(shown11);
+    await page.evaluate(() => fetch('/api/needle/changed', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ why: 'test (11d): another browser' }) }));
+    await page.waitForFunction((t) => IL.tips.token() !== t, tokA, { timeout: 5000 });
+    await sleep(1600);   // two status polls with the field still focused
+    const kept11 = await page.evaluate(() => ({ v: document.getElementById('anchor-n2').value, focused: document.activeElement && document.activeElement.id }));
+    await page.click('#btn-anchor-n1');
+    let body11 = null;
+    await page.route('**/api/needle/anchor', (route) => { body11 = route.request().postDataJSON(); return route.continue(); });
+    await page.click('#btn-anchor');
+    await sleep(1500);
+    await page.unroute('**/api/needle/anchor');
+    const st11 = (await status(page)).dispense.needle;
+    check('(11d) a contact typed before the needle change goes out with that needle\'s token and is refused, not recorded for the new needle',
+      !!fr11 && kept11.v === shown11 && kept11.focused === 'anchor-n2' && !!body11 && body11.needleChangedAtMs === tokA && st11.changedAtMs !== tokA && !st11.anchored,
+      { kept11, body11, tokA, now: st11.changedAtMs, anchored: st11.anchored });
+
     // ---- (12) the page ------------------------------------------------------------------------------------------------
     check('(12) no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
     check('(12) no native dialogs', dialogs.length === 0, dialogs);
