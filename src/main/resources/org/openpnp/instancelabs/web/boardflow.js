@@ -10,12 +10,12 @@
          chooses that board), #board-imported (where the drawing comes from) and #btn-board-use-fid ("Camera is on FID1":
          the board origin from the top camera centred on the board's first fiducial)
      hero(bv, {plan, sel, form, mode, s, hero, stageBar, row}) → {shown}
-         H3, on every render of the Run hero (cheap: patches only). With a plan: its drawing under the dots (Quiet unless
-         the operator chose otherwise: localStorage il.pv.picture), the picture control #pv-picture, the path preview
+         H3, on every render of the Run hero (cheap: patches only). With a plan: its drawing under the dots (the whole PCB, Full,
+         unless the operator chose otherwise: localStorage il.pv.picture), the picture control #pv-picture, the path preview
          (#pv-play, #run-preview) and #btn-pad-inspect in the stage bar. Without a plan: the chosen board's drawing at the
          form's seat, Full, with the live top camera and a 5 mm scale bar (shown: true while it is drawn).
      onPad(padId, ev), onPart(ref, ev)    H2: a click on a pad or a part opens the pad inspector (padinspect.js)
-     recordsMap(bv, plan)                 H4: the plan's drawing under Records' done-dot map, Quiet
+     recordsMap(bv, plan)                 H4: the plan's drawing under Records' done-dot map, Full
      onImported(saved)                    "Use this board" in the upload dialog: the board list again, the board chosen
      preview() → the hero's path preview (IL.pathPreview: play, pause, seek, state), null before the hero is drawn
    Board drawings come from IL.boardart.get (the browser's HTTP cache keeps them: the server marks them immutable). */
@@ -35,7 +35,7 @@
     thumbs: new Map(),           // art id → blob URL of its thumbnail (the art itself is not kept for it)
     step: null,                  // the Board step additions: {body, o, upload, thumbs, imported, fid}
     just: null,                  // the board an upload just saved: {file, fiducial} (its next-step hint)
-    pic: (() => { const v = IL.lsGet(PIC_KEY); return v === 'full' || v === 'off' ? v : 'quiet'; })(),
+    pic: (() => { const v = IL.lsGet(PIC_KEY); return v === 'quiet' || v === 'off' ? v : 'full'; })(),
     seatKey: null,
   };
 
@@ -452,7 +452,7 @@
     artP(id).then((a) => {
       if (!a || bv.destroyed) return;
       bv.setArt(a);
-      bv.picture('quiet');
+      bv.picture('full');
     });
   }
 
