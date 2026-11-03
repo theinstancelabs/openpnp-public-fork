@@ -244,7 +244,9 @@ Then the SIM cameras, the SIM balance, `/api/sim` and the SIM-only settings work
 says `server.simulatorConfirmed: true` once the machine is started.
 
 - **Use it** for scenarios that need those SIM features on the pty: the acceptance's `register`, `tips` and `padcal`.
-  In uinav: `--controller-sim-cap`, or `UINAV_SIM_CONTROLLER_CAP=1` next to `UINAV_SIM_CONTROLLER=pty`.
+  In uinav: `--controller-sim-cap`, or `UINAV_SIM_CONTROLLER_CAP=1` next to `UINAV_SIM_CONTROLLER=pty`. Those three
+  still fail on the pty until BR-69 feeds the SIM vacuum and the SIM paste there ("Known gaps"), so keep them on
+  GcodeServer, in CI too, until then.
 - **Never for the bug reproductions** (`tests/test_repro.py`, `e2e/test_openpnp_pty.py`, the deployer's e2e). They
   must see the board's exact M115, and the backend must treat them as the real machine. `e2e/test_openpnp_pty.py`
   drops `UINAV_SIM_CONTROLLER_CAP` from its launches and checks `simulatorConfirmed` is false after the connect.
@@ -424,8 +426,8 @@ The backend's SIM acceptance runs unchanged on lumen-sim. Point `UINAV_DIR` at t
 - Both have the same cause, in the backend: the SIM vacuum (`SimVacuum`) and the SIM paste (`SimPaste`) are fed
   only inside OpenPnP's GcodeServer (`GcodeServer.interpretGcode`). On the pty, lumen-sim answers M261 from its own
   vacuum model, which knows nothing of the SIM scene, so N1 reads open air. Nothing lays SIM paste for the SIM
-  cameras. Infra's request to the backend: feed both from the GcodeDriver's line stream on a SimGuard-confirmed
-  pty. `padcal` needs the same two models.
+  cameras. Infra's request to the backend (BR-69): feed both from the GcodeDriver's line stream on a
+  SimGuard-confirmed pty. `padcal` needs the same two models.
 
 Results on 10-31 (before BR-43/47):
 - **`stop`**: hold/web, hold/Swing and run/web pass. **run/Swing fails, 2 runs of 2.**
