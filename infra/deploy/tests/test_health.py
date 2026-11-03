@@ -90,6 +90,37 @@ class Health(unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertEqual(rep["failure"].split(":")[0], "serial")
 
+    def test_controller_power_cycled_behind_a_kept_alive_link(self):
+        """The controller switched off and on while OpenPnP ran with its link kept open (a health check by hand later).
+        BR-44: Start finds the link dead and connects again (GcodeDriver.setEnabled), so the connect line is new after
+        the enable, and the controller reads Marlin's boot position: never homed, a machine problem."""
+        self.start()
+        self.fake.enable()
+        self.fake.stop()
+        self.fake.power_cycle()
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine", rep)
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"])
+        serial = rep["steps"][2]["detail"]
+        self.assertIn("S/N 387932683335", serial)
+        self.assertNotIn("kept open", serial, "the enable connected again")
+        self.assertTrue(rep["failure"].startswith("axes: controller was reset"), rep)
+        self.assertNotIn(("POST", "/api/machine/home"), self.paths())
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
+
+    def test_controller_power_cycled_behind_a_kept_alive_link_before_br44(self):
+        """A build before BR-44 (a rollback can land on one): the enable fails on the dead port. No home."""
+        self.start(jar_fail=["old-status"])
+        self.fake.enable()
+        self.fake.stop()
+        self.fake.power_cycle()
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertTrue(rep["failure"].startswith("enable: HTTP 409"), rep)
+        self.assertIn("IO Error", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/home"), self.paths())
+
     def test_each_enable_connects_without_keep_alive(self):
         self.start(keep_alive=False)
         self.fake.enable()
@@ -152,6 +183,31 @@ class Health(unittest.TestCase):
         axes[3]["driverCoordinate"] = 720.0
         axes[0]["driverCoordinate"] = 0.5
         self.assertFalse(il_deploy.reset_signature(axes))
+
+    def test_reset_signature_after_a_quick_stop(self):
+        """Marlin's M410 (every STOP's DISABLE_COMMAND) recomputes the logical position from the step counts: at boot,
+        3197 counts at 4.44 steps/deg read A and B 720.05 (lumen-sim RESEARCH.md, M410). A power-cycled controller that
+        was STOPped once (the first health check's own STOP after it found the reset) still reads as reset: within a
+        step or two of 720, never homed. Found by the deploy e2e's test_3 (a health check by hand homed it)."""
+        def axes(b):
+            return [{"letter": "X", "driverCoordinate": 0.0}, {"letter": "Y", "driverCoordinate": 0.0},
+                    {"letter": "Z", "driverCoordinate": 0.0}, {"letter": "B", "driverCoordinate": b}]
+        for b in (720.05, 719.82, 720.27):
+            self.assertTrue(il_deploy.reset_signature(axes(b)), b)
+        for b in (721.0, 719.0, 0.05):
+            self.assertFalse(il_deploy.reset_signature(axes(b)), b)
+
+    def test_reset_controller_stopped_once_is_still_never_homed(self):
+        """The controller reset, the first check finds it and STOPs (M410: B now reads 720.05); a person runs the health
+        check again (after `resume`): still the reset controller, still no home."""
+        self.start(fail=["reset"])
+        self.assertIn("controller was reset", self.check()["failure"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine")
+        self.assertEqual([s["step"] for s in rep["steps"]][-1], "axes")
+        self.assertEqual(rep["steps"][-1]["detail"][:20], "controller was reset")
+        self.assertNotIn(("POST", "/api/machine/home"), self.paths())
 
     def test_reset_signature_is_A_or_B_at_720(self):
         """BR-02's rule (INF-10): X, Y, Z at 0 with A or B at 720. Marlin boots both rotation axes at 720; a G92 B0 alone
@@ -275,13 +331,39 @@ class Health(unittest.TestCase):
         self.assertGreaterEqual(len([p for p in self.paths() if p == ("GET", "/api/status")]), 2)
 
     def test_engine_that_never_starts_fails_at_the_status_timeout(self):
-        self.start(jar_fail=["engine"])
+        """A build before BR-44 cannot tell a failed engine from one still starting: the 200 without it is waited out
+        up to --status-timeout."""
+        self.start(jar_fail=["engine", "old-status"])
         t = time.monotonic()
         rep = self.check("--status-timeout", "1")
         self.assertGreaterEqual(time.monotonic() - t, 1.0)
         self.assertFalse(rep["ok"])
         self.assertEqual(rep["kind"], "build")
         self.assertIn("the dispense engine is not usable (dispense.running False, available False", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
+
+    def test_engine_that_failed_to_start_fails_at_once(self):
+        """BR-44: dispense.state 'failed' (DispenseService.start threw; startError says what) is final: no wait for
+        --status-timeout, and the reason names the error."""
+        self.start(jar_fail=["engine"])
+        t = time.monotonic()
+        rep = self.check("--status-timeout", "60")
+        self.assertLess(time.monotonic() - t, 10)
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("build", "status"))
+        self.assertIn("the dispense engine failed to start", rep["failure"])
+        self.assertIn("SQLITE_CORRUPT", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
+
+    def test_engine_still_starting_at_the_status_timeout_says_so(self):
+        """dispense.state 'starting' is waited for, up to --status-timeout."""
+        self.start(engine_start_s=600)
+        t = time.monotonic()
+        rep = self.check("--status-timeout", "1")
+        self.assertGreaterEqual(time.monotonic() - t, 1.0)
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "build")
+        self.assertIn("did not start within 1 s (dispense.state starting)", rep["failure"])
         self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
 
     def test_dispense_engine_must_run(self):

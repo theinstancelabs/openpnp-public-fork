@@ -135,6 +135,32 @@ class Idle(unittest.TestCase):
         self.start_fake()
         self.assertEqual(self.reasons(), [])
 
+    def test_pressure_start_up_stamp_is_told_by_server_started_at(self):
+        """BR-44: server.startedAtMs is the JVM's start. The pressure hold's first stamp is made while OpenPnP starts
+        (its API is up within --status-timeout's 120 s, or il_deploy calls the start failed), so a stamp in that window
+        is OpenPnP's own, whatever its text; a later one is an event, whatever its text."""
+        self.start_fake(pressure_initial_event="off")  # the first value's text changed: still OpenPnP's own stamp
+        self.assertEqual(self.reasons(), [])
+        self.fake.shutdown()
+        self.start_fake(jvm_start_s=il_deploy.STARTUP_STAMP_S + 60)  # stamped long after the JVM started
+        r = self.reasons()
+        self.assertTrue(any("a pressure event" in x and "ago" in x for x in r), r)
+
+    def test_pressure_start_up_stamp_of_a_build_before_br44(self):
+        """No server.startedAtMs (a rollback to an older build): the first value is told by its text, as before."""
+        self.start_fake(fail=["old-status"], jvm_start_s=il_deploy.STARTUP_STAMP_S + 60)
+        self.assertEqual(self.reasons(), [])
+        self.fake.shutdown()
+        self.start_fake(fail=["old-status"], pressure_initial_event="off")
+        r = self.reasons()
+        self.assertTrue(any("a pressure event" in x for x in r), r)
+
+    def test_machine_homing_is_busy(self):
+        st = {"machine": {"busy": False, "homing": True, "enabled": False}}
+        self.assertEqual(il_deploy.api_busy_reasons(st), ["OpenPnP is homing (machine.homing)"])
+        st["machine"]["homing"] = False
+        self.assertEqual(il_deploy.api_busy_reasons(st), [])
+
     def test_recent_activity_in_openpnp(self):
         for key, word in (("last_run_ended_s_ago", "run"), ("run_finished_s_ago", "run"),
                           ("pad_cal_ended_s_ago", "pad calibration"), ("pressure_event_s_ago", "pressure")):
@@ -219,6 +245,16 @@ class Idle(unittest.TestCase):
         st = {"run": None, "lastRun": None, "padCalibration": None}  # null where null is allowed: nothing deeper read
         self.assertNotIn("run.finishedAtMs", il_deploy.status_field_problems(st))
         self.assertIn("machine.enabled", il_deploy.status_field_problems(st))
+
+    def test_status_fields_of_br44(self):
+        """BR-44's fields are always in the new build's status (the e2e checks them on the real jar); a build before it
+        lacks exactly these, and il_deploy falls back to its older rules there."""
+        br44 = ["server.startedAtMs", "machine.homing", "dispense.state", "dispense.startError"]
+        for p in br44:
+            self.assertIn(p, il_deploy.STATUS_FIELDS)
+        self.start_fake(fail=["old-status"])
+        st = il_deploy.Api(self.lab.port).get("/api/status")[1]
+        self.assertEqual(sorted(il_deploy.status_field_problems(st)), sorted(br44))
 
     def test_status_fields_inside_places_and_surfaces_and_behind_nulls(self):
         """A place or surface without setAtMs is a rename (status_field_problems). What a null 'key?' or an empty map

@@ -108,6 +108,9 @@ HOME_GAVE_UP = "the home did not start or did not end within"
 # response to G28 ..."; G28 goes out with infinity-timeout-milliseconds, 60 s in the lab machine.xml): the controller
 # may still be in G28, where a STOP's M410 kills the board
 HOME_TIMED_OUT = re.compile(r"\btime[ds]?[ -]?out\b", re.I)
+# BR-44: server.startedAtMs is the JVM's start. The pressure hold's first value is stamped while OpenPnP starts, before
+# its API answers; il_deploy calls a start whose API and engine are not up within --status-timeout (120 s) failed
+STARTUP_STAMP_S = 120
 
 
 class Refused(Exception):
@@ -602,6 +605,8 @@ def api_busy_reasons(st):
         r.append("OpenPnP reports no machine state")
     elif m.get("busy") is not False:
         r.append("OpenPnP's machine is busy")
+    elif machine_homing(m):
+        r.append("OpenPnP is homing (machine.homing)")
     run = st.get("run")
     if run is not None and (not isinstance(run, dict) or run.get("running") is not False):
         r.append("a run is running (%s)" % (run.get("kind") if isinstance(run, dict) else run))
@@ -651,6 +656,14 @@ def _ms(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
+def machine_homing(m):
+    """machine.homing of /api/status or /api/machine (BR-44: true from the start of any home, the web's, the engine's or
+    OpenPnP's Home button, until it ends, a failure or a STOP included; ReferenceMachine.isHoming), or None from a build
+    before it."""
+    v = m.get("homing") if isinstance(m, dict) else None
+    return v if isinstance(v, bool) else None
+
+
 def _named(d):
     """[(name, dict)] of a JSON map {name: {...}} or a list of {"name": ...}."""
     if isinstance(d, dict):
@@ -678,9 +691,11 @@ ACTIVITY_FIELDS = (
 # {name: {..., "setAtMs"}} maps of places and surfaces
 NAMED_ACTIVITY_FIELDS = (("place '{}' set", "dispense.locations"), ("surface '{}' probed", "dispense.surfaces"))
 # The state il_deploy reads besides the times (api_busy_reasons, api_enabled_reasons, the pressure event, the health
-# check's status step)
-STATE_FIELDS = ("server.version", "server.simulated", "machine.enabled", "machine.busy", "run?.running",
-                "pressure.state", "pressure.on", "pressure.lastEvent", "pressure.lastEventAtMs", "dispense.running",
+# check's status step, the STOP rule). BR-44's (server.startedAtMs, machine.homing, dispense.state, startError) are
+# always there on a build since; on an older one their rules fall back to the earlier ones (a rollback can land there)
+STATE_FIELDS = ("server.version", "server.simulated", "server.startedAtMs", "machine.enabled", "machine.busy",
+                "machine.homing", "run?.running", "pressure.state", "pressure.on", "pressure.lastEvent",
+                "pressure.lastEventAtMs", "dispense.state", "dispense.startError", "dispense.running",
                 "dispense.available", "dispense.busy", "padCalibration?.state", "boardImport.reading")
 # Every key path il_deploy reads in /api/status with the dispense engine running. A missing time is skipped (fail open),
 # so the e2e checks them against the real build: a renamed field must not silently turn a check off.
@@ -730,21 +745,40 @@ def unchecked_status_fields(st):
     return out + [f"{path}.*.setAtMs" for _, path in NAMED_ACTIVITY_FIELDS if not _named(_at(st, path)[1])]
 
 
+def pressure_start_up_stamp(st):
+    """True if the pressure hold's last event is its first value, which PressureHold stamps when the API starts
+    (PressureHold.java:77-78), not a person's event. With server.startedAtMs (BR-44) the time decides: stamped within
+    STARTUP_STAMP_S of the JVM's start. A build before it: the first value's text, 'pressure off'."""
+    p = st.get("pressure") if isinstance(st.get("pressure"), dict) else {}
+    server = st.get("server") if isinstance(st.get("server"), dict) else {}
+    started, at = _ms(server.get("startedAtMs")), _ms(p.get("lastEventAtMs"))
+    if started is None:
+        return p.get("lastEvent") == "pressure off"
+    return at is not None and started <= at <= started + STARTUP_STAMP_S * 1000
+
+
 def api_activity_times(st):
     """[(what, epoch ms)] of activity OpenPnP's /api/status shows (ACTIVITY_FIELDS, the places and surfaces set, and
-    pressure events: PressureHold's first value, 'pressure off' stamped when the API starts (PressureHold.java:77-78),
-    is not one). Missing or null fields are skipped."""
+    pressure events: the pressure hold's first value, stamped while OpenPnP starts, is not one:
+    pressure_start_up_stamp). Missing or null fields are skipped."""
     out = [(what, _at(st, path)[1]) for what, path in ACTIVITY_FIELDS]
     p = st.get("pressure") if isinstance(st.get("pressure"), dict) else {}
-    out.append(("a pressure event", None if p.get("lastEvent") == "pressure off" else p.get("lastEventAtMs")))
+    out.append(("a pressure event", None if pressure_start_up_stamp(st) else p.get("lastEventAtMs")))
     for what, path in NAMED_ACTIVITY_FIELDS:
         out += [(what.format(n), v.get("setAtMs")) for n, v in _named(_at(st, path)[1])]
     return [(what, _ms(ms)) for what, ms in out if _ms(ms) is not None]
 
 
+# How far from 720 a rotation axis of a reset controller may read: Marlin's M410 (every STOP's DISABLE_COMMAND)
+# recomputes the position from the step counts, so after one STOP the boot position reads 720.05 (3197 counts at
+# 4.44 steps/deg, lumen-sim RESEARCH.md); a step is 0.23 deg. Wider fails safe (no home, a person checks).
+RESET_ROTATION_TOLERANCE = 0.5
+
+
 def reset_signature(axes):
     """X, Y, Z all 0 and A or B at 720 in the controller's own coordinates: what Marlin reports after a power cycle
-    (it boots both rotation axes at 720; BR-02's rule, INF-10). B must be read (the caller checks); A may be absent."""
+    (it boots both rotation axes at 720; BR-02's rule, INF-10), also after a STOP since (720.05: within
+    RESET_ROTATION_TOLERANCE). B must be read (the caller checks); A may be absent."""
     c = {}
     for a in axes or []:
         letter = str(a.get("letter") or "").upper()
@@ -752,7 +786,8 @@ def reset_signature(axes):
         if letter and letter not in c and isinstance(v, (int, float)) and not isinstance(v, bool):
             c[letter] = float(v)
     try:
-        return all(abs(c[k]) < 1e-3 for k in "XYZ") and any(abs(c[k] - 720.0) < 1e-3 for k in "AB" if k in c)
+        return all(abs(c[k]) < 1e-3 for k in "XYZ") and any(abs(c[k] - 720.0) <= RESET_ROTATION_TOLERANCE
+                                                             for k in "AB" if k in c)
     except KeyError:
         return False
 
@@ -1184,6 +1219,8 @@ PRESSURE_HELD = ("on", "vent_failed")  # PressureHold states with the pump or va
 def stop_sequence(api, wait_s, stop_timeout, poll, clock):
     """STOP OpenPnP's machine before OpenPnP is stopped or left alone. (ok, detail): ok = stopped, or nothing to
     stop (the API is gone). A STOP inside G28 hangs the controller until a power cycle, so:
+    - machine.homing true (BR-44: a home runs, whoever started it): wait, whatever else the status shows. A build
+      before BR-44 lacks it: the rules below alone;
     - the pressure held ('on', 'vent_failed'), or an engine run past its home (phase not 'home: ...'): STOP at
       once, outputs may be on (homes refuse while the pressure is held);
     - otherwise wait while the machine is busy or its state is unknown (no answer in time, HTTP != 200), up to
@@ -1192,7 +1229,10 @@ def stop_sequence(api, wait_s, stop_timeout, poll, clock):
       is left of wait_s, whichever is longer: one budget for both, as the unit's TimeoutStopSec. A pressure
       'starting' or 'stopping' waits too: PressureHold.start sets STARTING on the HTTP thread and queues its task
       behind the machine thread's work, which may be a home; nothing is on before that task runs, and a running
-      start ends within seconds."""
+      start ends within seconds.
+    machine.homing turns true only when OpenPnP's home starts: the engine's home phase and the web's home first read the
+    position and raise N1 (DispenseService.homeSafely), busy and not homing yet. So busy and the run's home phase are
+    still waited out with machine.homing false (WEB_API.md: a home can begin between a status read and a STOP)."""
     end = clock.monotonic() + wait_s
     while True:
         try:
@@ -1209,9 +1249,12 @@ def stop_sequence(api, wait_s, stop_timeout, poll, clock):
                 pressure = p.get("on") is True or p.get("state") in PRESSURE_HELD
                 running = run.get("running") is True
                 run_homing = running and str(run.get("phase") or "").startswith("home")
-                if pressure or (running and not run_homing) or (not running and m.get("busy") is False):
+                if machine_homing(m):
+                    why = "a home is running (machine.homing)"
+                elif pressure or (running and not run_homing) or (not running and m.get("busy") is False):
                     return api_stop_and_wait(api, max(stop_timeout, end - clock.monotonic()), poll, clock)
-                why = "the machine is busy (homing?)"
+                else:
+                    why = "the machine is busy (homing?)"
         if clock.monotonic() >= end:
             return False, f"STOP not sent: {why} for {wait_s:g} s"
         clock.sleep(poll)
@@ -1852,11 +1895,13 @@ class Deployer:
 
     # --- stopping and starting OpenPnP -----------------------------------------------------------
     def _wait_not_busy(self, seconds):
+        """Until /api/machine shows the machine not busy and no home running (machine.homing, BR-44). False at the
+        timeout."""
         end = self.clock.monotonic() + seconds
         while True:
             try:
                 code, m = self.api.get("/api/machine", timeout=10)
-                if code == 200 and m.get("busy") is False:
+                if code == 200 and m.get("busy") is False and not machine_homing(m):
                     return True
             except ApiDown:
                 pass
@@ -1926,7 +1971,8 @@ class Deployer:
     def _wait_status(self, watch_service):
         """/api/status of a started OpenPnP: 200 with the dispense engine running. OpenPnP starts its web API and the
         engine on configurationComplete in no fixed order (its listeners are a HashSet), so a 200 without the engine
-        is waited out too; at the timeout that 200 is returned, and the engine check fails on it."""
+        is waited out too; at the timeout that 200 is returned, and the engine check fails on it. dispense.state
+        (BR-44) 'failed' is final (DispenseService.start threw): that 200 is returned at once; 'starting' waits."""
         end = self.clock.monotonic() + self.cfg.status_timeout
         last, started = "no answer", None
         while True:
@@ -1939,7 +1985,7 @@ class Deployer:
                 code, st = self.api.get("/api/status", timeout=5)
                 if code == 200:
                     d = st.get("dispense")
-                    if isinstance(d, dict) and d.get("running") is True:
+                    if isinstance(d, dict) and (d.get("running") is True or d.get("state") == "failed"):
                         return st, None, None
                     started, last = st, "the dispense engine is not running yet"
                 else:
@@ -2077,6 +2123,12 @@ class Deployer:
         d = st.get("dispense") if isinstance(st.get("dispense"), dict) else {}
         if d.get("running") is not True or d.get("available") is not True:
             # DispenseService.install only logs a failed start: OpenPnP runs on, without its engine
+            if d.get("running") is not True and d.get("state") == "failed":
+                return fail("status", f"the dispense engine failed to start (dispense.state failed): "
+                                      f"{d.get('startError')}", stop=False)
+            if d.get("running") is not True and d.get("state") == "starting":
+                return fail("status", f"the dispense engine did not start within {cfg.status_timeout:g} s "
+                                      "(dispense.state starting)", stop=False)
             return fail("status", f"the dispense engine is not usable (dispense.running {d.get('running')}, "
                                   f"available {d.get('available')}: {d.get('unavailableReason')})", stop=False)
         step("status", f"version {version}, simulated {sim}, dispense engine available")
@@ -2084,7 +2136,7 @@ class Deployer:
         try:
             code, m = self.api.get("/api/machine", timeout=10)
             if code == 200 and m.get("enabled"):
-                if m.get("busy") is not False:
+                if m.get("busy") is not False or machine_homing(m):
                     return fail("enable", "the machine is already enabled and busy; not touching it", "machine", False)
                 ok, d = self.stop_machine()
                 if not ok:
