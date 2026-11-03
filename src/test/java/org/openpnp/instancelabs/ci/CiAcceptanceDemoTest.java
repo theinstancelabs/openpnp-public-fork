@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
  */
 public class CiAcceptanceDemoTest {
     @Test
-    public void failsOnPurpose() {
-        assertEquals(2, 1 + 2, "deliberate failure for the INF-01 acceptance PR");
+    public void passesOnceFixed() {
+        assertEquals(3, 1 + 2, "fixed: the INF-01 acceptance PR goes green");
     }
 }
