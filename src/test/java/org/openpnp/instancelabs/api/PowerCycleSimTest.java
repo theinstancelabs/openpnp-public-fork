@@ -89,6 +89,16 @@ public class PowerCycleSimTest {
         sim.machine.setEnabled(true);
     }
 
+    /**
+     * OpenPnP quits and starts again (a deploy, or a restart to recover the serial link) with the controller powered
+     * all along: the engine starts afresh on the same database and sees the next connect.
+     */
+    void restartOpenPnp() throws Exception {
+        sim.machine.setEnabled(false);
+        svc = DispenseService.start(Configuration.get());
+        sim.machine.setEnabled(true);
+    }
+
     /** The lines since the mark that move an axis or switch an output. */
     List<String> motionAndOutputs() {
         List<String> out = new ArrayList<>();
@@ -136,7 +146,67 @@ public class PowerCycleSimTest {
 
         JsonObject after = ok("GET", "/api/machine", null);
         assertTrue(after.get("positionKnown").getAsBoolean(), after.toString());
-        assertTrue(after.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), "the reset stays on record");
+        assertTrue(after.getAsJsonObject("powerCycle").get("detected").getAsBoolean(),
+                "this connection began with a reset: " + after);
+
+        // a Stop and Start afterwards, the controller powered all along: this connection is not a reset
+        reconnect();
+        JsonObject again = ok("GET", "/api/machine", null);
+        JsonObject pc2 = again.getAsJsonObject("powerCycle");
+        assertFalse(pc2.get("detected").getAsBoolean(), again.toString());
+        assertEquals(pc.get("atMs").getAsLong(), pc2.get("atMs").getAsLong(), "the last reset stays on record");
+    }
+
+    @Test
+    public void aResetStaysOnRecordAcrossAnOpenPnpRestart() throws Exception {
+        long setAt = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":298}").get("startAngleSetAtMs")
+                .getAsLong();
+        Thread.sleep(5); // the reset comes later than the angle, in ms
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        // the home's G92 A0 B0 removed the boot position: the next connect reads a homed controller
+        restartOpenPnp();
+
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertTrue(m.get("positionKnown").getAsBoolean(), "the attested home followed the reset: " + m);
+        JsonObject pc = m.getAsJsonObject("powerCycle");
+        assertFalse(pc.get("detected").getAsBoolean(), "this connection is not a reset: " + m);
+        assertFalse(pc.get("atMs").isJsonNull(), "the last reset stays on record: " + m);
+        JsonObject p = ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertFalse(p.get("controllerResetAtMs").isJsonNull(), p.toString());
+        assertTrue(p.get("controllerResetAtMs").getAsLong() > setAt, p.toString());
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(),
+                "I11: the angle was set before the reset, whatever restarted since: " + p);
+    }
+
+    @Test
+    public void aResetNotHomedBeforeAnOpenPnpRestartStillNeedsTheOperatorsWord() throws Exception {
+        powerCycle();
+        // OpenPnP's own jog moves the head while unhomed: the controller no longer reads the boot position
+        sim.machine.execute(() -> {
+            sim.driver.sendCommand("G1 X5 F3000");
+            return null;
+        });
+        restartOpenPnp();
+
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.get("positionKnown").getAsBoolean(), "the reset was never followed by a home: " + m);
+        assertTrue(m.get("positionUnknownWhy").getAsString().contains("reset"), m.toString());
+        assertFalse(m.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), "this connect read X 5: " + m);
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("nothing is under either tool"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
+
+        sim.server.mark();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        List<String> l = motionAndOutputs();
+        assertFalse(l.isEmpty(), sim.server.sinceMark().toString());
+        assertTrue(l.get(0).startsWith("G28"), "G28 first: " + l);
+
+        restartOpenPnp();
+        assertTrue(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean(), "the home is on record too");
     }
 
     @Test
