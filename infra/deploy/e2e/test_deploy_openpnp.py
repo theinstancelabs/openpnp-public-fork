@@ -394,7 +394,8 @@ class DeployRealOpenPnP(unittest.TestCase):
         cls.sim = LumenSim(d)
         # Marlin boots at X/Y/Z 0, A and B 720: il_deploy (and BR-02) read that as a power cycle and never home it
         # (test_2). The lab controller at deploy time has run since its power-on and was homed by an earlier session:
-        # G28 then G92 A0 B0, as OpenPnP's HOME_COMMAND does (INF-10; a G92 B0 alone left it unhomed at Z 0).
+        # G28 then G92 A0 B0, as the lab's patched HOME_COMMAND does (lumen-sim RESEARCH.md section 1; INF-10: a G92 B0
+        # alone left it unhomed at Z 0).
         c = DriverClient(cls.sim.link)
         try:
             c.send("G28", timeout_ms=60000)
