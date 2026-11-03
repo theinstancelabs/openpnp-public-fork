@@ -177,8 +177,11 @@ public class SimBoardCameraTest {
             sim.driver.setCommunicationsType(CommunicationsType.serial);
             try {
                 sim.driver.setPortName(pty.link.toString());
+                SimBoardCamera cam = camera(false);
+                cam.open(); // the transport is enough to open; a frame needs the identity too
+                assertTrue(uniform(cam.internalCapture()), "blank before lumen-sim said so");
                 SimGuard.noteIdentity(sim.machine, SimGuardTest.LUMEN_SIM);
-                camera(false).open();
+                assertFalse(uniform(cam.internalCapture()), "drawn once it did");
                 sim.driver.setPortName("/dev/ttyACM0");
                 IllegalStateException e = assertThrows(IllegalStateException.class, camera(false)::open);
                 assertTrue(e.getMessage().startsWith("simulation-only camera on a non-simulated machine"),

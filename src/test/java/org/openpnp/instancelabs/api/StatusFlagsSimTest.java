@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
@@ -53,7 +54,8 @@ public class StatusFlagsSimTest {
 
     @AfterEach
     public void after() throws Exception {
-        sim.server.delayBeforeOkMs.clear();
+        sim.server.holdOkUntil.values().forEach(CountDownLatch::countDown);
+        sim.server.holdOkUntil.clear();
         api.stop();
         DispenseService svc = DispenseService.get();
         if (svc != null) {
@@ -91,12 +93,19 @@ public class StatusFlagsSimTest {
         return false;
     }
 
+    /** G28's ok waits until the test opens the latch: a home the test ends. */
+    CountDownLatch hold(String prefix) {
+        CountDownLatch l = new CountDownLatch(1);
+        sim.server.holdOkUntil.put(prefix, l);
+        return l;
+    }
+
     @Test
     public void homingIsTrueWhileAnyHomeRuns() throws Exception {
         assertFalse(homing(), status().toString());
-        sim.server.delayBeforeOkMs.put("G28", 1500L);
 
         // the web's Home (through the engine's homeSafely)
+        CountDownLatch g28 = hold("G28");
         CompletableFuture<JsonObject> web = CompletableFuture.supplyAsync(() -> {
             try {
                 return call("POST", "/api/machine/home", "{\"wait\":true}");
@@ -106,27 +115,35 @@ public class StatusFlagsSimTest {
             }
         });
         assertTrue(homingBecomes(true), "the web home");
+        Thread.sleep(300);
+        assertTrue(homing(), "still homing while G28 is unanswered");
+        g28.countDown();
         assertTrue(web.get(30, TimeUnit.SECONDS).get("homed").getAsBoolean());
         assertTrue(homingBecomes(false), "after the web home");
 
         // OpenPnP's own Home button: machine.home() in a machine task
+        g28 = hold("G28");
         Future<Object> own = sim.machine.submit(() -> {
             sim.machine.home();
             return null;
         });
         assertTrue(homingBecomes(true), "OpenPnP's own home");
+        g28.countDown();
         own.get(30, TimeUnit.SECONDS);
         assertTrue(homingBecomes(false), "after OpenPnP's own home");
 
-        // a STOP during a home ends it, homing too
-        sim.server.delayBeforeOkMs.put("G28", 4000L);
+        // a STOP inside G28: still a home until G28 is answered (or its wait times out), then it ends
+        g28 = hold("G28");
         sim.machine.submit(() -> {
             sim.machine.home();
             return null;
         });
         assertTrue(homingBecomes(true), "the third home");
         call("POST", "/api/stop", null);
-        assertTrue(homingBecomes(false), "a STOP ended the home: " + status().getAsJsonObject("machine"));
+        Thread.sleep(300);
+        assertTrue(homing(), "G28 unanswered after the STOP: still homing");
+        g28.countDown();
+        assertTrue(homingBecomes(false), "the stopped home ended: " + status().getAsJsonObject("machine"));
     }
 
     @Test

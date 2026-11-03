@@ -2,7 +2,6 @@ package org.openpnp.instancelabs.dispense;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -38,9 +37,10 @@ public class LiveBoardPlanTest {
         File boardFile = pick("IL_TEST_BOARD", new File(home, "Desktop/ftp.board.xml"),
                 "src/test/resources/kicad/ftp.board.xml");
         File lab = new File(home, ".openpnp2");
-        File live = pick("IL_LIVE_CONFIG", new File(lab, "packages.xml").exists() ? lab : null,
-                "infra/fixtures/lab-config");
-        assumeTrue(boardFile.exists() && new File(live, "packages.xml").exists() && new File(live, "parts.xml").exists(),
+        File live = pick("IL_LIVE_CONFIG", new File(lab, "packages.xml").exists() && new File(lab, "parts.xml").exists()
+                ? lab : null, "infra/fixtures/lab-config");
+        // never skipped: the repo's copies are always there (BR-40: CI runs this)
+        assertTrue(boardFile.exists() && new File(live, "packages.xml").exists() && new File(live, "parts.xml").exists(),
                 "board " + boardFile + ", config " + live);
         File dir = Files.createTempDirectory("dispense-live-copy").toFile();
         for (String f : new String[] {"packages.xml", "parts.xml"}) {

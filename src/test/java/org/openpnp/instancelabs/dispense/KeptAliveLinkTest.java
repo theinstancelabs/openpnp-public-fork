@@ -24,6 +24,17 @@ public class KeptAliveLinkTest {
         }
     }
 
+    /** The driver's reader has ended: it answers "IO Error on reading from the controller". */
+    boolean readerEnded() {
+        try {
+            sim.driver.receiveResponses();
+            return false;
+        }
+        catch (Exception e) {
+            return String.valueOf(e.getMessage()).contains("IO Error on reading");
+        }
+    }
+
     @Test
     public void aStartAfterTheKeptAliveLinkDiedOpensItAgain() throws Exception {
         sim = new SimMachine(false);
@@ -33,7 +44,11 @@ public class KeptAliveLinkTest {
         sim.machine.setEnabled(false); // Stop: the link stays open
 
         sim.server.dropLink(); // the controller is switched off
-        Thread.sleep(500); // OpenPnP's reader sees the end of the link
+        long until = System.currentTimeMillis() + 5000;
+        while (!readerEnded()) { // OpenPnP's reader sees the end of the link
+            assertTrue(System.currentTimeMillis() < until, "OpenPnP's reader never saw the link end");
+            Thread.sleep(20);
+        }
         sim.server.mark();
         sim.machine.setEnabled(true);
         assertTrue(sim.machine.isEnabled());
