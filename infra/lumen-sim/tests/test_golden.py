@@ -23,6 +23,18 @@ class StaticReplies(unittest.TestCase):
         want = [t for _, t in goldens.replies(rows, "M115")]
         self.assertEqual(text(Bench().send("M115")), want)
 
+    def test_m115_byte_for_byte_with_the_simulator_line_off(self):
+        """BR-47: the simulator line is opt-in; off (the default) M115 is the board's own, bytes included."""
+        want = [t for _, t in goldens.replies(goldens.load("m115"), "M115")]
+        raws = []
+        for kw in ({}, {"sim_cap": False}):
+            b = Bench(**kw)
+            self.assertEqual(text(b.send("M115")), want, kw)
+            raws.append(b.raw)
+        self.assertEqual(raws[0], raws[1])
+        self.assertEqual(raws[0], "".join(line + "\n" for line in want).encode())
+        self.assertNotIn(b"SIMULATOR", raws[0])
+
     def test_m114_with_workspace_offset(self):
         rows = goldens.load("m114")
         want = [t for _, t in goldens.replies(rows, "M114")]
@@ -208,6 +220,57 @@ class Stop(unittest.TestCase):
         # 7 lines in, 6 oks out, all within a millisecond of the first
         self.assertEqual(len(oks), 6)
         self.assertLess(oks[-1] - oks[0], 0.002)
+
+
+class SimulatorCapability(unittest.TestCase):
+    """BR-47: with the flag on, M115 carries one more capability line, 'Cap:SIMULATOR:lumen-sim', last of the Cap
+    lines (where Marlin prints them, before the ok); everything else is the board's. OpenPnP's SimGuard accepts a
+    pty that sends it as a simulator. Off, nothing changes (above)."""
+
+    LINE = "Cap:SIMULATOR:lumen-sim"
+
+    def test_stock_with_the_flag_adds_the_line_before_the_ok(self):
+        want = [t for _, t in goldens.replies(goldens.load("m115"), "M115")]
+        self.assertEqual(text(Bench(sim_cap=True).send("M115")), want[:-1] + [self.LINE, "ok"])
+
+    def test_il_safety_with_the_flag_adds_the_line_after_host_watchdog(self):
+        off = text(Bench(personality="il-safety").send("M115"))
+        self.assertNotIn(self.LINE, off)
+        self.assertEqual(off[-2:], ["Cap:HOST_WATCHDOG:1", "ok"])
+        on = text(Bench(personality="il-safety", sim_cap=True).send("M115"))
+        self.assertEqual(on, off[:-1] + [self.LINE, "ok"])
+
+    def test_only_m115_carries_it(self):
+        b = Bench(sim_cap=True)
+        b.write("M114\nM105\nM503\nM119\nM211\n")
+        b.run(1.0)
+        self.assertFalse(any("SIMULATOR" in line for _, line in b.rx), b.rx)
+
+    def test_set_turns_it_on_and_off_on_the_running_board(self):
+        b = Bench()
+        self.assertFalse(b.sim.state(b.t)["sim_cap"])
+        self.assertTrue(b.sim.control({"cmd": "set", "sim_cap": True}, b.t)["ok"])
+        self.assertTrue(b.sim.state(b.t)["sim_cap"])
+        self.assertEqual(text(b.send("M115"))[-2:], [self.LINE, "ok"])
+        self.assertTrue(b.sim.control({"cmd": "set", "sim_cap": False}, b.t)["ok"])
+        self.assertFalse(b.sim.state(b.t)["sim_cap"])
+        self.assertEqual(text(b.send("M115")), [t for _, t in goldens.replies(goldens.load("m115"), "M115")])
+
+    def test_kept_across_a_power_cycle(self):
+        """lumen-sim's option, not the board's state: a power cycle boots the same simulator."""
+        b = Bench(sim_cap=True)
+        self.assertTrue(b.sim.control({"cmd": "power_cycle"}, b.t)["ok"])
+        self.assertEqual(b.sim.state(b.t)["boots"], 2)
+        self.assertEqual(text(b.send("M115"))[-2:], [self.LINE, "ok"])
+
+    def test_a_non_boolean_is_refused_and_changes_nothing(self):
+        for req in ({"cmd": "set", "sim_cap": "true"}, {"cmd": "set", "sim_cap": 1},
+                    {"cmd": "set", "sim_cap": None}, {"cmd": "set", "sim_cap": True, "vacuum": "x"}):
+            b = Bench()
+            reply = b.sim.control(dict(req), b.t)
+            self.assertFalse(reply["ok"], req)
+            self.assertFalse(b.sim.state(b.t)["sim_cap"], req)
+            self.assertNotIn("SIMULATOR", " ".join(text(b.send("M115"))), req)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ refused too.
 | `--vacuum N` | Raw 24-bit N1 vacuum reading in open air (default -1500000). |
 | `--surface-z Z` | Physical Z (mm) at which N1 touches a surface and seals (default: nothing under N1). See "Vacuum model". |
 | `--seed N` | Seed for random fault delays. |
+| `--sim-cap` | M115 also sends `Cap:SIMULATOR:lumen-sim`, which OpenPnP's SimGuard takes as a simulator. Default off. Only for SIM-feature scenarios, never for the reproductions: "The simulator line" below. |
 
 It stops on SIGINT, SIGTERM, SIGHUP (its terminal or ssh session closed) or `ctl stop`, and removes its symlink and
 socket. A SIGKILL (a stop that escalated, the OOM killer) gives it no chance to, and a link left behind names a freed
@@ -228,13 +229,37 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 | kill | fans unchanged, motion runs 0.6 s more | all four outputs off, planner stopped first |
 | M997 | unknown | reboot to DFU: the port goes away until a power cycle |
 
+## The simulator line (`--sim-cap`, BR-47)
+
+With `--sim-cap`, or `set {"sim_cap": true}` on a running lumen-sim, M115 sends one more line,
+`Cap:SIMULATOR:lumen-sim`. It comes last of the Cap lines (after `Cap:HOST_WATCHDOG:1` on il-safety), then the `ok`.
+Nothing else changes, and the real board never sends it. Off (the default), M115 is the board's byte for byte.
+
+OpenPnP's SimGuard (BR-47, `SimGuard.java`) takes the machine as simulated when both hold:
+- every driver is on a serial port that resolves to `/dev/pts/N` and was chosen by its name (no USB serial number or
+  description in the config);
+- that connection's M115 carries exactly this line. SimGuard asks at every connect and forgets at a disconnect.
+
+Then the SIM cameras, the SIM balance, `/api/sim` and the SIM-only settings work on lumen-sim, and `GET /api/status`
+says `server.simulatorConfirmed: true` once the machine is started.
+
+- **Use it** for scenarios that need those SIM features on the pty: the acceptance's `register`, `tips` and `padcal`.
+  In uinav: `--controller-sim-cap`, or `UINAV_SIM_CONTROLLER_CAP=1` next to `UINAV_SIM_CONTROLLER=pty`. Those three
+  still fail on the pty until BR-69 feeds the SIM vacuum and the SIM paste there ("Known gaps"), so keep them on
+  GcodeServer, in CI too, until then.
+- **Never for the bug reproductions** (`tests/test_repro.py`, `e2e/test_openpnp_pty.py`, the deployer's e2e). They
+  must see the board's exact M115, and the backend must treat them as the real machine. `e2e/test_openpnp_pty.py`
+  drops `UINAV_SIM_CONTROLLER_CAP` from its launches and checks `simulatorConfirmed` is false after the connect.
+- The flag is lumen-sim's, not the board's: a power cycle keeps it. A `set` shows from the next M115; SimGuard reads
+  M115 at a connect, so set it before Start (or stop and start again).
+
 ## Faults and the control channel
 
 Connect to `--control` and send one JSON object per line; each gets one JSON reply line with `"ok": true|false`.
 A malformed request (bad JSON, also JSON nested too deep to parse, a bad regex, a `count` that is not an integer >= 1,
-a non-finite or negative time, a key the request does not take, a flag (`on`, `kill_messages`) that is not `true` or
-`false`, a physical fault with no axis key, or a non-finite value) gets `"ok": false` with an `error` and changes
-nothing; so does a power cycle's `link` that is relative, not a `ttyLUMEN*` name (above), without a directory, on a
+a non-finite or negative time, a key the request does not take, a flag (`on`, `kill_messages`, `sim_cap`) that is not
+`true` or `false`, a physical fault with no axis key, or a non-finite value) gets `"ok": false` with an `error` and
+changes nothing; so does a power cycle's `link` that is relative, not a `ttyLUMEN*` name (above), without a directory, on a
 path that holds something else, or on one another lumen-sim holds. A `set` with one bad value applies none of it. Every request refuses a key it does not take, so a misspelt one (`"surfaceZ"`, `"downs"`,
 `"Nth"`) is an error, not a silent default; the keys are those in the table below. An ok fault with no `nth` and no
 `match` hits every line.
@@ -248,7 +273,7 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 
 | Request | Effect |
 |---|---|
-| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, homing_move_delay_s, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
+| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, homing_move_delay_s, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, kill_messages, sim_cap, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
 | `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now; with `"count": 2`, the 3rd and 4th. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. Keys: `nth`, `match`, `count`. Several rules may hit one line; each is used up. A power cycle ends every ok fault: they are the controller's, and the reboot clears them (the physical faults stay). |
 | `{"cmd": "fault", "fault": "delay_ok", "s": 0.5, ...}` | Extra delay before that `ok`; `"random": [lo, hi]` for a seeded random delay. Later output queues behind it, until `clear` or a power cycle. |
 | `{"cmd": "fault", "fault": "dup_ok", ...}` | The `ok` is sent twice. |
@@ -259,7 +284,7 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 | `{"cmd": "fault", "fault": "disconnect", "down_s": 1.0}` | Close the pty master (the host gets EIO) and remove the link, so the port is absent, as an unplugged one. After `down_s`, a new pty behind the link; the controller state is kept. `"down_s": null` stays down until a power cycle, and so does any `down_s` while the board is in DFU (its bootloader shows no serial port). |
 | `{"cmd": "fault", "fault": "frozen", "on": true}` | Stop reading the port (`on` is `true` or `false`, default `true`). The host's writes block once the pty buffer fills. Ends with `clear`, `"on": false` or a power cycle. |
 | `{"cmd": "power_cycle", "link": null, "down_s": 0}` | Close the master, boot state, new pty behind the link, not frozen; output the old board had not sent and pending injections are dropped. The head stays put (a stock kill's last 0.6 s of motion ends at power off). `"link"` publishes it at a new path instead and removes the old link (the board's ttyACM0 becoming ttyACM1; here e.g. ttyLUMEN0 to ttyLUMEN1). `"down_s": 2` keeps the port absent for 2 s first, as while the board resets and USB re-enumerates (the board is reset at once; default 0). The new `link` must be an absolute path; it is checked and its lock taken before the reset, and held through the down time. If the port still cannot be published after the reset (no pty left, the folder gone), the reply is `"ok": true` (the board was reset) with `link_error`, and `link` says where the port is (back at the old path if it could). Ok faults end (above). |
-| `{"cmd": "set", "kill_messages": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000, "homing_move_delay_s": 0.142}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"; `homing_move_delay_s`: "Homing time", default 0). |
+| `{"cmd": "set", "kill_messages": true, "sim_cap": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000, "homing_move_delay_s": 0.142}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"; `homing_move_delay_s`: "Homing time", default 0; `sim_cap`: "The simulator line"). |
 | `{"cmd": "fault", "fault": "home_offset", "x": 0.5, "y": -0.2}` | The X/Y switches now trigger at these physical positions (mm), so every later home of that axis lands that far off while M114 says 0. Nothing moves until a home. A new value replaces the old one per axis. |
 | `{"cmd": "fault", "fault": "lost_steps", "x": 0.3, "y": 0}` | The head moves by this much now, with no command, also mid-move. M114 and the counts do not change. Calls add up; a home removes it. |
 | `{"cmd": "fault", "fault": "z_shift", "z": 0.1}` | The whole Z frame shifts: the head moves by z now and the Z switch moves with it, so later homes keep the shift. Calls add up. |
@@ -320,7 +345,7 @@ From the repository root:
 python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```
 
-- 257 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 16 s left).
+- 266 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 16 s left).
 - Most tests run on the fake clock and finish in milliseconds. The pty tests start a `lumen_sim` process each and
   take a few seconds.
 - `tests/golden/` holds excerpts of `runs/serial.log`; see its README.
@@ -328,6 +353,8 @@ python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
   timeout (also at non-round times, under a hang guard, `tests/hang.py`) and the N1 touch against surfaces.
 - `tests/test_docs.py` checks the README's USB-identity instructions, including that its `sed` line works.
 - The golden tests compare reply text exactly and timing within 3 %.
+- `--sim-cap` (BR-47): with it off, M115 equals the golden byte for byte; with it on, the line comes last before the
+  `ok` on both personalities (`test_golden.py` `SimulatorCapability`, and through the pty in `test_transport.py`).
 
 | Golden | Board | lumen-sim |
 |---|---|---|
@@ -378,15 +405,31 @@ runs on 10-31 after the test's last fix passed all three:
 | (b) STOP 4 s into a home, head parked at 300, 300 | `POST /api/stop` | The STOP lands in `X_APPROACH`. OpenPnP logs `timeout waiting for response to M410`. The other five Stop lines then go out once each, in order, about 1 s apart, unanswered (since BR-66, PR #10; before it they were never sent). The home fails after 63 s (`homing failed: machine disabled: User requested stop.`). lumen-sim is halted (`Homing Failed`) and silent. A reconnect fails with `timeout waiting for response to G21`. After `uinav controller power-cycle` it connects, and M114 shows the boot position (B 720, count 3197). |
 | (c) 30-turn prime at 180 rpm | the engine's needle touch-off (`POST /api/calibrations/touch-off {"primeAtWaste":true}`, `primeRotationDeg` 10800, the profile's `dwellMs` 250) | run ERROR `GcodeDriver:…/ttyLUMEN timeout waiting for response to G4 P250`. 20 lines. `G1 B10809.9099 F64800`, then `G4 P250` answered only by busy lines. The engine's M410 comes 10.0 s later. The late `ok` (11.25 s) is credited to M410, and later oks shift by one, as in RESEARCH.md section 6a. |
 
-SimGuard reports `simulatorConfirmed: false` on this set-up. That refuses nothing in (a) to (c): the touch-off's
-prime fails before any camera is needed.
+SimGuard reports `simulatorConfirmed: false` on this set-up, also after the connect (test (a) checks both). The test
+drops `UINAV_SIM_CONTROLLER_CAP` from its launches, so lumen-sim never sends its simulator line here. That refuses
+nothing in (a) to (c): the touch-off's prime fails before any camera is needed. On 11-03 (il/integration 43a97c453,
+the fixtures' config) it passed 3 of 3 with `UINAV_SIM_CONTROLLER_CAP=1` in the environment. Run (a) without that
+drop and with the cap on, and SimGuard reports `simulatorConfirmed: true` after the connect.
 
 The backend's SIM acceptance runs unchanged on lumen-sim. Point `UINAV_DIR` at the uinav branch and set
-`UINAV_SIM_CONTROLLER=pty` and `LUMEN_SIM_DIR`; uinav then puts every session on lumen-sim. Results on 10-31:
+`UINAV_SIM_CONTROLLER=pty` and `LUMEN_SIM_DIR`; uinav then puts every session on lumen-sim. Add
+`UINAV_SIM_CONTROLLER_CAP=1` for the scenarios that need SimGuard ("The simulator line"). Results on 11-03
+(il/integration 43a97c453, BR-40's env overrides pointed at `infra/fixtures`):
 
-- **`load`**: every check passes except two of `saved_config_keeps_patch`, `usb-serial-number` and
-  `usb-description`. The pty mode removes the real board's USB identity on purpose, so those two can only pass with
-  GcodeServer.
+- **`load`**: passes with the cap on and with it off. Since BR-43 it checks that the USB identity is absent on the
+  pty.
+- **`register`** (cap on): fails. SimGuard confirms the session (the registration says `simulated: true`) and the
+  SIM top camera finds all three fiducials. The N1 probe then finds no contact (`N1 went down to Z 4.180, 1.25 mm
+  below the board top`), no board surface is saved, and the run is refused (`I4: no 'board' surface`).
+- **`tips`** (cap on): seed, add, mount, frame and prime pass. The landing check finds no dot within ±6 mm, and
+  measuring is refused because "where it lands has not been checked".
+- Both have the same cause, in the backend: the SIM vacuum (`SimVacuum`) and the SIM paste (`SimPaste`) are fed
+  only inside OpenPnP's GcodeServer (`GcodeServer.interpretGcode`). On the pty, lumen-sim answers M261 from its own
+  vacuum model, which knows nothing of the SIM scene, so N1 reads open air. Nothing lays SIM paste for the SIM
+  cameras. Infra's request to the backend (BR-69): feed both from the GcodeDriver's line stream on a
+  SimGuard-confirmed pty. `padcal` needs the same two models.
+
+Results on 10-31 (before BR-43/47):
 - **`stop`**: hold/web, hold/Swing and run/web pass. **run/Swing fails, 2 runs of 2.**
   - After the Swing Stop, OpenPnP's DISABLE_COMMAND thread and the engine's abort send on the one GcodeDriver at
     the same time.
@@ -400,13 +443,11 @@ The backend's SIM acceptance runs unchanged on lumen-sim. Point `UINAV_DIR` at t
 
 ## Known gaps
 
-- **SimGuard.** SimGuard treats only loopback TCP with `FIRMWARE_NAME:GcodeServer` as a simulator.
-  - On this pty OpenPnP runs as a real machine: the SIM top camera (SimBoardCamera refuses to open: "simulation-only
-    camera on a non-simulated machine"), the SIM bottom camera, the SIM balance and the `/api/sim` endpoints are
-    off.
-  - SIM-only settings (shortened calibration statistics, fast probe timings) are refused.
-  - Scenarios that need those (register, padcal, tips) cannot run here until the backend recognises lumen-sim.
-    Proposed: a sim-only M115 field, see the backend request.
+- **The SIM scene.** SimGuard accepts lumen-sim with `--sim-cap` (BR-47), so the SIM cameras, the SIM balance,
+  `/api/sim` and the SIM-only settings work on the pty. The SIM vacuum and the SIM paste do not: they live in
+  GcodeServer only (above). lumen-sim's own N1 model sees only the surfaces given by `--surface-z` or `set`, and not
+  `instancelabs/sim-scene.json`. Until the backend feeds both models on the pty, `register`, `tips` and `padcal` fail
+  on lumen-sim.
 - Not modelled:
   - stepper current;
   - TMC drivers (`M122` prints nothing);
