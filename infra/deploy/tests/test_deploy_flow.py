@@ -245,6 +245,35 @@ class Flow(unittest.TestCase):
         self.assertIn(b, self.bad())
         self.assertIn("dispense", self.bad()[b]["reason"])
 
+    def test_engine_that_failed_to_start_is_bad_at_once_with_its_error(self):
+        """BR-44: dispense.state 'failed' ends the wait for the engine at once (no --status-timeout), and its startError
+        is the bad build's reason."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c, fail=["engine"])
+        t = time.monotonic()
+        self.assertEqual(self.lab.main("deploy", extra=("--status-timeout", "120")), 4, self.lab.last_out)
+        self.assertLess(time.monotonic() - t, 60)
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertIn("the dispense engine failed to start", self.bad()[b]["reason"])
+        self.assertIn("SQLITE_CORRUPT", self.bad()[b]["reason"])
+
+    def test_rollback_to_a_build_before_br44(self):
+        """A rollback can land on a build whose /api/status lacks machine.homing, server.startedAtMs and dispense.state:
+        il_deploy falls back to its rules from before them, and the build passes its health check."""
+        a = self.release(4, self.lab.b, fail=["old-status"])
+        self.deploy()
+        self.lab.start_service()
+        b = self.release(5, self.lab.c, schema=5)
+        self.deploy()
+        self.backdate_resume(16 * 60)
+        self.assertEqual(self.lab.main("rollback"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertIn(b, self.bad())
+        self.assertNotIn("pending", self.deployed()["current"])
+        self.assertEqual(self.violations(), [])
+        self.assert_released_by("rollback")
+
     def test_engine_starting_after_the_api_is_not_a_failure(self):
         """The real OpenPnP can answer /api/status before its dispense engine runs (e2e): a deploy waits for it."""
         self.lab.machine(engine_start_s=0.5)

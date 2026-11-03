@@ -32,6 +32,9 @@ jar, which connects over its real serial stack (jSerialComm) to lumen-sim's pty.
      hand is taken to have left (person.json dated back past the quiet period).
      test_2: lumen-sim power-cycled and a third build: the deploy must not home the reset controller (exit 5, the
      previous build back unchecked, the hold set), then `resume`.
+     test_3 (BR-44): the controller power-cycled again while OpenPnP runs with its link kept open; a health check by
+     hand: Start finds the link dead and connects again (a new connect line for the serial step), and the reset
+     controller is not homed.
 
 Checked: rc of each step, the current/previous links, deployed.json, bad.json, the server.version each health check
 saw, STATE.md's "Deployed on the machine" line and Holder, the deploy.jsonl records, and lumen-sim's I/O log. The
@@ -41,7 +44,9 @@ must end with no model errors and not halted. And the real /api/status has every
 (il_deploy.STATUS_FIELDS; a missing time is skipped there, so a backend rename would silently turn a check off), with
 the health check's home in machine.zCheck.homeAtMs, inside il_deploy's own window. The paths it could not check
 (il_deploy.unchecked_status_fields: behind a null, or in an empty map) must be exactly ENGINE_TASK_FIELDS, which only an
-engine run or a pad calibration fills in; this test drives neither (Backend's contract test covers them).
+engine run or a pad calibration fills in; this test drives neither (Backend's contract test covers them). BR-44's
+fields: dispense.state 'running', machine.homing false, and the pressure hold's first stamp within
+il_deploy.STARTUP_STAMP_S of server.startedAtMs (results.json keeps the gap measured).
 
 Why the cameras are swapped. With no camera device, OpenPnP would start with the fixture's OpenPnpCaptureCameras:
 open() only logs "No camera found with ID ..." and returns (OpenPnpCaptureCamera.java:174), and the native library
@@ -50,7 +55,7 @@ cameras, so on the lab computer OpenPnP would open the real cameras, which anoth
 swap, the test opens no camera on any host.
 
 Skipped unless IL_DEPLOY_E2E=1, and IL_DEPLOY_E2E_JAR and IL_DEPLOY_E2E_LIB name a built jar and its lib/
-directory. Run as a script (CI), a skip then exits 1. About 2 minutes. From the repository root:
+directory. Run as a script (CI), a skip then exits 1. About 3 minutes. From the repository root:
 
     mvn -B -T1 -DskipTests package
     IL_DEPLOY_E2E=1 IL_DEPLOY_E2E_JAR=target/openpnp-gui-0.0.1-alpha-SNAPSHOT.jar IL_DEPLOY_E2E_LIB=target/lib \\
@@ -366,6 +371,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         if reason:
             raise unittest.SkipTest(reason)
         cls.timings = {}
+        cls.measured = {}
         cls.dir = tempfile.mkdtemp(prefix="il-deploy-e2e-")
         cls.xvfb = cls.sim = cls.svc_cfg = None
         atexit.register(cls._kill_leftovers)
@@ -494,7 +500,8 @@ class DeployRealOpenPnP(unittest.TestCase):
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(OUT, name))
         with open(os.path.join(OUT, "results.json"), "w") as f:
-            json.dump({"timings_s": cls.timings, "sha7": getattr(cls, "sha7", None)}, f, indent=1)
+            json.dump({"timings_s": cls.timings, "sha7": getattr(cls, "sha7", None),
+                       "measured": getattr(cls, "measured", {})}, f, indent=1)
 
     # --- helpers --------------------------------------------------------------------------------
     def main(self, *cmd, expect=0):
@@ -584,6 +591,15 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertEqual(len(homes), 1, il_deploy.api_activity_times(st))
         since, until = il_deploy.read_json(os.path.join(self.root, "own-activity.json"))[-1]
         self.assertTrue(since * 1000 <= homes[0] <= until * 1000, (since, homes[0], until))
+        # BR-44 on the real build: the engine runs, no home runs, and the pressure hold's first value was stamped while
+        # this OpenPnP started (pressure_start_up_stamp: its text, 'pressure off', within STARTUP_STAMP_S of
+        # server.startedAtMs)
+        self.assertEqual((st["dispense"]["state"], st["dispense"]["startError"], st["machine"]["homing"]),
+                         ("running", None, False))
+        gap_ms = st["pressure"]["lastEventAtMs"] - st["server"]["startedAtMs"]
+        self.measured["pressure first stamp after the JVM start (s)"] = round(gap_ms / 1000, 2)
+        self.assertTrue(0 <= gap_ms <= il_deploy.STARTUP_STAMP_S * 1000, gap_ms)
+        self.assertTrue(il_deploy.pressure_start_up_stamp(st), st["pressure"])
 
     def person_left(self):
         """The person who ran il_deploy by hand has left the machine: their note (person.json) is dated back past the
@@ -749,6 +765,46 @@ class DeployRealOpenPnP(unittest.TestCase):
         h = self.holder()
         self.assertTrue(h.idle and h.value.startswith("nobody (released by Infra resume at "), h.value)
         self.assertFalse(os.path.exists(os.path.join(self.root, "hold.json")))
+        type(self).power_cycled_ok = True
+
+    def test_3_a_link_kept_alive_through_a_power_cycle_reconnects_and_is_never_homed(self):
+        """BR-44: OpenPnP runs with its controller link kept open (connection-keep-alive) and the controller is switched
+        off and on. A health check by hand: Start finds the link dead and connects again (GcodeDriver.setEnabled), so
+        the serial step reads the new connect line, not the kept-open fallback, and the controller's boot position stops
+        the check before any home. Before BR-44 that enable failed on the dead port."""
+        if not getattr(type(self), "power_cycled_ok", False):
+            self.skipTest("needs test_2's power cycle")
+        start = self.sim.io_count()
+        # The previous build runs since test_2, never enabled. A health check by hand connects it: the controller still
+        # reads its boot position (not homed since the power cycle; A and B 720.05, as test_2's STOP's M410 recomputed
+        # them from the step counts), so no home; the STOP leaves the link open.
+        self.main("health", "--no-claim", expect=1)
+        rep = json.loads(self.last_stdout)
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"], rep)
+        self.assertNotIn("kept open", rep["steps"][2]["detail"])
+        self.assertIn("controller was reset", rep["failure"])
+        self.assertTrue(rep["stopped"]["ok"], rep)
+        log = os.path.join(self.root, "state", "config", "log", "OpenPnP.log")
+        with open(log, errors="replace") as f:
+            connects = f.read().count("Serial port: connecting to ")
+
+        self.assertTrue(self.sim.ctl({"cmd": "power_cycle"})["ok"])  # the link OpenPnP keeps open dies
+        self.main("health", "--no-claim", expect=1)
+        rep = json.loads(self.last_stdout)
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"], rep)
+        self.assertNotIn("kept open", rep["steps"][2]["detail"], "Start connected again")
+        self.assertIn("Serial port: connecting to %s by " % self.sim.link, rep["steps"][2]["detail"])
+        self.assertIn("controller was reset", rep["failure"])
+        self.assertTrue(rep["stopped"]["ok"], rep)
+        with open(log, errors="replace") as f:
+            text = f.read()
+        self.assertIn("the kept-alive link to the controller is dead: connecting again", text)
+        self.assertEqual(text.count("Serial port: connecting to "), connects + 1)
+
+        lines = [line for _, line in sent(self.sim.io(start))]
+        self.assertEqual([x for x in lines if x.split(" ")[0] in ("G0", "G1", "G28")], [], "something moved")
+        st = self.sim.state()
+        self.assertEqual((st["halted"], st["sim_errors"]), (False, []))
 
 if __name__ == "__main__":
     # CI runs this file directly: with IL_DEPLOY_E2E=1 a skip means a miswired job (no jar, no Xvfb), not a pass
