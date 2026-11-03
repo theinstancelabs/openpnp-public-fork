@@ -831,33 +831,49 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     await shoot(page, 'edit-tip-correction');
     await page.evaluate(() => { const d = IL.dialog.top(); if (d) d.close('test'); });
 
-    // ---- (11d) a contact typed before a needle change keeps that needle's token (PR #5 review, setup.js:683/685) -------
-    // The operator retypes the shown N2 contact and keeps the field focused; another browser records a needle change; only
-    // N1 is captured again. Record needle frame must not post the old contact under the new needle's token.
-    await closePanels(page);
-    await page.evaluate(() => IL.go('#setup'));
-    await page.waitForSelector('#anchor-n2', { timeout: 10000 });
-    const tokA = (await status(page)).dispense.needle.changedAtMs;
-    const fr11 = await page.evaluate((t) => IL.api('POST', '/api/needle/anchor', { surfaceZ: 5.5, needleContactZ: 2.91, needleChangedAtMs: t }), tokA);
-    await page.waitForFunction(() => document.getElementById('anchor-n2').value !== '', null, { timeout: 5000 });
-    const shown11 = await page.evaluate(() => document.getElementById('anchor-n2').value);
-    await page.click('#anchor-n2', { clickCount: 3 });
-    await page.keyboard.type(shown11);
-    await page.evaluate(() => fetch('/api/needle/changed', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ why: 'test (11d): another browser' }) }));
-    await page.waitForFunction((t) => IL.tips.token() !== t, tokA, { timeout: 5000 });
-    await sleep(1600);   // two status polls with the field still focused
-    const kept11 = await page.evaluate(() => ({ v: document.getElementById('anchor-n2').value, focused: document.activeElement && document.activeElement.id }));
-    await page.click('#btn-anchor-n1');
-    let body11 = null;
-    await page.route('**/api/needle/anchor', (route) => { body11 = route.request().postDataJSON(); return route.continue(); });
-    await page.click('#btn-anchor');
-    await sleep(1500);
-    await page.unroute('**/api/needle/anchor');
-    const st11 = (await status(page)).dispense.needle;
-    check('(11d) a contact typed before the needle change goes out with that needle\'s token and is refused, not recorded for the new needle',
-      !!fr11 && kept11.v === shown11 && kept11.focused === 'anchor-n2' && !!body11 && body11.needleChangedAtMs === tokA && st11.changedAtMs !== tokA && !st11.anchored,
-      { kept11, body11, tokA, now: st11.changedAtMs, anchored: st11.anchored });
+    // ---- (11d-f) a value typed before a needle change keeps that needle's token (PR #5 reviews, setup.js:53/683/685) --
+    // Each case: a frame recorded for this needle A (by the API, as another browser would), a value typed for A, needle B
+    // recorded meanwhile in another browser, the other contact typed after the change (within 20 mm of it, so the engine
+    // gets as far as the token): Record needle frame posts A's token, the engine refuses it (409 needle-changed), the
+    // card shows the refusal, and no frame is recorded for B.
+    async function staleCase(name, typeOld, afterChange, freshId, freshVal) {
+      await closePanels(page);
+      await page.reload();
+      await page.waitForFunction(() => window.IL && IL.api && IL.tips && IL.tips.data(), null, { timeout: 30000 });
+      await page.evaluate(() => IL.go('#setup'));
+      await page.waitForSelector('#anchor-n2', { timeout: 10000 });
+      const tokA = (await status(page)).dispense.needle.changedAtMs;
+      await page.evaluate((t) => IL.api('POST', '/api/needle/anchor', { surfaceZ: 5.5, needleContactZ: 2.91, needleChangedAtMs: t }), tokA);
+      await page.waitForFunction(() => document.getElementById('anchor-n2').value === '2.910' && document.getElementById('anchor-n1').value === '5.500', null, { timeout: 8000 });
+      await typeOld();
+      await page.evaluate(() => fetch('/api/needle/changed', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ why: 'test (11d-f): another browser' }) }));
+      await page.waitForFunction((t) => IL.tips.token() !== t, tokA, { timeout: 5000 });
+      await sleep(1600);   // two status polls
+      if (afterChange) await afterChange();
+      await page.click('#' + freshId, { clickCount: 3 });
+      await page.keyboard.type(freshVal);
+      let body = null;
+      await page.route('**/api/needle/anchor', (route) => { body = route.request().postDataJSON(); return route.continue(); });
+      const resP = page.waitForResponse((r) => r.url().includes('/api/needle/anchor') && r.request().method() === 'POST', { timeout: 10000 }).catch(() => null);
+      await page.click('#btn-anchor');
+      const res = await resP;
+      await sleep(800);
+      await page.unroute('**/api/needle/anchor');
+      const st = (await status(page)).dispense.needle;
+      const box = await page.evaluate(() => { const r = document.querySelector('#card-needle .su-ref .refusal'); return r ? r.textContent : null; });
+      check(name, !!body && body.needleChangedAtMs === tokA && !!res && res.status() === 409 && !st.anchored
+        && /The needle was changed at \d\d:\d\d after these values were taken/.test(box || ''),
+        { body, status: res && res.status(), anchored: st.anchored, box: box && box.slice(0, 200), tokA, now: st.changedAtMs });
+    }
+    await staleCase('(11d) N2 retyped to the shown value and kept in focus through a needle change: posted with the old needle\'s token, refused',
+      async () => { await page.click('#anchor-n2', { clickCount: 3 }); await page.keyboard.type('2.910'); }, null, 'anchor-n1', '5.5');
+    await staleCase('(11e) N2 typed for the old needle, then a key and Backspace after the change: still the old needle\'s token, refused',
+      async () => { await page.click('#anchor-n2', { clickCount: 3 }); await page.keyboard.type('2.95'); await page.keyboard.press('Tab'); },
+      async () => { await page.click('#anchor-n2'); await page.keyboard.press('End'); await page.keyboard.type('7'); await page.keyboard.press('Backspace'); },
+      'anchor-n1', '5.5');
+    await staleCase('(11f) N1 typed for the old needle, N2 typed after the change: the old needle\'s token, refused',
+      async () => { await page.click('#anchor-n1', { clickCount: 3 }); await page.keyboard.type('5.6'); await page.keyboard.press('Tab'); }, null, 'anchor-n2', '2.91');
 
     // ---- (12) the page ------------------------------------------------------------------------------------------------
     check('(12) no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
