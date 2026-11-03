@@ -139,9 +139,12 @@ public class TipSetupUiSimTest {
             assertTrue(js < index.indexOf("/static/" + later), "tipsetup.js before " + later);
         }
         assertTrue(index.contains("<script src=\"/static/tipsetup.js\" defer></script>"), "deferred like the modules");
-        // the strip's Tip cell, after the purge row, before the verdict (§22.7)
+        // the strip's Tip cell, after the pressure, before the session and the verdict (the agreed mockups, 11-02: no
+        // start angle and purge row cells)
         int tip = index.indexOf("id=\"chip-tip\"");
-        assertTrue(tip > index.indexOf("id=\"chip-purge\"") && tip < index.indexOf("id=\"pill-engine\""), "#chip-tip in the strip");
+        int session = index.indexOf("id=\"cell-session\"");
+        assertTrue(tip > index.indexOf("id=\"pill-pressure\"") && tip < session && session < index.indexOf("id=\"pill-engine\""), "#chip-tip in the strip");
+        assertFalse(index.contains("id=\"chip-angle\"") || index.contains("id=\"chip-purge\""), "no start angle or purge row cell");
     }
 
     @Test
