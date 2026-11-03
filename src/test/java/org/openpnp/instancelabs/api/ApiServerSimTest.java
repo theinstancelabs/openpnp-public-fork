@@ -967,6 +967,62 @@ public class ApiServerSimTest {
         }
     }
 
+    /**
+     * BR-42 (Infra on lumen-sim, 10-31): the real board acks M410 after 1-2 s. With the machine's F9 DISABLE_COMMAND,
+     * STOP does not wait for the engine, so OpenPnP's Stop and the engine's stop lines and recovery send on one driver at
+     * once; an ok lost between them kept the engine busy up to 60 s. Now the engine is idle and the machine off within
+     * 15 s, and no line timed out.
+     */
+    @Test
+    public void aStopMidRunWithASlowM410EndsIdleWithoutATimeout() throws Exception {
+        setUpBoardRuns();
+        double[][] pos = new double[30][];
+        for (int i = 0; i < pos.length; i++) {
+            pos[i] = new double[] {2 + 4.0 * (i % 6), 2 + 3 * (i / 6), 0};
+        }
+        File board = writeBoard(pos);
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, String.join("\n",
+                ControllerCommands.STOP_SEQUENCE));
+        try (SlowProxy proxy = new SlowProxy(sim.server.getPort(), 10)) {
+            sim.machine.setEnabled(false);
+            sim.driver.disconnect();
+            ((org.openpnp.machine.reference.driver.TcpCommunications) sim.driver.getCommunications())
+                    .setPort(proxy.port());
+            sim.machine.setEnabled(true);
+            sim.machine.home();
+            ok(post("/api/screw/start-angle", "{}"));
+            JsonObject plan = planTied(board);
+            assertEquals(202, post("/api/run", "{\"planId\":\"" + plan.get("planId").getAsString() + "\"}").status);
+            long t0 = System.currentTimeMillis();
+            JsonObject s;
+            do {
+                Thread.sleep(20);
+                s = ok(get("/api/status"));
+            } while ((s.get("run").isJsonNull() || s.getAsJsonObject("run").get("dotsDone").getAsInt() < 2)
+                    && System.currentTimeMillis() - t0 < 30000);
+            sim.server.delayBeforeOkMs.put("M410", 1000L);
+            JsonObject stop = ok(post("/api/stop", null));
+            long t1 = System.currentTimeMillis();
+            do {
+                Thread.sleep(50);
+                s = ok(get("/api/status"));
+            } while ((s.getAsJsonObject("run").get("running").getAsBoolean()
+                    || s.getAsJsonObject("dispense").get("busy").getAsBoolean()
+                    || s.getAsJsonObject("machine").get("enabled").getAsBoolean())
+                    && System.currentTimeMillis() - t1 < 30000);
+            long took = System.currentTimeMillis() - t1;
+            JsonObject run = s.getAsJsonObject("run");
+            assertEquals("ABORTED", run.get("status").getAsString(), run.toString());
+            assertTrue(took < 15000, "idle and off " + took + " ms after the STOP: " + stop);
+            JsonObject last = ok(get("/api/runs/last")).getAsJsonObject("run");
+            assertFalse(last.toString().contains("timeout"), "no line timed out: " + last);
+        }
+        finally {
+            sim.server.delayBeforeOkMs.clear();
+        }
+    }
+
     @Test
     public void scaleEntriesCreateRecords() throws Exception {
         JsonObject c = ok(post("/api/calibrations/scale-shots",
