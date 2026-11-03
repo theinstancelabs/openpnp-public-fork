@@ -18,6 +18,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.openpnp.ConfigurationListener;
 import org.openpnp.instancelabs.board.EdtRunner;
@@ -144,6 +146,8 @@ public final class DispenseService {
     private final HomeTracker homeTracker;
     /** BR-02: a controller reset seen at a connect; the position is unknown until a home. */
     private final ControllerReset controllerReset;
+    /** BR-02: the CONNECT_COMMAND's G92 was warned about (once per engine). */
+    private volatile boolean connectG92Warned;
     /** The last good open-air N1 baseline (the probe's part-on-N1 check across tasks). */
     private final VacuumProber.BaselineMemory baselineMemory = new VacuumProber.BaselineMemory();
     /** The API's manual pressure hold: engine tasks refuse to start while it is on (machine thread). */
@@ -275,7 +279,9 @@ public final class DispenseService {
         Machine machine = configuration.getMachine();
         homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
         controllerReset = new ControllerReset(null, machine != null && machine.isEnabled(),
-                machine != null && machine.isHomed());
+                machine != null && machine.isHomed(), resetHistory(),
+                e -> db.event(null, ControllerReset.EVENT_KNOWN.equals(e.code) ? "INFO" : "WARN", e.code, e.message,
+                        e.atMs));
         if (machine != null) {
             machine.addListener(homeTracker);
             machineListener = new MachineListener.Adapter() {
@@ -390,18 +396,60 @@ public final class DispenseService {
             else {
                 OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
                 letterB = mapper.letterB().charAt(0);
+                warnIfConnectSetsPosition(mapper.getDriver());
                 m114 = new DriverGcodeChannel(mapper.getDriver()).sendAndCollect("M114", cfg.commandTimeoutMs);
             }
         }
         catch (Exception e) {
             error = String.valueOf(e.getMessage());
         }
-        controllerReset.connected(m114, letterB, error);
+        controllerReset.connected(m114, letterB, error); // journals a reset or an unread position to the events
         String why = controllerReset.unknownWhy();
         if (why != null) {
             Logger.warn("dispense: {}", why);
+        }
+    }
+
+    /**
+     * BR-02: a G92 in the driver's CONNECT_COMMAND sets the controller's position before the M114 above reads it, so a
+     * reset's boot position would be hidden. Warned once per engine (the log and the events).
+     */
+    private void warnIfConnectSetsPosition(GcodeDriver driver) {
+        if (connectG92Warned) {
+            return;
+        }
+        String connect = driver.getCommand(null, GcodeDriver.CommandType.CONNECT_COMMAND);
+        Matcher g92 = Pattern.compile("(?im)^\\s*G92\\b.*$").matcher(connect == null ? "" : connect);
+        if (g92.find()) {
+            connectG92Warned = true;
+            String why = "the driver's CONNECT_COMMAND sends '" + g92.group().trim() + "': it sets the controller's "
+                    + "position at every connect, so the engine cannot tell a controller reset (X 0, Y 0, Z 0, B 720) "
+                    + "from a reconnect (BR-02): remove it from CONNECT_COMMAND";
+            Logger.warn("dispense: {}", why);
             db.event(null, "WARN", "MACHINE", why);
         }
+    }
+
+    /**
+     * BR-02: what earlier engines journaled about controller resets (the newest of each kind), so a restart keeps the
+     * screw count's epoch and an unknown position. Unreadable, it counts as an unread connect: unknown until a home.
+     */
+    private List<ControllerReset.Event> resetHistory() {
+        List<ControllerReset.Event> h = new ArrayList<>();
+        try {
+            for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
+                    ControllerReset.EVENT_KNOWN)) {
+                h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
+                        (String) row.get("message")));
+            }
+        }
+        catch (SQLException | RuntimeException e) {
+            Logger.warn(e, "dispense: the record of controller resets could not be read");
+            h.add(new ControllerReset.Event(ControllerReset.EVENT_UNREAD, System.currentTimeMillis(), "the engine's "
+                    + "record of controller resets could not be read (" + e.getMessage() + "), so it may have been "
+                    + "reset"));
+        }
+        return h;
     }
 
     /** The controller's M115 answer on the current connection. */

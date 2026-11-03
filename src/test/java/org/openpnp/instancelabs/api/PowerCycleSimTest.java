@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
 
 import com.google.gson.JsonObject;
@@ -155,6 +156,23 @@ public class PowerCycleSimTest {
         JsonObject pc2 = again.getAsJsonObject("powerCycle");
         assertFalse(pc2.get("detected").getAsBoolean(), again.toString());
         assertEquals(pc.get("atMs").getAsLong(), pc2.get("atMs").getAsLong(), "the last reset stays on record");
+    }
+
+    @Test
+    public void aG92InTheConnectCommandIsWarnedAbout() throws Exception {
+        // it would set the position before the engine's M114 reads it, hiding a reset's boot position
+        String connect = sim.driver.getCommand(null, GcodeDriver.CommandType.CONNECT_COMMAND);
+        sim.driver.setCommand(null, GcodeDriver.CommandType.CONNECT_COMMAND,
+                (connect == null ? "" : connect + "\n") + "G92 X0 Y0 ; a config edit");
+        reconnect();
+        reconnect();
+        int warned = 0;
+        for (java.util.Map<String, Object> e : svc.getDb().recentEvents(20)) {
+            if (String.valueOf(e.get("message")).contains("CONNECT_COMMAND sends 'G92 X0 Y0")) {
+                warned++;
+            }
+        }
+        assertEquals(1, warned, "warned once per engine: " + svc.getDb().recentEvents(20));
     }
 
     @Test

@@ -1328,9 +1328,14 @@ public class DispenseDb implements AutoCloseable {
     }
 
     public synchronized void event(String runId, String level, String code, String message) {
+        event(runId, level, code, message, System.currentTimeMillis());
+    }
+
+    /** An event at a given time (epoch ms); a failure is logged, not thrown. */
+    public synchronized void event(String runId, String level, String code, String message, long ts) {
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO events(ts, run_uuid, level, code, message) VALUES (?,?,?,?,?)")) {
-            ps.setLong(1, System.currentTimeMillis());
+            ps.setLong(1, ts);
             ps.setString(2, runId);
             ps.setString(3, level);
             ps.setString(4, code);
@@ -1344,6 +1349,16 @@ public class DispenseDb implements AutoCloseable {
 
     public synchronized List<Map<String, Object>> recentEvents(int limit) throws SQLException {
         return query("SELECT * FROM events ORDER BY id DESC LIMIT " + Math.max(1, limit));
+    }
+
+    /** The newest event of each of the codes, oldest first (rows of ts, code and message; BR-02's journal). */
+    public synchronized List<Map<String, Object>> newestEvents(String... codes) throws SQLException {
+        if (codes.length == 0) {
+            return new ArrayList<>();
+        }
+        String in = String.join(",", Collections.nCopies(codes.length, "?"));
+        return query("SELECT ts, code, message FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE code IN ("
+                + in + ") GROUP BY code) ORDER BY id", (Object[]) codes);
     }
 
     public synchronized long insertTouchOff(String method, double zOffsetMm, Double previousOffsetMm,
