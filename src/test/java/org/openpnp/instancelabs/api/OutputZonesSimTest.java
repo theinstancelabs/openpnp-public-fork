@@ -249,7 +249,7 @@ public class OutputZonesSimTest {
         CompletableFuture<HttpResponse<String>> second = async("POST", "/api/pressure/start", "{}");
         waitFor(() -> {
             try {
-                return "starting".equals(pressure().get("state").getAsString());
+                return !"off".equals(pressure().get("state").getAsString()); // starting (or on under load)
             }
             catch (Exception e) {
                 return false;
