@@ -319,8 +319,9 @@ final class DispenseEndpoints {
         }
         PressureHold.Options o = pressureOptions(svc.getConfig(), b);
         ApiContext.refuseUnlessOk(ctx.preflight(svc, Interlocks.Scope.noNeedle()), "Pressure on");
+        // every start: one queued behind motion (an earlier start's park) would trust OpenPnP's planned position
+        ctx.requireMachineIdle();
         if (o.park != null) {
-            ctx.requireMachineIdle();
             ctx.requirePositionKnown(svc);
         }
         if (!o.pumpOnly) {

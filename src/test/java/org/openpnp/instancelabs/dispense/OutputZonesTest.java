@@ -120,7 +120,8 @@ public class OutputZonesTest {
         for (DispensePlan.PlannedDot d : dotsOf(near, "R16.1")) {
             double out = board.distanceOutside(d.xMm, d.yMm);
             assertTrue(out > 3.0 && out < 3.2, "R16.1's dot is " + out + " mm beyond the points");
-            assertNull(OutputZones.of(c, CAMERA).refusal(d.xMm, d.yMm), "I12 allows it");
+            assertNull(OutputZones.of(c, CAMERA).lineRefusal("dot 'R16.1'", d.xMm, d.yMm),
+                    "I12 allows the program's dot");
         }
         assertEquals(Collections.emptyList(), ZFrameTest.i4(ZFrameTest.check(c, near)), "I4 passes it");
         ToyMapper m = new ToyMapper(290, 125, 31.5, 0);
@@ -171,7 +172,7 @@ public class OutputZonesTest {
         OutputZones z = OutputZones.of(config(), CAMERA);
         String why = z.refusal(150, 150);
         assertNotNull(why);
-        assertTrue(why.contains("not over a place where paste may go"), why);
+        assertTrue(why.contains("not over a place that takes paste while the pressure is held"), why);
         assertNull(z.zoneAt(150, 150));
     }
 

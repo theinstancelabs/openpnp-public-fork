@@ -12,6 +12,8 @@ import java.util.Map;
  * boards of plans) by I4's own rule ({@link Interlocks#onSurface}: within {@code surfaceMarginMm} of its points), so I4
  * and I12 never disagree about a dot. Forbidden, whatever else covers it: the bottom camera (a circle of
  * {@code forbidRadiusMm}) and the configured circles. With the valve on the needle never crosses a forbidden zone.
+ * The pressure hold, which may drool for minutes, opens the valve only over a sink: the waste, the towel, the cup, the
+ * purge row, the calibration area or a coupon (never over a board or another surface: #12's final review).
  * The refusals say what to do in their context: the hold where the needle is ({@link #refusal}), its park
  * ({@link #parkRefusal}), a program's line ({@link #lineRefusal}) and move ({@link #crossing}).
  */
@@ -22,14 +24,17 @@ public final class OutputZones {
         public final String name, label;
         public final boolean circle;
         public final double a, b, c, d; // circle: cx, cy, r; box: x0, y0, x1, y1
+        /** Takes the pressure hold's drool: the waste, the towel, the cup, the purge row, the area, a coupon. */
+        public final boolean sink;
         /** A probed surface's plane and the configuration whose I4 margin applies; null for a circle or a box. */
         private final SurfacePlane plane;
         private final DispenseConfig cfg;
 
-        private Zone(String name, String label, boolean circle, double a, double b, double c, double d,
+        private Zone(String name, String label, boolean sink, boolean circle, double a, double b, double c, double d,
                 SurfacePlane plane, DispenseConfig cfg) {
             this.name = name;
             this.label = label;
+            this.sink = sink;
             this.circle = circle;
             this.a = a;
             this.b = b;
@@ -39,18 +44,19 @@ public final class OutputZones {
             this.cfg = cfg;
         }
 
-        static Zone circle(String name, String label, double cx, double cy, double r) {
-            return new Zone(name, label, true, cx, cy, r, 0, null, null);
+        static Zone circle(String name, String label, boolean sink, double cx, double cy, double r) {
+            return new Zone(name, label, sink, true, cx, cy, r, 0, null, null);
         }
 
+        /** The purge row, the calibration area, a coupon: sinks. */
         static Zone box(String name, double x0, double y0, double x1, double y1, double margin) {
-            return new Zone(name, "the " + name, false, Math.min(x0, x1) - margin, Math.min(y0, y1) - margin,
+            return new Zone(name, "the " + name, true, false, Math.min(x0, x1) - margin, Math.min(y0, y1) - margin,
                     Math.max(x0, x1) + margin, Math.max(y0, y1) + margin, null, null);
         }
 
         static Zone surface(String surface, SurfacePlane plane, DispenseConfig cfg) {
-            return new Zone("surface " + surface, "the probed '" + surface + "' surface", false, 0, 0, 0, 0, plane,
-                    cfg);
+            return new Zone("surface " + surface, "the probed '" + surface + "' surface", false, false, 0, 0, 0, 0,
+                    plane, cfg);
         }
 
         public boolean contains(double x, double y) {
@@ -108,21 +114,21 @@ public final class OutputZones {
         DispenseConfig.OutputZoneSettings s = c.outputZones != null ? c.outputZones
                 : new DispenseConfig.OutputZoneSettings();
         if (bottomCameraXY != null) {
-            z.forbid.add(Zone.circle(BOTTOM_CAMERA, "the " + BOTTOM_CAMERA, bottomCameraXY[0], bottomCameraXY[1],
-                    s.forbidRadiusMm));
+            z.forbid.add(Zone.circle(BOTTOM_CAMERA, "the " + BOTTOM_CAMERA, false, bottomCameraXY[0],
+                    bottomCameraXY[1], s.forbidRadiusMm));
         }
         if (s.forbid != null) {
             for (DispenseConfig.ForbidZone f : s.forbid) {
                 if (f != null) {
                     String name = f.name == null ? "forbidden circle" : f.name;
-                    z.forbid.add(Zone.circle(name, "the " + name, f.x, f.y, f.radiusMm));
+                    z.forbid.add(Zone.circle(name, "the " + name, false, f.x, f.y, f.radiusMm));
                 }
             }
         }
         for (Map.Entry<String, DispenseConfig.NamedLocation> e : c.locations.entrySet()) {
             if (e.getValue() != null) {
-                z.allow.add(Zone.circle(e.getKey(), "the place '" + e.getKey() + "'", e.getValue().x, e.getValue().y,
-                        s.placeRadiusMm));
+                z.allow.add(Zone.circle(e.getKey(), "the place '" + e.getKey() + "'", isSinkPlace(c, e.getKey()),
+                        e.getValue().x, e.getValue().y, s.placeRadiusMm));
             }
         }
         if (c.padCalibration != null && c.padCalibration.couponPlaces != null) {
@@ -158,6 +164,12 @@ public final class OutputZones {
         return z;
     }
 
+    /** The places that take the hold's drool: the waste (by its setting), the towel and the cup. */
+    static boolean isSinkPlace(DispenseConfig c, String name) {
+        return name != null && (name.equalsIgnoreCase(c.wasteLocationName) || name.equalsIgnoreCase("towel")
+                || name.equalsIgnoreCase("cup"));
+    }
+
     /** "forbidden: <name>", the name of the allowed zone the point is in, or null when it is in none. */
     public String zoneAt(double x, double y) {
         Zone f = forbiddenAt(x, y);
@@ -173,14 +185,14 @@ public final class OutputZones {
      * (x, y) is …: park first (or start it with park: 'waste')".
      */
     public String refusal(double x, double y) {
-        String why = why(x, y);
+        String why = whyHold(x, y);
         return why == null ? null : String.format(Locale.ROOT, "the needle (%.1f, %.1f) is %s: park first (or start "
                 + "it with park: 'waste')", x, y, why);
     }
 
     /** The hold's park over {@code place} (null: over a point) at (x, y): null when allowed; else why not. */
     public String parkRefusal(String place, double x, double y) {
-        String why = why(x, y);
+        String why = whyHold(x, y);
         return why == null ? null : String.format(Locale.ROOT, "the park over %s(%.1f, %.1f) is %s: park over another "
                 + "place", place == null ? "" : "'" + place + "' ", x, y, why);
     }
@@ -233,6 +245,22 @@ public final class OutputZones {
         }
         return allowedAt(x, y) != null ? null : "not over a place where paste may go (a place, the purge row, the "
                 + "calibration area or a probed surface)";
+    }
+
+    /** As {@link #why}, for the pressure hold: only a sink takes its drool. */
+    private String whyHold(double x, double y) {
+        Zone f = forbiddenAt(x, y);
+        if (f != null) {
+            return "over " + f.label + ", where the valve and the screw stay off";
+        }
+        for (Zone a : allow) {
+            if (a.sink && a.contains(x, y)) {
+                return null;
+            }
+        }
+        Zone a = allowedAt(x, y);
+        return (a != null ? "over " + a.label + ", " : "") + "not over a place that takes paste while the pressure is "
+                + "held (the waste, the towel, the cup, the purge row, the calibration area or a coupon)";
     }
 
     private Zone forbiddenAt(double x, double y) {

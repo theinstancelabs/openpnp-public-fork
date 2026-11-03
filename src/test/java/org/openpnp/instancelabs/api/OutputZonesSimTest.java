@@ -167,7 +167,8 @@ public class OutputZonesSimTest {
         sim.server.mark();
         call("POST", "/api/pressure/start", "{}");
         assertEquals(409, lastStatus, lastBody);
-        assertTrue(lastBody.contains("I12") && lastBody.contains("not over a place where paste may go"), lastBody);
+        assertTrue(lastBody.contains("I12") && lastBody.contains("not over a place that takes paste while the pressure "
+                + "is held"), lastBody);
         assertFalse(sim.server.sinceMark().stream().anyMatch(l -> l.startsWith("M106")), "nothing switched on");
 
         sim.server.mark();
