@@ -548,6 +548,14 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     @Override
     public void setEnabled(boolean enabled) throws Exception {
+        if (enabled && connected && (readerThread == null || !readerThread.isAlive())) {
+            // Instance Labs (BR-44): a link kept open while the machine was off (connection-keep-alive) died meanwhile,
+            // e.g. the controller was switched off. Open it again, with the CONNECT_COMMAND a fresh controller needs,
+            // instead of failing on the dead port.
+            Logger.warn("[{}] the kept-alive link to the controller is dead: connecting again",
+                    getCommunications().getConnectionName());
+            disconnect();
+        }
         if (enabled && !connected) {
             connect();
         }
