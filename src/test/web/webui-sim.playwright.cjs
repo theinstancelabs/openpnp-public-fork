@@ -111,8 +111,16 @@ async function openDetails(page, id) {
   if (!(await page.evaluate((i) => document.getElementById(i).open, id))) await page.click('#' + id + ' > summary');
 }
 
-/** Opens a workspace from the left navigation. */
+/**
+ * Opens a workspace from the left navigation. Setup, Profile (pad types) and Calibrate are reached the way the agreed
+ * menu has them (11-02): Machine, then its By hand link.
+ */
 async function nav(page, ws) {
+  if (['setup', 'profile', 'calibrate'].includes(ws)) {
+    await page.click('.tabs [role=tab][data-tab=machine]');
+    await page.click('#ws-machine a[href="#' + ws + '"]');
+    return;
+  }
   await page.click('.tabs [role=tab][data-tab=' + ws + ']');
 }
 

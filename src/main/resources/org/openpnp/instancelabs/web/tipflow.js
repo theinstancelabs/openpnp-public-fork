@@ -81,7 +81,7 @@
     // On now
     V.nowName = el('h1', { class: 'tf-h1', id: 'tipnow-name' });
     V.nowMeta = el('div', { class: 'meta' });
-    const change = el('button', { type: 'button', class: 'btn', id: 'btn-tip-change' }, IL.icon('i-swap'), 'Change the tip');
+    const change = el('button', { type: 'button', class: 'btn', id: 'btn-tipnow-change' }, IL.icon('i-swap'), 'Change the tip');
     change.addEventListener('click', () => IL.go('#tip/which'));
     V.nowPhoto = el('div', { class: 'tf-pic', id: 'tipnow-photo' });
     V.nowKv = el('dl', { class: 'kv kv--wrap', style: 'flex:1' });

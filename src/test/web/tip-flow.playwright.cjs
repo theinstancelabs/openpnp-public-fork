@@ -99,7 +99,7 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     check('(2) the height names its source (by hand, the side camera, or the bed switch once fitted)', !!h && /by hand|side camera|bed switch|both tips|from K|not measured/i.test(h.how), h);
 
     // ---- (3) Which tip ------------------------------------------------------------------------------------------------
-    await page.click('#btn-tip-change');
+    await page.click('#btn-tipnow-change');
     await page.waitForSelector('.kind[data-key]', { timeout: 10000 }).catch(() => null);
     const kinds = await page.evaluate(() => Array.from(document.querySelectorAll('.kind[data-key]')).map((k) => ({ key: k.dataset.key, tag: (k.querySelector('.tag') || {}).textContent || '',
       img: !!k.querySelector('img, svg'), path: (k.querySelector('.kind__path') || {}).textContent || '' })));
