@@ -1292,8 +1292,9 @@ choice kept in localStorage `il.pv.picture`):
   (light theme composite `#aab2b1`, dark theme `#243034`) by a class that swaps `--pv-a-mask` (no rebuild); finish,
   holes, outline and exposed copper kept. Dots and pad marks keep the finish behind them, so rule 1 holds.
 - **Off**: the art SVG hidden and `.pv--art` removed: exactly today's drawing and tokens.
-- Defaults: **Quiet** in the Run hero while a plan is shown, while live and in Records; **Full** in the upload preview,
-  the thumbnails, the pre-plan hero and the inspector. The operator's choice in the hero is remembered.
+- Defaults: **Full** everywhere: the Run hero (with or without a plan, idle or live), Records, the upload preview, the
+  thumbnails and the inspector. The operator's choice in the hero is remembered. *Changed 10-31 (user: show the actual
+  PCB, not a grey outline); Quiet was the default under a plan and in Records before.*
 
 **Text.**
 
@@ -2052,7 +2053,7 @@ above, the code is right:
   found: …` (`getBoard` would have written an empty file there).
 - **§5.1.1 hooks.** H1–H5 are in AR's web-ui (`il/ar-webui`); `boardflow.js` fills them: H1 the Board step's
   `#btn-board-upload`, `#board-thumbs`, `#board-imported` and `#btn-board-use-fid`, H2 a pad or part click opens the
-  inspector, H3 the hero's drawing, picture control (`il.pv.picture`: Full, Quiet (default), Off), path preview and
+  inspector, H3 the hero's drawing, picture control (`il.pv.picture`: Full (default), Quiet, Off), path preview and
   `#btn-pad-inspect`, and before planning the chosen board's drawing at the form's seat with the live camera and a
   5 mm scale bar, H4 the Records map, H5 the replaced map view destroyed.
 - **§5.8 upload dialog** (`boardimport.js`, `IL.boardImport.open({file, onSaved})`): states choose → reading → preview

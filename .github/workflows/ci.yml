@@ -1,39 +1,308 @@
 name: CI
 
+# The gate for the integration branch (il/integration) and every PR (INF-01, owner: Infra role). One required check:
+# "gate", green only if every job below passed. A green push to il/integration also publishes a versioned build as a
+# GitHub prerelease, which the lab computer's deployer installs when the machine is idle (INF-02, infra/deploy/).
+# What runs where: infra/README.md.
+
 on:
-  push:
   pull_request:
+  push:
+    branches: [il/integration]
   workflow_dispatch:
 
+# A PR's newer run cancels its older one. Push and manual runs never share a group: GitHub keeps one pending run per
+# group and cancels the older pending one, which would drop an il/integration merge's gate and release. The deployer
+# orders releases by run number and accepts ancestors, so parallel push runs are safe.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.event_name, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  JAR: target/openpnp-gui-0.0.1-alpha-SNAPSHOT.jar
+  PLAYWRIGHT_VERSION: 1.64.1
+  UINAV_REF: d92c4b2bff8d8aca4fa4842b5a3e5bc3e064e136
 
 jobs:
-  test:
-    name: mvn test (JDK 17, headless)
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+  build:
+    name: Build (checkstyle, compile, package)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
           cache: maven
+      - name: Package
+        run: mvn -B -T1 -DskipTests package
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openpnp-build
+          path: |
+            target/openpnp-gui-*.jar
+            target/lib/
+          retention-days: 7
+          if-no-files-found: error
 
-      - name: Test
+  infra:
+    name: Infra self-tests (CI helpers, deploy, lumen-sim)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: unittest
+        run: |
+          set -e
+          for t in infra/*/tests; do
+            d="$(dirname "$t")"
+            echo "::group::$d"
+            python3 -m unittest discover -v -s "$t" -t "$d"
+            echo "::endgroup::"
+          done
+
+  maven:
+    name: Unit + simulated-machine integration (mvn test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+      - name: Lab layout from infra/fixtures
+        # LiveBoardPlanTest reads ~/Desktop/ftp.board.xml and ~/.openpnp2 and is skipped without them (BR-40).
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" /home/lumen
+          python3 infra/ci/lab_layout.py
+      - name: mvn test
         # No DISPLAY on the runner, so AWT runs headless; the suite needs no X server.
         run: mvn -B -T1 test
-
-      - name: Upload test reports
+      - name: Counts
         if: always()
-        uses: actions/upload-artifact@v6
+        run: python3 infra/ci/surefire_summary.py target/surefire-reports >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: surefire-reports
           path: target/surefire-reports/
           if-no-files-found: ignore
           retention-days: 14
+
+  deploy-e2e:
+    name: Deploy dry run (real OpenPnP + lumen-sim, deploy and rollback)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/download-artifact@v8
+        with:
+          name: openpnp-build
+          path: target
+      - name: Xvfb
+        run: command -v Xvfb >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q xvfb; }
+      - name: infra/deploy/e2e
+        # INF-02's CI acceptance on the real backend: two releases in CI's format, deploy + health check (enable,
+        # home, stop) against lumen-sim on a pty, a second deploy over a running OpenPnP, a rollback, and a deploy
+        # after a controller power cycle that must hold without homing. Skipping counts as a failure here.
+        env:
+          IL_DEPLOY_E2E: '1'
+          IL_DEPLOY_E2E_JAR: ${{ env.JAR }}
+          IL_DEPLOY_E2E_LIB: target/lib
+          IL_DEPLOY_E2E_OUT: ${{ runner.temp }}/deploy-e2e
+        run: python3 infra/deploy/e2e/test_deploy_openpnp.py -v
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: deploy-e2e
+          path: ${{ runner.temp }}/deploy-e2e/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  controller-e2e:
+    name: Simulated controller behind OpenPnP (home, STOP in G28, long prime)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/sim-env
+        with:
+          uinav-token: ${{ secrets.UINAV_TOKEN }}
+          uinav-ssh-key: ${{ secrets.UINAV_DEPLOY_KEY }}
+          playwright: 'false'
+      - name: infra/lumen-sim/e2e
+        # INF-03's acceptance through the real backend: OpenPnP on lumen-sim's pty (uinav --controller pty) homes,
+        # a STOP 4 s into a home reproduces the M410 timeout and the halted controller, and a 30-turn prime at
+        # 180 rpm reproduces "timeout waiting for response to G4 P250".
+        env:
+          LUMEN_SIM_E2E: '1'
+        run: LUMEN_SIM_E2E_JAR="$JAR" LUMEN_SIM_E2E_OUT="$RUNNER_TEMP/controller-e2e" python3 infra/lumen-sim/e2e/test_openpnp_pty.py -v
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: controller-e2e
+          path: |
+            ${{ runner.temp }}/controller-e2e/
+            /tmp/openpnp-uinav-*/*/*.log
+            /tmp/openpnp-uinav-*/*/openpnp.out
+          if-no-files-found: ignore
+          retention-days: 14
+
+  ui-e2e:
+    name: UI end-to-end (webui-sim, board-import, pad-profile, tip-setups)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/sim-env
+        with:
+          uinav-token: ${{ secrets.UINAV_TOKEN }}
+          uinav-ssh-key: ${{ secrets.UINAV_DEPLOY_KEY }}
+      - name: run-webui-sim-test.sh
+        env:
+          OUT_DIR: ${{ runner.temp }}/webui
+        run: src/test/web/run-webui-sim-test.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ui-e2e
+          path: |
+            ${{ runner.temp }}/webui/
+            /tmp/openpnp-uinav-*/*/*.log
+            /tmp/openpnp-uinav-*/*/openpnp.out
+            /tmp/openpnp-uinav-*/*/config/log/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  ui-boardview:
+    name: UI end-to-end (boardview)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/sim-env
+        with:
+          uinav-token: ${{ secrets.UINAV_TOKEN }}
+          uinav-ssh-key: ${{ secrets.UINAV_DEPLOY_KEY }}
+      - name: run-boardview-test.sh
+        env:
+          OUT_DIR: ${{ runner.temp }}/boardview
+        run: src/test/web/run-boardview-test.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ui-boardview
+          path: |
+            ${{ runner.temp }}/boardview/
+            /tmp/il-ui-session-*/
+            /tmp/openpnp-uinav-*/*/*.log
+            /tmp/openpnp-uinav-*/*/openpnp.out
+          if-no-files-found: ignore
+          retention-days: 14
+
+  acceptance:
+    name: SIM acceptance (${{ matrix.shard }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Sharded by measured scenario time (≈ 13-16 min each); together they are il_sim_acceptance.py all.
+        shard:
+          - padcal:controls
+          - padcal:main,nano
+          - tips board
+          - register stop import load
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/sim-env
+        with:
+          uinav-token: ${{ secrets.UINAV_TOKEN }}
+          uinav-ssh-key: ${{ secrets.UINAV_DEPLOY_KEY }}
+          playwright: 'false'
+      - name: il_sim_acceptance.py
+        run: python3 infra/ci/acceptance.py run --shard "${{ matrix.shard }}" --out "$RUNNER_TEMP/acc" --jar "$JAR"
+      - name: Artifact name
+        if: always()
+        id: name
+        run: echo "slug=$(echo '${{ matrix.shard }}' | tr ' :,' '---')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: acceptance-${{ steps.name.outputs.slug }}
+          path: |
+            ${{ runner.temp }}/acc/
+            /tmp/openpnp-uinav-*/*/*.log
+            /tmp/openpnp-uinav-*/*/openpnp.out
+          if-no-files-found: ignore
+          retention-days: 14
+
+  gate:
+    name: gate
+    if: always()
+    needs: [build, infra, maven, deploy-e2e, controller-e2e, ui-e2e, ui-boardview, acceptance]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
+          echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null
+
+  release:
+    name: Release (versioned build for the deployer)
+    needs: [gate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/il/integration' && needs.gate.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: openpnp-build
+          path: target
+      - name: Package
+        run: |
+          set -euo pipefail
+          TAG="il-build-${GITHUB_RUN_NUMBER}-${GITHUB_SHA:0:7}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          python3 infra/ci/make_release.py --jar "$JAR" --lib target/lib --tag "$TAG" --sha "$GITHUB_SHA" \
+            --branch "${GITHUB_REF_NAME}" --run-id "$GITHUB_RUN_ID" --run-number "$GITHUB_RUN_NUMBER" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --out "$RUNNER_TEMP/rel"
+      - name: Attest (binds the tarball's bytes to this workflow, ref and commit)
+        # The deployer runs 'gh attestation verify' with --signer-workflow ci.yml, --source-ref il/integration and
+        # --source-digest <sha>: a release published by anything else (another workflow, a hand upload) is refused.
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ runner.temp }}/rel/openpnp-il-*.tar.gz
+      - name: Publish
+        # A release already at the tag (a re-run finds what an earlier attempt published) passes only if it is this
+        # run's own: published by github-actions[bot] at this commit, BUILD-INFO naming this run, its tarball attested
+        # by this run under the deployer's policy. Anything else there fails the run instead of leaving it green with
+        # its build unreleased.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 infra/ci/publish_release.py --dir "$RUNNER_TEMP/rel" --tag "$TAG" --sha "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

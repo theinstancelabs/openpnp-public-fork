@@ -532,15 +532,27 @@
     IL.planRefreshSoon();
     return p;
   }
-  /** The needle token each touch-off row was first seen under (a row from before a needle change is refused, §22.3). */
-  const toTokens = {};
-  function touchToken(id) {
-    if (!(id in toTokens)) toTokens[id] = IL.tips ? IL.tips.token() : null;
-    return toTokens[id];
+  /**
+   * Whether a touch-off row measured the needle and frame in force (§22.3), from the server's times: null when it did,
+   * else {why: 'change' | 'frame', atMs} for a row older than the last needle change or than the needle Z frame. Never
+   * from when this page first saw the row: an old needle's offset must not reach the new one.
+   */
+  function touchEra(row, n) {
+    const t = Number(row.created_at);
+    if (isNum(n.changedAtMs) && t < n.changedAtMs) return { why: 'change', atMs: n.changedAtMs };
+    const a = n.anchor;
+    if (a && isNum(a.setAtMs) && t < a.setAtMs) return { why: 'frame', atMs: a.setAtMs };
+    return null;
   }
+  const eraText = (e) => 'Touched off before the ' + (e.why === 'change' ? 'needle change' : 'needle Z frame') + ' at ' + IL.fmtTime(e.atMs - S.skewMs)
+    + ': touch off again.';
   async function useTouchOff(v) {
+    // the era again at the press (a needle change may have landed since the render); the token of the same status
+    const n = (S.status && S.status.dispense && S.status.dispense.needle) || {};
+    const era = touchEra(v.row, n);
+    if (era) throw new Error(eraText(era));
     const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(v.row.z_offset_mm.toFixed(4)), note: 'touch-off #' + v.row.id + ' (web UI)',
-      needleChangedAtMs: touchToken(v.row.id) });
+      needleChangedAtMs: isNum(n.changedAtMs) ? Number(n.changedAtMs) : null });
     IL.planRefreshSoon();
     await loadCalibrations();
     return r;
@@ -584,11 +596,12 @@
     const latest = rows.find((r) => /dot-ladder-touch-off/.test(r.method || '')) || null;
     const v = pcr.touchOffView(latest);
     const needle = (s.dispense && s.dispense.needle) || {};
-    const inUse = v && isNum(needle.zOffsetMm) && Math.abs(needle.zOffsetMm - v.row.z_offset_mm) < 5e-4;
-    if (v) touchToken(v.row.id);
+    // a row of another needle or frame is never "In use" and is never offered for the needle offset
+    const era = v ? touchEra(v.row, needle) : null;
+    const inUse = v && !era && isNum(needle.zOffsetMm) && Math.abs(needle.zOffsetMm - v.row.z_offset_mm) < 5e-4;
     // after a run that recorded nothing (its reason is in the box above) the one below is an older run's
     const older = noContact(s.run);
-    IL.keyed(host, JSON.stringify([v ? v.row.id : null, inUse, C.ver, older]), () => {
+    IL.keyed(host, JSON.stringify([v ? v.row.id : null, inUse, C.ver, older, era ? eraText(era) : null]), () => {
       if (!v) return [sub('Last touch-off'), el('p', { class: 'muted cal-none', text: C.data ? 'No touch-off with dots yet.' : C.error ? 'Could not load the records: ' + C.error : 'Loading the records…' })];
       const a = v.analysis || {};
       const gaps = a.gapsMm || [];
@@ -601,8 +614,9 @@
             el('div', { class: 'cal-to__big' }, isNum(a.contactGapMm) ? 'Contact at a gap of ' + IL.fmtSigned(a.contactGapMm, 3) + ' mm' : 'No contact found'),
             el('div', { text: 'offset ' + IL.fmtSigned(v.row.previous_offset_mm, 3) + ' → ' + IL.fmtSigned(v.row.z_offset_mm, 3) + ' mm' + (isNum(v.delta) ? ', Δ ' + IL.fmtSigned(v.delta, 3) : '') }),
             a.reason ? el('div', { class: 'dim', text: a.reason }) : null,
-            v.applied || inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
-              : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
+            era ? el('div', { class: 'cal-to__old', id: 'to-era' }, IL.glyph('need', 'xs'), ' ' + eraText(era))
+              : inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
+                : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
           el('table', { class: 'tbl cal-to__t' }, el('thead', {}, el('tr', {}, el('th', { class: 'r' }, IL.unitText('Gap mm')), el('th', { class: 'r' }, IL.unitText('Dot Ø mm')), el('th', { text: '' }))),
             el('tbody', {}, gaps.map((g, i) => {
               const dot = pcr.touchOffDot(a, i);
