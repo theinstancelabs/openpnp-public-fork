@@ -6,8 +6,8 @@ directory only holds what runs them and ships them. Python here is standard libr
 | Path | What | Request |
 |---|---|---|
 | `../.github/workflows/ci.yml` | The pipeline: one required check, `gate` | INF-01 |
-| `../.github/actions/sim-env/` | Sets a runner up for the SIM gates (JDK, uinav, Xvfb, Playwright, lab layout) | INF-01 |
-| `ci/` | CI helpers: `lab_layout.py`, `acceptance.py`, `make_release.py`, `publish_release.py`, `surefire_summary.py` | INF-01 |
+| `../.github/actions/sim-env/` | Sets a runner up for the SIM gates (JDK, uinav, Xvfb, Playwright, the gates' input files) | INF-01 |
+| `ci/` | CI helpers: `sim_env.py`, `acceptance.py`, `make_release.py`, `publish_release.py`, `surefire_summary.py` | INF-01 |
 | `fixtures/` | The lab files the SIM gates read: `lab-config/` (= `~/.openpnp2` of 10-27, the config the gates are green against, minus backups, logs and two legacy automation scripts), `lab-instancelabs/` (`dispense-config.json`, bench run files without photos) | INF-01 |
 | `deploy/` | The lab computer's deployer (`il_deploy.py`, systemd units) | INF-02 |
 | `lumen-sim/` | Simulated LumenPnP Marlin controller on a pty | INF-03 |
@@ -32,9 +32,36 @@ Runs on every pull request, on pushes to `il/integration`, and by hand (workflow
 The SIM jobs need read access to the private `theinstancelabs/openpnp-uinav` (Actions secret `UINAV_TOKEN` or
 `UINAV_DEPLOY_KEY`); without it they fail with a message saying so, never pass. uinav is pinned by `UINAV_REF`.
 
-The gates read host paths (`~/.openpnp2`, `~/Desktop/ftp.board.xml`, `/home/lumen/instancelabs/{config,runs}`).
-`ci/lab_layout.py` lays the fixtures out at those paths on the runner, so the gates run unchanged. It refuses to run
-on the lab computer and never overwrites.
+The gates default to the lab computer's paths (`~/.openpnp2`, `~/Desktop/ftp.board.xml`,
+`/home/lumen/instancelabs/{config,runs}`) and read env overrides instead when set (BR-40). `ci/sim_env.py DIR` copies
+the fixtures into DIR (new or empty; nothing outside it is written): the live config with a `boards.xml`, the test
+board, `machine.xml.patched` from `tools/instancelabs/make_machine_patch.py`, the engine's `dispense-config.json` and
+the bench run files, and prints the overrides in `GITHUB_ENV` format (`OPENPNP_CONFIG`, `IL_LIVE_CONFIG`,
+`IL_TEST_BOARD`, `IL_PATCHED_MACHINE_XML`, `IL_DISPENSE_CONFIG`, `IL_RUNS_DIR`, `LUMEN_SIM_E2E_CONFIG`,
+`LUMEN_SIM_E2E_DISPENSE_CONFIG`). CI: `python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"` (a refusal
+exits 2 and fails the step). On any computer, the same env runs a gate on the fixtures instead of the lab's files:
+`lab_env="$(python3 infra/ci/sim_env.py "$(mktemp -d)/lab" --export)" && eval "$lab_env"`, then the gate in that
+shell, after another `&&` (`&& src/test/web/run-boardview-test.sh`). A new directory each run and the `&&`, because
+a refused directory (not empty: a second run, or another user of the computer made it) prints nothing on stdout, and
+`eval` of nothing succeeds, even under `set -e`: the gate would then read `~/.openpnp2` and the lab's files, unwarned.
+
+`ci/lab_layout.py`, the old way (the fixtures copied to the lab computer's paths, `/home/lumen` made with sudo), is
+superseded but still called in two places; it and `ci/tests/test_lab_layout.py` go once both are switched:
+1. `.github/actions/sim-env/action.yml`, step "Lab layout from infra/fixtures": its run becomes
+   `python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"` (shell: bash, no sudo), and the description
+   says "the gates' input files from infra/fixtures and their env (infra/ci/sim_env.py)" in place of "the lab
+   computer's file layout from infra/fixtures (infra/ci/lab_layout.py)", the eight names added to what it exports.
+2. `.github/workflows/ci.yml`, maven job, step "Lab layout from infra/fixtures": deleted. Its comment is out of date:
+   since BR-40 LiveBoardPlanTest asserts instead of skipping, and without the lab's files it reads the repo's
+   `src/test/resources/kicad/ftp.board.xml` and `infra/fixtures/lab-config` (what sim_env.py copies). No other maven
+   test reads env (the scan in `ci/tests/test_sim_env.py` covers every `src/test/java` file that calls `getenv`).
+
+`ci/tests/test_sim_env.py` scans the gates' sources (`src/test/sim`, `src/test/web`, `infra/*/e2e`, the Java tests
+that read env) for an env override with a lab computer path as its default, and fails the infra job when sim_env.py
+does not set it. It knows the usual spellings (`os.environ.get`/`os.getenv`/`os.environ[...]` in either quotes,
+`${X:-...}`, `System.getenv`, `getOrDefault`, `pick`, `process.env`; `/home/`, `~/`, `expanduser`, `Path.home`,
+`user.home`, `$HOME`, `homedir`, and names bound to those two levels deep, `acc.HOME` across files); its docstring
+lists what it does not see.
 
 ## Tests
 ```
