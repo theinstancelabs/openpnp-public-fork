@@ -1,9 +1,14 @@
 package org.openpnp.instancelabs.dispense;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +46,69 @@ public class OutputZonesTest {
         assertEquals("waste", z.zoneAt(100, 50));
         assertEquals("purge row", z.zoneAt(85, 230));
         assertEquals("surface patch1", z.zoneAt(310, 268));
+    }
+
+    /** ZFrameTest's pad R24.1 and a 0603 pad R16.1 at (x, y), planned on its probed ftp board. */
+    static DispensePlan ftp(DispenseConfig c, double x, double y) {
+        PadType t = DispenseDb.seedPadTypes().get(1); // chip-0603
+        t.status = PadTypeStatus.PROVISIONAL;
+        t.version = 1;
+        List<PadGeometry> pads = new ArrayList<>();
+        pads.add(new PadGeometry("R24.1", 359.584, 131.569, 0, 0.8, 0.95, 5.5, t));
+        pads.add(new PadGeometry("R16.1", x, y, 0, 0.8, 0.95, 5.5, t));
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(t), null))
+                .withSurface(DispenseService.planeOf(c, c.boardSurfaceName)).plan("ftp", pads, 290, 125);
+        p.boardRegistration = ZFrameTest.SEAT;
+        return p;
+    }
+
+    static List<DispensePlan.PlannedDot> dotsOf(DispensePlan p, String padId) {
+        List<DispensePlan.PlannedDot> l = new ArrayList<>();
+        for (DispensePlan.PlannedDot d : p.dots) {
+            if (d.padId.equals(padId)) {
+                l.add(d);
+            }
+        }
+        assertFalse(l.isEmpty(), "no dot on " + padId);
+        return l;
+    }
+
+    /**
+     * Review (BLOCKER): a probed surface allows paste wherever I4 lets a dot take its Z from it, by I4's own rule
+     * (within {@code surfaceMarginMm}, 3.5 mm, of the probed points), so a board run I4 passes is never refused by I12.
+     * ZFrameTest's ftp board probed at the bench spots: a pad 3.08 mm beyond the points passes both, its board program
+     * too; with a 3 mm margin both refuse it; a pad beyond the margin is refused by both, by I4 first.
+     */
+    @Test
+    public void aProbedSurfaceAllowsWhatI4Allows() throws Exception {
+        DispenseConfig c = ZFrameTest.cfg();
+        SurfacePlane board = DispenseService.planeOf(c, "board");
+        DispensePlan near = ftp(c, 366.19, 151.3); // the points' right edge runs at x 363.1 there
+        for (DispensePlan.PlannedDot d : dotsOf(near, "R16.1")) {
+            double out = board.distanceOutside(d.xMm, d.yMm);
+            assertTrue(out > 3.0 && out < 3.2, "R16.1's dot is " + out + " mm beyond the points");
+            assertNull(OutputZones.of(c, CAMERA).refusal(d.xMm, d.yMm), "I12 allows it");
+        }
+        assertEquals(Collections.emptyList(), ZFrameTest.i4(ZFrameTest.check(c, near)), "I4 passes it");
+        ToyMapper m = new ToyMapper(290, 125, 31.5, 0);
+        GcodeProgram prog = GcodeStreamBuilder.forPlan(c, m, near, Collections.emptyList(), false, false, 0L);
+        assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(prog, c, "B",
+                GcodeStreamValidator.zWindow(c, m), GcodeStreamValidator.ZoneCheck.of(OutputZones.of(c, CAMERA), m)),
+                "the board program passes the validator");
+        // one rule, one setting: with a 3 mm margin I4 and I12 both refuse it
+        c.surfaceMarginMm = 3.0;
+        assertFalse(ZFrameTest.i4(ZFrameTest.check(c, near)).isEmpty());
+        for (DispensePlan.PlannedDot d : dotsOf(near, "R16.1")) {
+            assertNotNull(OutputZones.of(c, CAMERA).refusal(d.xMm, d.yMm));
+        }
+        c.surfaceMarginMm = 3.5;
+        DispensePlan far = ftp(c, 367.3, 151.3);
+        List<String> i4 = ZFrameTest.i4(ZFrameTest.check(c, far));
+        assertTrue(i4.size() == 1 && i4.get(0).contains("outside the probed 'board' surface"), i4.toString());
+        for (DispensePlan.PlannedDot d : dotsOf(far, "R16.1")) {
+            assertTrue(board.distanceOutside(d.xMm, d.yMm) > 3.5);
+            assertNotNull(OutputZones.of(c, CAMERA).refusal(d.xMm, d.yMm));
+        }
     }
 
     @Test
