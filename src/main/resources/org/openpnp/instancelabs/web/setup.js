@@ -50,7 +50,7 @@
   function fld(input, o) {
     const kind = input.type === 'checkbox' ? 'check' : input.tagName === 'SELECT' ? 'select' : input.tagName === 'TEXTAREA' ? 'text' : 'num';
     const f = Object.assign({ el: input, kind, d: undefined, edited: false, server: kind === 'check' ? false : '' }, o || {});
-    input.addEventListener(kind === 'check' || kind === 'select' ? 'change' : 'input', () => { f.edited = true; f.tok = curToken(); paint(f); IL.render(); });
+    input.addEventListener(kind === 'check' || kind === 'select' ? 'change' : 'input', () => { if (!f.edited) f.tok = curToken(); f.edited = true; paint(f); IL.render(); });
     input.addEventListener('blur', () => { if (f.edited && same(f)) unedit(f); paint(f); });
     ALL.push(f);
     return f;
@@ -551,10 +551,10 @@
     c.root.insertBefore(el('div', { class: 'su-trim' }, el('div', { class: 'su-trim__t' }, el('b', { text: 'Needle XY trim' }), c.trimState), c.bTrim), c.ref);
 
     const opts = { refusalIn: c.ref };
-    // every needle value carries the needle token it was taken under (§22.3): its field's last edit, else now (tokenOf)
+    // every needle value carries the needle token it was taken under (§22.3): where its field's edit began, else now (tokenOf)
     c.bK.addEventListener('click', () => IL.act(c.bK, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), k = need(F.k, 'K');
-      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k, needleChangedAtMs: tokenOf('frame', [F.n1, F.k, F.n2]) });
+      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k, needleChangedAtMs: tokenOf([F.n1, F.k]) });
       clean(F.n1, F.k, F.n2);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -563,7 +563,7 @@
       + ' mm, offset ' + fmt(r.offsetMm, 3) + ' mm. Confirm the offset or touch off next.' }, opts)));
     c.bBoth.addEventListener('click', () => IL.act(c.bBoth, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), n2 = need(F.n2, 'the needle contact Z');
-      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2, needleChangedAtMs: tokenOf('frame', [F.n1, F.k, F.n2]) });
+      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2, needleChangedAtMs: tokenOf([F.n1, F.n2]) });
       clean(F.n1, F.n2);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -576,7 +576,7 @@
       const off = manual ? need(F.off, 'the needle offset in mm') : nd.anchorOffsetMm;
       if (!isNum(off)) throw bad('Record the needle Z frame first.');
       const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(Number(off).toFixed(4)), note: manual ? 'entered in the web UI' : 'confirmed frame offset (web UI)',
-        needleChangedAtMs: tokenOf('offset', [F.off]) });
+        needleChangedAtMs: tokenOf([F.off]) });
       clean(F.off);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -587,13 +587,13 @@
     return c.root;
   }
   /**
-   * The needle token a press posts (§22.3): each edited field keeps the token of its last edit (typed or captured), and
-   * a field edited under another needle than now gives its token, which the engine refuses (409 needle-changed);
-   * else now (the press takes the values shown). So a value typed before a needle change never goes out under the new
-   * needle's token, also when it only differs from the server's after the change (a focused field keeps it). Tokens
-   * are compared by equality.
+   * The needle token a press posts (§22.3): an edited field keeps the token of the moment its edit began (typing) or
+   * of its last capture, and a field edited under another needle than now gives its token, which the engine refuses
+   * (409 needle-changed); else now (the press takes the values shown). So a value typed before a needle change never
+   * goes out under the new needle's token: not when it only differs from the server's after the change (a focused
+   * field keeps it), nor after more keystrokes. A press passes only the fields it posts. Tokens compare by equality.
    */
-  function tokenOf(group, fs) {
+  function tokenOf(fs) {
     const now = curToken();
     const old = fs.find((f) => f.edited && f.tok !== undefined && f.tok !== now);
     return old ? old.tok : now;
@@ -767,7 +767,7 @@
         T.save.addEventListener('click', () => IL.act(T.save, async () => {
           const dx = need(F.dx, 'dx in mm (0 for none)'), dy = need(F.dy, 'dy in mm (0 for none)');
           if (Math.abs(dx) > 1 || Math.abs(dy) > 1) throw bad('The trim is at most ±1 mm on each axis: a needle that lands farther off needs its landing checked (Setup › Dispenser & tip › Check where it lands).');
-          const r = await IL.api('POST', '/api/needle/xy-trim', { dxMm: dx, dyMm: dy, note: IL.str(F.note.el) || null, needleChangedAtMs: tokenOf('trim', [F.dx, F.dy, F.note]) });
+          const r = await IL.api('POST', '/api/needle/xy-trim', { dxMm: dx, dyMm: dy, note: IL.str(F.note.el) || null, needleChangedAtMs: tokenOf([F.dx, F.dy, F.note]) });
           clean(F.dx, F.dy, F.note);
           IL.loadConfig();
           IL.planRefreshSoon();
