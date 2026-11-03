@@ -2,7 +2,6 @@ package org.openpnp.instancelabs.dispense;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -18,16 +17,31 @@ import org.openpnp.model.Location;
 
 /**
  * Plans the real test board (~/Desktop/ftp.board.xml: 40 R_0603 + 40 LED_0603 + 3 fiducials) with
- * COPIES of the live packages.xml / parts.xml in a temp config dir. Skipped where those files do
- * not exist. Never writes to ~/.openpnp2.
+ * COPIES of the live packages.xml / parts.xml in a temp config dir. Where the lab's files are absent
+ * (CI), the repo's copies: src/test/resources/kicad/ftp.board.xml and infra/fixtures/lab-config
+ * (BR-40); IL_TEST_BOARD and IL_LIVE_CONFIG override both. Never writes to ~/.openpnp2.
  */
 public class LiveBoardPlanTest {
+    /** The env override, else the lab computer's file (null: not there), else the repo's copy. */
+    static File pick(String env, File lab, String repo) {
+        String override = System.getenv(env);
+        if (override != null && !override.isEmpty()) {
+            return new File(override);
+        }
+        return lab != null && lab.exists() ? lab : new File(repo);
+    }
+
     @Test
     public void ftpBoardPlans160Dots() throws Exception {
         File home = new File(System.getProperty("user.home"));
-        File boardFile = new File(home, "Desktop/ftp.board.xml");
-        File live = new File(home, ".openpnp2");
-        assumeTrue(boardFile.exists() && new File(live, "packages.xml").exists() && new File(live, "parts.xml").exists());
+        File boardFile = pick("IL_TEST_BOARD", new File(home, "Desktop/ftp.board.xml"),
+                "src/test/resources/kicad/ftp.board.xml");
+        File lab = new File(home, ".openpnp2");
+        File live = pick("IL_LIVE_CONFIG", new File(lab, "packages.xml").exists() && new File(lab, "parts.xml").exists()
+                ? lab : null, "infra/fixtures/lab-config");
+        // never skipped: the repo's copies are always there (BR-40: CI runs this)
+        assertTrue(boardFile.exists() && new File(live, "packages.xml").exists() && new File(live, "parts.xml").exists(),
+                "board " + boardFile + ", config " + live);
         File dir = Files.createTempDirectory("dispense-live-copy").toFile();
         for (String f : new String[] {"packages.xml", "parts.xml"}) {
             Files.copy(new File(live, f).toPath(), new File(dir, f).toPath(), StandardCopyOption.REPLACE_EXISTING);

@@ -172,6 +172,10 @@ public class ReferenceMachine extends AbstractMachine {
 
     private boolean isHomed = false;
 
+    /** Instance Labs (BR-44): homes running now, from any caller (the Home button, the web API, the engine). */
+    private final java.util.concurrent.atomic.AtomicInteger homesRunning =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     private List<Class<? extends Axis>> registeredAxisClasses = new ArrayList<>();
 
     private List<Class<? extends Feeder>> registeredFeederClasses = new ArrayList<>();
@@ -526,26 +530,39 @@ public class ReferenceMachine extends AbstractMachine {
     @Override
     public void home() throws Exception {
         Logger.debug("homing machine");
+        homesRunning.incrementAndGet();
+        try {
+            if (isHomed()) {
+                // if one rehomes, the isHomed flag has to be removed
+                getMotionPlanner().unhome();
+                this.setHomed(false);
+            }
 
-        if (isHomed()) {
-            // if one rehomes, the isHomed flag has to be removed
-            getMotionPlanner().unhome();
-            this.setHomed(false);
-        }
+            getMotionPlanner().home();
+            Configuration.get().getScripting().on("Machine.AfterDriverHoming", null);
+            super.home();
+            Configuration.get().getScripting().on("Machine.AfterHoming", null);
 
-        getMotionPlanner().home();
-        Configuration.get().getScripting().on("Machine.AfterDriverHoming", null);
-        super.home();
-        Configuration.get().getScripting().on("Machine.AfterHoming", null);
+            // if homing went well, set machine homed-flag true
+            this.setHomed(true);
 
-        // if homing went well, set machine homed-flag true
-        this.setHomed(true);
-        
-        if (isParkAfterHomed()) {
-            for (Head head : getHeads()) {
-                MovableUtils.park(head);
+            if (isParkAfterHomed()) {
+                for (Head head : getHeads()) {
+                    MovableUtils.park(head);
+                }
             }
         }
+        finally {
+            homesRunning.decrementAndGet();
+        }
+    }
+
+    /**
+     * Instance Labs (BR-44): a home is running (from its start until it ends, a failure or a STOP included). A STOP
+     * inside G28 hangs the stock controller, so the deployer never sends one while this is true.
+     */
+    public boolean isHoming() {
+        return homesRunning.get() > 0;
     }
 
     @Override

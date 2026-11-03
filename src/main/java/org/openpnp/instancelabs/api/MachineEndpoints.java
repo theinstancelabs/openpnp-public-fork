@@ -22,6 +22,7 @@ import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeReport;
+import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
@@ -48,6 +49,12 @@ final class MachineEndpoints {
      * ({@code machineEnabled} true then); the status shows when the machine is off.
      */
     static final long STOP_ANSWER_MS = 1500;
+    /**
+     * Longest Start waits for a switch-off still running (BR-52): one DISABLE_COMMAND line waiting the driver's timeout
+     * for a lost ok (10 s on the machines so far; the lines after it wait at most 1 s each, BR-66) and a closing link's
+     * reader join (3 s), with room to spare.
+     */
+    static final long START_WAITS_FOR_SWITCH_OFF_MS = 20000;
 
     private final ApiContext ctx;
     private final ExecutorService cameraExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -115,14 +122,7 @@ final class MachineEndpoints {
             }
         }
         if (m.isEnabled()) {
-            Runnable task = () -> {
-                try {
-                    m.setEnabled(false);
-                }
-                catch (Exception e) {
-                    Logger.warn(e, "web STOP: disabling the machine failed");
-                }
-            };
+            Runnable task = () -> ctx.switchOff.stop(m);
             if (m.isBusy()) {
                 // As OpenPnP's own Stop button: bypass the busy machine thread (emergency path).
                 Thread t = new Thread(task, "il-api-stop");
@@ -165,6 +165,12 @@ final class MachineEndpoints {
 
     Object enable() throws Exception {
         Machine m = ctx.machine();
+        // BR-52: a machine switching off still reads started; start it again once the switch-off has ended
+        if (!ctx.switchOff.awaitEnd(START_WAITS_FOR_SWITCH_OFF_MS)) {
+            throw ApiException.refused("OpenPnP is still switching the machine off after "
+                    + START_WAITS_FOR_SWITCH_OFF_MS / 1000 + " s (it waits for the controller's answers): press Start "
+                    + "again in a moment; if it stays, switch the controller off and on");
+        }
         if (m.isEnabled()) {
             return Views.map("enabled", true, "homed", m.isHomed(), "note", "the machine was already started");
         }
@@ -271,6 +277,8 @@ final class MachineEndpoints {
         // OpenPnP opens the controller link when the machine is started (enabled).
         s.put("connected", m.isEnabled());
         s.put("homed", m.isHomed());
+        // BR-44: from the start of any home until it ends (the deployer never sends STOP while it is true)
+        s.put("homing", m instanceof ReferenceMachine && ((ReferenceMachine) m).isHoming());
         s.put("busy", m.isBusy());
         DispenseService svc = ctx.svcOrNull();
         if (svc != null) {

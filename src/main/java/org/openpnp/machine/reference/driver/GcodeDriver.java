@@ -321,6 +321,9 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     protected LinkedBlockingQueue<Line> responseQueue = new LinkedBlockingQueue<>();
     protected LinkedBlockingQueue<AxesLocation> reportedLocationsQueue = new LinkedBlockingQueue<>();
     protected LinkedBlockingQueue<Line> receivedConfirmationsQueue = new LinkedBlockingQueue<>();
+    /** Instance Labs (BR-42): senders between their write and their confirmation. Guarded by confirmationLock. */
+    private int confirmationWaiters;
+    private final Object confirmationLock = new Object();
 
     protected Line errorResponse;
     private boolean motionPending;
@@ -548,8 +551,27 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     @Override
     public void setEnabled(boolean enabled) throws Exception {
+        boolean relink = false;
+        if (enabled && connected && keptAliveLinkIsDead()) {
+            // Instance Labs (BR-44): a link kept open while the machine was off (connection-keep-alive) died meanwhile,
+            // e.g. the controller was switched off. Open it again, with the CONNECT_COMMAND a fresh controller needs,
+            // instead of failing on the dead port.
+            Logger.warn("[{}] the kept-alive link to the controller is dead: connecting again",
+                    getCommunications().getConnectionName());
+            disconnect();
+            relink = true;
+        }
         if (enabled && !connected) {
-            connect();
+            try {
+                connect();
+            }
+            catch (Exception e) {
+                if (!relink) {
+                    throw e;
+                }
+                throw new Exception("controller link lost: it was open while the machine was off and could not be "
+                        + "opened again (is the controller switched on?): " + e.getMessage(), e);
+            }
         }
         if (connected) {
             if (enabled) {
@@ -558,8 +580,11 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                 sendGcode(getCommand(null, CommandType.ENABLE_COMMAND));
             }
             else {
+                // Instance Labs (BR-66): the Stop's lines one by one, as the dispense engine's I1 shutdown. A controller
+                // error left pending, or a line that fails or gets no answer, no longer keeps the lines after it (M410
+                // first, then the valves and pumps off) from going out.
+                sendEveryLine(getCommand(null, CommandType.DISABLE_COMMAND));
                 try {
-                    sendGcode(getCommand(null, CommandType.DISABLE_COMMAND));
                     drainCommandQueue(getTimeoutAtMachineSpeed());
                 }
                 catch (Exception e) {
@@ -1199,6 +1224,14 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     }
 
     /**
+     * Instance Labs (BR-44): the link kept open while the machine was off has died (its reader ended on the dead port),
+     * so Start opens it again.
+     */
+    protected boolean keptAliveLinkIsDead() {
+        return readerThread == null || !readerThread.isAlive();
+    }
+
+    /**
      *  Disconnect the threads used for communications.
      */
     protected void disconnectThreads() {
@@ -1225,6 +1258,45 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         return timeoutMilliseconds == -1 ?
                 timeoutMilliseconds 
                 : Math.round(timeoutMilliseconds/Math.max(0.05, Configuration.get().getMachine().getSpeed()));
+    }
+
+    /**
+     * Instance Labs (BR-66): each line of {@code gCode} goes out even if one before it failed or got no answer, as the
+     * dispense engine's I1 shutdown ({@code DriverGcodeChannel.sendCritical}). A line refused by a pending controller
+     * error (bailOnError clears it as it throws) is sent again, up to 3 attempts. After a line that failed otherwise
+     * (no answer within the timeout), the next lines wait at most 1 s each: a silent controller cannot act on them
+     * anyway, and the Stop then ends in about the timeout plus a second per line, not the timeout per line.
+     * GcodeAsyncDriver (not the live machine's driver) only queues the lines here; its writer thread still drops a
+     * line whose predecessor's ok timed out under confirmation flow control (upstream behaviour).
+     */
+    private void sendEveryLine(String gCode) {
+        if (gCode == null) {
+            return;
+        }
+        long timeout = timeoutMilliseconds;
+        for (String command : gCode.split("\n")) {
+            command = command.trim();
+            if (command.length() == 0) {
+                continue;
+            }
+            for (int attempt = 1;; attempt++) {
+                try {
+                    sendCommand(command, timeout);
+                    break;
+                }
+                catch (Exception e) {
+                    String msg = String.valueOf(e.getMessage());
+                    if (msg.contains("error response from controller") && attempt < 3) {
+                        Logger.warn("{} Stop line {} refused by a pending controller error, sending it again: {}",
+                                getName(), command, msg);
+                        continue;
+                    }
+                    Logger.warn(e, "{} Stop line {} failed; the next lines go out anyway", getName(), command);
+                    timeout = Math.min(timeout, 1000);
+                    break;
+                }
+            }
+        }
     }
 
     protected void sendGcode(String gCode, long timeout) throws Exception {
@@ -1260,17 +1332,35 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
         // After sending this, we want one more confirmation. 
         // TODO: true queued reporting. For now it is sufficient to poll one for one.
-        receivedConfirmationsQueue.clear();
+        // Instance Labs (BR-42): only a sender alone drops stale confirmations. With another sender waiting (OpenPnP's
+        // Stop beside the dispense engine's line in flight) its ok may be in the queue already, and clearing it made
+        // that sender wait its whole timeout. Each line still gets one ok, and each waiting sender takes one; at a STOP
+        // which sender takes which is harmless (both only wait for an acknowledgement). Elsewhere (a vent from a timer
+        // thread beside a motion-complete M400) the M400 could take the vent's ok in a window of microseconds and
+        // return early, where before the vent lost it and timed out. Follow-up: each ok to the oldest writer.
+        synchronized (confirmationLock) {
+            if (confirmationWaiters == 0) {
+                receivedConfirmationsQueue.clear();
+            }
+            confirmationWaiters++;
+        }
         try {
-            // Send the command.
-            getCommunications().writeLine(command);
+            try {
+                // Send the command.
+                getCommunications().writeLine(command);
+            }
+            catch (IOException ex) {
+                Logger.error(ex, "{} failed to write command {}", getCommunications().getConnectionName(), command);
+                disconnect();
+                Configuration.get().getMachine().setEnabled(false);
+            }
+            waitForConfirmation(command, timeout);
         }
-        catch (IOException ex) {
-            Logger.error(ex, "{} failed to write command {}", getCommunications().getConnectionName(), command);
-            disconnect();
-            Configuration.get().getMachine().setEnabled(false);
+        finally {
+            synchronized (confirmationLock) {
+                confirmationWaiters--;
+            }
         }
-        waitForConfirmation(command, timeout);
         if (command.startsWith("$")) {
             Thread.sleep(dollarWaitTimeMilliseconds);
         }
