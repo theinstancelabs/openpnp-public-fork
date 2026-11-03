@@ -55,10 +55,13 @@ public class SimBoardCamera extends ImageCamera {
         super.open();
     }
 
-    /** Throws unless every driver is a GcodeDriver on loopback TCP and the scene file exists. */
+    /**
+     * Throws unless every driver is a GcodeDriver on loopback TCP or on lumen-sim's pseudo-terminal (BR-47), and the
+     * scene file exists.
+     */
     static void requireSimulationMachine(Configuration c) {
         Machine m = c.getMachine();
-        if (!SimGuard.isLoopbackOnly(m)) {
+        if (!SimGuard.isSimulatorTransport(m)) {
             throw new IllegalStateException("simulation-only camera on a non-simulated machine: " + drivers(m));
         }
         File scene = SimGuard.sceneFile(c);

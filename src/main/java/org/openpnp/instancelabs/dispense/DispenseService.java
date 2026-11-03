@@ -2876,12 +2876,14 @@ public final class DispenseService {
     }
 
     /**
-     * Every driver is loopback TCP and the controller identified itself as OpenPnP's simulator on this
-     * connection ({@link SimGuard#isSimulated}, or the answer this service noted at the connect).
+     * Every driver is on a simulator transport (loopback TCP, or lumen-sim's pseudo-terminal) and the controller
+     * identified itself as a simulator on this connection ({@link SimGuard#isSimulated}, or the answer this service
+     * noted at the connect).
      */
     public boolean isSimulatorConfirmed() {
         Machine m = configuration.getMachine();
-        return SimGuard.isSimulated(m) || (Boolean.TRUE.equals(connectionSimulated) && SimGuard.isLoopbackOnly(m));
+        return SimGuard.isSimulated(m)
+                || (Boolean.TRUE.equals(connectionSimulated) && SimGuard.isSimulatorTransport(m));
     }
 
     /** The API's manual pressure hold: engine tasks that move refuse to start while it is on. */
