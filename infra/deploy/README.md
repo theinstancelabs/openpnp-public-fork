@@ -143,7 +143,7 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
         OpenPnP's own (tinylog's StartupPolicy starts a new one at each start). The e2e runs this step against the
         real jar with the lumen-sim link as the pattern.
      4. Controller axes are read: X, Y, Z and B must all have a driver coordinate (else "the controller position was
-        not read"), and they must not be the power-cycle signature (X/Y/Z 0, B 720). Either way it does **not** home.
+        not read"), and they must not be the power-cycle signature (X/Y/Z 0 with A or B at 720). Either way it does **not** home.
      5. Home. Whatever the answer, it never STOPs while the machine is busy: on anything but `homed` it waits
         while busy (up to `--home-busy-wait`). The API answers 409 "the home did not start or did not end within
         5 min" after its own limit (`MachineEndpoints.home`) while the home may run on; il_deploy's

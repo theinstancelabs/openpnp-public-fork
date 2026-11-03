@@ -6,8 +6,8 @@ stubs are on the classpath). Everything is driven through the backend's web API 
 does. The config is a copy of ~/.openpnp2 (read only) with machine.xml from tools/instancelabs/make_machine_patch.py,
 the config the SIM acceptance uses, plus visual homing off (the SIM camera has no homing fiducial).
 
-  (a) enable + home through /api/machine/enable and /api/machine/home {"wait": true}: homed, and OpenPnP's axes
-      match lumen-sim's state;
+  (a) enable + home through /api/machine/enable and /api/machine/home {"wait": true, "clearBelowAttested": true}
+      (INF-10): homed, and OpenPnP's axes match lumen-sim's state;
   (b) STOP 4 s into a home (POST /api/stop): 'timeout waiting for response to M410' in OpenPnP's log, the home
       fails, lumen-sim is halted, a reconnect cannot talk to it until 'uinav controller power-cycle';
   (c) the 30-turn prime at 180 rpm through the engine (a needle touch-off with primeRotationDeg 10800 and the
@@ -207,6 +207,11 @@ class PtySession:
         subprocess.run([UINAV, "--session", self.name, "stop"], capture_output=True, timeout=120)
 
 
+# Every home here follows a sim start, i.e. a controller reset (lumen-sim boots at X/Y/Z 0, B 720 like
+# the board). After BR-02 the backend homes from there only with the operator's word that nothing is under N1 or
+# the needle (INF-10); CI's simulator has nothing under the tools. Older backends ignore the field.
+HOME = {"wait": True, "clearBelowAttested": True}
+
 def record(key, value):
     if not OUT:
         return
@@ -278,7 +283,7 @@ class HomeAndPrimeTest(SessionTest):
         self.enable()
         n0 = self.s.io()[1]
         t0 = time.time()
-        code, r = self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
+        code, r = self.s.api("POST", "/api/machine/home", HOME, timeout=180)
         home_s = time.time() - t0
         self.assertEqual(code, 200, r)
         self.assertTrue(r.get("homed"), r)
@@ -310,7 +315,7 @@ class HomeAndPrimeTest(SessionTest):
         st = self.s.status()
         if not st["machine"]["homed"]:
             self.enable()
-            self.assertEqual(self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)[0], 200)
+            self.assertEqual(self.s.api("POST", "/api/machine/home", HOME, timeout=180)[0], 200)
         tip = st["dispense"]["tip"]["key"]
         token = st["dispense"]["needle"].get("changedAtMs")
         setup = [
@@ -379,7 +384,7 @@ class StopDuringHomingTest(SessionTest):
 
         def home():
             t = time.time()
-            res["home"] = self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=200)
+            res["home"] = self.s.api("POST", "/api/machine/home", HOME, timeout=200)
             res["home_s"] = time.time() - t
 
         th = threading.Thread(target=home)
