@@ -164,6 +164,36 @@ class PtyTransport(unittest.TestCase):
         self.assertEqual(state["pts"], os.path.realpath(self.sim.link))
 
 
+class SimCapOption(unittest.TestCase):
+    """BR-47: '--sim-cap' puts 'Cap:SIMULATOR:lumen-sim' into M115 on the pty (default off: PtyTransport's golden)."""
+
+    def test_the_cli_flag_sends_the_line_last_before_the_ok(self):
+        sim = SimProcess("--sim-cap")
+        self.addCleanup(sim.stop)
+        self.assertTrue(sim.ctl({"cmd": "state"})["state"]["sim_cap"])
+        fd = open_raw(sim.link)
+        try:
+            os.write(fd, b"M115\n")
+            want = [t for _, t in goldens.replies(goldens.load("m115"), "M115")]
+            self.assertEqual(read_until_ok(fd), want[:-1] + ["Cap:SIMULATOR:lumen-sim", "ok"])
+        finally:
+            os.close(fd)
+
+    def test_ctl_set_turns_it_on(self):
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        self.assertFalse(sim.ctl({"cmd": "state"})["state"]["sim_cap"])
+        out = subprocess.run([sys.executable, "-m", "lumen_sim", "ctl", "--control", sim.sock, "set",
+                              '{"sim_cap": true}'], cwd=PKG_ROOT, capture_output=True, text=True, timeout=10)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        fd = open_raw(sim.link)
+        try:
+            os.write(fd, b"M115\n")
+            self.assertEqual(read_until_ok(fd)[-2:], ["Cap:SIMULATOR:lumen-sim", "ok"])
+        finally:
+            os.close(fd)
+
+
 class PowerCycle(unittest.TestCase):
     def test_power_cycle_drops_the_link_and_repoints_the_symlink(self):
         sim = SimProcess("--personality", "stock")

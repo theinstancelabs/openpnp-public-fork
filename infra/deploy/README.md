@@ -69,12 +69,17 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
        the engine's work, its start and its stop, and nothing while idle, so the quiet period runs from its last
        line also after a person stopped the service or it died (the API is not asked then). `deploy`/`run` only: a
        person running `health` has just started OpenPnP;
-     - if OpenPnP runs, its API reports no run, no pressure, nothing busy, the machine **switched off**
-       (`machine.enabled` false: someone who pressed Start and Home in the web UI may be working at the machine by
-       hand), and nothing recent in the last 15 min:
+     - if OpenPnP runs, its API reports no run, no pressure, nothing busy, no home running (`machine.homing`), the
+       machine **switched off** (`machine.enabled` false: someone who pressed Start and Home in the web UI may be
+       working at the machine by hand), and nothing recent in the last 15 min:
        - no run ended (`run.finishedAtMs`, `lastRun.endedAtMs`), no pad calibration ended
-         (`padCalibration.endedAtMs`), no pressure event (`pressure.lastEventAtMs`; the pressure hold's first value,
-         `lastEvent` "pressure off" stamped when the API starts, is not an event);
+         (`padCalibration.endedAtMs`), no pressure event (`pressure.lastEventAtMs`). The pressure hold's first value,
+         stamped when the API starts (`PressureHold`), is not an event: `lastEvent` exactly "pressure off" (every
+         event after it has more text) and, with `server.startedAtMs` (BR-44, the JVM's start), stamped within 120 s
+         of it (`STARTUP_STAMP_S`: the API comes up within `--status-timeout`'s 120 s, or il_deploy calls the start
+         failed). Both must hold: a person's event early after the start counts, and so does a first value whose text
+         changed (fails closed: the quiet period then runs from OpenPnP's start). A build before BR-44 has no
+         `startedAtMs`: there the text alone;
        - no home (`machine.zCheck.homeAtMs`);
        - no hand work in the dispense config: needle change, touch-off, landing, XY trim and anchor
          (`dispense.needle.changedAtMs`, `setAtMs`, `landing.setAtMs`, `xyTrim.setAtMs`, `anchor.setAtMs`), tip
@@ -133,8 +138,11 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
      1. `/api/status` answers 200 and `server.version` ends with `.<sha7>`; `simulated` is false; the dispense
         engine runs and is available (`dispense.running` and `dispense.available`: OpenPnP keeps running when
         the engine fails to start, e.g. on a failed config migration). OpenPnP starts its web API and the engine
-        in no fixed order, so a 200 without the engine is waited out up to `--status-timeout` (120 s); an engine
-        that never starts fails the check then.
+        in no fixed order, so a 200 without the engine is waited out up to `--status-timeout` (120 s) while
+        `dispense.state` (BR-44) is `starting`; an engine that never starts fails the check then ("did not start
+        within 120 s"). `dispense.state` `failed` (`DispenseService.start` threw) fails it at once, with
+        `dispense.startError` in the reason. A build before BR-44 has no `state`: every 200 without the engine is
+        waited out.
      2. Enable.
      3. The log shows `Serial port: connecting to ...` (`SerialPortCommunications.resolvePort`) matching
         `--serial-match` (default ` S/N <--usb-sn>`, i.e. ` S/N 387932683335`) after the enable or, when the enable
@@ -143,10 +151,15 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
         OpenPnP's own (tinylog's StartupPolicy starts a new one at each start). The e2e runs this step against the
         real jar with the lumen-sim link as the pattern.
      4. Controller axes are read: X, Y, Z and B must all have a driver coordinate (else "the controller position was
-        not read"), and they must not be the power-cycle signature (X/Y/Z 0 with A or B at 720). Either way it does **not** home.
-     5. Home. Whatever the answer, it never STOPs while the machine is busy: on anything but `homed` it waits
-        while busy (up to `--home-busy-wait`). The API answers 409 "the home did not start or did not end within
-        5 min" after its own limit (`MachineEndpoints.home`) while the home may run on; il_deploy's
+        not read"), and they must not be the power-cycle signature (X/Y/Z 0 with A or B at 720, within 0.5: Marlin's
+        M410, sent by every STOP, recomputes the position from the step counts, so a reset controller STOPped once
+        reads 720.05; `RESET_ROTATION_TOLERANCE`). Either way it does **not** home.
+     5. Home. Whatever the answer, it never STOPs while the machine is busy or homing: on anything but `homed` it
+        waits while `machine.busy` or `machine.homing` (BR-44) is true (up to `--home-busy-wait`); a build before
+        BR-44 (a rollback can land there) has no `machine.homing`, so `machine.busy` alone (the home tests run on
+        both status shapes). The API answers
+        409 "the home did not start or did not end within 5 min" after its own limit (`MachineEndpoints.home`)
+        while the home may run on; il_deploy's
         `--home-timeout` (330 s) is longer. Such a home that then ends homed passes; one that ends unhomed is a
         machine problem, one still busy is "a home that never ends" (below). A home that failed on OpenPnP's own
         timeout (`homing failed: ... timeout waiting for response to G28`: GcodeDriver sends G28 with
@@ -160,6 +173,12 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
         From the enable on, OpenPnP's API going away or not answering (the JVM dies mid-home, e.g. a native camera
         library crash; a person stops the service because something looked wrong) is a machine problem too, never
         the build's: the controller may still be finishing that G28 and the outputs keep their state.
+
+        A controller power-cycled while OpenPnP ran with its link kept open (a health check by hand): since BR-44
+        Start finds the link dead and connects again (`GcodeDriver.setEnabled`: "the kept-alive link to the
+        controller is dead: connecting again"), so step 3 reads that new connect line and step 4 finds the boot
+        position (no home). A build before BR-44 failed the enable on the dead port (`enable: HTTP 409 ... IO Error`,
+        no home). A deploy restarts OpenPnP, so its enable always connects afresh.
      6. Homed and not busy.
      7. `POST /api/stop`, and the STOP is confirmed (below).
    - **On failure it rolls back.** It STOPs (only if the STOP is safe; otherwise it leaves OpenPnP running,
@@ -239,6 +258,10 @@ Exit codes:
   `free`, `Nobody?`, bold markers, a `wants` note.
 - Never STOPs during a home: a STOP inside G28 hangs the controller until a power cycle. One rule for every
   STOP (deploys, the exception path, the unit's ExecStop, the test service manager):
+  - `machine.homing` true (BR-44: from the start of any home, the web's, the engine's or OpenPnP's own Home button,
+    until it ends; `ReferenceMachine.isHoming`): wait, whatever else the status shows (an engine run past its home
+    phase, the pressure held: OpenPnP's Home button does not check the web's pressure hold, and the valve-off lines
+    would queue behind the G28 a STOP kills). A build before BR-44 lacks the field: the rules below alone;
   - the pressure held (`pressure.state` `on` or `vent_failed`), or an engine run past its home (its phase is not
     `home: ...`): STOP at once, outputs may be on (homes refuse while the pressure is held);
   - the pressure `starting` or `stopping` with the machine busy: wait as for a home. `PressureHold.start` sets
@@ -246,7 +269,11 @@ Exit codes:
     nothing is on before that task runs, and a running start ends within seconds;
   - otherwise wait while the machine is busy or its state is unknown (no answer in time, HTTP not 200), up to
     `--home-busy-wait` (5 min), then STOP. Still busy: no STOP, OpenPnP is not killed by il_deploy, and the
-    hold is set. If systemd stops OpenPnP anyway, SIGTERM closes the port and Marlin finishes the home;
+    hold is set. If systemd stops OpenPnP anyway, SIGTERM closes the port and Marlin finishes the home.
+    `machine.homing` false does not end this wait: it turns true only when OpenPnP's home starts, and the engine's
+    home phase and the web's home first read the position and raise N1 (`DispenseService.homeSafely`), busy and not
+    homing yet; a STOP then may meet the G28 that follows (WEB_API.md names this window). So busy and a run in its
+    `home: ...` phase are waited out as before;
   - OpenPnP not answering at all (connection refused): nothing to stop.
 - Never homes a controller that shows the power-cycle signature. It reports `controller was reset; a person
   must check the machine` and sets the hold.
@@ -334,7 +361,7 @@ Check from the unit's environment with `systemd-run --user --wait --pipe gh auth
 desktop keyring here).
 
 ## Tests
-From the repo root (about 2.5 min, 287 tests; starts fake OpenPnP processes on free loopback ports, never a serial port):
+From the repo root (about 2.5 min, 320 tests; starts fake OpenPnP processes on free loopback ports, never a serial port):
 ```
 python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
 ```
@@ -350,7 +377,12 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
   `engine_start_s` (the API answers before the dispense engine runs); home refusals before the home starts, and
   the 409 after the server's own limit while the home runs on (`home_cap_s`, 300 s like `MachineEndpoints`); a
   new `OpenPnP.log` at each start, and a link kept open across a STOP (`keep_alive`, true like the lab
-  machine.xml), so only the first enable logs the connect line.
+  machine.xml), so only the first enable logs the connect line. BR-44's fields as the real server sets them
+  (`machine.homing` while a home runs, or the engine run's home with `run_homing`; `server.startedAtMs`, `jvm_start_s`
+  before the API; `dispense.state` `running`, `starting` before `engine_start_s`, `failed` with `startError` for the
+  `engine` failure), or a build before them (`old-status`); `pressure_initial_event` renames the pressure hold's first
+  value; `power_cycle()` kills a kept-open link (the next enable connects again and logs it, or with `old-status`
+  fails on the dead port) and boots the controller at X/Y/Z 0, B 720 (720.05 after a STOP, as Marlin's M410).
 - `tests/fakes.py` has a fake GitHub with a real commit graph, so the compare direction is tested, release authors,
   CI workflow runs (`actions/runs/<id>`) with their check suites and `gate` check-runs per suite, and the
   attestations GitHub stores per artifact digest; a fake `gh` (`FakeGhCli`) for `GhAttestation`: `attestation
@@ -402,8 +434,9 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
 ## End to end with the real OpenPnP (`e2e/`)
 `e2e/test_deploy_openpnp.py` runs the deploy flow with the real jar instead of the fake OpenPnP, in front of
 lumen-sim (`../lumen-sim`), the simulated controller on a pty. OpenPnP connects through its real serial stack.
-It needs no openpnp-uinav, so it runs on a stock GitHub runner. About 2 minutes (122 s on the lab computer,
-11-01: deploy 31 s, deploy over a running OpenPnP 32 s, rollback 30 s, the refused deploy 13 s).
+It needs no openpnp-uinav, so it runs on a stock GitHub runner. About 3 minutes (164 s on the lab computer,
+11-03: deploy 26 s, deploy over a running OpenPnP 29 s, health by hand 25 s, rollback 29 s, the refused deploy 15 s,
+test_3's two health checks 8 s each).
 - **Releases:** `infra/ci/make_release.py` twice from the one jar, with CI's command line. The jar's build sha7
   (manifest `Implementation-Version`; OpenPnP ends `server.version` with it) starts both fake commits' shas,
   so the production version check runs unchanged. The fake GitHub of the unit tests serves them.
@@ -440,7 +473,14 @@ It needs no openpnp-uinav, so it runs on a stock GitHub runner. About 2 minutes 
   inside il_deploy's own window.
 - **test_2:** lumen-sim power-cycled, a third build: `run` exits 5 after reading X/Y/Z 0, B 720. Nothing moves
   (no G0/G1/G28), the previous build runs again unchecked, the new build is not marked bad, and the hold is set
-  until `resume`.
+  until `resume`. The deploy restarts OpenPnP, so BR-44's reconnect of a kept-alive link plays no part here.
+- **test_3 (BR-44):** `health --no-claim` on that build connects it (boot position: no home; its STOP keeps the link
+  open), lumen-sim is power-cycled again, and a second `health --no-claim` finds Start connecting again ("the
+  kept-alive link to the controller is dead: connecting again", one more connect line, read by the serial step instead
+  of the kept-open fallback) and the reset controller, never homed. Nothing moves.
+- BR-44's fields on the real build (in `assert_status_fields`): `dispense.state` `running`, `startError` null,
+  `machine.homing` false, and the pressure hold's first stamp within `STARTUP_STAMP_S` of `server.startedAtMs`
+  (`results.json` keeps the gap, `measured`).
 
 From the repo root, with the build in `target/`:
 ```
@@ -472,3 +512,8 @@ Found by it, fixed test-first:
   the update" gets `setAtMs` now), which the activity check took for a person's: the rollback right after a deploy
   was "not idle". What OpenPnP stamps while il_deploy alone drives it does not count (`test_deploy_flow`:
   `landing_set_at_start`).
+- 11-03 (test_3): the power-cycle signature compared A and B with 720 to 0.001. The health check that finds a reset
+  controller STOPs it, and the STOP's M410 makes Marlin read A and B 720.05 from its step counts, so the next check
+  (a health check by hand after `resume`, or the next deploy) took the reset controller for a homed one: it raised N1
+  from a believed Z 0 and homed it (BR-02's hazard). Now within 0.5 of 720 (`test_health`:
+  `test_reset_controller_stopped_once_is_still_never_homed`).

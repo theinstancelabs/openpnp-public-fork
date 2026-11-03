@@ -18,7 +18,7 @@ INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": '
 # The keys each request takes besides "cmd" (and a fault's "fault"): an unknown one (a misspelt "surfaceZ" or "downs")
 # is refused, not ignored. Ok faults check theirs in faults.KEYS; physical faults take their axes (PHYSICAL_FAULTS).
 REQUEST_KEYS = {"state": (), "clear": (), "stop": (), "power_cycle": ("link", "down_s"),
-                "set": ("kill_messages", "vacuum", "rs485", "mcp3426", "surface_z", "surfaces", "seal_drop",
+                "set": ("kill_messages", "sim_cap", "vacuum", "rs485", "mcp3426", "surface_z", "surfaces", "seal_drop",
                         "homing_move_delay_s")}
 FAULT_KEYS = {"inject": ("kind", "text", "after_s"), "inject_bytes": ("hex", "text", "after_s"),
               "partial": ("text", "after_s"), "halt": ("reason",), "disconnect": ("down_s",), "frozen": ("on",)}
@@ -51,10 +51,11 @@ def mm(value, name):
 
 class Simulator:
     def __init__(self, personality="stock", park=DEFAULT_PARK, vacuum=OPEN_AIR_VACUUM, rs485=None,
-                 kill_messages=False, seed=0, t0=0.0):
+                 kill_messages=False, seed=0, t0=0.0, sim_cap=False):
         self.personality = personalities.get(personality)
         self.machine = Machine(park, vacuum, rs485)
         self.kill_messages = kill_messages
+        self.sim_cap = sim_cap      # lumen-sim's option, so every board it boots has it
         self.faults = Faults(seed)
         self.out = deque()          # (release time, bytes), release times never decrease
         self._last_release = -math.inf
@@ -71,7 +72,7 @@ class Simulator:
     def _boot(self, t):
         self.boots += 1
         return Firmware(self.personality, self.machine, t, emit=self._emit, on_line=self._on_line,
-                        kill_messages=self.kill_messages, on_error=self._sim_error)
+                        kill_messages=self.kill_messages, on_error=self._sim_error, sim_cap=self.sim_cap)
 
     def _sim_error(self, record):
         self.sim_errors.append(record)
@@ -298,8 +299,11 @@ class Simulator:
         if not isinstance(rs485, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in rs485.items()):
             raise ValueError("rs485 must map request hex to reply hex (strings), not %r" % (rs485,))
         kill = flag(req["kill_messages"], "kill_messages") if "kill_messages" in req else None
+        sim_cap = flag(req["sim_cap"], "sim_cap") if "sim_cap" in req else None
         if kill is not None:
             self.kill_messages = self.fw.kill_messages = kill
+        if sim_cap is not None:
+            self.sim_cap = self.fw.sim_cap = sim_cap
         if vacuum is not None:
             self.machine.vacuum = vacuum
         self.machine.rs485.update({k.upper(): v for k, v in rs485.items()})
@@ -377,6 +381,7 @@ class Simulator:
             "watchdog": {"timeout_ms": fw.wd_timeout, "tripped": fw.wd_tripped} if self.personality.host_watchdog
             else None,
             "kill_messages": self.kill_messages,
+            "sim_cap": self.sim_cap,
             "faults": self.faults.describe(),
             "lines_read": self.seq,
             "sim_errors": list(self.sim_errors),
