@@ -28,6 +28,7 @@ function check(name, cond, detail) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const status = (page) => page.evaluate(() => IL.api('GET', '/api/status'));
+const IL_num = (v) => (typeof v === 'number' && isFinite(v) ? v : null);
 const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelectorAll(s)).map((n) => n.textContent.trim()), sel);
 
 (async () => {
@@ -125,12 +126,16 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     check('(4) the rail: Which tip done, Swap now', rail4.length === 7 && /step--done/.test(rail4[0]) && /step--(now|need)/.test(rail4[1]), rail4);
     let mountUrl = null;
     await page.route('**/api/tip-setups/*/mount', (r) => { mountUrl = r.request().url(); return r.continue(); });
+    const mountResP = page.waitForResponse((r) => /\/api\/tip-setups\/[^/]+\/mount$/.test(r.url()), { timeout: 20000 }).catch(() => null);
     await page.click('#btn-tip-on');
+    const mountRes = await mountResP;
+    const mountBody = mountRes ? await mountRes.json().catch(() => null) : null;
     await page.waitForFunction((k) => IL.api('GET', '/api/status').then((s) => s.dispense.tip && s.dispense.tip.key === k), other.key, { timeout: 30000, polling: 500 }).catch(() => null);
     await page.unroute('**/api/tip-setups/*/mount');
     const st4 = await status(page);
     check('(4) It\'s on mounts the chosen kind, under a new needle token', !!mountUrl && mountUrl.includes('/api/tip-setups/' + encodeURIComponent(other.key) + '/mount')
-      && st4.dispense.tip.key === other.key && st4.dispense.needle.changedAtMs !== st0.dispense.needle.changedAtMs, { mountUrl, tip: st4.dispense.tip.key });
+      && st4.dispense.tip.key === other.key && st4.dispense.needle.changedAtMs !== st0.dispense.needle.changedAtMs,
+      { mountUrl, status: mountRes && mountRes.status(), answer: mountBody && JSON.stringify(mountBody).slice(0, 600), tip: st4.dispense.tip.key });
     await page.waitForSelector('#tip-gauge:enabled', { timeout: 5000 }).catch(() => null);
     await page.fill('#tip-gauge', '18');
     await page.click('#btn-tip-gauge');
@@ -149,12 +154,18 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     const pics0 = (await page.evaluate((k) => IL.api('GET', '/api/tip-setups').then((r) => (r.setups || r).find((x) => x.key === k)), other.key)) || {};
     // the height is a by-hand step today (Machine › By hand › Setup › Needle Z frame): done here as the operator would,
     // both tips touching the blank, with the heights the session's frame had before the mount
-    const a0 = st0.dispense.needle.anchor;
+    // both tips touching the blank at its place (the N1 contact Z the session stores for "blank"), then the frame's
+    // offset confirmed: the two by-hand steps of Setup's needle card
+    const locs = await page.evaluate(() => IL.api('GET', '/api/locations'));
+    const bz = locs && locs.blank && IL_num(locs.blank.z);
     check('(5) the height is by hand first, with a link to the needle card', (steps5.find((x) => x.k === 'height') || {}).s === 'hand' && !!(await page.$('#tip-height-hand')), steps5);
-    if (a0) await page.evaluate(([n1, n2, t]) => IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2, note: 'tip-flow test: both tips, by hand', needleChangedAtMs: t }),
-      [a0.surfaceZMm, a0.needleContactZMm, st4.dispense.needle.changedAtMs]);
+    if (bz !== null) {
+      const fr = await page.evaluate(([z, t]) => IL.api('POST', '/api/needle/anchor', { surfaceZ: z, needleContactZ: Number((z - 2.59).toFixed(3)), note: 'tip-flow test: both tips, by hand', needleChangedAtMs: t }),
+        [bz, st4.dispense.needle.changedAtMs]);
+      await page.evaluate(([off, t]) => IL.api('POST', '/api/needle/offset', { offsetMm: off, note: 'tip-flow test: the frame offset confirmed', needleChangedAtMs: t }), [fr.offsetMm, st4.dispense.needle.changedAtMs]);
+    }
     await page.waitForFunction(() => { const l = document.querySelector('#tip-checks li[data-k="height"]'); return l && l.dataset.state === 'done'; }, null, { timeout: 10000 }).catch(() => null);
-    check('(5) after the frame by hand, the height is done', (await page.evaluate(() => (document.querySelector('#tip-checks li[data-k="height"]') || {}).dataset.state)) === 'done', a0);
+    check('(5) after the frame and its offset by hand, the height is done', (await page.evaluate(() => (document.querySelector('#tip-checks li[data-k="height"]') || {}).dataset.state)) === 'done', { bz });
     // the checks lay dots: the paste question of the session (same barrel or new) comes first when nobody answered it
     if (await page.$('#tip-barrel-same')) await page.click('#tip-barrel-same');
     await page.waitForSelector('#btn-tip-checks-start:enabled', { timeout: 10000 }).catch(() => null);

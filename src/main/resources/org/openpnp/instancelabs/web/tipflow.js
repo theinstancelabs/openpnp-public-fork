@@ -192,8 +192,8 @@
     const st = {};
     st.below = W.below === 'running' ? ['now', 'taking the picture from below…'] : W.below === 'done' ? ['done', 'picture taken ' + t(W.belowAt)]
       : W.below && W.below.error ? ['todo', W.below.error] : ['todo', 'the machine takes a picture from below (it moves to the bottom camera)'];
-    st.height = nd.anchor && nd.anchored ? ['done', (isNum(nd.anchor.rawSumMm) ? 'from K, the side camera' : 'both tips touching') + ', ' + t(nd.anchor.setAtMs) + '; the bed switch once fitted']
-      : ['hand', 'By hand first: record the needle height frame (Machine › By hand › Setup › Needle Z frame); where it lands waits for it. The machine measures it itself with the bed switch (requested).'];
+    st.height = nd.anchor && nd.anchored && nd.touchedOff ? ['done', (isNum(nd.anchor.rawSumMm) ? 'from K, the side camera' : 'both tips touching') + ', ' + t(nd.anchor.setAtMs) + '; the bed switch once fitted']
+      : ['hand', 'By hand first: record the needle height frame, then confirm its offset (Machine › By hand › Setup › Needle Z frame); where it lands waits for both. The machine measures it itself with the bed switch (requested).'];
     st.prime = ['hand', 'By hand today: Setup › Pressure and prime. The machine primes by itself once it can see the flow (requested).'];
     st.drip = ['hand', 'By hand today: watch the tip for a minute with the screw still. The machine checks it itself once built (requested).'];
     const job = W.job;
@@ -222,8 +222,8 @@
       } catch (e) { W.below = { error: e.message || String(e) }; }
       IL.render();
       const nd = ((S.status || {}).dispense || {}).needle || {};
-      if (!(nd.anchor && nd.anchored)) {   // the engine refuses the landing check before the height (I4): say so first
-        W.lands = { error: 'Waits for the height: record the needle height frame by hand first (Machine › By hand › Setup), then start the checks again.' };
+      if (!(nd.anchor && nd.anchored && nd.touchedOff)) {   // the engine refuses the landing check before the height and its offset (I4)
+        W.lands = { error: 'Waits for the height: record the needle height frame and confirm its offset by hand first (Machine › By hand › Setup), then start the checks again.' };
         return;
       }
       W.lands = 'running';
