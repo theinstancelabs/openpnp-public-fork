@@ -3237,8 +3237,9 @@ public final class DispenseService {
         DispenseConfig c = cfg;
         String unknown = controllerReset.unknownWhy();
         if (unknown != null && !clearBelowAttested) {
-            throw refused("MACHINE: " + unknown + ". Check that nothing is under either tool (N1 or the needle), then "
-                    + "home saying so: the home is then G28 straight away, nothing moves before it.");
+            throw refused("MACHINE: " + unknown + ". " + Character.toUpperCase(ControllerReset.HOME_CHECK.charAt(0))
+                    + ControllerReset.HOME_CHECK.substring(1) + "; then home saying so: G28 is then the first line, "
+                    + "with no Z move before it.");
         }
         Nozzle n = unknown != null ? null : getProbeNozzle();
         if (unknown != null) {

@@ -481,8 +481,7 @@ public final class Interlocks {
     }
 
     /** What to do when the position is unknown (BR-02). */
-    public static final String POSITION_UNKNOWN_REMEDY = "home first (Home), after checking that nothing is under "
-            + "either tool";
+    public static final String POSITION_UNKNOWN_REMEDY = "home first (Home); " + ControllerReset.HOME_CHECK;
 
     /** I9 refusal: a plan of several doses names the spots each switch takes. */
     private static String i9Text(Inputs in, List<DoseBlocks.Run> blocks, int left) {

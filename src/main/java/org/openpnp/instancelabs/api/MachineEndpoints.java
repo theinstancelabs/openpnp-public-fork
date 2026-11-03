@@ -19,6 +19,7 @@ import java.util.concurrent.TimeoutException;
 import javax.imageio.ImageIO;
 
 import org.openpnp.instancelabs.dispense.ControllerCommands;
+import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeReport;
@@ -204,8 +205,8 @@ final class MachineEndpoints {
         boolean attested = Json.bool(r.json(), "clearBelowAttested", false);
         String unknown = svc == null ? null : svc.positionUnknownWhy();
         if (unknown != null && !attested) {
-            throw ApiException.refused(unknown + ". Check that nothing is under either tool (N1 or the needle), then "
-                    + "home again saying so (clearBelowAttested): the home is then G28 straight away, nothing moves "
+            throw ApiException.refused("MACHINE: " + unknown + ". " + capitalize(ControllerReset.HOME_CHECK)
+                    + "; then home again saying so (clearBelowAttested): G28 is then the first line, with no Z move "
                     + "before it.");
         }
         // With the engine: N1 raised first when a STOP left it low, and a STOP during the home stops the
@@ -292,6 +293,9 @@ final class MachineEndpoints {
             s.putAll(svc.getControllerReset().view());
             Map<String, Object> home = Views.home(svc.homePlan());
             double[] n1 = svc.probeNozzleZ();
+            if (svc.positionUnknownWhy() != null) {
+                n1 = null; // the believed Z is the boot's, and the attested home goes straight to G28 (no raise)
+            }
             home.put("n1Z", n1 == null ? null : n1[0]);
             home.put("n1Low", n1 != null && n1[1] > 0);
             // which tool is low: N1 under its safe zone, or N1 above it, which on the shared Z puts the needle low
@@ -493,5 +497,9 @@ final class MachineEndpoints {
 
     void shutdown() {
         cameraExecutor.shutdownNow();
+    }
+
+    private static String capitalize(String s) {
+        return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 }

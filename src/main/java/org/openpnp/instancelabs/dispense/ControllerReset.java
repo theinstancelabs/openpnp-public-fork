@@ -41,6 +41,13 @@ import java.util.regex.Pattern;
  * <p>Times are epoch ms from an injectable clock. Thread safe.</p>
  */
 public final class ControllerReset {
+    /**
+     * What the home after a reset does, and what the operator checks first: the board's G28 homes X, then Y, at the
+     * current height (no Z clearance: Z_HOMING_HEIGHT and HOME_Z_FIRST off), then Z at its Z_SAFE_HOMING point.
+     */
+    public static final String HOME_CHECK = "the home first drives the head to its homing corner (X, then Y) at the "
+            + "height the tools are at now, then homes Z there: check that nothing is under either tool (N1 or the "
+            + "needle) or in their way to that corner, and level N1 and the needle by hand if one is low";
     /** Where stock Marlin believes A and B are at power-up (J_MAX_POS), until a G92. */
     public static final double BOOT_B_DEG = 720;
     /** Journal codes (the events table's {@code code}): a connect read the boot position. */
