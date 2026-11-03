@@ -392,11 +392,14 @@ class DeployRealOpenPnP(unittest.TestCase):
         cls.xvfb_log = open(os.path.join(d, "xvfb.log"), "ab")
         cls.xvfb, cls.display = start_xvfb(cls.xvfb_log)
         cls.sim = LumenSim(d)
-        # Marlin boots at X/Y/Z 0, B 720: il_deploy reads that as a power cycle and never homes it (test_2). The lab
-        # controller at deploy time has run since its power-on; G92 B0 makes lumen-sim so.
+        # Marlin boots at X/Y/Z 0, A and B 720: il_deploy (and BR-02) read that as a power cycle and never home it
+        # (test_2). The lab controller at deploy time has run since its power-on and was homed by an earlier session:
+        # G28 then G92 A0 B0, as the lab's patched HOME_COMMAND does (lumen-sim RESEARCH.md section 1; INF-10: a G92 B0
+        # alone left it unhomed at Z 0).
         c = DriverClient(cls.sim.link)
         try:
-            c.send("G92 B0")
+            c.send("G28", timeout_ms=60000)
+            c.send("G92 A0 B0")
         finally:
             c.close()
         cls.io_start = cls.sim.io_count()
@@ -680,6 +683,16 @@ class DeployRealOpenPnP(unittest.TestCase):
         lines = sent(io_rows)
         homes = [i for i, line in lines if line == "G28"]
         self.assertEqual(len(homes), 4, [line for _, line in lines])
+        # BR-02's hazard (INF-10): motion while the position is only believed, e.g. a Z raise before the home. After
+        # each connect (CONNECT_COMMAND's G21) no G0/G1 before that connection's first G28; moves after a home are fine
+        connects = [i for i, line in lines if line.split(";")[0].strip() == "G21"]
+        self.assertEqual(len(connects), 3, "three OpenPnP starts: deploy, deploy over it, rollback")
+        for k, c in enumerate(connects):
+            first = next((g for g in homes if g > c), None)
+            end = connects[k + 1] if k + 1 < len(connects) else len(io_rows)
+            self.assertTrue(first is not None and first < end, "no home after connect #%d" % (k + 1))
+            moves = [line for i, line in lines if c < i < first and line.split(" ")[0] in ("G0", "G1")]
+            self.assertEqual(moves, [], "motion before the home of connect #%d" % (k + 1))
         for k, g in enumerate(homes):
             ok = next((j for j in range(g + 1, len(io_rows)) if io_rows[j][1] == "<" and io_rows[j][2] == "ok"), None)
             self.assertIsNotNone(ok, "G28 #%d never answered" % (k + 1))
@@ -694,7 +707,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         type(self).deployed_ok = True
 
     def test_2_a_power_cycled_controller_is_never_homed(self):
-        """lumen-sim power-cycled (Marlin's boot position: X/Y/Z 0, B 720) while a newer green build lands: the deploy
+        """lumen-sim power-cycled (Marlin's boot position: X/Y/Z 0, A and B 720) while a newer green build lands: the deploy
         reads the controller after the enable and does not home it. The previous build goes back with its config,
         unchecked (it ran before: it runs again, not enabled), the new build is not marked bad, and the hold is set
         until a person runs `resume`. Nothing moves."""

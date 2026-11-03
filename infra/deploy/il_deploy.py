@@ -743,7 +743,8 @@ def api_activity_times(st):
 
 
 def reset_signature(axes):
-    """X, Y, Z all 0 and B at 720 in the controller's own coordinates: what Marlin reports after a power cycle."""
+    """X, Y, Z all 0 and A or B at 720 in the controller's own coordinates: what Marlin reports after a power cycle
+    (it boots both rotation axes at 720; BR-02's rule, INF-10). B must be read (the caller checks); A may be absent."""
     c = {}
     for a in axes or []:
         letter = str(a.get("letter") or "").upper()
@@ -751,7 +752,7 @@ def reset_signature(axes):
         if letter and letter not in c and isinstance(v, (int, float)) and not isinstance(v, bool):
             c[letter] = float(v)
     try:
-        return all(abs(c[k]) < 1e-3 for k in "XYZ") and abs(c["B"] - 720.0) < 1e-3
+        return all(abs(c[k]) < 1e-3 for k in "XYZ") and any(abs(c[k] - 720.0) < 1e-3 for k in "AB" if k in c)
     except KeyError:
         return False
 
@@ -2121,8 +2122,8 @@ class Deployer:
         if not all(_ms(coords.get(k)) is not None for k in "XYZB"):
             return fail("axes", f"the controller position was not read (driver coordinates {coords})")
         if reset_signature(axes):
-            return fail("axes", "controller was reset; a person must check the machine (X, Y, Z 0 and B 720 after "
-                                "the start; not homing)", "machine")
+            return fail("axes", "controller was reset; a person must check the machine (X, Y, Z 0 and A or B 720 "
+                                "after the start; not homing)", "machine")
         step("axes", coords)
 
         lost = claim_lost("home", True)
