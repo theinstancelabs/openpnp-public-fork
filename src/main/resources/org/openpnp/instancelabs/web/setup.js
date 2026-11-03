@@ -554,7 +554,7 @@
     // every needle value carries the needle token it was taken under (§22.3): where its field's edit began, else now (tokenOf)
     c.bK.addEventListener('click', () => IL.act(c.bK, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), k = need(F.k, 'K');
-      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k, needleChangedAtMs: tokenOf([F.n1, F.k]) });
+      const r = await postNeedle('/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k }, [F.n1, F.k]);
       clean(F.n1, F.k, F.n2);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -563,7 +563,7 @@
       + ' mm, offset ' + fmt(r.offsetMm, 3) + ' mm. Confirm the offset or touch off next.' }, opts)));
     c.bBoth.addEventListener('click', () => IL.act(c.bBoth, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), n2 = need(F.n2, 'the needle contact Z');
-      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2, needleChangedAtMs: tokenOf([F.n1, F.n2]) });
+      const r = await postNeedle('/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2 }, [F.n1, F.n2]);
       clean(F.n1, F.n2);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -597,6 +597,22 @@
     const now = curToken();
     const old = fs.find((f) => f.edited && f.tok !== undefined && f.tok !== now);
     return old ? old.tok : now;
+  }
+  /**
+   * Posts needle values with their token (tokenOf). A 409 needle-changed empties and releases the fields taken under
+   * another needle (Backend's review of #5): the operator takes them again, and a value typed then carries this
+   * needle's token. The refusal still shows.
+   */
+  async function postNeedle(path, body, fs) {
+    try {
+      return await IL.api('POST', path, Object.assign({}, body, { needleChangedAtMs: tokenOf(fs) }));
+    } catch (e) {
+      if (e && e.status === 409 && e.code === 'needle-changed') {
+        const now = curToken();
+        for (const f of fs) if (f.edited && f.tok !== undefined && f.tok !== now) { if (f.kind !== 'check') f.el.value = ''; unedit(f); paint(f); }
+      }
+      throw e;
+    }
   }
   /** The frame or offset answer's question ("is the {S} on the dispenser?") and the I4 offset warning, kept until the next. */
   function frameAnswer(r) {
@@ -1121,6 +1137,7 @@
             el('p', { class: 'panel__lead', text: "Jog N1 over a spot on the " + name + " in OpenPnP's window and lower it until the tip touches, then add the point. Spread at least 3 points (5 is better) around the purge row and the places on it." }),
             PB.live, PB.table, PB.fit));
         PB.handBox.open = PB.byHand;
+        PB.handApplied = PB.byHand;
         PB.handBox.addEventListener('toggle', () => { if (PB.byHand !== PB.handBox.open) { PB.byHand = PB.handBox.open; IL.render(); } });
         // the automatic foot
         PB.note = el('div', { class: 'su-blank-note', id: 'blank-note' });
@@ -1165,7 +1182,9 @@
       const fin = !live && run && PB.runId && run.runId === PB.runId ? run : null;
       if (!live) loadBlankPreview(s, name);
       const byHand = PB.byHand && !live;
-      if (PB.handBox.open !== byHand) PB.handBox.open = byHand;
+      // the wanted state is applied only when it changes: a render between a close (a click on the summary, or a test's
+      // .open = false) and its toggle event, which runs as a later task, must not open it again (gate flake, 11-02)
+      if (PB.handApplied !== byHand) { PB.handApplied = byHand; if (PB.handBox.open !== byHand) PB.handBox.open = byHand; }
       IL.show(PB.handBox, !live);
       IL.show(PB.autoFoot, !byHand);
       IL.show(PB.handFoot, byHand);

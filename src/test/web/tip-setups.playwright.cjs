@@ -836,7 +836,7 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     // recorded meanwhile in another browser, the other contact typed after the change (within 20 mm of it, so the engine
     // gets as far as the token): Record needle frame posts A's token, the engine refuses it (409 needle-changed), the
     // card shows the refusal, and no frame is recorded for B.
-    async function staleCase(name, typeOld, afterChange, freshId, freshVal) {
+    async function staleCase(name, typeOld, afterChange, freshId, freshVal, staleId, staleVal) {
       await closePanels(page);
       await page.reload();
       await page.waitForFunction(() => window.IL && IL.api && IL.tips && IL.tips.data(), null, { timeout: 30000 });
@@ -865,15 +865,28 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
       check(name, !!body && body.needleChangedAtMs === tokA && !!res && res.status() === 409 && !st.anchored
         && /The needle was changed at \d\d:\d\d after these values were taken/.test(box || ''),
         { body, status: res && res.status(), anchored: st.anchored, box: box && box.slice(0, 200), tokA, now: st.changedAtMs });
+      // the refused field is emptied and released (Backend's review of #5): typed again, it carries this needle's token
+      const emptied = await page.evaluate((x) => document.getElementById(x).value, staleId);
+      await page.click('#' + staleId, { clickCount: 3 });
+      await page.keyboard.type(staleVal);
+      const res2P = page.waitForResponse((r) => r.url().includes('/api/needle/anchor') && r.request().method() === 'POST', { timeout: 10000 }).catch(() => null);
+      await page.click('#btn-anchor');
+      const res2 = await res2P;
+      await sleep(800);
+      const st2 = (await status(page)).dispense.needle;
+      check(name.slice(0, 5) + ' then: the refused field is emptied, typed again it records the frame for the new needle', emptied === '' && !!res2 && res2.status() === 200 && st2.anchored,
+        { emptied, status: res2 && res2.status(), anchored: st2.anchored });
     }
     await staleCase('(11d) N2 retyped to the shown value and kept in focus through a needle change: posted with the old needle\'s token, refused',
-      async () => { await page.click('#anchor-n2', { clickCount: 3 }); await page.keyboard.type('2.910'); }, null, 'anchor-n1', '5.5');
+      async () => { await page.click('#anchor-n2', { clickCount: 3 }); await page.keyboard.type('2.910'); }, null, 'anchor-n1', '5.5', 'anchor-n2', '2.91');
     await staleCase('(11e) N2 typed for the old needle, then a key and Backspace after the change: still the old needle\'s token, refused',
       async () => { await page.click('#anchor-n2', { clickCount: 3 }); await page.keyboard.type('2.95'); await page.keyboard.press('Tab'); },
       async () => { await page.click('#anchor-n2'); await page.keyboard.press('End'); await page.keyboard.type('7'); await page.keyboard.press('Backspace'); },
-      'anchor-n1', '5.5');
+      'anchor-n1', '5.5', 'anchor-n2', '2.95');
     await staleCase('(11f) N1 typed for the old needle, N2 typed after the change: the old needle\'s token, refused',
-      async () => { await page.click('#anchor-n1', { clickCount: 3 }); await page.keyboard.type('5.6'); await page.keyboard.press('Tab'); }, null, 'anchor-n2', '2.91');
+      async () => { await page.click('#anchor-n1', { clickCount: 3 }); await page.keyboard.type('5.6'); await page.keyboard.press('Tab'); }, null, 'anchor-n2', '2.91', 'anchor-n1', '5.6');
+    await staleCase('(11g) N1 retyped to the shown value and kept in focus through a needle change: the old needle\'s token, refused',
+      async () => { await page.click('#anchor-n1', { clickCount: 3 }); await page.keyboard.type('5.500'); }, null, 'anchor-n2', '2.91', 'anchor-n1', '5.5');
 
     // ---- (12) the page ------------------------------------------------------------------------------------------------
     check('(12) no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
