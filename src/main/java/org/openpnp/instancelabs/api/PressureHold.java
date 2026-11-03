@@ -20,6 +20,7 @@ import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DriverGcodeChannel;
 import org.openpnp.instancelabs.dispense.GcodeChannel;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
+import org.openpnp.instancelabs.dispense.OutputZones;
 import org.openpnp.instancelabs.dispense.RunResult;
 import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.spi.Machine;
@@ -77,7 +78,7 @@ final class PressureHold implements DispenseListener {
     private volatile String lastEvent = "pressure off";
     private volatile long lastEventAtMs = System.currentTimeMillis();
     private volatile String lastError;
-    /** BR-03: the current session switches the pump only (no valve line). */
+    /** BR-03: the session (the current one, else the last) switches the pump only (no valve line). */
     private volatile boolean pumpOnly;
     /**
      * Which start owns the hold (counts the starts; guarded by {@code this}). A start's machine task acts only while it
@@ -95,8 +96,21 @@ final class PressureHold implements DispenseListener {
     static final class Options {
         boolean pumpOnly;
         double[] park;
-        String parkName;
+        /** The park for the event ("waste", "(120.0, 60.0)"), and the place's name (null when it is a point). */
+        String parkName, parkPlace;
         Double durationS;
+    }
+
+    /**
+     * I12 for a hold with its paste landing at {@code at} (where the needle is, or the park): null when the valve may
+     * open there; else why not, with the remedy for the hold or for its park.
+     */
+    static String zoneRefusal(DispenseService svc, Options o, double[] at) {
+        if (at == null) {
+            return "the needle's position is unknown: start it with park: 'waste'";
+        }
+        OutputZones zones = svc.outputZones();
+        return o.park != null ? zones.parkRefusal(o.parkPlace, at[0], at[1]) : zones.refusal(at[0], at[1]);
     }
     private DispenseConfig cfg;
     private GcodeChannel channel;
@@ -226,8 +240,7 @@ final class PressureHold implements DispenseListener {
             return cancelled;
         }
         if (!o.pumpOnly) {
-            double[] at = svc.needleXY();
-            String out = at == null ? "the needle's position is unknown" : svc.outputZones().refusal(at[0], at[1]);
+            String out = zoneRefusal(svc, o, svc.needleXY());
             if (out != null) {
                 markOff(gen, "pressure start refused: I12: " + out);
                 return "I12: " + out;
@@ -654,7 +667,7 @@ final class PressureHold implements DispenseListener {
         State s = state;
         m.put("state", s.name().toLowerCase());
         m.put("on", s == State.ON);
-        m.put("mode", pumpOnly ? "pump" : "hold");
+        m.put("mode", s == State.OFF ? null : pumpOnly ? "pump" : "hold");
         m.put("onSinceMs", onSinceMs == 0 ? null : onSinceMs);
         m.put("autoOffAtMs", autoOffAtMs == 0 ? null : autoOffAtMs);
         m.put("remainingS", autoOffAtMs == 0 ? null : Math.max(0, (autoOffAtMs - now) / 1000.0));

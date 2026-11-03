@@ -19,9 +19,9 @@ import java.util.regex.Pattern;
  * <li>No B feed above the B limit (bMaxFeedDegS, at most 400 rpm).</li>
  * <li>No M400 between a dot's first and last line (no per-dot synchronisation).</li>
  * <li>The program ends with valve and pump OFF and the watchdog disarmed.</li>
- * <li>I12 (BR-03, with a {@link ZoneCheck}): the needle's X/Y at every valve-on line and every B line is inside an
- * allowed output zone and outside every forbidden one ({@link OutputZones}); with the valve on, no X/Y move crosses
- * a forbidden zone.</li>
+ * <li>I12 (BR-03, with a {@link ZoneCheck}): where the needle's paste lands at every valve-on line and every B line is
+ * inside an allowed output zone and outside every forbidden one ({@link OutputZones}); with the valve on, no X/Y move
+ * crosses a forbidden zone. One entry for the lines and one for the moves, each with its count and its first.</li>
  * </ul>
  *
  * <p>The screw turns (profile calibration design §6.4), from the B targets in steps since each
@@ -58,7 +58,6 @@ public final class GcodeStreamValidator {
         }
     }
 
-    /** The raw Z window for this configuration, or null without a needle frame (I4 refuses then). */
     /**
      * BR-03: the output zones and how to find the needle in the program's raw lines. N2's X/Y is the raw head X/Y plus
      * the N2 offset ({@code dx}, {@code dy}: a translation, as OpenPnP's head offsets are), and the paste lands at that
@@ -91,6 +90,7 @@ public final class GcodeStreamValidator {
         }
     }
 
+    /** The raw Z window for this configuration, or null without a needle frame (I4 refuses then). */
     public static ZWindow zWindow(DispenseConfig cfg, RawMapper mapper) throws Exception {
         return zWindow(cfg, mapper, null);
     }
@@ -290,6 +290,9 @@ public final class GcodeStreamValidator {
         double rawX = zc == null ? 0 : zc.startRawX, rawY = zc == null ? 0 : zc.startRawY;
         // where the paste lands, from the raw head X/Y
         double ox = zc == null ? 0 : zc.dx + prog.landingDxMm, oy = zc == null ? 0 : zc.dy + prog.landingDyMm;
+        // I12 is one entry for the valve and screw lines (their count and the first) and one for the valve-on moves
+        int outLines = 0, crossings = 0;
+        String firstOut = null, firstCross = null, dot = null;
         Pattern zWord = zw == null ? null
                 : Pattern.compile("(?:^|\\s)" + Pattern.quote(zw.letterZ) + "([-+]?[0-9]*\\.?[0-9]+)");
         boolean pump = false, valve = false, zeroed = prog.bZeroedAtStart, inDot = false, armed = false;
@@ -324,9 +327,10 @@ public final class GcodeStreamValidator {
                     p.add(where + "valve ON before pump ON");
                 }
                 valve = true;
-                String out = zc == null ? null : zc.zones.refusal(rawX + ox, rawY + oy);
+                String out = zc == null ? null : zc.zones.lineRefusal("the valve ON at line " + n, rawX + ox, rawY + oy);
                 if (out != null) {
-                    p.add(where + "I12: " + out);
+                    outLines++;
+                    firstOut = firstOut == null ? out : firstOut;
                 }
             }
             else if (norm.equals(ControllerCommands.VALVE_OFF)) {
@@ -357,7 +361,8 @@ public final class GcodeStreamValidator {
                 if (valve && (nx != rawX || ny != rawY)) {
                     String cross = zc.zones.crossing(rawX + ox, rawY + oy, nx + ox, ny + oy);
                     if (cross != null) {
-                        p.add(where + "I12: " + cross);
+                        crossings++;
+                        firstCross = firstCross == null ? "line " + n + " " + cross : firstCross;
                     }
                 }
                 rawX = nx;
@@ -383,9 +388,11 @@ public final class GcodeStreamValidator {
                 if (!(pump && valve)) {
                     p.add(where + "B move outside a pressure session");
                 }
-                String out = zc == null ? null : zc.zones.refusal(rawX + ox, rawY + oy);
+                String out = zc == null ? null : zc.zones.lineRefusal((inDot && dot != null ? "dot '" + dot + "'"
+                        : "the screw") + " at line " + n, rawX + ox, rawY + oy);
                 if (out != null) {
-                    p.add(where + "I12: " + out);
+                    outLines++;
+                    firstOut = firstOut == null ? out : firstOut;
                 }
             }
             else if (s.equals("M400") && inDot) {
@@ -399,12 +406,21 @@ public final class GcodeStreamValidator {
             }
             if (line.has(GcodeProgram.Marker.DOT_BEGIN)) {
                 inDot = true;
+                dot = line.padId;
             }
             if (line.has(GcodeProgram.Marker.DOT_END)) {
                 inDot = false;
             }
         }
         turns.end();
+        if (outLines > 0) {
+            p.add("I12: " + (outLines == 1 ? "" : outLines + " valve or screw lines put paste where it may not go; the "
+                    + "first: ") + firstOut);
+        }
+        if (crossings > 0) {
+            p.add("I12: " + (crossings == 1 ? "" : crossings + " moves with the valve on cross a forbidden zone; the "
+                    + "first: ") + firstCross);
+        }
         if (pump || valve) {
             p.add("program ends with pneumatics ON");
         }

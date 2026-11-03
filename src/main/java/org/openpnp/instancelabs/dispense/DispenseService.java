@@ -755,9 +755,10 @@ public final class DispenseService {
     }
 
     /**
-     * BR-03: moves the needle so that its paste lands on (x, y) (N2 there minus the landing + trim, as programs aim)
-     * at OpenPnP's safe Z (both tools up first), on the calling machine thread, and waits until the head is still: the
-     * pressure hold's park. Refused with the position unknown (BR-02).
+     * BR-03: moves the needle so that its paste lands on (x, y) (N2 there minus the landing + trim, as programs aim),
+     * both tools up first (OpenPnP's safe Z), and ends at the travel height; on the calling machine thread, waiting
+     * until the head is still: the pressure hold's park. Refused with the position unknown (BR-02), and when N2's safe
+     * Z zone does not hold the travel height (on the see-saw a nozzle would go into the work).
      */
     public void parkNeedle(double x, double y) throws Exception {
         requireAvailable();
@@ -765,10 +766,18 @@ public final class DispenseService {
         if (unknown != null) {
             throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
         }
-        double[] l = landingAndTrim(cfg);
+        DispenseConfig c = cfg;
+        double[] l = landingAndTrim(c);
+        double nx = x - l[0], ny = y - l[1];
+        OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) configuration.getMachine(), nozzle,
+                c.bAxisName);
+        if (outsideSafeZone(mapper.zSafeZoneRaw(), mapper.toRaw(nx, ny, c.travelSafeZMm).z)) {
+            throw refused(String.format(Locale.ROOT, "the travel height %.1f mm is outside N2's safe Z zone: on the "
+                    + "see-saw the park would put a nozzle into the work", c.travelSafeZMm));
+        }
         Location at = nozzle.getLocation().convertToUnits(LengthUnit.Millimeters);
-        org.openpnp.util.MovableUtils.moveToLocationAtSafeZ(nozzle, new Location(LengthUnit.Millimeters, x - l[0],
-                y - l[1], at.getZ(), at.getRotation()));
+        org.openpnp.util.MovableUtils.moveToLocationAtSafeZ(nozzle, new Location(LengthUnit.Millimeters, nx, ny,
+                c.travelSafeZMm, at.getRotation()));
         configuration.getMachine().getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
     }
 

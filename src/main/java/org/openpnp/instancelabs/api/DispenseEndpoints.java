@@ -323,12 +323,9 @@ final class DispenseEndpoints {
             ctx.requirePositionKnown(svc);
         }
         if (!o.pumpOnly) {
-            OutputZones zones = svc.outputZones();
-            double[] at = o.park != null ? o.park : svc.needleXY();
-            String out = at == null ? "the needle's position is unknown" : zones.refusal(at[0], at[1]);
+            String out = PressureHold.zoneRefusal(svc, o, o.park != null ? o.park : svc.needleXY());
             if (out != null) {
-                throw ApiException.refused("I12: " + out + (o.park == null ? " (or start it with park: 'waste')"
-                        : ""));
+                throw ApiException.refused("I12: " + out);
             }
         }
         return ctx.pressure.start(svc, o);
@@ -357,6 +354,7 @@ final class DispenseEndpoints {
                 }
                 o.park = new double[] {l.x, l.y};
                 o.parkName = name;
+                o.parkPlace = name;
             }
             else if (p.isJsonObject() && p.getAsJsonObject().has("x") && p.getAsJsonObject().has("y")) {
                 double x = p.getAsJsonObject().get("x").getAsDouble(), y = p.getAsJsonObject().get("y").getAsDouble();
