@@ -984,6 +984,8 @@ public class ApiServerSimTest {
         ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, String.join("\n",
                 ControllerCommands.STOP_SEQUENCE));
+        // a lost ok must break the 15 s below: the Stop now sends its other lines anyway (BR-66), after the timeout
+        sim.driver.setTimeoutMilliseconds(20000);
         try (SlowProxy proxy = new SlowProxy(sim.server.getPort(), 10)) {
             sim.machine.setEnabled(false);
             sim.driver.disconnect();

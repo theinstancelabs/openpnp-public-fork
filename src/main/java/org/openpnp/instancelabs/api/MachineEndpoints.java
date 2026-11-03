@@ -50,8 +50,8 @@ final class MachineEndpoints {
     static final long STOP_ANSWER_MS = 1500;
     /**
      * Longest Start waits for a switch-off still running (BR-52): one DISABLE_COMMAND line waiting the driver's timeout
-     * for a lost ok (10 s on the machines so far; the driver gives up on the rest) and a closing link's reader join
-     * (3 s), with room to spare.
+     * for a lost ok (10 s on the machines so far; the lines after it wait at most 1 s each, BR-66) and a closing link's
+     * reader join (3 s), with room to spare.
      */
     static final long START_WAITS_FOR_SWITCH_OFF_MS = 20000;
 

@@ -1234,29 +1234,40 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     }
 
     /**
-     * Instance Labs (BR-66): each line of {@code gCode} goes out even if one before it failed or got no answer. A
-     * controller error pending before a line is logged instead of thrown, so it cannot swallow the line.
+     * Instance Labs (BR-66): each line of {@code gCode} goes out even if one before it failed or got no answer, as the
+     * dispense engine's I1 shutdown ({@code DriverGcodeChannel.sendCritical}). A line refused by a pending controller
+     * error (bailOnError clears it as it throws) is sent again, up to 3 attempts. After a line that failed otherwise
+     * (no answer within the timeout), the next lines wait at most 1 s each: a silent controller cannot act on them
+     * anyway, and the Stop then ends in about the timeout plus a second per line, not the timeout per line.
+     * GcodeAsyncDriver (not the live machine's driver) only queues the lines here; its writer thread still drops a
+     * line whose predecessor's ok timed out under confirmation flow control (upstream behaviour).
      */
     private void sendEveryLine(String gCode) {
         if (gCode == null) {
             return;
         }
+        long timeout = timeoutMilliseconds;
         for (String command : gCode.split("\n")) {
             command = command.trim();
             if (command.length() == 0) {
                 continue;
             }
-            Line pending = errorResponse;
-            if (pending != null) {
-                errorResponse = null;
-                Logger.warn("{} a controller error was pending at the Stop, sending {} anyway: {}", getName(), command,
-                        pending);
-            }
-            try {
-                sendCommand(command, timeoutMilliseconds);
-            }
-            catch (Exception e) {
-                Logger.warn(e, "{} Stop line {} failed; the next lines go out anyway", getName(), command);
+            for (int attempt = 1;; attempt++) {
+                try {
+                    sendCommand(command, timeout);
+                    break;
+                }
+                catch (Exception e) {
+                    String msg = String.valueOf(e.getMessage());
+                    if (msg.contains("error response from controller") && attempt < 3) {
+                        Logger.warn("{} Stop line {} refused by a pending controller error, sending it again: {}",
+                                getName(), command, msg);
+                        continue;
+                    }
+                    Logger.warn(e, "{} Stop line {} failed; the next lines go out anyway", getName(), command);
+                    timeout = Math.min(timeout, 1000);
+                    break;
+                }
             }
         }
     }
