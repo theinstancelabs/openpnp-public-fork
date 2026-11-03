@@ -138,7 +138,7 @@ public final class DispenseService {
     private MachineListener machineListener;
     private MachineListener identityListener;
     /**
-     * Whether the controller of the current connection said it is OpenPnP's simulator (M115 at the
+     * Whether the controller of the current connection said it is a simulator (GcodeServer or lumen-sim; M115 at the
      * connect or of the last task), null when not asked yet on this connection.
      */
     private volatile Boolean connectionSimulated;
@@ -236,8 +236,12 @@ public final class DispenseService {
      */
     public static synchronized DispenseService start(Configuration configuration) throws SQLException, IOException {
         if (instance != null) {
-            instance.shutdown();
-            instance = null;
+            try {
+                instance.shutdown();
+            }
+            finally {
+                instance = null;
+            }
         }
         startError = null;
         try {

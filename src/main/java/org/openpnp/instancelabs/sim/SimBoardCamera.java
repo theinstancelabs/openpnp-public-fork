@@ -25,11 +25,12 @@ import org.openpnp.util.ImageUtils;
  * into an ImageCamera, so its XML fits this class).
  *
  * <ul>
- * <li>{@link #open()} refuses unless every driver is loopback TCP and the scene file exists, so a
+ * <li>{@link #open()} refuses unless every driver is on a simulator transport (loopback TCP, or
+ * lumen-sim's pseudo-terminal: {@link SimGuard#isSimulatorTransport}) and the scene file exists, so a
  * mis-set class in a real configuration only gives a camera that does not open.</li>
  * <li>{@link #internalCapture()} draws the board only while {@link SimGuard#isSimulated} (the
- * controller said GcodeServer on this connection); otherwise a uniform grey frame stamped
- * {@value #UNCONFIRMED}, on which nothing can be found.</li>
+ * controller said it is a simulator on this connection: GcodeServer or lumen-sim); otherwise a
+ * uniform grey frame stamped {@value #UNCONFIRMED}, on which nothing can be found.</li>
  * <li>The configured flips are applied to the drawing in advance: ReferenceCamera's transform flips it
  * back, so the engine sees the board the right way round. Any other image transform is refused.</li>
  * </ul>
