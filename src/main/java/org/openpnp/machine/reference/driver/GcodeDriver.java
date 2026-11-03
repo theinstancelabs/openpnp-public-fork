@@ -561,8 +561,11 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                 sendGcode(getCommand(null, CommandType.ENABLE_COMMAND));
             }
             else {
+                // Instance Labs (BR-66): the Stop's lines one by one, as the dispense engine's I1 shutdown. A controller
+                // error left pending, or a line that fails or gets no answer, no longer keeps the lines after it (M410
+                // first, then the valves and pumps off) from going out.
+                sendEveryLine(getCommand(null, CommandType.DISABLE_COMMAND));
                 try {
-                    sendGcode(getCommand(null, CommandType.DISABLE_COMMAND));
                     drainCommandQueue(getTimeoutAtMachineSpeed());
                 }
                 catch (Exception e) {
@@ -1228,6 +1231,34 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         return timeoutMilliseconds == -1 ?
                 timeoutMilliseconds 
                 : Math.round(timeoutMilliseconds/Math.max(0.05, Configuration.get().getMachine().getSpeed()));
+    }
+
+    /**
+     * Instance Labs (BR-66): each line of {@code gCode} goes out even if one before it failed or got no answer. A
+     * controller error pending before a line is logged instead of thrown, so it cannot swallow the line.
+     */
+    private void sendEveryLine(String gCode) {
+        if (gCode == null) {
+            return;
+        }
+        for (String command : gCode.split("\n")) {
+            command = command.trim();
+            if (command.length() == 0) {
+                continue;
+            }
+            Line pending = errorResponse;
+            if (pending != null) {
+                errorResponse = null;
+                Logger.warn("{} a controller error was pending at the Stop, sending {} anyway: {}", getName(), command,
+                        pending);
+            }
+            try {
+                sendCommand(command, timeoutMilliseconds);
+            }
+            catch (Exception e) {
+                Logger.warn(e, "{} Stop line {} failed; the next lines go out anyway", getName(), command);
+            }
+        }
     }
 
     protected void sendGcode(String gCode, long timeout) throws Exception {
