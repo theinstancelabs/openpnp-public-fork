@@ -6,8 +6,8 @@ directory only holds what runs them and ships them. Python here is standard libr
 | Path | What | Request |
 |---|---|---|
 | `../.github/workflows/ci.yml` | The pipeline: one required check, `gate` | INF-01 |
-| `../.github/actions/sim-env/` | Sets a runner up for the SIM gates (JDK, uinav, Xvfb, Playwright, lab layout) | INF-01 |
-| `ci/` | CI helpers: `lab_layout.py`, `acceptance.py`, `make_release.py`, `publish_release.py`, `surefire_summary.py` | INF-01 |
+| `../.github/actions/sim-env/` | Sets a runner up for the SIM gates (JDK, uinav, Xvfb, Playwright, the gates' input files) | INF-01 |
+| `ci/` | CI helpers: `sim_env.py`, `acceptance.py`, `make_release.py`, `publish_release.py`, `surefire_summary.py` | INF-01 |
 | `fixtures/` | The lab files the SIM gates read: `lab-config/` (= `~/.openpnp2` of 10-27, the config the gates are green against, minus backups, logs and two legacy automation scripts), `lab-instancelabs/` (`dispense-config.json`, bench run files without photos) | INF-01 |
 | `deploy/` | The lab computer's deployer (`il_deploy.py`, systemd units) | INF-02 |
 | `lumen-sim/` | Simulated LumenPnP Marlin controller on a pty | INF-03 |
@@ -32,9 +32,16 @@ Runs on every pull request, on pushes to `il/integration`, and by hand (workflow
 The SIM jobs need read access to the private `theinstancelabs/openpnp-uinav` (Actions secret `UINAV_TOKEN` or
 `UINAV_DEPLOY_KEY`); without it they fail with a message saying so, never pass. uinav is pinned by `UINAV_REF`.
 
-The gates read host paths (`~/.openpnp2`, `~/Desktop/ftp.board.xml`, `/home/lumen/instancelabs/{config,runs}`).
-`ci/lab_layout.py` lays the fixtures out at those paths on the runner, so the gates run unchanged. It refuses to run
-on the lab computer and never overwrites.
+The gates default to the lab computer's paths (`~/.openpnp2`, `~/Desktop/ftp.board.xml`,
+`/home/lumen/instancelabs/{config,runs}`) and read env overrides instead when set (BR-40). `ci/sim_env.py DIR` copies
+the fixtures into DIR (new or empty; nothing outside it is written): the live config with a `boards.xml`, the test
+board, `machine.xml.patched` from `tools/instancelabs/make_machine_patch.py`, the engine's `dispense-config.json` and
+the bench run files, and prints the overrides in `GITHUB_ENV` format (`OPENPNP_CONFIG`, `IL_LIVE_CONFIG`,
+`IL_TEST_BOARD`, `IL_PATCHED_MACHINE_XML`, `IL_DISPENSE_CONFIG`, `IL_RUNS_DIR`, `LUMEN_SIM_E2E_CONFIG`,
+`LUMEN_SIM_E2E_DISPENSE_CONFIG`). CI: `python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"`. On any
+computer, the same env runs a gate on the fixtures instead of the lab's files:
+`eval "$(python3 infra/ci/sim_env.py /tmp/lab --export)"`. (`ci/lab_layout.py`, the old way: the fixtures copied to
+those host paths with sudo, is superseded and goes when the workflow switches.)
 
 ## Tests
 ```
