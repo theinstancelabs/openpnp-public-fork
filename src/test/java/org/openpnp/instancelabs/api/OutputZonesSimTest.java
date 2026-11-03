@@ -246,24 +246,46 @@ public class OutputZonesSimTest {
         sim.server.mark();
         CompletableFuture<HttpResponse<String>> first = startHeldInThePark("{\"park\":\"waste\"}");
         assertEquals("off", ok("POST", "/api/pressure/stop", null).get("state").getAsString());
-        CompletableFuture<HttpResponse<String>> second = async("POST", "/api/pressure/start", "{}");
-        waitFor(() -> {
-            try {
-                return !"off".equals(pressure().get("state").getAsString()); // starting (or on under load)
-            }
-            catch (Exception e) {
-                return false;
-            }
-        }, "the newer start");
+        // #12 final review m2: while the park still moves, a newer start is refused (OpenPnP is busy), so it can never
+        // open the valve where a park that failed after OpenPnP planned it left the head
+        HttpResponse<String> busy = async("POST", "/api/pressure/start", "{}").get(30, TimeUnit.SECONDS);
+        assertEquals(409, busy.statusCode(), busy.body());
+        assertTrue(busy.body().contains("busy"), busy.body());
         sim.server.delayBeforeOkMs.clear(); // the park goes on
-        HttpResponse<String> a = first.get(60, TimeUnit.SECONDS), b = second.get(60, TimeUnit.SECONDS);
+        HttpResponse<String> a = first.get(60, TimeUnit.SECONDS);
         assertEquals(409, a.statusCode(), a.body());
-        assertEquals(200, b.statusCode(), b.body());
+        assertConsistent("off");
+        assertFalse(sim.server.sinceMark().contains("M106 P3 S255"), "the switched-off start never opened the valve");
+        // once the head is still, a newer start works and opens the valve once
+        JsonObject on = ok("POST", "/api/pressure/start", "{}");
+        assertEquals("on", on.get("state").getAsString(), on.toString());
         assertConsistent("on");
         assertEquals(1, java.util.Collections.frequency(sim.server.sinceMark(), "M106 P3 S255"), "one valve ON");
         JsonObject off = ok("POST", "/api/pressure/stop", null);
         assertFalse(off.has("note"), "not 'already off': " + off);
         assertConsistent("off");
+    }
+
+    /**
+     * #12 final review M1: after a board run the needle stands over the board, a probed surface: a hold there would
+     * put 18 psi of drool on the finished board, so Pressure on without a park is refused; parked over the waste it
+     * goes on.
+     */
+    @Test
+    public void aHoldIsRefusedOverABoardAndGoesOnOverTheWaste() throws Exception {
+        double[] at = svc.needleXY();
+        ok("PUT", "/api/surfaces/board", String.format(java.util.Locale.ROOT, "{\"points\":[[%.3f,%.3f,5.5],"
+                + "[%.3f,%.3f,5.5],[%.3f,%.3f,5.5]]}", at[0] - 10, at[1] - 10, at[0] + 10, at[1] - 10, at[0],
+                at[1] + 10));
+        sim.server.mark();
+        call("POST", "/api/pressure/start", "{}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("I12") && lastBody.contains("park first"), lastBody);
+        assertEquals("ok".equals(i12().get("state").getAsString()), false, "I12 shows the hold refused: " + i12());
+        assertFalse(sim.server.sinceMark().contains("M106 P2 S255"), "nothing switched on");
+        JsonObject on = ok("POST", "/api/pressure/start", "{\"park\":\"waste\"}");
+        assertEquals("on", on.get("state").getAsString(), on.toString());
+        stopPressure();
     }
 
     /** Pressure off during the park: the valve never opens, the hold is off, and the next start works. */

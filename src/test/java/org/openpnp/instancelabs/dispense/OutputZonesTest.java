@@ -42,10 +42,43 @@ public class OutputZonesTest {
         assertNull(z.refusal(100, 50), "the waste");
         assertNull(z.refusal(103, 52), "near the waste, inside its radius");
         assertNull(z.refusal(80 + 19 * 2.5, 230), "the last purge spot");
-        assertNull(z.refusal(310, 268), "inside the probed patch");
+        assertNull(z.lineRefusal("dot 'P1' at line 9", 310, 268), "a program's dot inside the probed patch");
         assertEquals("waste", z.zoneAt(100, 50));
         assertEquals("purge row", z.zoneAt(85, 230));
         assertEquals("surface patch1", z.zoneAt(310, 268));
+    }
+
+    /**
+     * #12 final review M1: the hold opens the valve only over a sink (the waste, the towel, the cup, the purge row,
+     * the calibration area, a coupon), never over a board or another surface (a finished board would take 18 psi of
+     * drool); a program keeps every allowed zone (I4 holds its dots to their surface).
+     */
+    @Test
+    public void aHoldOpensTheValveOnlyOverASink() {
+        DispenseConfig c = config();
+        c.locations.put("cup", new DispenseConfig.NamedLocation(140, 50, 5));
+        c.locations.put("blank", new DispenseConfig.NamedLocation(170, 120, 5.5));
+        c.locations.put("park", new DispenseConfig.NamedLocation(60, 120, 31.5));
+        c.calibrationArea.x0Mm = 20.0;
+        c.calibrationArea.y0Mm = 160.0;
+        c.calibrationArea.widthMm = 30.0;
+        c.calibrationArea.heightMm = 20.0;
+        OutputZones z = OutputZones.of(c, CAMERA);
+        assertNull(z.refusal(100, 50), "the waste");
+        assertNull(z.refusal(140, 50), "the cup");
+        assertNull(z.refusal(85, 230), "the purge row");
+        assertNull(z.refusal(30, 170), "the calibration area");
+        String board = z.refusal(310, 268);
+        assertNotNull(board, "a probed surface (a board) is no sink");
+        assertTrue(board.contains("park first"), board);
+        assertTrue(board.contains("the waste"), board);
+        assertNotNull(z.refusal(170, 120), "the blank's place is no sink");
+        assertNotNull(z.refusal(60, 120), "the park place is no sink");
+        assertNotNull(z.parkRefusal("blank", 170, 120), "a park over a place that is no sink");
+        assertNull(z.parkRefusal("waste", 100, 50));
+        // a program still lays its dots on the surfaces and the places
+        assertNull(z.lineRefusal("dot 'P1' at line 9", 310, 268));
+        assertNull(z.lineRefusal("the valve ON at line 4", 170, 120));
     }
 
     /** ZFrameTest's pad R24.1 and a 0603 pad R16.1 at (x, y), planned on its probed ftp board. */
