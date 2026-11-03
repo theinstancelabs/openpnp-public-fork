@@ -7,11 +7,23 @@ M990 S3000
 G0 X34.6890 Y115.9360 F12000
 ; pressurize: pump ON -> wait -> valve ON -> settle
 M106 P2 S255
-G4 P1000
+G4 P250
+G4 P250
+G4 P250
+G4 P250
 M106 P3 S255
-G4 P1000
-G4 P1000
-G4 P1000
+G4 P250
+G4 P250
+G4 P250
+G4 P250
+G4 P250
+G4 P250
+G4 P250
+G4 P250
+G4 P250
+G4 P250
+G4 P250
+G4 P250
 ; first purge dot sets the phase: rest 257.6 deg -> 117.9 deg, the work starts at 297.9 deg
 ; dot -3 purge#0 rot 220.495
 G1 Z60.0400 F3000
