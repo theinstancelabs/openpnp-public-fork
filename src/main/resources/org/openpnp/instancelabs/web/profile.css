@@ -232,6 +232,8 @@
 .cal-to__s { display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; line-height: 1.4; }
 .cal-to__big { font: 650 16px/1.25 var(--font-ui); }
 .cal-to__ok { display: flex; align-items: center; gap: 6px; color: var(--ok); font-weight: 650; }
+/* a touch-off of another needle or frame: no Use button, the reason in its place */
+.cal-to__old { display: flex; align-items: flex-start; gap: 6px; color: var(--need); font-weight: 650; }
 .cal-current { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 15px; }
 .cal-current__k { font-weight: 650; margin-right: 4px; }
 .cal-result { margin: 0; font-size: 14px; padding: 8px 12px; border-radius: 10px; background: var(--ok-bg); color: var(--ok); font-weight: 600; }
