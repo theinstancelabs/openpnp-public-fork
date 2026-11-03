@@ -129,11 +129,22 @@ public class PowerCycleSimTest {
         assertEquals(0, rep.get("z").getAsDouble(), 1e-9);
         assertEquals(720, rep.get("b").getAsDouble(), 1e-9);
 
+        // #11 final review MINOR: the status no longer says N1 is low and that the home raises it (the believed Z 0
+        // is the boot's, and the attested home goes straight to G28)
+        JsonObject home0 = m.getAsJsonObject("home");
+        assertFalse(home0.get("n1Low").getAsBoolean(), m.toString());
+        assertTrue(home0.get("lowTool").isJsonNull(), m.toString());
+        assertTrue(home0.get("n1Z").isJsonNull(), m.toString());
+
         // without the operator's word: refused, and nothing is sent
         sim.server.mark();
         call("POST", "/api/machine/home", "{\"wait\":true}");
         assertEquals(409, lastStatus, lastBody);
         assertTrue(lastBody.contains("nothing is under either tool"), lastBody);
+        // #11 final review MAJOR: G28 drives X, then Y, at the tools' height first (no Z clearance on this firmware)
+        assertTrue(lastBody.contains("homing corner") && lastBody.contains("at the height the tools are at now")
+                && lastBody.contains("level N1 and the needle by hand"), lastBody);
+        assertFalse(lastBody.contains("nothing moves before it"), lastBody);
         assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
 
         // with it: G28 is the first motion line, no Z move on the believed position before it
@@ -303,6 +314,7 @@ public class PowerCycleSimTest {
         call("POST", "/api/machine/z-check", "{\"wait\":true}");
         assertEquals(409, lastStatus, lastBody);
         assertTrue(lastBody.contains("controller was reset"), lastBody);
+        assertTrue(lastBody.contains("homing corner"), "the remedy says what the home does: " + lastBody);
         call("POST", "/api/pressure/start", null);
         assertEquals(409, lastStatus, lastBody);
         assertTrue(lastBody.contains("controller was reset"), lastBody);
