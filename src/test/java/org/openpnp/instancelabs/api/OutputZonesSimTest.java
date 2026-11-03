@@ -10,6 +10,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -108,6 +111,50 @@ public class OutputZonesSimTest {
         ok("POST", "/api/pressure/stop", null);
     }
 
+    CompletableFuture<HttpResponse<String>> async(String method, String path, String json) {
+        return http.sendAsync(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + api.getPort() + path))
+                .timeout(Duration.ofSeconds(120)).header("Content-Type", "application/json")
+                .method(method, json == null ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers.ofString(json))
+                .build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    static void waitFor(BooleanSupplier done, String what) throws Exception {
+        long end = System.currentTimeMillis() + 20_000;
+        while (!done.getAsBoolean()) {
+            assertTrue(System.currentTimeMillis() < end, "waited 20 s for " + what);
+            Thread.sleep(10);
+        }
+    }
+
+    JsonObject pressure() throws Exception {
+        return ok("GET", "/api/status", null).getAsJsonObject("pressure");
+    }
+
+    /** Starts the hold with a park whose first move the controller holds for 3 s; returns once that move was sent. */
+    CompletableFuture<HttpResponse<String>> startHeldInThePark(String json) throws Exception {
+        sim.server.delayBeforeOkMs.put("G1", 3000L);
+        CompletableFuture<HttpResponse<String>> f = async("POST", "/api/pressure/start", json);
+        waitFor(() -> sim.server.sinceMark().stream().anyMatch(l -> l.startsWith("G1")), "the park's first move");
+        return f;
+    }
+
+    /**
+     * The pressure state agrees with the lines since the mark: "on" (with its I7 auto-off and keepalive) exactly when
+     * the last valve line opened it.
+     */
+    void assertConsistent(String state) throws Exception {
+        List<String> l = sim.server.sinceMark();
+        boolean open = l.lastIndexOf("M106 P3 S255") > l.lastIndexOf("M107 P3");
+        JsonObject p = pressure();
+        assertEquals(state, p.get("state").getAsString(), p + " after " + l);
+        assertEquals("on".equals(state), open, "the valve is " + (open ? "open" : "closed") + ": " + p + " after " + l);
+        if (open) {
+            assertFalse(p.get("autoOffAtMs").isJsonNull(), "the I7 auto-off is set: " + p);
+            assertTrue(p.get("keepaliveArmed").getAsBoolean(), "the keepalive pings: " + p);
+        }
+    }
+
     @Test
     public void theHoldOpensTheValveOnlyOverAPlaceAndParksFirstWhenAsked() throws Exception {
         JsonObject z = i12();
@@ -181,6 +228,68 @@ public class OutputZonesSimTest {
         assertEquals(40 - 1.5, at.getY(), 0.01);
         assertEquals("waste", i12().get("zone").getAsString());
         stopPressure();
+    }
+
+    /**
+     * Review (MAJOR), its sequence: Pressure on with park; Pressure off during the park (the controller holds the
+     * move); Pressure on without park. The first start ends refused when its park ends and sends nothing; the newer
+     * one switches on (over the waste the park reached) and owns the state: on, with its auto-off and pings, until
+     * Pressure off vents it.
+     */
+    @Test
+    public void aStartSwitchedOffDuringItsParkNeverActsForANewerOne() throws Exception {
+        sim.towelUnderNeedle(svc); // the newer start passes I12 wherever OpenPnP shows the needle
+        ok("PUT", "/api/config", "{\"pumpToValveSettleMs\":200,\"valveSettleMs\":200}");
+        sim.server.mark();
+        CompletableFuture<HttpResponse<String>> first = startHeldInThePark("{\"park\":\"waste\"}");
+        assertEquals("off", ok("POST", "/api/pressure/stop", null).get("state").getAsString());
+        CompletableFuture<HttpResponse<String>> second = async("POST", "/api/pressure/start", "{}");
+        waitFor(() -> {
+            try {
+                return "starting".equals(pressure().get("state").getAsString());
+            }
+            catch (Exception e) {
+                return false;
+            }
+        }, "the newer start");
+        sim.server.delayBeforeOkMs.clear(); // the park goes on
+        HttpResponse<String> a = first.get(60, TimeUnit.SECONDS), b = second.get(60, TimeUnit.SECONDS);
+        assertEquals(409, a.statusCode(), a.body());
+        assertEquals(200, b.statusCode(), b.body());
+        assertConsistent("on");
+        assertEquals(1, java.util.Collections.frequency(sim.server.sinceMark(), "M106 P3 S255"), "one valve ON");
+        JsonObject off = ok("POST", "/api/pressure/stop", null);
+        assertFalse(off.has("note"), "not 'already off': " + off);
+        assertConsistent("off");
+    }
+
+    /** Pressure off during the park: the valve never opens, the hold is off, and the next start works. */
+    @Test
+    public void pressureOffDuringTheParkNeverOpensTheValve() throws Exception {
+        ok("PUT", "/api/config", "{\"pumpToValveSettleMs\":200,\"valveSettleMs\":200}");
+        sim.server.mark();
+        CompletableFuture<HttpResponse<String>> start = startHeldInThePark("{\"park\":\"waste\"}");
+        assertEquals("off", ok("POST", "/api/pressure/stop", null).get("state").getAsString());
+        sim.server.delayBeforeOkMs.clear();
+        HttpResponse<String> a = start.get(60, TimeUnit.SECONDS);
+        assertEquals(409, a.statusCode(), a.body());
+        assertFalse(sim.server.sinceMark().contains("M106 P3 S255"), "the valve never opened");
+        assertConsistent("off");
+        assertEquals("on", ok("POST", "/api/pressure/start", "{}").get("state").getAsString(), "over the waste now");
+        stopPressure();
+    }
+
+    /** STOP during the park: the valve never opens and the hold ends off. */
+    @Test
+    public void aStopDuringTheParkNeverOpensTheValve() throws Exception {
+        sim.server.mark();
+        CompletableFuture<HttpResponse<String>> start = startHeldInThePark("{\"park\":\"waste\"}");
+        ok("POST", "/api/stop", null);
+        sim.server.delayBeforeOkMs.clear();
+        HttpResponse<String> a = start.get(60, TimeUnit.SECONDS);
+        assertEquals(409, a.statusCode(), a.body());
+        assertFalse(sim.server.sinceMark().contains("M106 P3 S255"), "the valve never opened");
+        assertConsistent("off");
     }
 
     @Test
