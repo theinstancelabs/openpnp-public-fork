@@ -25,11 +25,12 @@ import org.openpnp.util.ImageUtils;
  * into an ImageCamera, so its XML fits this class).
  *
  * <ul>
- * <li>{@link #open()} refuses unless every driver is loopback TCP and the scene file exists, so a
+ * <li>{@link #open()} refuses unless every driver is on a simulator transport (loopback TCP, or
+ * lumen-sim's pseudo-terminal: {@link SimGuard#isSimulatorTransport}) and the scene file exists, so a
  * mis-set class in a real configuration only gives a camera that does not open.</li>
  * <li>{@link #internalCapture()} draws the board only while {@link SimGuard#isSimulated} (the
- * controller said GcodeServer on this connection); otherwise a uniform grey frame stamped
- * {@value #UNCONFIRMED}, on which nothing can be found.</li>
+ * controller said it is a simulator on this connection: GcodeServer or lumen-sim); otherwise a
+ * uniform grey frame stamped {@value #UNCONFIRMED}, on which nothing can be found.</li>
  * <li>The configured flips are applied to the drawing in advance: ReferenceCamera's transform flips it
  * back, so the engine sees the board the right way round. Any other image transform is refused.</li>
  * </ul>
@@ -55,10 +56,13 @@ public class SimBoardCamera extends ImageCamera {
         super.open();
     }
 
-    /** Throws unless every driver is a GcodeDriver on loopback TCP and the scene file exists. */
+    /**
+     * Throws unless every driver is a GcodeDriver on loopback TCP or on lumen-sim's pseudo-terminal (BR-47), and the
+     * scene file exists.
+     */
     static void requireSimulationMachine(Configuration c) {
         Machine m = c.getMachine();
-        if (!SimGuard.isLoopbackOnly(m)) {
+        if (!SimGuard.isSimulatorTransport(m)) {
             throw new IllegalStateException("simulation-only camera on a non-simulated machine: " + drivers(m));
         }
         File scene = SimGuard.sceneFile(c);

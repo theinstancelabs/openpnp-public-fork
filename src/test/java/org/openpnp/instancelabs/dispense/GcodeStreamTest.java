@@ -450,9 +450,36 @@ public class GcodeStreamTest {
         GcodeProgram p = board(c, mapper(), toyPlan(c), false, true, 0L);
         String s = p.asString();
         assertTrue(s.contains("M990 S3000"));
-        assertTrue(s.contains("M106 P2 S255\nG4 P1000\nG4 P1000\nG4 P500\nM106 P3 S255\nG4 P1000\nG4 P1000\nG4 P1000\n"));
+        // the settles go out in pieces of at most 250 ms whatever the ping interval (STOP latency, review 10-31)
+        assertTrue(s.contains("M106 P2 S255\n" + "G4 P250\n".repeat(10) + "M106 P3 S255\n" + "G4 P250\n".repeat(12)), s);
         assertTrue(s.contains("M990 S0"));
         assertTrue(GcodeStreamValidator.validate(p, c, "B").isEmpty());
+    }
+
+    /**
+     * STOP latency (review 10-31 MAJOR, GcodeStreamBuilder:434): the pump-to-valve and valve settles go out in pieces
+     * of at most 250 ms, with or without the host watchdog, so a STOP's valve-off waits at most one piece in the
+     * controller's queue instead of the whole 3 s settle. The per-dot dwell stays the profile's (Process's setting).
+     */
+    @Test
+    public void settlesGoOutInPiecesOfAtMost250Ms() throws Exception {
+        for (boolean keepalive : new boolean[] {false, true}) {
+            DispenseConfig c = toyConfig();
+            c.pumpToValveSettleMs = 1000;
+            c.valveSettleMs = 3000;
+            c.profile.dwellMs = 400;
+            GcodeProgram p = board(c, mapper(), toyPlan(c), false, keepalive, 0L);
+            List<String> t = p.text();
+            int pump = t.indexOf(ControllerCommands.PUMP_ON);
+            int valve = t.indexOf(ControllerCommands.VALVE_ON);
+            assertEquals(java.util.Collections.nCopies(4, "G4 P250"), t.subList(pump + 1, valve), "keepalive " + keepalive);
+            assertEquals(java.util.Collections.nCopies(12, "G4 P250"), t.subList(valve + 1, valve + 13),
+                    "keepalive " + keepalive);
+            assertFalse(t.get(valve + 13).startsWith("G4"), t.subList(valve, valve + 14).toString());
+            assertEquals(p.dotCount + p.purgeDotCount, t.stream().filter("G4 P400"::equals).count(),
+                    "the per-dot dwell is one line, as before");
+            assertTrue(GcodeStreamValidator.validate(p, c, "B").isEmpty());
+        }
     }
 
     @Test

@@ -72,6 +72,9 @@ public class RecordingGcodeServer implements AutoCloseable {
     /** Marlin M92 B (steps per degree), for the reported step count. */
     public static final double B_STEPS_PER_DEG = 4.44;
 
+    /** The connection being served, or null (dropLink closes it). */
+    private volatile Socket client;
+
     public RecordingGcodeServer() throws Exception {
         server = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
         for (char c : "XYZAB".toCharArray()) {
@@ -86,9 +89,21 @@ public class RecordingGcodeServer implements AutoCloseable {
         return server.getLocalPort();
     }
 
+    /**
+     * The link drops, as when the controller is switched off under a USB connection: the connection being served is
+     * closed (OpenPnP's reader then ends); the next connect is served as usual.
+     */
+    public void dropLink() throws Exception {
+        Socket s = client;
+        if (s != null) {
+            s.close();
+        }
+    }
+
     private void run() {
         while (!server.isClosed()) {
             try (Socket s = server.accept()) {
+                client = s;
                 SimPaste connected = paste;
                 if (connected != null) {
                     connected.powerCycle(); // a reconnect is a controller power-up

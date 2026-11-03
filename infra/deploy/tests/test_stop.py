@@ -62,10 +62,13 @@ class StubService:
         return set()
 
 
-def status(busy=False, run=None, pressure=False, state=None):
+def status(busy=False, run=None, pressure=False, state=None, homing=None):
+    """/api/status; homing None: a build before BR-44 (no machine.homing)."""
     state = state or ("on" if pressure else "off")
-    return 200, {"machine": {"busy": busy, "enabled": True}, "run": run,
-                 "pressure": {"on": state == "on", "state": state}}
+    machine = {"busy": busy, "enabled": True}
+    if homing is not None:
+        machine["homing"] = homing
+    return 200, {"machine": machine, "run": run, "pressure": {"on": state == "on", "state": state}}
 
 
 class Decisions(unittest.TestCase):
@@ -159,6 +162,70 @@ class Decisions(unittest.TestCase):
                 ok, detail = self.deployer(api).stop_machine()
                 self.assertTrue(ok, detail)
                 self.assertEqual((api.posts, api.gets_before_stop), (["/api/stop"], 2))
+
+    # --- BR-44: machine.homing, true from the start of any home until it ends (ReferenceMachine.isHoming) ----------
+    def test_no_stop_while_machine_homing_says_a_home_runs(self):
+        """machine.homing decides that a home runs, whatever else the status shows: an engine run past its home phase,
+        the pressure held or vent_failed (OpenPnP's own Home button does not check the web's pressure hold), or a
+        machine not busy. A STOP's M410 inside G28 hangs the controller, and the valve-off lines queue behind it."""
+        dots = {"running": True, "kind": "board", "phase": "dot 12 of 40"}
+        for name, kw in (("a run past its home", {"busy": True, "run": dots}),
+                         ("the pressure held", {"busy": True, "pressure": True}),
+                         ("vent failed", {"busy": True, "state": "vent_failed"}),
+                         ("not busy", {"busy": False})):
+            with self.subTest(name):
+                api = StubApi(lambda n, kw=kw: status(homing=True, **kw))
+                ok, detail = self.deployer(api).stop_machine()
+                self.assertFalse(ok, detail)
+                self.assertEqual(api.posts, [], "never STOP while machine.homing is true")
+                self.assertIn("machine.homing", detail)
+                # the home ends: the STOP goes out at the first answer that says so
+                api = StubApi(lambda n, kw=kw: status(homing=n < 4, **kw))
+                ok, detail = self.deployer(api).stop_machine()
+                self.assertTrue(ok, detail)
+                self.assertEqual((api.posts, api.gets_before_stop), (["/api/stop"], 4))
+
+    def test_not_homing_yet_keeps_the_pre_home_wait(self):
+        """machine.homing turns true when OpenPnP's home starts. The engine's home phase and the web's home first read
+        the position and raise N1 (DispenseService.homeSafely), busy and not homing yet: a STOP there may meet the G28
+        that follows (WEB_API.md: the check-then-STOP window). So a run in its home phase, and a busy machine, are
+        still waited out; what is STOPped at once stays as before (outputs on)."""
+        pre_home = {"running": True, "kind": "board", "phase": "home: not homed · raising N1 from Z 12.00"}
+        for name, kw in (("the run's home phase", {"busy": True, "run": pre_home}), ("busy", {"busy": True})):
+            with self.subTest(name):
+                api = StubApi(lambda n, kw=kw: status(homing=False, **kw))
+                ok, detail = self.deployer(api).stop_machine()
+                self.assertFalse(ok, detail)
+                self.assertEqual(api.posts, [])
+        dots = {"running": True, "kind": "board", "phase": "dot 12 of 40"}
+        for name, kw in (("a run past its home", {"busy": True, "run": dots}),
+                         ("the pressure held", {"pressure": True}), ("idle", {})):
+            with self.subTest(name):
+                api = StubApi(lambda n, kw=kw: status(homing=False, **kw))
+                ok, detail = self.deployer(api).stop_machine()
+                self.assertTrue(ok, detail)
+                self.assertEqual((api.posts, api.gets_before_stop), (["/api/stop"], 1))
+
+    def test_a_home_ends_when_machine_homing_says_so(self):
+        """The health check's wait for a home its POST did not see end (Deployer._wait_not_busy) also waits while
+        machine.homing is true."""
+        api = StubApi(lambda n: status(busy=False, homing=n < 4))
+        d = self.deployer(api)
+        self.assertTrue(d._wait_not_busy(5))
+        self.assertEqual(api.gets, 4)
+        api = StubApi(lambda n: status(busy=False, homing=True))
+        self.assertFalse(self.deployer(api, "--poll-interval", "0.5")._wait_not_busy(2))
+
+    def test_a_home_ends_when_busy_says_so(self):
+        """The same wait holds while machine.busy is true: with machine.homing false (BR-44), and without it (a build
+        before BR-44, where a rollback can land), where machine.busy alone shows the home."""
+        for homing in (False, None):
+            with self.subTest(homing=homing):
+                api = StubApi(lambda n, homing=homing: status(busy=n < 4, homing=homing))
+                self.assertTrue(self.deployer(api)._wait_not_busy(5))
+                self.assertEqual(api.gets, 4)
+                api = StubApi(lambda n, homing=homing: status(busy=True, homing=homing))
+                self.assertFalse(self.deployer(api, "--poll-interval", "0.5")._wait_not_busy(2))
 
     def test_exec_stop_uses_the_same_rules(self):
         """Exit 0 when the machine is off (or OpenPnP is gone); 1 when it may not be: systemd then marks the unit
@@ -258,6 +325,25 @@ class AgainstTheFake(unittest.TestCase):
         t.join()
         self.assertEqual(self.stops(), [])
         self.assertEqual(self.violations(), [])
+
+    def test_exec_stop_waits_for_a_home_the_run_phase_does_not_show(self):
+        """An engine run past its home phase (dots) while a home runs (OpenPnP's own Home button, a pad calibration's
+        home between its steps): the run's phase alone says STOP at once; machine.homing says wait (BR-44)."""
+        self.fake = FakeOpenPnP(self.lab.port, self.lab.dir, self.lab.config, machine={"home_s": 1.0},
+                                requests=self.lab.requests_path)
+        self.fake.fail.add("run")
+        self.fake.run_active = True
+        self.fake.start_thread()
+        self.fake.enable()
+        t = threading.Thread(target=self.fake.home, args=({"wait": True},), daemon=True)
+        t.start()
+        while not self.fake.homing:
+            pass
+        self.assertEqual(self.lab.main("stop-openpnp"), 0, self.lab.last_out)
+        t.join()
+        self.assertEqual(len(self.stops()), 1)
+        self.assertEqual(self.violations(), [])
+        self.assertFalse(self.fake.enabled)
 
     def test_exec_stop_waits_for_the_engines_abort(self):
         """An engine run (a long prime) during the ExecStop: the STOP disables the machine at once, the run's own abort

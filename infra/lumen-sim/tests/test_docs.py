@@ -44,5 +44,22 @@ class UsbIdentity(unittest.TestCase):
         self.assertIn('baud="115200" name="SerialPortCommunications"/>', out)
 
 
+class SimCapScenarios(unittest.TestCase):
+    """Review round 4: the README sent `register`, `tips` and `padcal` to --sim-cap without saying they fail on the
+    pty until BR-69 feeds the SIM vacuum and paste there; a CI gate built from it would fail on every PR."""
+
+    def test_the_use_it_line_says_they_fail_on_the_pty_until_br69(self):
+        with open(README, encoding="utf-8") as f:
+            text = f.read()
+        section = text[text.index("## The simulator line"):]
+        section = section[:section.index("\n## ")]
+        bullet = section[section.index("- **Use it**"):]
+        bullet = bullet[:bullet.index("\n- ")]
+        for scenario in ("register", "tips", "padcal"):
+            self.assertIn("`%s`" % scenario, bullet)
+        self.assertIn("BR-69", bullet)
+        self.assertRegex(bullet, r"still fail on the pty")
+
+
 if __name__ == "__main__":
     unittest.main()

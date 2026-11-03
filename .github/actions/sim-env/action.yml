@@ -2,8 +2,9 @@ name: SIM environment
 description: >
   Everything the backend's SIM gates need on a GitHub runner: JDK 17, the tested OpenPnP build (artifact from the
   build job) in target/, openpnp-uinav (private: read with a secret), Xvfb, Node 22 + Playwright with Chromium, and
-  the lab computer's file layout from infra/fixtures (infra/ci/lab_layout.py). Exports UINAV, UINAV_DIR,
-  PLAYWRIGHT_DIR and PLAYWRIGHT_BROWSERS_PATH.
+  the gates' input files from infra/fixtures and their env (infra/ci/sim_env.py, BR-40). Exports UINAV, UINAV_DIR,
+  PLAYWRIGHT_DIR, PLAYWRIGHT_BROWSERS_PATH and sim_env.py's OPENPNP_CONFIG, IL_LIVE_CONFIG, IL_TEST_BOARD,
+  IL_PATCHED_MACHINE_XML, IL_DISPENSE_CONFIG, IL_RUNS_DIR, LUMEN_SIM_E2E_CONFIG and LUMEN_SIM_E2E_DISPENSE_CONFIG.
 inputs:
   uinav-token:
     description: read access to theinstancelabs/openpnp-uinav (fine-grained token, contents read)
@@ -109,8 +110,6 @@ runs:
         for f in system-ui sans-serif monospace; do echo "$f -> $(fc-match "$f")"; done
         [ "$(fc-match -f '%{family}' system-ui)" = "Noto Sans" ] && [ "$(fc-match -f '%{family}' sans-serif)" = "Noto Sans" ]
 
-    - name: Lab layout from infra/fixtures
+    - name: The gates' input files from infra/fixtures (BR-40 env overrides)
       shell: bash
-      run: |
-        sudo install -d -o "$(id -u)" -g "$(id -g)" /home/lumen
-        python3 infra/ci/lab_layout.py
+      run: python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"

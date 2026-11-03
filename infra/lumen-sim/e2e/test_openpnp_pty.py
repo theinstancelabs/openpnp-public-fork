@@ -6,8 +6,8 @@ stubs are on the classpath). Everything is driven through the backend's web API 
 does. The config is a copy of ~/.openpnp2 (read only) with machine.xml from tools/instancelabs/make_machine_patch.py,
 the config the SIM acceptance uses, plus visual homing off (the SIM camera has no homing fiducial).
 
-  (a) enable + home through /api/machine/enable and /api/machine/home {"wait": true}: homed, and OpenPnP's axes
-      match lumen-sim's state;
+  (a) enable + home through /api/machine/enable and /api/machine/home {"wait": true, "clearBelowAttested": true}
+      (INF-10): homed, and OpenPnP's axes match lumen-sim's state;
   (b) STOP 4 s into a home (POST /api/stop): 'timeout waiting for response to M410' in OpenPnP's log, the home
       fails, lumen-sim is halted, a reconnect cannot talk to it until 'uinav controller power-cycle';
   (c) the 30-turn prime at 180 rpm through the engine (a needle touch-off with primeRotationDeg 10800 and the
@@ -24,6 +24,7 @@ Skipped unless LUMEN_SIM_E2E=1 and LUMEN_SIM_E2E_JAR names the OpenPnP jar. Take
 Env: UINAV_DIR (openpnp-uinav with --controller pty), LUMEN_SIM_E2E_CONFIG (config dir to copy, default
 ~/.openpnp2), LUMEN_SIM_E2E_DISPENSE_CONFIG (engine config to stage, default the SIM acceptance's if present),
 LUMEN_SIM_E2E_PORTS (web API ports to try, default 18930-18939), LUMEN_SIM_E2E_OUT (keeps logs and results.json).
+UINAV_SIM_CONTROLLER_CAP is ignored: lumen-sim runs without its simulator line, so SimGuard sees the board (BR-47).
 """
 import json
 import os
@@ -108,6 +109,8 @@ class PtySession:
         self.port = free_api_port()
         env = dict(os.environ, OPENPNP_IL_API_PORT=str(self.port), LUMEN_SIM_DIR=LUMEN_SIM_DIR)
         env.setdefault("JAVA_TOOL_OPTIONS", "-Xmx1536m")
+        # The reproductions need the board's exact M115: never lumen-sim's simulator line (uinav's sim default)
+        env.pop("UINAV_SIM_CONTROLLER_CAP", None)
         cmd = [UINAV, "--session", name, "launch", "--controller", "pty", "--controller-park", PARK,
                "--config", stage(os.path.join(tmp, "stage-" + name)), "--openpnp-jar", os.path.abspath(JAR)]
         for x in XML_SETS:
@@ -207,6 +210,11 @@ class PtySession:
         subprocess.run([UINAV, "--session", self.name, "stop"], capture_output=True, timeout=120)
 
 
+# Every home here follows a sim start, i.e. a controller reset (lumen-sim boots at X/Y/Z 0, B 720 like
+# the board). After BR-02 the backend homes from there only with the operator's word that nothing is under N1 or
+# the needle (INF-10); CI's simulator has nothing under the tools. Older backends ignore the field.
+HOME = {"wait": True, "clearBelowAttested": True}
+
 def record(key, value):
     if not OUT:
         return
@@ -276,9 +284,11 @@ class HomeAndPrimeTest(SessionTest):
         st = self.s.status()
         self.assertFalse(st["server"]["simulatorConfirmed"])  # SimGuard: a serial board, i.e. a real machine
         self.enable()
+        # SimGuard asked at the connect (M115): the board's own answer, without lumen-sim's simulator line (BR-47)
+        self.assertFalse(self.s.status()["server"]["simulatorConfirmed"])
         n0 = self.s.io()[1]
         t0 = time.time()
-        code, r = self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
+        code, r = self.s.api("POST", "/api/machine/home", HOME, timeout=180)
         home_s = time.time() - t0
         self.assertEqual(code, 200, r)
         self.assertTrue(r.get("homed"), r)
@@ -310,7 +320,7 @@ class HomeAndPrimeTest(SessionTest):
         st = self.s.status()
         if not st["machine"]["homed"]:
             self.enable()
-            self.assertEqual(self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)[0], 200)
+            self.assertEqual(self.s.api("POST", "/api/machine/home", HOME, timeout=180)[0], 200)
         tip = st["dispense"]["tip"]["key"]
         token = st["dispense"]["needle"].get("changedAtMs")
         setup = [
@@ -351,7 +361,10 @@ class HomeAndPrimeTest(SessionTest):
         moves = [(t, l) for t, d, l in io if d == ">" and l.startswith("G1 B")]
         self.assertEqual(len(moves), 1, moves)
         self.assertRegex(moves[0][1], r"^G1 B108\d\d\.\d+ F64800$")
-        g4 = [i for i, (t, d, l) in enumerate(io) if d == ">" and l == "G4 P250"]
+        # the dwell after the screw move (the pump and valve settles before it also go out as G4 P250 pieces since
+        # PR #15: a STOP's valve-off waits behind at most one piece)
+        i_move = next(i for i, (t, d, l) in enumerate(io) if d == ">" and l.startswith("G1 B"))
+        g4 = [i for i, (t, d, l) in enumerate(io) if i > i_move and d == ">" and l == "G4 P250"]
         self.assertEqual(len(g4), 1)
         t_g4, after = io[g4[0]][0], io[g4[0] + 1:]  # by position: the G1's ok can share the G4's millisecond
         i_abort = next(i for i, (t, d, l) in enumerate(after) if d == ">" and l == "M410")
@@ -376,7 +389,7 @@ class StopDuringHomingTest(SessionTest):
 
         def home():
             t = time.time()
-            res["home"] = self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=200)
+            res["home"] = self.s.api("POST", "/api/machine/home", HOME, timeout=200)
             res["home_s"] = time.time() - t
 
         th = threading.Thread(target=home)
