@@ -34,6 +34,7 @@ import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DotImager;
+import org.openpnp.instancelabs.dispense.FlatVacuum;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.instancelabs.vision.Dot;
 import org.openpnp.machine.reference.driver.GcodeDriver;
@@ -60,6 +61,8 @@ public class ApiServerSimTest {
     @BeforeEach
     public void before() throws Exception {
         sim = new SimMachine();
+        // N1 touches 5.5 everywhere, as setPlaces types it in: a run after a home checks Z with one touch
+        FlatVacuum.install(sim, FlatVacuum.scene(5.5, null, 0));
         svc = DispenseService.start(Configuration.get());
         assertTrue(svc.isAvailable(), String.valueOf(svc.getUnavailableReason()));
         ApiSettings s = new ApiSettings();
@@ -154,6 +157,8 @@ public class ApiServerSimTest {
         // probed surfaces: the blank (places and purge row) and the test board's area (origin 100, 80; 20 x 10 mm)
         ok(call("PUT", "/api/surfaces/blank", "{\"points\":[[60,30,5.5],[200,30,5.5],[60,50,5.5],[200,50,5.5]]}"));
         ok(call("PUT", "/api/surfaces/board", "{\"points\":[[98,78,5.5],[130,78,5.5],[98,95,5.5],[130,95,5.5]]}"));
+        // the simulator's probe timings (il_sim_scene.py FAST_TIMINGS): the Z check after a home
+        ok(call("PUT", "/api/config", "{\"vacuumProbe\":{\"vacuumSettleMs\":300,\"readDelayMs\":0}}"));
     }
 
     /**
@@ -587,6 +592,7 @@ public class ApiServerSimTest {
         assertTrue(sum.get("estimatedSeconds").getAsDouble() > 0, sum.toString());
         assertTrue(sum.get("estimatedDph").getAsDouble() > 0, sum.toString());
         assertEquals(8, sum.get("purgeDots").getAsInt());
+        assertEquals(8, plan.get("purgeSpotsNeeded").getAsInt(), "one dot size: the profile's purge dots (I9)");
         assertFalse(sum.has("estimatedDphUpperBound"), sum.toString());
         // the plan carries the profile it was made with; no calibration / q any more
         assertFalse(plan.has("calibration"), plan.toString());
@@ -601,6 +607,9 @@ public class ApiServerSimTest {
         assertTrue(plan.get("cleanCheck").isJsonNull());
         String planId = plan.get("planId").getAsString();
         assertEquals(planId, ok(get("/api/plan/" + planId)).get("planId").getAsString());
+        // the board on this seat has no paste yet: it will be board 1 of the session
+        JsonObject pasted = plan.getAsJsonObject("pasted");
+        assertTrue(pasted.get("board").isJsonNull() && pasted.get("nextBoard").getAsInt() == 1, pasted.toString());
 
         sim.server.setBStepCount(4321); // the screw's history since the controller's power-up
         sim.server.mark();
@@ -639,6 +648,13 @@ public class ApiServerSimTest {
         JsonObject row = s.getAsJsonObject("dispense").getAsJsonObject("purgeRow");
         assertEquals(8, row.get("usedSpots").getAsInt());
         assertEquals(5, row.get("boardsLeft").getAsInt());
+        // rc1 review: the server keeps the board's paste (a new tab or browser sees it): board 1, a dot on each pad
+        assertEquals(1, progress.get("boardNumber").getAsInt(), progress.toString());
+        assertEquals(1, s.getAsJsonObject("lastRun").get("boardNumber").getAsInt());
+        pasted = ok(get("/api/plan/" + planId)).getAsJsonObject("pasted");
+        assertEquals(1, pasted.get("board").getAsInt(), pasted.toString());
+        assertEquals(6, pasted.get("dots").getAsInt());
+        assertEquals(6, pasted.getAsJsonObject("pads").entrySet().size(), pasted.toString());
 
         // a subset: only the first 2 dots, logged as such
         JsonObject sub = ok(post("/api/run", "{\"planId\":\"" + planId + "\",\"maxDots\":2,\"wait\":true}"));
@@ -646,6 +662,8 @@ public class ApiServerSimTest {
         assertEquals(2, sub.getAsJsonObject("result").get("dotsDone").getAsInt());
         assertEquals(2, sub.getAsJsonObject("result").get("dotsPlanned").getAsInt());
         assertEquals(planId, sub.get("parentPlanId").getAsString());
+        assertEquals(8, ok(get("/api/plan/" + planId)).getAsJsonObject("pasted").get("dots").getAsInt(),
+                "a subset run's dots go on the same board");
         // GET /api/plans: the plans kept, newest first, without the run subsets (a fresh browser restores the latest)
         JsonArray kept = get("/api/plans").array();
         List<String> keptIds = new ArrayList<>();
@@ -662,6 +680,21 @@ public class ApiServerSimTest {
         assertTrue(first.getAsJsonObject("profile").get("name").getAsString().length() > 0, first.toString());
         assertTrue(first.get("profileFingerprint").getAsString().contains("psi="), first.toString());
         assertTrue(first.get("createdAtMs").getAsLong() > 0);
+        // the same seat planned again is the same board, with its paste
+        JsonObject again = ok(post("/api/plan", planBody(board)));
+        assertEquals(8, again.getAsJsonObject("pasted").get("dots").getAsInt(), again.toString());
+        assertEquals(1, again.getAsJsonObject("pasted").get("board").getAsInt());
+        // the operator wiped the board: a run with "wiped" clears its paste first, then counts its own dots
+        JsonObject wiped = ok(post("/api/run", "{\"planId\":\"" + planId + "\",\"maxDots\":2,\"wiped\":true,\"wait\":true}"));
+        assertEquals("OK", wiped.getAsJsonObject("result").get("status").getAsString(), wiped.toString());
+        JsonObject afterWipe = ok(get("/api/plan/" + planId)).getAsJsonObject("pasted");
+        assertEquals(2, afterWipe.get("dots").getAsInt(), afterWipe.toString());
+        assertEquals(1, afterWipe.get("board").getAsInt(), "the same board, wiped");
+        // "Next board": the board is taken off; the next one is board 2
+        assertEquals(2, ok(post("/api/board/next", null)).get("nextBoard").getAsInt());
+        JsonObject next = ok(get("/api/plan/" + planId)).getAsJsonObject("pasted");
+        assertTrue(next.get("board").isJsonNull() && next.get("dots").getAsInt() == 0 && next.get("nextBoard").getAsInt()
+                == 2, next.toString());
 
         // the purge row was wiped: all spots free again
         JsonObject reset = ok(post("/api/purge-row/reset", null));
@@ -797,10 +830,26 @@ public class ApiServerSimTest {
         JsonObject st = ok(get("/api/status")).getAsJsonObject("dispense");
         assertTrue(st.getAsJsonObject("needle").get("anchored").getAsBoolean());
         assertTrue(st.getAsJsonObject("surfaces").has("board"));
+        // Setup › Settings › Refuse flagged pads (rc1 review): the readiness reads it from the status
+        assertTrue(st.get("refuseFlaggedPads").getAsBoolean());
+        ok(call("PUT", "/api/config", "{\"refuseFlaggedPads\":false}"));
+        assertFalse(ok(get("/api/status")).getAsJsonObject("dispense").get("refuseFlaggedPads").getAsBoolean());
+        ok(call("PUT", "/api/config", "{\"refuseFlaggedPads\":true}"));
         // a needle change invalidates the frame
+        assertTrue(st.getAsJsonObject("needle").get("kRefusal").isJsonNull());
         ok(post("/api/needle/changed", null));
-        assertFalse(ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle").get("anchored")
-                .getAsBoolean());
+        JsonObject changed = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertFalse(changed.get("anchored").getAsBoolean());
+        // K belongs to the needle it was measured with: the new needle's frame is measured with both tips
+        assertTrue(changed.get("kRefusal").getAsString().startsWith("K was measured with the needle before the change at"),
+                changed.toString());
+        Res fromK = post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        assertEquals(409, fromK.status, fromK.toString());
+        assertTrue(fromK.body.contains("record the needle frame with both tips touching the same spot"), fromK.toString());
+        ok(post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactZ\":2.71}"));
+        JsonObject again = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertTrue(again.get("anchored").getAsBoolean() && again.get("kRefusal").isJsonNull(), again.toString());
+        assertEquals(-2.79, again.get("anchorOffsetMm").getAsDouble(), 1e-9);
     }
 
     /** TCP proxy that delays every "ok" from the controller, so a run takes long enough to STOP it. */
@@ -869,7 +918,8 @@ public class ApiServerSimTest {
         setUpBoardRuns();
         double[][] pos = new double[30][];
         for (int i = 0; i < pos.length; i++) {
-            pos[i] = new double[] {2 + 2.5 * (i % 10), 2 + 3 * (i / 10), 0};
+            // 4 mm apart: at 2.5 mm two 0603s' facing dots would bridge (MAY_BRIDGE)
+            pos[i] = new double[] {2 + 4.0 * (i % 6), 2 + 3 * (i / 6), 0};
         }
         File board = writeBoard(pos);
         ok(call("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}"));
@@ -950,6 +1000,9 @@ public class ApiServerSimTest {
         assertEquals(400, call("PUT", "/api/config", "{\"noSuchSetting\":1}").status);
         // I4 state cannot be forged through the settings; an unchanged round-trip is accepted
         Res forge = call("PUT", "/api/config", "{\"needleZOffsetSetAtMs\":" + System.currentTimeMillis() + "}");
+        assertEquals(400, forge.status, forge.toString());
+        // nor the Z frame of the touch-off (the home it was measured under, ZCheck)
+        forge = call("PUT", "/api/config", "{\"needleZOffsetHomeAtMs\":" + System.currentTimeMillis() + "}");
         assertEquals(400, forge.status, forge.toString());
         JsonObject all = ok(get("/api/config"));
         assertEquals(200, call("PUT", "/api/config", all.toString()).status);

@@ -1,0 +1,177 @@
+/* padprofile.css: pads that need a profile and the pad calibration (padprofile.js; PROFILE_CALIBRATION_DESIGN.md §13).
+   Tokens and shared components live in app.css (not redefined here); class vocabulary: DEV_NOTES.md §7. */
+
+/* ================================================================ reason badge (Needs a profile, upload preview, card) */
+.pp-badge { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 3px 10px 3px 4px; border-radius: 13px; font: 650 13px/1.2 var(--font-ui);
+  border: 1px solid var(--need-line); background: var(--need-bg); color: var(--need); max-width: 100%; }
+.pp-badge > span:last-child { min-width: 0; overflow-wrap: break-word; }
+.pp-badge[data-reason="tip"], .pp-badge[data-reason="part"] { border-color: var(--block-line); background: var(--block-bg); color: var(--block); }
+.pp-badge[data-reason="outside"] { border-color: var(--info-line); background: var(--info-bg); color: var(--info); }
+.pp-badge[data-reason="ready"] { border-color: var(--ok-line); background: var(--ok-bg); color: var(--ok); }
+.pp-badge[data-reason="fiducial"] { border-color: var(--off-line); background: var(--off-bg); color: var(--off); }
+.pp-pass { display: inline-flex; align-items: center; gap: 5px; font-weight: 650; }
+
+/* ================================================================ Profile › Needs a profile */
+.pt-needs { border-color: var(--need-line); }
+.pt-needs .card__title { display: flex; align-items: center; gap: 10px; }
+.pt-needs .card__title .count { min-width: 26px; height: 22px; border-radius: 11px; display: inline-grid; place-items: center; background: var(--need-bg); color: var(--need);
+  border: 1px solid var(--need-line); font: 700 12.5px/1 var(--font-ui); padding: 0 7px; }
+.pt-needs .card__title .count:empty { display: none; }
+.pt-needs .card__body { display: flex; flex-direction: column; gap: 10px; padding: 0 18px 14px; }
+.pt-needs__lead { margin: 0; font-size: 14px; line-height: 1.45; color: var(--ink-2); }
+.pt-needs__wrap { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.pt-needs__t { table-layout: fixed; }
+.pt-needs__t th { padding: 9px 10px 7px; font-size: 11px; background: var(--tile); }
+.pt-needs__t th:first-child, .pt-needs__t td:first-child { padding-left: 14px; }
+.pt-needs__t td { vertical-align: top; padding: 10px; }
+/* the row whose suggestion the side panel shows */
+.pt-needs__t tr.sel > td { background: var(--accent-tint); }
+.pt-needs__t tr.sel > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.pt-needs__t th:nth-child(1) { width: 30%; }
+.pt-needs__t th:nth-child(2) { width: 184px; }   /* "not calibrated yet" on one line */
+.pt-needs__t--tip td:first-child { width: 30%; }
+.pt-needs__n { font-weight: 650; overflow-wrap: anywhere; }
+.pt-needs__s { font-size: 12.5px; color: var(--ink-3); margin-top: 2px; }
+.pt-needs__partial { font-size: 12.5px; color: var(--need); margin-top: 4px; line-height: 1.35; }
+.pt-needs__sugg { font-size: 13.5px; line-height: 1.35; }
+.pt-needs__why { font-size: 13.5px; line-height: 1.45; color: var(--ink-2); }
+.pt-needs__st { font-weight: 600; }
+.pt-needs__conf { font-weight: 500; color: var(--ink-3); }
+.pt-needs__btns { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.pt-needs__btns .btn { height: auto; min-height: 34px; padding-top: 5px; padding-bottom: 5px; }
+.pt-needs__more > summary { display: flex; align-items: center; gap: 8px; }
+.pt-needs__more[open] > summary { margin-bottom: 4px; }
+.pt-needs__foot { align-items: center; }
+.pt-needs__foot .reason { flex-basis: 100%; }
+#pt-needs-host:empty { display: none; }
+
+/* ================================================================ the suggestion card (Profile side panel) */
+.pt-sugg { display: flex; flex-direction: column; gap: 12px; padding-top: 4px; }
+.pt-sugg .notebox { display: flex; gap: 8px; align-items: flex-start; }
+.pt-sugg .notebox .st { margin-top: 1px; flex: none; }
+.pt-sugg__text { margin: 0; font: 450 15px/1.5 var(--font-ui); color: var(--ink); }
+.pt-sugg__fig { margin: 0; }
+.pt-sugg__pv { height: 220px; border: 1px solid var(--line); border-radius: 12px; background: var(--pv-bg); overflow: hidden; }
+.pt-sugg__fig figcaption { font-size: 12.5px; color: var(--ink-3); margin-top: 6px; }
+.pt-sugg__kv { grid-template-columns: minmax(0, 132px) minmax(0, 1fr); }
+.pt-sugg__kv dd { font-weight: 550; line-height: 1.4; }
+.pt-sugg__alt { margin: 4px 0 0; padding-left: 18px; font-size: 13.5px; line-height: 1.45; display: flex; flex-direction: column; gap: 4px; }
+.pt-sugg__foot { flex-wrap: wrap; }
+.pt-sugg__foot .btn { flex: 1 1 auto; }
+.pv-sugg { fill: color-mix(in srgb, var(--data) 28%, transparent); stroke: var(--data); stroke-width: 1.5px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.pv-l-sugg { pointer-events: none; }
+
+/* Profile's pad-type table: "4 · 4 blocked" (the pads of a type that waits for its calibration) fits its column */
+.pt-families .pt-table col.pt-c-plan { width: 104px; }
+
+/* pad-type editor: the type's own turn and dots, its calibration facts */
+.pt-calinfo:empty { display: none; }
+.pt-calinfo { padding: 10px 12px; border-radius: 10px; background: var(--tile); border: 1px solid var(--line); }
+
+/* ================================================================ the pad-cal panel view */
+.pcal { display: flex; flex-direction: column; gap: 12px; padding-top: 2px; }
+.pcal__note { margin: 0; font-size: 14.5px; line-height: 1.5; }
+.pcal__needs { font-weight: 600; }
+.pcal__plan td { padding: 8px 8px; vertical-align: top; }
+.pcal__plan td:first-child { padding-left: 2px; }
+.pcal__st { font-weight: 650; }
+.pcal__sd { font-size: 12.5px; color: var(--ink-3); margin-top: 2px; line-height: 1.4; }
+.pcal__warn { font-size: 13px; color: var(--need); font-weight: 600; }
+.pcal__groups { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.pcal__groups b { overflow-wrap: anywhere; }
+.pcal__fixes { display: flex; flex-direction: column; gap: 8px; }
+.pcal__fixes .notebox { display: flex; gap: 8px; align-items: flex-start; }
+.pcal__fixes .st { flex: none; margin-top: 1px; }
+.pcal-live { font-size: 13.5px; color: var(--ink-2); }
+.pcal-stop { margin: 6px 0 0; font-size: 13px; color: var(--ink-2); }
+.phases li.skip .ph__t { color: var(--ink-3); font-weight: 550; }
+.pcal__tblwrap { overflow-x: auto; }
+.pcal__ladder { font-size: 13px; }
+.pcal__ladder th, .pcal__ladder td { padding: 7px 6px; }
+.pcal__ladder td:first-child, .pcal__ladder th:first-child { padding-left: 2px; }
+.pcal__foot { flex-wrap: wrap; }
+.pcal__foot .btn { flex: 1 1 auto; }
+
+/* the readings prompt */
+#pcal-ask { grid-template-columns: auto minmax(0, 1fr); }
+.pcal-ask { min-width: 0; }
+.pcal-ask .ri__act { grid-column: auto; flex-direction: column; align-items: stretch; }
+.pcal-coupon { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 6px 12px; padding: 10px 0; border-top: 1px solid var(--need-line); }
+.pcal-coupon__f { display: contents; }
+.pcal-coupon__t { align-self: center; }
+.pcal-coupon__in, .pcal-coupon__mg { grid-column: 1 / -1; }
+.pcal-coupon:first-child { border-top: 0; }
+.pcal-coupon--pending { grid-template-columns: minmax(0, 1fr); }
+.pcal-coupon--pending .pcal-coupon__in { grid-template-columns: repeat(2, minmax(0, 1fr)) auto auto; }
+.pcal-coupon__img { width: 72px; height: 72px; border-radius: 8px; border: 1px solid var(--line); object-fit: cover; background: var(--sunken); }
+.pcal-coupon__img--none { display: grid; place-items: center; font-size: 12px; color: var(--ink-3); }
+.pcal-coupon__t { font-size: 13.5px; line-height: 1.4; }
+.pcal-coupon__in { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-items: end; }
+.pcal-coupon__in .field { min-width: 0; }
+.pcal-coupon__in .input { font-variant-numeric: tabular-nums; }
+.pcal-coupon__mg { font: 650 13.5px/1.3 var(--font-ui); margin-top: 6px; color: var(--ink); }
+
+/* the result */
+.ri--ok { background: var(--ok-bg); border-color: var(--ok-line); }
+#pcal-result { grid-template-columns: auto minmax(0, 1fr); }
+#pcal-result .ri__t { display: block; font-size: 15px; line-height: 1.45; font-weight: 500; }
+#pcal-result .ri__t > b { font-weight: 700; }
+.pcal__more { display: flex; flex-direction: column; gap: 12px; }
+.pcal__res { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.pcal__res > li { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--surface); }
+.pcal__gh { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pcal__gh b { overflow-wrap: anywhere; }
+.pcal__kv { margin-top: 8px; font-size: 13px; grid-template-columns: minmax(0, 92px) minmax(0, 1fr); }
+.pcal__checks { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 1.4; }
+.pcal__checks li { display: flex; gap: 6px; align-items: flex-start; }
+.pcal__checks li .st { flex: none; margin-top: 1px; }
+.pcal__checks li.bad { color: var(--block); font-weight: 600; }
+.pcal__crops { display: flex; flex-wrap: wrap; gap: 10px; }
+.pcal-crop { margin: 0; display: grid; grid-template-columns: 72px 72px; gap: 4px; }
+.pcal-crop img { width: 72px; height: 72px; border-radius: 6px; border: 1px solid var(--line); background: var(--sunken); image-rendering: auto; }
+.pcal-crop figcaption { grid-column: 1 / -1; font-size: 12px; color: var(--ink-3); }
+.pcal__pred { font-size: 13px; }
+.pcal__pred td { vertical-align: top; padding: 6px 6px; }
+
+/* ================================================================ upload preview, pad inspector */
+td.bi-pp { font-size: 13.5px; line-height: 1.35; }
+.bi-pkgs--pp th:nth-child(1) { width: 38%; }   /* the profile badge gets the room a long reason needs */
+.pp-cell__s { font-size: 12.5px; color: var(--ink-2); margin-top: 4px; line-height: 1.35; }
+.pp-insp { display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; }
+.pp-insp > .st { flex: none; margin-top: 1px; }
+.pp-insp .btn-row { margin-top: 8px; flex-wrap: wrap; }
+.pp-insp__s { margin-top: 6px; font-weight: 600; }
+#board-import-profile .bi-todo__b { display: flex; gap: 6px; flex-wrap: wrap; }
+.bi-w .pp-needs-w { margin: 6px 0; gap: 4px; }
+
+/* ================================================================ Calibrate › Pad calibration, Weigh dots (calibrate.js) */
+.fgrid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.pca-fig { margin: 0; }
+.pca-map { display: block; width: 100%; height: 170px; border: 1px solid var(--line); border-radius: 12px; background: var(--sunken); }
+.pca-area { fill: color-mix(in srgb, var(--accent) 12%, transparent); stroke: var(--accent); stroke-width: 0.35; }
+.pca-used { fill: color-mix(in srgb, var(--data) 45%, transparent); stroke: none; }
+.pca-spot { fill: var(--surface); stroke: var(--ink-3); stroke-width: 0.25; }
+.pca-spot--used { fill: var(--data); stroke: var(--data); }
+.pca-coupon { fill: var(--tile); stroke: var(--ink-3); stroke-width: 0.3; stroke-dasharray: 1 0.6; }
+.pca-t { fill: var(--ink-2); font-family: var(--font-ui); font-weight: 650; }
+.pca-place { stroke: var(--ink); stroke-width: 0.35; fill: none; }
+.pca-far { flex-basis: 100%; }
+.pca-far::before { display: none !important; }
+.pca-far:empty { display: none; }
+.pca-key { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--ink-3); margin-top: 6px; }
+.pca-key > span { display: inline-flex; align-items: center; gap: 6px; }
+.pca-key > span::before { content: ''; width: 12px; height: 9px; border-radius: 2px; border: 1px solid var(--ink-3); background: var(--tile); }
+.pca-key__a::before { border-color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 12%, transparent) !important; }
+.pca-key__u::before { border-color: var(--data) !important; background: color-mix(in srgb, var(--data) 45%, transparent) !important; }
+.pca-key__p::before { width: 9px !important; border-radius: 50% !important; background: var(--surface) !important; }
+.pca-key__c::before { border-style: dashed !important; }
+.pca-left { font: 650 15px/1.35 var(--font-ui); }
+.pca-line { font-size: 14px; line-height: 1.45; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cal-older { grid-column: 1 / -1; }
+.cal-older > summary { padding: 4px 2px 8px; }
+.cal-guide__t { margin: 0; font-weight: 650; }
+.cal-guide .btn-row { margin-top: 6px; }
+@media (max-width: 1360px) {
+  .fgrid--4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pt-families .pt-table col.pt-c-plan { width: 98px; }
+}

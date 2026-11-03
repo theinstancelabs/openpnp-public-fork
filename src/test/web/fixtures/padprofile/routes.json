@@ -1,0 +1,5 @@
+{
+  "_": "devproxy.py --route-fixtures src/test/web/fixtures/padprofile [--routes FILE]: the pad calibration's states without running it (PROFILE_CALIBRATION_DESIGN.md §13.5). This file: the readings prompt (status.padCalibration waiting for the coupon readings). routes-result.json: the result card; routes-preview.json: the before-start summary of Calibrate automatically. The JSON files are answers of a SIM session (padcal.kicad_pcb planned at X 200, Y 120; SW_SPST_3.9x2.9mm calibrated with the shortened SIM settings of §14.4); their camera crops are not included (the images stay empty).",
+  "GET /api/status": {"merge": {"padCalibration": "job-awaiting.json"}},
+  "GET /api/pad-calibrations/current": "job-awaiting.json"
+}

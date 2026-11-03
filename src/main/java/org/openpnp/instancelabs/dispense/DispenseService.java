@@ -1,19 +1,37 @@
 package org.openpnp.instancelabs.dispense;
 
+import java.awt.geom.AffineTransform;
+import java.awt.geom.Point2D;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 import org.openpnp.ConfigurationListener;
+import org.openpnp.instancelabs.board.EdtRunner;
+import org.openpnp.instancelabs.padprofile.DoseModel;
+import org.openpnp.instancelabs.padprofile.LadderStats;
+import org.openpnp.instancelabs.padprofile.Limits;
+import org.openpnp.instancelabs.sim.SimGuard;
+import org.openpnp.instancelabs.vision.BareSpotCheck;
 import org.openpnp.instancelabs.vision.Dot;
+import org.openpnp.instancelabs.vision.FiducialLocator;
+import org.openpnp.instancelabs.vision.SpotDot;
 import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
+import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.AxesLocation;
 import org.openpnp.model.Board;
 import org.openpnp.model.BoardLocation;
@@ -21,13 +39,17 @@ import org.openpnp.model.Configuration;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.spi.Camera;
+import org.openpnp.spi.Driver;
 import org.openpnp.spi.Head;
 import org.openpnp.spi.Machine;
 import org.openpnp.spi.MachineListener;
 import org.openpnp.spi.MotionPlanner.CompletionType;
 import org.openpnp.spi.Nozzle;
 import org.openpnp.spi.NozzleTip;
+import org.openpnp.util.Utils2D;
 import org.pmw.tinylog.Logger;
+
+import com.google.gson.Gson;
 
 /**
  * Entry point of the Instance Labs dispense engine. One instance per OpenPnP configuration,
@@ -42,6 +64,18 @@ public final class DispenseService {
     private static volatile DispenseService instance;
     /** Longest the Stop path waits for an engine line that passed its abort check to be written. */
     static final long STOP_WRITE_GRACE_MS = 50;
+    /** The vacuum probe nozzle (name or id). */
+    public static final String PROBE_NOZZLE = "N1";
+    /**
+     * A board top Z further than this from the needle-frame surface is refused at planning: boards and
+     * the blank sit on the same bed (the bench has them about 1 mm apart), while a height taken with
+     * the needle instead of N1 is 2.59 mm off.
+     */
+    public static final double MAX_BOARD_Z_FROM_ANCHOR_MM = 2.0;
+    /** Time estimates of Register board's steps (s): one fiducial (search and centring), one N1 touch. */
+    public static final double FIDUCIAL_ESTIMATE_S = 5, PROBE_POINT_ESTIMATE_S = 17;
+    /** The refusal of a task queued before a STOP (§7.8). */
+    public static final String STOPPED_SINCE_QUEUED = "STOP was pressed after this step was queued: nothing was sent";
 
     /** A run refused before any G-code that moves or switches anything was sent. */
     public static class RunRefusedException extends Exception {
@@ -60,6 +94,11 @@ public final class DispenseService {
     private volatile String unavailableReason;
     private final AtomicBoolean bZeroed = new AtomicBoolean(false);
     private final AtomicBoolean busy = new AtomicBoolean(false);
+    /**
+     * The engine task queued last: its run, its Future, when it was queued, and whether its body began (taken by the
+     * machine thread, or ended by {@link #releaseDroppedTask}: whichever comes first).
+     */
+    private volatile Queued queued;
     private volatile DispenseExecutor activeExecutor;
     private volatile RunResult activeRun;
     private volatile RunResult lastRun;
@@ -67,10 +106,25 @@ public final class DispenseService {
     private volatile BarrelPressureSensor pressureSensor;
     private volatile DotImager dotImagerOverride;
     private MachineListener machineListener;
-    /** When OpenPnP last enabled (connected to) the controller: the B step count may restart (I11). */
-    private volatile Long controllerConnectedAtMs;
+    private MachineListener identityListener;
+    /**
+     * Whether the controller of the current connection said it is OpenPnP's simulator (M115 at the
+     * connect or of the last task), null when not asked yet on this connection.
+     */
+    private volatile Boolean connectionSimulated;
+    /** Connects, disables and homes: whether a task must home first, and Z data older than the last home. */
+    private final HomeTracker homeTracker;
+    /** The last good open-air N1 baseline (the probe's part-on-N1 check across tasks). */
+    private final VacuumProber.BaselineMemory baselineMemory = new VacuumProber.BaselineMemory();
+    /** The API's manual pressure hold: engine tasks refuse to start while it is on (machine thread). */
+    private volatile BooleanSupplier pressureHoldActive = () -> false;
     /** Set by {@link #abort}: stops a camera-only clean-pad check (it has no executor). */
     private volatile boolean cameraTourAbort;
+    /**
+     * Counts every {@link #abort}: a task queued before a STOP refuses at its start, so a step a job
+     * queued in the gap between two steps never pressurises (profile calibration design §7.8).
+     */
+    private final AtomicLong stopEpoch = new AtomicLong();
 
     // ------------------------------------------------------------------------------------------
     // Lifecycle
@@ -100,6 +154,7 @@ public final class DispenseService {
             instance.shutdown();
         }
         instance = new DispenseService(configuration);
+        instance.askIdentityOnConnect();
         Logger.info("Instance Labs dispense service started: {}", instance.isAvailable() ? "available"
                 : "unavailable (" + instance.unavailableReason + ")");
         return instance;
@@ -117,7 +172,9 @@ public final class DispenseService {
         this.db = DispenseDb.open(configDir);
         resolveNozzle();
         Machine machine = configuration.getMachine();
+        homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
         if (machine != null) {
+            machine.addListener(homeTracker);
             machineListener = new MachineListener.Adapter() {
                 @Override
                 public void machineHomed(Machine m, boolean isHomed) {
@@ -127,7 +184,6 @@ public final class DispenseService {
                 @Override
                 public void machineEnabled(Machine m) {
                     bZeroed.set(false);
-                    controllerConnectedAtMs = System.currentTimeMillis();
                 }
 
                 @Override
@@ -157,6 +213,11 @@ public final class DispenseService {
         Machine machine = configuration.getMachine();
         if (machine != null && machineListener != null) {
             machine.removeListener(machineListener);
+            machine.removeListener(homeTracker);
+        }
+        if (machine != null && identityListener != null) {
+            machine.removeListener(identityListener);
+            SimGuard.askAtConnect(machine, null);
         }
         try {
             db.close();
@@ -166,32 +227,93 @@ public final class DispenseService {
         }
     }
 
-    private void resolveNozzle() {
-        nozzle = null;
-        unavailableReason = null;
+    /**
+     * Asks the controller who it is (M115) right after every connect, so whether it is the simulator
+     * is known from the start of a connection, not only after its first engine task: the API's checks
+     * of records made on the simulator then hold right after a Start ({@link #isSimulatorConfirmed}).
+     * SimGuard asks, and notes the answer, right after it forgot the last connection's answer.
+     */
+    private void askIdentityOnConnect() {
         Machine machine = configuration.getMachine();
-        if (!(machine instanceof ReferenceMachine)) {
-            unavailableReason = "machine is not a ReferenceMachine";
+        if (machine == null) {
             return;
         }
-        for (Head h : machine.getHeads()) {
-            for (Nozzle n : h.getNozzles()) {
-                if (cfg.nozzle.equals(n.getId())) {
-                    nozzle = n;
-                }
+        SimGuard.askAtConnect(machine, () -> {
+            connectionSimulated = null;
+            if (!(machine instanceof ReferenceMachine) || nozzle == null) {
+                return null;
             }
+            OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
+            List<String> m115 = new DriverGcodeChannel(mapper.getDriver())
+                    .sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
+            connectionSimulated = SimGuard.isSimulatorIdentity(m115);
+            return m115;
+        });
+        identityListener = new MachineListener.Adapter() {
+            @Override
+            public void machineEnableFailed(Machine m, String reason) {
+                connectionSimulated = null;
+            }
+
+            @Override
+            public void machineAboutToBeDisabled(Machine m, String reason) {
+                connectionSimulated = null;
+            }
+
+            @Override
+            public void machineDisabled(Machine m, String reason) {
+                connectionSimulated = null;
+            }
+        };
+        machine.addListener(identityListener);
+    }
+
+    /** The controller's M115 answer on the current connection. */
+    private void noteIdentity(List<String> m115) {
+        SimGuard.noteIdentity(configuration.getMachine(), m115);
+        connectionSimulated = SimGuard.isSimulatorIdentity(m115);
+    }
+
+    /**
+     * Finds the dispenser nozzle. Each field is written once, the reason before a null nozzle: every config update
+     * resolves again, and a transient null made concurrent readers (the status's interlocks, availability) fail with a
+     * NullPointerException or "unavailable (null)".
+     */
+    private void resolveNozzle() {
+        Machine machine = configuration.getMachine();
+        Nozzle found = null;
+        String why = null;
+        if (!(machine instanceof ReferenceMachine)) {
+            why = "machine is not a ReferenceMachine";
         }
-        if (nozzle == null) {
+        else {
             for (Head h : machine.getHeads()) {
                 for (Nozzle n : h.getNozzles()) {
-                    if (cfg.nozzle.equals(n.getName())) {
-                        nozzle = n;
+                    if (cfg.nozzle.equals(n.getId())) {
+                        found = n;
                     }
                 }
             }
+            if (found == null) {
+                for (Head h : machine.getHeads()) {
+                    for (Nozzle n : h.getNozzles()) {
+                        if (cfg.nozzle.equals(n.getName())) {
+                            found = n;
+                        }
+                    }
+                }
+            }
+            if (found == null) {
+                why = "no dispenser nozzle '" + cfg.nozzle + "' in the machine";
+            }
         }
-        if (nozzle == null) {
-            unavailableReason = "no dispenser nozzle '" + cfg.nozzle + "' in the machine";
+        if (found == null) {
+            unavailableReason = why;
+            nozzle = null;
+        }
+        else {
+            nozzle = found;
+            unavailableReason = null;
         }
     }
 
@@ -274,12 +396,24 @@ public final class DispenseService {
 
     /** When OpenPnP last connected to the controller (epoch ms), or null. */
     public Long getControllerConnectedAtMs() {
-        return controllerConnectedAtMs;
+        return homeTracker.getConnectedAtMs();
     }
 
     public synchronized void setLocation(String name, double x, double y, double z) throws IOException {
+        setLocation(name, x, y, z, null);
+    }
+
+    /**
+     * As above; a place derived from another ({@code from}: the test-dot spot follows the waste) keeps the time and the
+     * Z frame of the place it follows, else it is stamped now (I4: its Z was taken under this home).
+     */
+    public synchronized void setLocation(String name, double x, double y, double z, DispenseConfig.NamedLocation from)
+            throws IOException {
         DispenseConfig c = cfg.copy();
-        c.locations.put(name, new DispenseConfig.NamedLocation(x, y, z));
+        DispenseConfig.NamedLocation l = new DispenseConfig.NamedLocation(x, y, z);
+        l.setAtMs = from != null ? from.setAtMs : Long.valueOf(System.currentTimeMillis());
+        l.homeAtMs = from != null ? from.homeAtMs : Long.valueOf(homeTracker.frameHomeAtMs());
+        c.locations.put(name, l);
         updateConfig(c);
     }
 
@@ -299,6 +433,7 @@ public final class DispenseService {
         c.needleZOffsetMm = offsetMm;
         c.needleZOffsetSetAtMs = Math.max(System.currentTimeMillis(),
                 c.needleChangedAtMs == null ? 0 : c.needleChangedAtMs);
+        c.needleZOffsetHomeAtMs = homeTracker.frameHomeAtMs();
         updateConfig(c);
         db.insertTouchOff(method, offsetMm, prev, details, null);
     }
@@ -321,6 +456,7 @@ public final class DispenseService {
         long now = Math.max(System.currentTimeMillis(), c.needleChangedAtMs == null ? 0 : c.needleChangedAtMs);
         c.needleAnchor = new DispenseConfig.NeedleAnchor(surfaceZMm, needleContactZMm, xMm, yMm, now);
         c.needleAnchor.rawSumMm = rawSumMm;
+        c.needleAnchor.homeAtMs = homeTracker.frameHomeAtMs();
         c.needleZOffsetMm = c.needleAnchor.offsetMm();
         updateConfig(c);
         db.insertTouchOff("needle-frame (N1 + needle contact)", c.needleZOffsetMm, prev, new com.google.gson.Gson()
@@ -347,6 +483,28 @@ public final class DispenseService {
         return (rawSumMm - n1ContactZ - r0) * 10 / (r1 - r0);
     }
 
+    /**
+     * Why the needle frame cannot be recorded from K now, or null. K is a sum of raw Z heights (N1's contact and
+     * the needle's), so it holds for the home and the needle it was measured with only: a home that moved the Z
+     * zero moves K by about twice the shift, and a frame "from K" then gives the old offset (63 - K) whatever N1
+     * just touched (review: the needle 2 x 0.8 mm into the board after the Z-moved remedy). So while the Z check of
+     * this home failed, and after a needle change, the frame is measured with both tips touching the same spot.
+     */
+    public String needleFrameFromKRefusal() {
+        DispenseConfig c = cfg;
+        ZCheck.Result z = homeTracker.getZCheck();
+        if (ZCheck.failed(z, homeTracker.getLastHomeAtMs())) {
+            return String.format(Locale.ROOT, "K was measured under another home: Z moved %.2f mm at the home of %s, "
+                    + "and K moves by about twice that. Record the needle frame with both tips touching the same spot",
+                    z.deltaMm, ZCheck.clock(z.homeAtMs));
+        }
+        if (c.needleAnchor != null && !c.isNeedleAnchored()) {
+            return "K was measured with the needle before the change at " + ZCheck.clock(c.needleChangedAtMs)
+                    + ": record the needle frame with both tips touching the same spot";
+        }
+        return null;
+    }
+
     /** Stores a probed surface (validated: at least 3 points spanning an area). */
     public synchronized SurfacePlane setSurface(String name, List<DispenseConfig.SurfacePoint> points, String note)
             throws IOException {
@@ -359,13 +517,24 @@ public final class DispenseService {
      */
     public synchronized SurfacePlane setSurface(String name, List<DispenseConfig.SurfacePoint> points, String note,
             String boardFingerprint) throws IOException {
+        return setSurface(name, points, note, boardFingerprint, null);
+    }
+
+    /** As above; {@code simulated} marks a surface probed on OpenPnP's simulator (refused elsewhere, I4). */
+    public synchronized SurfacePlane setSurface(String name, List<DispenseConfig.SurfacePoint> points, String note,
+            String boardFingerprint, Boolean simulated) throws IOException {
         SurfacePlane plane = SurfacePlane.fit(points); // throws IllegalArgumentException if unusable
         DispenseConfig c = cfg.copy();
         DispenseConfig.SurfaceMap m = new DispenseConfig.SurfaceMap();
         m.points = new ArrayList<>(points);
         m.setAtMs = System.currentTimeMillis();
+        m.homeAtMs = homeTracker.frameHomeAtMs();
         m.note = note;
         m.boardFingerprint = boardFingerprint;
+        m.simulated = simulated;
+        if (name.equals(c.blankLocationName)) {
+            m.replaced = ZCheck.kept(c.surface(name), homeTracker.getLastHomeAtMs());
+        }
         c.surfaces.put(name, m);
         updateConfig(c);
         db.event(null, "INFO", "SURFACE", String.format(java.util.Locale.ROOT,
@@ -402,8 +571,9 @@ public final class DispenseService {
 
     /**
      * Identity of a board location as a plan depends on it: global location, side, fiducial
-     * transform (status and matrix) and every placement (review finding: a board moved, re-checked
-     * or edited after planning was not detected at Run).
+     * transform (status and matrix), every placement (review finding: a board moved, re-checked
+     * or edited after planning was not detected at Run) and the parts, packages and pads behind
+     * them ({@link BoardContentDigest}: a board imported again with other pads).
      */
     public static String boardFingerprint(BoardLocation bl) {
         StringBuilder sb = new StringBuilder();
@@ -416,6 +586,7 @@ public final class DispenseService {
                 sb.append(String.format(java.util.Locale.ROOT, "|%s,%s,%s,%s,%.4f,%.4f,%.4f,%.4f", pl.getId(),
                         pl.getSide(), pl.getType(), pl.isEnabled(), l.getX(), l.getY(), l.getZ(), l.getRotation()));
             }
+            sb.append('|').append(BoardContentDigest.of(bl.getBoard()));
         }
         return digest(sb);
     }
@@ -499,13 +670,58 @@ public final class DispenseService {
         dotImagerOverride = imager;
     }
 
-    /** Thread-safe: stops the active stream before its next line; pneumatics are switched off (I1). */
+    /**
+     * Thread-safe: stops the active stream before its next line; pneumatics are switched off (I1).
+     * Every task queued before it refuses at its start ({@link #stopEpoch}). A task OpenPnP dropped
+     * ends here ({@link #releaseDroppedTask}).
+     */
     public void abort(String reason) {
+        stopEpoch.incrementAndGet();
         cameraTourAbort = true;
         DispenseExecutor e = activeExecutor;
         if (e != null) {
             e.requestAbort(reason);
         }
+        releaseDroppedTask();
+    }
+
+    /** An engine task as queued on OpenPnP's machine thread. */
+    private static final class Queued {
+        final RunResult run;
+        final long atMs = System.currentTimeMillis();
+        final AtomicBoolean began = new AtomicBoolean(false);
+        volatile Future<?> future;
+
+        Queued(RunResult run) {
+            this.run = run;
+        }
+    }
+
+    /** How long a queued task may wait for an idle machine thread before it counts as dropped. */
+    static final long DROPPED_AFTER_MS = 1000;
+
+    /**
+     * Ends an engine task OpenPnP dropped, and returns whether it did (rc1 review). OpenPnP removes every task queued
+     * behind one of its own that throws (its Home or jog meeting a limit), without running or cancelling it, so the
+     * task's finish() never ran and every engine endpoint then answered "a dispense task is already running … press
+     * STOP" until OpenPnP restarted, STOP included. A task still not begun while the machine thread has been idle past
+     * {@link #DROPPED_AFTER_MS} will never run: it ends ERROR here, and if it ran after all it would end at once.
+     * Called by STOP, and by the API before it refuses a request as busy.
+     */
+    public boolean releaseDroppedTask() {
+        Queued q = queued;
+        Machine m = configuration.getMachine();
+        if (q == null || !busy.get() || q.future == null || q.future.isDone() || m == null || m.isBusy()
+                || System.currentTimeMillis() - q.atMs < DROPPED_AFTER_MS || !q.began.compareAndSet(false, true)) {
+            return false;
+        }
+        q.run.status = RunResult.Status.ERROR;
+        q.run.message = "OpenPnP dropped this task before it started (a task of its own ahead of it failed): nothing "
+                + "was sent; start it again";
+        Logger.warn("dispense {}: dropped by OpenPnP before it started", q.run.kind);
+        finish(q.run);
+        q.future.cancel(false); // a caller waiting for it (the pad calibration) learns at once
+        return true;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -554,17 +770,33 @@ public final class DispenseService {
     // ------------------------------------------------------------------------------------------
 
     public DispensePlanner newPlanner() throws SQLException {
-        return new DispensePlanner(cfg, new PadTypeResolver(db.currentPadTypes(), db.packageMappings()))
-                .withRules(db.currentPadRules()).withSurface(planeOf(cfg, cfg.boardSurfaceName));
+        DispenseConfig.PurgeRow row = cfg.purgeRow;
+        return new DispensePlanner(cfg, padTypeResolver()).withRules(db.currentPadRules())
+                .withSurface(planeOf(cfg, cfg.boardSurfaceName))
+                .withPurgeSpots(k -> row.isDefined() && k < row.spotsLeft() ? row.spot(row.usedSpots + k) : null);
     }
 
     /** Plans a board location; the path starts at the end of the purge row (or N2's current XY). */
     public DispensePlan planBoard(BoardLocation bl) throws Exception {
+        return planBoard(bl, null);
+    }
+
+    /**
+     * As above, through a fiducial registration ({@code reg} null: none): the plan's pads follow its
+     * board -> machine affine, the board Z stays the nominal seat's. Refused when the board top Z
+     * cannot be an N1 contact height ({@link #boardZProblem}).
+     */
+    public DispensePlan planBoard(BoardLocation bl, BoardRegistration reg) throws Exception {
         requireAvailable();
+        String zProblem = boardZProblem(cfg, bl.getGlobalLocation().convertToUnits(LengthUnit.Millimeters).getZ());
+        if (zProblem != null) {
+            throw new IllegalStateException(zProblem);
+        }
+        BoardLocation at = reg == null ? bl : reg.applyTo(bl);
         double[] start = planStart();
-        DispensePlan plan = newPlanner().planBoard(bl, start[0], start[1]);
-        plan.boardFingerprint = boardFingerprint(bl);
-        plan.boardRegistration = boardRegistration(bl);
+        DispensePlan plan = newPlanner().planBoard(at, start[0], start[1]);
+        plan.boardFingerprint = boardFingerprint(at);
+        plan.boardRegistration = boardRegistration(at);
         db.insertPadPlan(plan);
         db.event(null, "INFO", "PLAN", plan.summary());
         return plan;
@@ -572,10 +804,30 @@ public final class DispenseService {
 
     /** Loads a board file and plans it at the given board location (top side up). */
     public DispensePlan planBoardFile(File boardFile, Location boardLocation) throws Exception {
-        Board board = configuration.getBoard(boardFile);
+        if (!boardFile.isFile()) {
+            // getBoard would write an empty board file there and list it
+            throw new FileNotFoundException("Board file not found: " + boardFile.getPath());
+        }
+        Board board = EdtRunner.call(() -> configuration.getBoard(boardFile), 10_000);
         BoardLocation bl = new BoardLocation(board);
         bl.setLocation(boardLocation);
         return planBoard(bl);
+    }
+
+    /**
+     * Why a board top Z cannot be right, or null: more than {@link #MAX_BOARD_Z_FROM_ANCHOR_MM} from
+     * the needle-frame surface. Without a needle frame there is nothing to compare it with (I4 refuses
+     * the run then).
+     */
+    public static String boardZProblem(DispenseConfig c, double boardZ) {
+        DispenseConfig.NeedleAnchor a = c.needleAnchor;
+        if (a == null || Math.abs(boardZ - a.surfaceZMm) <= MAX_BOARD_Z_FROM_ANCHOR_MM + 1e-9) {
+            return null;
+        }
+        return String.format(Locale.ROOT, "the board top Z %.3f is %.2f mm from the needle-frame surface %.3f (at most "
+                + "%.1f mm: the board and the blank sit on the same bed). The board top Z is the height where N1 "
+                + "touches the board; a height taken with the needle is about 2.6 mm off. Set the board Z again.",
+                boardZ, Math.abs(boardZ - a.surfaceZMm), a.surfaceZMm, MAX_BOARD_Z_FROM_ANCHOR_MM);
     }
 
     private double[] planStart() {
@@ -593,9 +845,25 @@ public final class DispenseService {
      * them (I9 refuses the run then).
      */
     public static List<GcodeStreamBuilder.DotSpec> purgeSpecs(DispenseConfig c) {
+        return purgeSpecs(c, c.profile.purgeDots);
+    }
+
+    /**
+     * The purge-row spots a board run of {@code plan} lays: the initial purge and the phase and flush
+     * dots before every further dose block ({@link DoseBlocks#purgeSpotsNeeded}).
+     */
+    public static List<GcodeStreamBuilder.DotSpec> purgeSpecs(DispenseConfig c, DispensePlan plan) {
+        return purgeSpecs(c, DoseBlocks.purgeSpotsNeeded(plan, c));
+    }
+
+    /**
+     * The next {@code n} unused spots of the purge row as dot specs (their rotation is the profile's;
+     * the builder turns each by its block's dose). Empty if {@code n} is 0 or the row cannot supply
+     * them (I9 refuses the run then).
+     */
+    public static List<GcodeStreamBuilder.DotSpec> purgeSpecs(DispenseConfig c, int n) {
         List<GcodeStreamBuilder.DotSpec> l = new ArrayList<>();
         DispenseConfig.PurgeRow row = c.purgeRow;
-        int n = c.profile.purgeDots;
         SurfacePlane plane = planeOf(c, row.surfaceName);
         if (n <= 0 || !row.isDefined() || row.spotsLeft() < n || plane == null) {
             return l;
@@ -615,12 +883,27 @@ public final class DispenseService {
      * rules); without a plan the generic checks (needle frame, touch-off) only.
      */
     public InterlockReport checkInterlocks(DispensePlan plan, double estimatedPressurisedSeconds) {
-        return Interlocks.check(interlockInputs(cfg, plan, estimatedPressurisedSeconds, boardScope(cfg, plan)));
+        return checkInterlocks(plan, estimatedPressurisedSeconds, false, false);
+    }
+
+    /**
+     * As above for a run that homes first ({@code homeFirst}: "not homed" is a note) and checks Z
+     * itself after the home ({@code zCheckFirst}: Z data older than the home are a note).
+     */
+    public InterlockReport checkInterlocks(DispensePlan plan, double estimatedPressurisedSeconds, boolean homeFirst,
+            boolean zCheckFirst) {
+        return Interlocks.check(interlockInputs(cfg, plan, estimatedPressurisedSeconds, boardScope(cfg, plan), homeFirst,
+                zCheckFirst));
     }
 
     /** Pre-flight interlocks for a calibration / shots / hold scope (no plan rules, no I9-I11). */
     public InterlockReport checkInterlocks(Interlocks.Scope scope, double estimatedPressurisedSeconds) {
-        return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope));
+        return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope, false, false));
+    }
+
+    /** CONFIG and MACHINE only (Register board, the surface probe, the Z check): they never dispense. */
+    public InterlockReport checkBasicInterlocks(boolean homeFirst) {
+        return Interlocks.checkBasic(interlockInputs(cfg.copy(), null, 0, null, homeFirst, false));
     }
 
     /** I4 scope of a board run: the board surface under every dot, the purge surface under the purge. */
@@ -635,9 +918,10 @@ public final class DispenseService {
         }
         sc.checkPlanSurface = true;
         DispenseConfig.PurgeRow row = c.purgeRow;
-        if (c.profile.purgeDots > 0 && row.isDefined()) {
+        int purge = DoseBlocks.purgeSpotsNeeded(plan, c);
+        if (purge > 0 && row.isDefined()) {
             List<double[]> t = new ArrayList<>();
-            for (int i = 0; i < Math.min(c.profile.purgeDots, row.spotsLeft()); i++) {
+            for (int i = 0; i < Math.min(purge, row.spotsLeft()); i++) {
                 t.add(row.spot(row.usedSpots + i));
             }
             sc.moreSurfaces.put(row.surfaceName, t);
@@ -654,6 +938,7 @@ public final class DispenseService {
         if (referenceSurface) {
             sc.referencePlaces.add(place);
         }
+        sc.dispensePlaces.add(place);
         return sc;
     }
 
@@ -665,6 +950,7 @@ public final class DispenseService {
         sc.referencePlaces.add(blankName);
         if (primeAtWaste) {
             sc.referencePlaces.add(c.wasteLocationName);
+            sc.dispensePlaces.add(c.wasteLocationName);
         }
         sc.surfaceName = blankName;
         if (specs != null) {
@@ -675,19 +961,22 @@ public final class DispenseService {
         return sc;
     }
 
-    private Interlocks.Inputs interlockInputs(DispenseConfig c, DispensePlan plan, double est, Interlocks.Scope scope) {
+    private Interlocks.Inputs interlockInputs(DispenseConfig c, DispensePlan plan, double est, Interlocks.Scope scope,
+            boolean homeFirst, boolean zCheckFirst) {
         Interlocks.Inputs in = new Interlocks.Inputs();
         Machine m = configuration.getMachine();
         in.cfg = c;
         in.machineEnabled = m != null && m.isEnabled();
         in.machineHomed = m != null && m.isHomed();
-        in.nozzleName = nozzle == null ? cfg.nozzle : nozzle.getName();
+        Nozzle n = nozzle; // read once: a config update resolves it again on another thread
+        in.nozzleName = n == null ? cfg.nozzle : n.getName();
         in.compatibleNozzleTips = new ArrayList<>();
-        if (nozzle != null) {
-            for (NozzleTip t : nozzle.getCompatibleNozzleTips()) {
+        if (n != null) {
+            for (NozzleTip t : n.getCompatibleNozzleTips()) {
                 in.compatibleNozzleTips.add(t.getName());
             }
-            in.loadedNozzleTip = nozzle.getNozzleTip() == null ? null : nozzle.getNozzleTip().getName();
+            NozzleTip loaded = n.getNozzleTip();
+            in.loadedNozzleTip = loaded == null ? null : loaded.getName();
         }
         in.pressureSensor = pressureSensor;
         in.plan = plan;
@@ -698,7 +987,8 @@ public final class DispenseService {
                 for (PadType t : types) {
                     in.padTypesNow.put(t.typeKey, t);
                 }
-                in.padTypesFingerprintNow = new PadTypeResolver(types, db.packageMappings()).fingerprint();
+                in.padTypesFingerprintNow = new PadTypeResolver(types, db.packageMappings())
+                        .withPastePartial(db.pastePartialPackages()).fingerprint();
             }
             catch (Exception e) {
                 in.padTypesNow = null; // unknown: the version checks are skipped, the gate check still runs
@@ -708,9 +998,14 @@ public final class DispenseService {
         in.estimatedPressurisedSeconds = est;
         in.opticalCheckAvailable = imager() != null && imager().isAvailable();
         in.scope = scope == null ? new Interlocks.Scope() : scope;
-        in.controllerConnectedAtMs = controllerConnectedAtMs;
+        in.controllerConnectedAtMs = homeTracker.getConnectedAtMs();
         in.boardRun = plan != null;
-        in.purgeDots = plan == null ? 0 : c.profile.purgeDots;
+        in.purgeDots = plan == null ? 0 : DoseBlocks.purgeSpotsNeeded(plan, c);
+        in.homeFirst = homeFirst;
+        in.zCheckFirst = zCheckFirst;
+        in.lastHomeAtMs = homeTracker.getLastHomeAtMs();
+        in.zCheck = homeTracker.getZCheck();
+        in.simulatorConfirmed = isSimulatorConfirmed();
         return in;
     }
 
@@ -723,7 +1018,8 @@ public final class DispenseService {
     }
 
     /**
-     * Streams a plan on the machine thread as one pressure session (bench recipe): the clean-pad
+     * Streams a plan on the machine thread as one pressure session (bench recipe): a home first when
+     * one is needed (homeBeforeRun) and a Z check when Z data predate the last home, the clean-pad
      * check with the pressure off (I10), then pump/valve ON, the purge row, a cross to the work with
      * no stop, every dot, vent. The Future never throws for dispense failures; see status.
      */
@@ -742,16 +1038,39 @@ public final class DispenseService {
             Session s = new Session(c, r);
             r.profile = c.profile.copy();
             db.event(r.runId, "INFO", "PROFILE", new com.google.gson.Gson().toJson(r.profile));
-            // Interlocks first (I4 Z frame before any program is built), then again with the estimate (I7).
-            r.interlocks = Interlocks.check(interlockInputs(c, plan, 0, boardScope(c, plan)));
+            // Every check but the home and the Z check first (those two are notes): a refusal moves nothing.
+            HomeTracker.Plan hp = homeTracker.plan(true, configuration.getMachine().isHomed(), c.homeBeforeRun);
+            ZCheckPlan zp = zCheckPlan(plan, hp.needed);
+            if (zp.needed && zp.reference == null) {
+                return s.refuse(noZReference(hp.needed, zp.homeAtMs));
+            }
+            r.interlocks = Interlocks.check(interlockInputs(c, plan, 0, boardScope(c, plan), hp.needed, zp.needed));
             if (!r.interlocks.ok()) {
                 return s.refuse(r.interlocks.toString());
             }
-            List<GcodeStreamBuilder.DotSpec> purge = purgeSpecs(c);
+            Map<String, Object> d = new LinkedHashMap<>();
+            d.put("stage", hp.needed ? "home" : zp.needed ? "z check" : "dispense");
+            d.put("home", homeDetail(hp));
+            detail(r, d);
+            HomeReport home = new HomeReport();
+            homeIfNeeded(s, home, s.exec::isAbortRequested);
+            r.homedFirst = home.done;
+            r.zCheck = zCheckIfNeeded(s, plan.boardRegistration, boardScope(c, plan), s.exec::isAbortRequested);
+            d.put("stage", "dispense");
+            d.put("zCheck", r.zCheck);
+            detail(r, d);
+            // Interlocks first (I4 Z frame before any program is built), then again with the estimate (I7).
+            r.interlocks = Interlocks.check(interlockInputs(c, plan, 0, boardScope(c, plan), false, false));
+            if (!r.interlocks.ok()) {
+                return s.refuse(r.interlocks.toString());
+            }
+            List<GcodeStreamBuilder.DotSpec> purge = purgeSpecs(c, plan);
             GcodeProgram estimate = GcodeStreamBuilder.forPlan(c, s.mapper, plan, purge, bZeroed.get(), s.keepalive,
                     0L);
-            r.interlocks = Interlocks.check(interlockInputs(c, plan, estimate.estimatedPressurisedSeconds,
-                    boardScope(c, plan)));
+            Interlocks.Inputs withEstimate = interlockInputs(c, plan, estimate.estimatedPressurisedSeconds,
+                    boardScope(c, plan), false, false);
+            withEstimate.programBlocks = estimate.blocks; // I6-feed: every block's paste demand
+            r.interlocks = Interlocks.check(withEstimate);
             if (!r.interlocks.ok()) {
                 return s.refuse(r.interlocks.toString());
             }
@@ -765,9 +1084,9 @@ public final class DispenseService {
             }
             GcodeProgram p = s.runSegment(() -> {
                 Long count = s.readBCount();
-                if (count == null && c.profile.isPartialTurn(c)) {
+                if (count == null && DoseBlocks.anyPartial(plan, c)) {
                     throw new RunRefusedException("I11: the controller did not report the B step count (M114 "
-                            + "Count): the start angle of a partial-turn profile cannot be set. Nothing was sent.",
+                            + "Count): the start angle of a partial-turn dose cannot be set. Nothing was sent.",
                             null);
                 }
                 return GcodeStreamBuilder.forPlan(c, s.mapper, plan, purge, bZeroed.get(), s.keepalive, count);
@@ -928,6 +1247,10 @@ public final class DispenseService {
         RunResult r = newRun("shots", null, locationName, getCurrentCalibration().id, count);
         return submit(r, () -> {
             DispenseConfig c = cfg;
+            String reserved = couponReservation(locationName); // §7.5: a coupon waiting for its readings takes no dots
+            if (reserved != null) {
+                throw refused(reserved);
+            }
             Session s = new Session(c, r);
             Interlocks.Scope scope = shotsScope(locationName, referenceSurface);
             if (!s.preflight(scope, 0)) {
@@ -990,7 +1313,11 @@ public final class DispenseService {
         public RunResult run;
     }
 
-    /** Needle touch-off by dot ladder at stepped gaps (plan §6.1). Applies the new offset if found and asked. */
+    /**
+     * Needle touch-off by dot ladder at stepped gaps (plan §6.1). Applies the new offset if found and asked. Each dot
+     * is found at its spot with the strings cut off; paste at a spot that is not one dot refuses the conclusion
+     * ({@link NeedleTouchOff#analyze}). A pitch with no room between the dots is refused before anything is sent.
+     */
     public Future<TouchOffResult> runNeedleTouchOff(NeedleTouchOff.Request req, boolean apply) throws Exception {
         requireAvailable();
         String blankName = req.locationName == null ? cfg.blankLocationName : req.locationName;
@@ -1000,6 +1327,12 @@ public final class DispenseService {
         res.run = r;
         return submitResult(r, res, () -> {
             DispenseConfig c = cfg;
+            String pitch = NeedleTouchOff.pitchProblem(req, c);
+            if (pitch != null) {
+                throw refused(pitch);
+            }
+            double dotMm = NeedleTouchOff.expectedDotDiameterMm(req, c);
+            double steadyMm = NeedleTouchOff.steadyDotMm(req, c);
             Session s = new Session(c, r);
             SurfacePlane plane = planeOf(c, blankName);
             if (Double.isNaN(req.rotationDeg)) {
@@ -1019,16 +1352,13 @@ public final class DispenseService {
             if (!s.preflight(scope, p.estimatedPressurisedSeconds)) {
                 return;
             }
-            List<Dot> found = s.imageDots(specs, req.primeAtWaste, primeExtra, req.pitchMm / 2);
-            double[] gaps = NeedleTouchOff.gaps(req);
-            Double[] d = new Double[gaps.length];
-            for (int i = 0; i < d.length; i++) {
-                d[i] = found.get(i) == null ? null : found.get(i).diameterMm;
-            }
-            res.analysis = NeedleTouchOff.analyze(gaps, d, req.jumpRatio);
+            List<SpotDot> seen = s.imageSpots(specs, req.primeAtWaste, primeExtra, NeedleTouchOff.cutMm(dotMm),
+                    req.pitchMm / 2);
+            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen, req.jumpRatio, steadyMm);
             res.previousOffsetMm = c.needleZOffsetMm;
             java.util.Map<String, Object> det = new java.util.LinkedHashMap<>();
             det.put("analysis", res.analysis);
+            det.put("pitchMm", req.pitchMm);
             det.put("blank", blankName);
             det.put("blankPlane", plane == null ? null : java.util.Arrays.asList(plane.a, plane.b, plane.c));
             det.put("blankPlaneMaxResidualMm", plane == null ? null : plane.maxAbsResidualMm);
@@ -1048,6 +1378,2179 @@ public final class DispenseService {
             r.message = res.analysis.reason;
             s.ok();
         });
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Home when needed, Z after a home, Register board, surface probe
+    // (docs/instancelabs/AUTO_REGISTER_DESIGN.md)
+    // ------------------------------------------------------------------------------------------
+
+    /** Connects, disables, homes and the latest Z check. */
+    public HomeTracker getHomeTracker() {
+        return homeTracker;
+    }
+
+    /** Whether a task must home first now, and why (setting homeBeforeRun). */
+    public HomeTracker.Plan homePlan() {
+        Machine m = configuration.getMachine();
+        return homeTracker.plan(m != null && m.isEnabled(), m != null && m.isHomed(), cfg.homeBeforeRun);
+    }
+
+    /**
+     * Every driver is loopback TCP and the controller identified itself as OpenPnP's simulator on this
+     * connection ({@link SimGuard#isSimulated}, or the answer this service noted at the connect).
+     */
+    public boolean isSimulatorConfirmed() {
+        Machine m = configuration.getMachine();
+        return SimGuard.isSimulated(m) || (Boolean.TRUE.equals(connectionSimulated) && SimGuard.isLoopbackOnly(m));
+    }
+
+    /** The API's manual pressure hold: engine tasks that move refuse to start while it is on. */
+    public void setPressureHoldCheck(BooleanSupplier active) {
+        pressureHoldActive = active == null ? () -> false : active;
+    }
+
+    /** The vacuum probe nozzle N1, or null if the machine has none. */
+    public Nozzle getProbeNozzle() {
+        Machine machine = configuration.getMachine();
+        if (machine == null) {
+            return null;
+        }
+        for (Head h : machine.getHeads()) {
+            for (Nozzle n : h.getNozzles()) {
+                if (PROBE_NOZZLE.equals(n.getName()) || PROBE_NOZZLE.equals(n.getId())) {
+                    return n;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * N1's raw Z as OpenPnP knows it, whether it lies outside z1's safe zone (a STOP during a probe or a
+     * board's dots left a tool low: the next home moves Z to the safe height first), and whether above it:
+     * {z, outside, above}, or null without N1. On the shared Z axis N1 above its zone puts the needle low
+     * (a STOP during board dots: N1 at 60.06, the needle at 2.94 over the pad).
+     */
+    public double[] probeNozzleZ() {
+        Nozzle n = getProbeNozzle();
+        Machine m = configuration.getMachine();
+        if (n == null || !(m instanceof ReferenceMachine)) {
+            return null;
+        }
+        try {
+            OpenPnpRawMapper n1 = OpenPnpRawMapper.forProbeNozzle((ReferenceMachine) m, n, cfg.bAxisName);
+            double z = n1.currentPlanned()[2];
+            double[] zone = n1.zSafeZoneRaw();
+            boolean above = zone != null && !Double.isNaN(zone[1]) && z > zone[1] + 1e-6;
+            return new double[] {z, outsideSafeZone(zone, z) ? 1 : 0, above ? 1 : 0};
+        }
+        catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static boolean outsideSafeZone(double[] zone, double z) {
+        return zone != null && ((!Double.isNaN(zone[0]) && z < zone[0] - 1e-6) || (!Double.isNaN(zone[1])
+                && z > zone[1] + 1e-6));
+    }
+
+    /** What a Z check after the last home needs for a task: its stale Z data and the first point it would touch. */
+    public static final class ZCheckPlan {
+        public boolean needed;
+        public List<ZCheck.Stale> stale = new ArrayList<>();
+        public Long homeAtMs;
+        /**
+         * The first stored point the check would touch, or null: not needed, or some stale datum has no
+         * point in its Z frame left (the check is refused).
+         */
+        public ZCheck.Reference reference;
+        public ZCheck.Result last;
+        /**
+         * N1 touches the check makes when the spots are bare: one per Z frame (home period) of the stale data,
+         * so 2 when, e.g., the board was probed under a later home than the needle frame (0 when not needed).
+         */
+        public int touches;
+    }
+
+    /**
+     * The Z check a board run of {@code plan} (null: the needle tasks on the blank) needs. With
+     * {@code homeFirst} every Z datum predates the coming home.
+     */
+    public ZCheckPlan zCheckPlan(DispensePlan plan, boolean homeFirst) {
+        DispenseConfig c = cfg;
+        return zCheckPlan(c, plan == null ? needleTasksScope(c) : boardScope(c, plan),
+                plan == null ? null : plan.boardRegistration, homeFirst);
+    }
+
+    /**
+     * The Z check of a board run of a plan that may run now: tied to the board surface's registration (I4 refuses
+     * any other), on the board and the blank (its purge row). For the status before a plan is chosen.
+     */
+    public ZCheckPlan boardRunZCheckPlan(boolean homeFirst) {
+        DispenseConfig c = cfg;
+        DispenseConfig.SurfaceMap board = c.surface(c.boardSurfaceName);
+        return zCheckPlan(c, needleTasksScope(c), board == null ? null : board.boardFingerprint, homeFirst);
+    }
+
+    private ZCheckPlan zCheckPlan(DispenseConfig c, Interlocks.Scope sc, String planRegistration, boolean homeFirst) {
+        ZCheckPlan p = new ZCheckPlan();
+        p.last = homeTracker.getZCheck();
+        p.homeAtMs = homeTracker.getLastHomeAtMs();
+        p.stale = ZCheck.stale(c, sc, homeFirst ? Long.valueOf(Long.MAX_VALUE) : p.homeAtMs);
+        List<ZCheck.Stale> open = homeFirst ? p.stale : ZCheck.unchecked(p.last, p.homeAtMs, p.stale);
+        p.needed = !open.isEmpty();
+        List<ZCheck.Reference> refs = ZCheck.references(c, planRegistration, homeFirst ? null : p.homeAtMs);
+        p.reference = ZCheck.unreachable(refs, open).isEmpty() ? ZCheck.first(refs, open) : null;
+        p.touches = p.needed && p.reference != null ? ZCheck.touches(refs, open) : 0;
+        return p;
+    }
+
+    /** The I4 refusal of a run whose Z check (after a home it does itself, or the last one) has no point left. */
+    public static String noZReference(boolean homesFirst, Long lastHomeAtMs) {
+        return homesFirst ? "I4: the run homes first, and Z must then be checked, but no point measured before the "
+                + "home is left to touch (no blank or board surface, no needle-frame X/Y): record the needle frame "
+                + "again" : "I4: " + ZCheck.noReferenceMessage(lastHomeAtMs);
+    }
+
+    /** The Z data of the needle tasks (prime, test dot, touch-off, dot ladder, shots) and of Check Z. */
+    static Interlocks.Scope needleTasksScope(DispenseConfig c) {
+        Interlocks.Scope sc = blankScope(c, c.blankLocationName, false, false, null);
+        sc.moreSurfaces.put(c.boardSurfaceName, new ArrayList<>());
+        return sc;
+    }
+
+    /** A top camera (or a test imager) for the fiducials and the looks before N1 touches. */
+    public boolean hasTopCamera() {
+        DotImager im = imager();
+        return im != null && im.isAvailable();
+    }
+
+    /** The pad types, package mappings and package options now (BoardFeatures, plans). */
+    public PadTypeResolver padTypeResolver() throws SQLException {
+        return new PadTypeResolver(db.currentPadTypes(), db.packageMappings())
+                .withPastePartial(db.pastePartialPackages());
+    }
+
+    /**
+     * The checks of a probe task before anything moves (§4.4), for the API's 409: N1 present and
+     * untransformed, the needle frame (a board) or the frame band (a needle-frame surface), the
+     * simulator timings, OpenPnP's N1 state and the window. On a loopback link whose controller has not
+     * identified itself yet the timings are left to the task, which asks it first (M115).
+     */
+    public VacuumProber.Window probePreflight(boolean board, String what, double nominalZ) throws Exception {
+        requireAvailable();
+        ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
+        DispenseConfig c = cfg;
+        Nozzle n = getProbeNozzle();
+        if (n == null) {
+            throw refused("PROBE: nozzle '" + PROBE_NOZZLE + "' is not in the machine");
+        }
+        OpenPnpRawMapper n1 = OpenPnpRawMapper.forProbeNozzle(m, n, c.bAxisName);
+        String why = n1.probeNozzleProblem(nozzle);
+        if (why != null) {
+            throw refused(why);
+        }
+        OpenPnpRawMapper dispenser = new OpenPnpRawMapper(m, nozzle, c.bAxisName);
+        double[] here = dispenser.currentNozzleLocation();
+        double travel = dispenser.toRaw(here[0], here[1], c.travelSafeZMm).z;
+        boolean unknown = connectionSimulated == null && SimGuard.isLoopbackOnly(m);
+        VacuumProber.Settings ps = VacuumProber.Settings.of(c, isSimulatorConfirmed() || unknown);
+        return VacuumProber.preflight(c, board, what, nominalZ, travel, ps, n);
+    }
+
+    /**
+     * POST /api/machine/home: {@link #homeSafely(DispenseExecutor, OpenPnpRawMapper, BooleanSupplier,
+     * HomeReport, RunResult)} on the machine thread, with an executor of its own that STOP aborts.
+     */
+    public HomeReport homeSafely() throws Exception {
+        requireAvailable();
+        ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
+        DispenseConfig c = cfg;
+        OpenPnpRawMapper mapper = new OpenPnpRawMapper(m, nozzle, c.bAxisName);
+        DispenseExecutor exec = new DispenseExecutor(c, new DriverGcodeChannel(mapper.getDriver()), mapper.letterB(),
+                System::currentTimeMillis);
+        HomeReport rep = HomeReport.of(homePlan());
+        activeExecutor = exec;
+        try {
+            long t0 = System.currentTimeMillis();
+            homeSafely(exec, mapper, exec::isAbortRequested, rep, null);
+            rep.done = true;
+            rep.seconds = (System.currentTimeMillis() - t0) / 1000.0;
+        }
+        finally {
+            if (activeExecutor == exec) {
+                activeExecutor = null;
+            }
+        }
+        return rep;
+    }
+
+    /**
+     * Homes on the machine thread (§2.3): first, when a STOP left N1 low, raises it to the travel Z
+     * (Z only: X/Y never move before G28, whatever axis order the firmware homes in); then OpenPnP's
+     * home, during which a disable disconnects every driver, so visual homing and the park cannot move
+     * the head after a STOP. A STOP (or a disable) during the home un-homes and ends ABORTED. {@code r}
+     * is the task's run (its phase, lines and warnings), null for the API's home.
+     */
+    private void homeSafely(DispenseExecutor exec, OpenPnpRawMapper dispenser, BooleanSupplier aborted, HomeReport rep,
+            RunResult r) throws Exception {
+        ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
+        DispenseConfig c = cfg;
+        Nozzle n = getProbeNozzle();
+        if (n != null) {
+            OpenPnpRawMapper n1 = OpenPnpRawMapper.forProbeNozzle(m, n, c.bAxisName);
+            double[] pos = new double[3];
+            AxesLocation at;
+            try {
+                at = n1.getDriver().getReportedLocation(c.commandTimeoutMs);
+            }
+            catch (Exception e) {
+                if (aborted.getAsBoolean()) {
+                    throw new DispenseExecutor.AbortedException(abortReason(exec, "stopped before homing"));
+                }
+                throw refused("MACHINE: homing failed: the controller did not report its position (" + e.getMessage()
+                        + "). Nothing else was done; home from the strip and try again.");
+            }
+            ReferenceControllerAxis[] xyz = n1.xyzAxes();
+            for (int i = 0; i < 3; i++) {
+                pos[i] = at.getCoordinate(xyz[i], LengthUnit.Millimeters);
+            }
+            n1.resync(pos, pos, n1.currentB());
+            if (outsideSafeZone(n1.zSafeZoneRaw(), pos[2])) {
+                double travel = homeRaiseZ(dispenser, c, n1.zSafeZoneRaw());
+                rep.n1RaisedFromZ = pos[2];
+                if (r != null) {
+                    phase(r, String.format(Locale.ROOT, "home: %s · raising N1 from Z %.2f", rep.why, pos[2]));
+                }
+                exec.sendGated(DispenseExecutor.Scope.HOME, "G1 " + n1.letterZ() + GcodeStreamBuilder.f4(travel) + " F600",
+                        c.commandTimeoutMs + 60_000L, r);
+                exec.sendGated(DispenseExecutor.Scope.HOME, "M400", c.commandTimeoutMs + 60_000L, r);
+                pos[2] = travel;
+                n1.resync(pos, pos, n1.currentB());
+                Logger.info("N1 was at Z {}: raised to {} before homing", rep.n1RaisedFromZ, travel);
+            }
+        }
+        if (aborted.getAsBoolean()) {
+            throw new DispenseExecutor.AbortedException(abortReason(exec, "stopped before homing"));
+        }
+        MachineListener cut = new MachineListener.Adapter() {
+            @Override
+            public void machineDisabled(Machine machine, String reason) {
+                for (Driver d : machine.getDrivers()) {
+                    if (d instanceof GcodeDriver) {
+                        ((GcodeDriver) d).disconnect();
+                    }
+                }
+            }
+        };
+        m.addListener(cut);
+        Exception failed = null;
+        try {
+            homeTracker.homeStarted();
+            m.home();
+        }
+        catch (Exception e) {
+            failed = e;
+        }
+        finally {
+            m.removeListener(cut);
+            homeTracker.homeEnded();
+        }
+        if (aborted.getAsBoolean() || !m.isEnabled()) {
+            m.setHomed(false);
+            throw new DispenseExecutor.AbortedException(abortReason(exec, "stopped during homing"));
+        }
+        if (failed != null) {
+            m.setHomed(false);
+            throw new RunRefusedException("MACHINE: homing failed: " + failed.getMessage() + ". Nothing else was done; "
+                    + "home from the strip and try again.", failed);
+        }
+    }
+
+    /** The raw Z N1 is raised to before a home: the dispense travel Z (31.5, z1's home and the see-saw middle). */
+    private static double homeRaiseZ(OpenPnpRawMapper dispenser, DispenseConfig c, double[] zone) throws Exception {
+        double[] n = dispenser.currentNozzleLocation();
+        double z = dispenser.toRaw(n[0], n[1], c.travelSafeZMm).z;
+        if (outsideSafeZone(zone, z)) {
+            z = (zone[0] + zone[1]) / 2; // keep N1 inside its safe zone whatever the travel Z
+        }
+        return z;
+    }
+
+    private static String abortReason(DispenseExecutor exec, String otherwise) {
+        String why = exec == null ? null : exec.getAbortReason();
+        return why == null ? otherwise : why;
+    }
+
+    /** Inside a task right after its Session: homes when the home plan says so (§2.3), else nothing. */
+    private void homeIfNeeded(Session s, HomeReport rep, BooleanSupplier aborted) throws Exception {
+        Machine m = configuration.getMachine();
+        HomeTracker.Plan hp = homeTracker.plan(m.isEnabled(), m.isHomed(), s.c.homeBeforeRun);
+        rep.needed = hp.needed;
+        rep.whyCode = hp.whyCode;
+        rep.why = hp.why;
+        if (!hp.needed) {
+            return;
+        }
+        if (aborted.getAsBoolean()) {
+            throw new DispenseExecutor.AbortedException(abortReason(s.exec, "stopped before homing"));
+        }
+        phase(s.r, "home: " + hp.why);
+        long t0 = System.currentTimeMillis();
+        homeSafely(s.exec, s.mapper, aborted, rep, s.r);
+        rep.done = true;
+        rep.seconds = (System.currentTimeMillis() - t0) / 1000.0;
+    }
+
+    /**
+     * The Z check of a task (§2.4): when Z data of its scope predate the last home and no passing
+     * check for that home vouches for them, one N1 touch at the first stored point whose spot is bare,
+     * per Z frame among those data (a point vouches only for data measured under its home). Returns
+     * the last touch, or null when none was needed. Refused when no point is left, when it does not
+     * touch, and when it fails ("Z moved").
+     */
+    private ZCheck.Result zCheckIfNeeded(Session s, String planRegistration, Interlocks.Scope scope,
+            BooleanSupplier aborted) throws Exception {
+        Long home = homeTracker.getLastHomeAtMs();
+        List<ZCheck.Stale> open = ZCheck.unchecked(homeTracker.getZCheck(), home, ZCheck.stale(s.c, scope, home));
+        if (open.isEmpty()) {
+            return null;
+        }
+        List<ZCheck.Reference> refs = ZCheck.references(s.c, planRegistration, home);
+        if (refs.isEmpty()) {
+            throw refused("I4: " + ZCheck.noReferenceMessage(home));
+        }
+        List<ZCheck.Stale> unreachable = ZCheck.unreachable(refs, open);
+        if (!unreachable.isEmpty()) {
+            throw refused("I4: " + ZCheck.noFrameReferenceMessage(home, unreachable));
+        }
+        Probe pr = new Probe(s, aborted, null);
+        for (ZCheck.Reference ref : refs) {
+            if (!ZCheck.vouchesForAny(ref, open)) {
+                continue; // its frame is checked already
+            }
+            phase(s.r, "z check: " + ZCheck.describe(ref.name));
+            VacuumProber.Target t = new VacuumProber.Target();
+            t.n = 1;
+            t.x = ref.x;
+            t.y = ref.y;
+            t.storedZ = ref.z;
+            VacuumProber.Point p = pr.run("z check", Collections.singletonList(t), VacuumProber.Window.around(ref.z,
+                    pr.travelZ, pr.settings)).get(0);
+            if ("not-bare".equals(p.state)) {
+                s.r.warnings.add("Z check: " + p.failure + " (the next stored point is used)");
+                continue;
+            }
+            if (p.z == null) {
+                throw refused(p.failure);
+            }
+            ZCheck.Result res = ZCheck.vouch(ZCheck.result(ref, p.z, System.currentTimeMillis(), home), ref, s.c,
+                    homeTracker.getZCheck());
+            homeTracker.setZCheck(res);
+            db.event(s.r.runId, res.pass ? "INFO" : "WARN", "ZCHECK", new Gson().toJson(res));
+            if (!res.pass) {
+                throw refused("I4: " + ZCheck.movedMessage(res));
+            }
+            restampZFrame(res);
+            open = ZCheck.unchecked(res, home, open);
+            if (open.isEmpty()) {
+                return res;
+            }
+        }
+        throw refused("I4: Z must be checked after the home at " + ZCheck.clock(home) + ", but something lies on every "
+                + "stored point (paste, a part or print seen): wipe one of them, or record the needle frame again");
+    }
+
+    /**
+     * A passing Z check: the data it vouched for are in its home's Z frame from now on ({@link ZCheck#restamp}).
+     * Not saved: they keep their older frame, and the next home touches one more point.
+     */
+    private synchronized void restampZFrame(ZCheck.Result res) {
+        DispenseConfig c = cfg.copy();
+        try {
+            if (ZCheck.restamp(c, res)) {
+                updateConfig(c);
+            }
+        }
+        catch (Exception e) {
+            Logger.warn(e, "dispense: the Z frames checked at the home were not saved");
+        }
+    }
+
+    /** The N1 vacuum probe of a task: N1's mapper and checks, the settings and the prober over the session's gate. */
+    private final class Probe {
+        final Session s;
+        final OpenPnpRawMapper n1;
+        final VacuumProber.Settings settings;
+        final VacuumProber prober;
+        /** The raw Z the dispense stream travels at, sent as N1 Z. */
+        final double travelZ;
+        final BooleanSupplier aborted;
+        /** The points the prober reported in the current run: the record of a run that refused or stopped. */
+        private final Map<Integer, VacuumProber.Point> seen = new LinkedHashMap<>();
+
+        Probe(Session s, BooleanSupplier aborted, java.util.function.Consumer<VacuumProber.Point> progress)
+                throws Exception {
+            this.s = s;
+            this.aborted = aborted;
+            ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
+            Nozzle n = getProbeNozzle();
+            if (n == null) {
+                throw refused("PROBE: nozzle '" + PROBE_NOZZLE + "' is not in the machine");
+            }
+            n1 = OpenPnpRawMapper.forProbeNozzle(m, n, s.c.bAxisName);
+            String why = n1.probeNozzleProblem(nozzle);
+            if (why != null) {
+                throw refused(why);
+            }
+            settings = VacuumProber.Settings.of(s.c, isSimulatorConfirmed());
+            double[] here = s.mapper.currentNozzleLocation();
+            travelZ = s.mapper.toRaw(here[0], here[1], s.c.travelSafeZMm).z;
+            // everything OpenPnP queued must be done before the raw probe lines start
+            m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+            prober = new VacuumProber(settings, n1, VacuumProber.gatedIo(s.exec, s.r), spotLook(imager()), s.r,
+                    aborted, pt -> {
+                        seen.put(pt.n, pt);
+                        if (progress != null) {
+                            progress.accept(pt);
+                        }
+                    }, baselineMemory);
+        }
+
+        /**
+         * Probes the targets. After it returns or refuses, OpenPnP learns where the probe left N1;
+         * after a STOP or failed end lines (the prober sent the I1 shutdown) the session recovers
+         * instead (position read-back, un-home). A STOP is told by the flags, not by the exception:
+         * a STOP during the camera look surfaces as the look's exception, which is rethrown as the
+         * STOP so every task records it as stopped. However it ended, a PROBE event keeps every
+         * point's readings, release wait and look ({@code what}: the z check, same seat, the probe).
+         */
+        List<VacuumProber.Point> run(String what, List<VacuumProber.Target> targets, VacuumProber.Window w)
+                throws Exception {
+            boolean recovered = false;
+            List<VacuumProber.Point> out = null;
+            seen.clear();
+            try {
+                out = prober.probe(targets, w);
+                return out;
+            }
+            catch (Exception e) {
+                boolean stop = aborted.getAsBoolean();
+                if (prober.needsRecovery() || stop) {
+                    recovered = true;
+                    s.recover();
+                }
+                if (stop && !(e instanceof DispenseExecutor.AbortedException)) {
+                    DispenseExecutor.AbortedException a = new DispenseExecutor.AbortedException(abortReason(s.exec,
+                            "stopped during the probe"));
+                    a.addSuppressed(e);
+                    throw a;
+                }
+                throw e;
+            }
+            finally {
+                if (!recovered && !prober.needsRecovery()) {
+                    n1.resync(prober.finalPlanned(), prober.finalDriver(), n1.currentB());
+                }
+                record(what, w, out);
+            }
+        }
+
+        /** The PROBE event of one run: the real machine needs the readings of a refused probe most (§5.4). */
+        private void record(String what, VacuumProber.Window w, List<VacuumProber.Point> out) {
+            try {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("what", what);
+                m.put("window", w);
+                m.put("points", out != null ? out : new ArrayList<>(seen.values()));
+                db.event(s.r.runId, out != null && VacuumProber.refusal(out) == null ? "INFO" : "WARN", "PROBE",
+                        new Gson().toJson(m));
+            }
+            catch (RuntimeException e) {
+                Logger.warn(e, "dispense: the probe record was not written");
+            }
+        }
+    }
+
+    /** The camera look before an N1 touch (§4.5): one lit frame centred on the spot, BareSpotCheck. */
+    private static VacuumProber.SpotLook spotLook(DotImager im) {
+        if (im == null || !im.isAvailable()) {
+            return null;
+        }
+        BareSpotCheck.Settings bs = new BareSpotCheck.Settings();
+        return (x, y) -> {
+            DotImager.Frame f = im.captureLit(x, y, null);
+            if (f == null || f.image == null) {
+                return null; // an imager without pictures (dot vision only): no look
+            }
+            BareSpotCheck.Result res = BareSpotCheck.check(f.image, f.mmPerPxX, f.mmPerPxY, bs);
+            VacuumProber.Look l = new VacuumProber.Look();
+            l.bare = res.bare;
+            l.foreignShare = res.foreignShare;
+            l.ringSpread = res.ringSpread;
+            l.rawShare = res.rawShare;
+            l.threshold = res.threshold;
+            l.wideShare = res.wideShare;
+            l.reason = res.reason;
+            return l;
+        };
+    }
+
+    /**
+     * One engine task with stages (Register board, the surface probe): the stage a STOP came in, and
+     * the STOP test, which also covers a STOP before the Session existed.
+     */
+    private final class Task {
+        final RunResult r;
+        volatile String stage;
+        volatile Session s;
+        /** The stage when the task ended other than OK. */
+        volatile String endedIn;
+        /** The task's live progress (status.run.detail). */
+        final Map<String, Object> detail = new LinkedHashMap<>();
+        final Map<Integer, VacuumProber.Point> points = new LinkedHashMap<>();
+        int stepsPlanned;
+        int stepsDone;
+        double secondsLeft;
+        private String lastPointPhase;
+
+        Task(RunResult r, String stage) {
+            this.r = r;
+            this.stage = stage;
+        }
+
+        Session start(DispenseConfig c) throws Exception {
+            s = new Session(c, r);
+            if (cameraTourAbort) {
+                s.exec.requestAbort("STOP before the start");
+            }
+            return s;
+        }
+
+        boolean aborted() {
+            Session x = s;
+            return cameraTourAbort || (x != null && x.exec.isAbortRequested());
+        }
+
+        /** Runs the body; a failure is ABORTED when STOP was pressed, else REFUSED or ERROR by its kind. */
+        void run(Body body) throws Exception {
+            try {
+                body.run();
+            }
+            catch (Exception e) {
+                endedIn = stage;
+                if (r.status == RunResult.Status.RUNNING) {
+                    boolean stop = aborted();
+                    r.status = stop ? RunResult.Status.ABORTED
+                            : e instanceof RunRefusedException ? RunResult.Status.REFUSED : RunResult.Status.ERROR;
+                    r.message = stop ? abortReason(s == null ? null : s.exec, String.valueOf(e.getMessage()))
+                            : String.valueOf(e.getMessage());
+                }
+                throw e;
+            }
+        }
+
+        /** A probe point changed: phase on a new spot or look, and the live detail. */
+        void point(String what, int total, VacuumProber.Point p) {
+            points.put(p.n, p);
+            if ("now".equals(p.state) || "look".equals(p.state)) {
+                String ph = "look".equals(p.state) ? what + ": look"
+                        : what + ": point " + p.n + " of " + total + (p.alternate > 0 ? " · alternate " + p.alternate : "");
+                if (!ph.equals(lastPointPhase)) {
+                    lastPointPhase = ph;
+                    phase(r, ph);
+                }
+            }
+            if ("contact".equals(p.state)) {
+                stepsDone++;
+                secondsLeft = Math.max(0, secondsLeft - PROBE_POINT_ESTIMATE_S);
+            }
+            send();
+        }
+
+        void send() {
+            Map<String, Object> d = new LinkedHashMap<>(detail);
+            d.put("stage", stage);
+            d.put("stepsDone", stepsDone);
+            d.put("stepsPlanned", stepsPlanned);
+            d.put("estimatedSecondsLeft", Math.round(secondsLeft));
+            List<Map<String, Object>> probes = new ArrayList<>();
+            for (VacuumProber.Point p : points.values()) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("n", p.n);
+                m.put("x", p.x);
+                m.put("y", p.y);
+                m.put("state", p.state);
+                m.put("z", p.z);
+                m.put("lastZ", p.lastZ);
+                m.put("alternate", p.alternate);
+                probes.add(m);
+            }
+            if (!probes.isEmpty()) {
+                d.put("probes", probes);
+            }
+            detail(r, d);
+        }
+    }
+
+    /**
+     * Register board (§5.2): home if needed, find the fiducials with the top camera, fit the board ->
+     * machine affine, decide the seat, touch the board with N1's vacuum (or re-touch 3 stored points of
+     * a same seat), save the surface tied to the registration and plan the board again. A registration
+     * once stored stays (also after a refused probe or a STOP) and the board is planned with it. A board
+     * with fewer fiducials than needed is refused; one without any is probed only when the request says so
+     * ({@link RegisterRequest#probeOnly}, F10). The Future never throws for task failures; see the result.
+     */
+    public Future<RegistrationResult> registerBoard(RegisterRequest req) throws Exception {
+        requireAvailable();
+        RunResult r = newRun("board-registration", req.plan.planId, req.plan.boardName, 0, 0);
+        RegistrationResult res = new RegistrationResult();
+        res.run = r;
+        res.home = new HomeReport();
+        res.probe = new ProbeReport();
+        res.probe.mode = req.probe.name().toLowerCase(Locale.ROOT);
+        Task t = new Task(r, "home");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> register(req, res, t)), () -> {
+            res.ok = r.status == RunResult.Status.OK || r.status == RunResult.Status.RUNNING;
+            res.stoppedStage = r.status == RunResult.Status.ABORTED ? t.endedIn : null;
+            res.message = res.ok ? registrationSentence(res) : r.message;
+            if (res.ok) {
+                r.message = res.message;
+            }
+        });
+    }
+
+    private void register(RegisterRequest req, RegistrationResult res, Task t) throws Exception {
+        RunResult r = t.r;
+        DispenseConfig c = cfg;
+        Session s = t.start(c);
+        BooleanSupplier aborted = t::aborted;
+        HomeTracker.Plan hp = homePlan();
+        t.stepsPlanned = (hp.needed ? 1 : 0) + 1 + 5;
+        t.secondsLeft = (hp.needed ? hp.estimateS : 0) + 3 * FIDUCIAL_ESTIMATE_S + 5 * PROBE_POINT_ESTIMATE_S;
+        t.detail.put("home", homeDetail(hp));
+        t.send();
+        homeIfNeeded(s, res.home, aborted);
+        if (res.home.done) {
+            t.stepsDone++;
+            t.secondsLeft = Math.max(0, t.secondsLeft - hp.estimateS);
+        }
+        r.interlocks = Interlocks.checkBasic(interlockInputs(c, null, 0, null, false, false));
+        if (!r.interlocks.ok()) {
+            throw refused(r.interlocks.toString());
+        }
+
+        // the fiducials
+        t.stage = "fiducials";
+        Board board = req.nominal.getBoard();
+        boolean job = req.boardKey != null && req.boardKey.startsWith("job:");
+        BoardFeatures f = BoardFeatures.of(board, new PadTypeResolver(db.currentPadTypes(), db.packageMappings()),
+                req.fiducialHints);
+        String few = fewFiducials(f, c.fiducialCheck.minFiducials);
+        // probe only (F10) is for a board without a single fiducial: one that has some is fitted by them, or refused
+        boolean onlyProbe = few != null && req.probeOnly && f.fiducials.isEmpty();
+        if (few != null && !onlyProbe) {
+            throw refused(few);
+        }
+        DotImager im = imager();
+        if (im == null || !im.isAvailable()) {
+            throw refused(NO_CAMERA);
+        }
+        boolean sim = isSimulatorConfirmed();
+        res.simulated = sim;
+        if (onlyProbe) {
+            probeOnly(req, res, t, f, few, sim);
+            s.ok();
+            return;
+        }
+        BoardRegistration prev = c.boardRegistrations.get(req.boardKey);
+        if (prev != null && prev.refusal(req.boardKey, req.nominalSeat, board, () -> sim) != null) {
+            prev = null;
+        }
+        BoardLocation guess = prev == null ? req.nominal : prev.applyTo(req.nominal);
+        List<FiducialLocator.Target> targets = new ArrayList<>();
+        double maxD = 0;
+        for (BoardFeatures.Fiducial fd : f.fiducials) {
+            Location e = Utils2D.calculateBoardPlacementLocation(guess, new Location(LengthUnit.Millimeters, fd.x, fd.y,
+                    0, 0)).convertToUnits(LengthUnit.Millimeters);
+            targets.add(new FiducialLocator.Target(fd.name, fd.x, fd.y, e.getX(), e.getY(), fd.diameterMm));
+            RegistrationResult.FidResult fr = new RegistrationResult.FidResult();
+            fr.name = fd.name;
+            fr.bx = fd.x;
+            fr.by = fd.y;
+            fr.expectedX = e.getX();
+            fr.expectedY = e.getY();
+            fr.searchRadiusMm = c.fiducialCheck.searchRadiusMm;
+            res.fiducials.add(fr);
+            maxD = Math.max(maxD, fd.diameterMm);
+        }
+        t.stepsPlanned = (hp.needed ? 1 : 0) + targets.size() + 5 + 1;
+        t.secondsLeft = targets.size() * FIDUCIAL_ESTIMATE_S + 5 * PROBE_POINT_ESTIMATE_S;
+        t.detail.put("fiducials", fiducialDetail(res.fiducials));
+        FiducialLocator.Settings ls = new FiducialLocator.Settings();
+        ls.searchRadiusMm = c.fiducialCheck.searchRadiusMm;
+        ls.minFiducials = c.fiducialCheck.minFiducials;
+        double margin = maxD * ls.detector.maxDiameterFactor;
+        boolean[] sized = {false};
+        FiducialLocator.FrameSource cam = (x, y) -> {
+            DotImager.Frame fr = im.captureLit(x, y, req.nominalZ);
+            if (!sized[0] && fr != null && fr.image != null) {
+                sized[0] = true;
+                int n = FiducialLocator.searchFrameCount(fr.image.getWidth(), fr.image.getHeight(), fr.mmPerPxX,
+                        fr.mmPerPxY, margin, ls.searchRadiusMm);
+                if (n > FiducialLocator.MAX_SEARCH_FRAMES) {
+                    throw refused(String.format(Locale.ROOT, "REG: fiducialCheck.searchRadiusMm %.1f needs %d camera "
+                            + "frames of %.1f x %.1f mm per fiducial (at most %d): use a smaller radius",
+                            ls.searchRadiusMm, n, fr.image.getWidth() * fr.mmPerPxX, fr.image.getHeight() * fr.mmPerPxY,
+                            FiducialLocator.MAX_SEARCH_FRAMES));
+                }
+            }
+            return fr;
+        };
+        FiducialLocator locator = new FiducialLocator(ls, cam, aborted, found -> {
+            RegistrationResult.FidResult fr = fidResult(res, found.target.name);
+            fr.x = found.x;
+            fr.y = found.y;
+            fr.state = "found";
+            fr.iterations = found.iterations;
+            fr.frames = found.frames;
+            fr.offsetPx = found.lastOffsetPx;
+            fr.offsetFromExpectedMm = found.offsetFromExpectedMm;
+            t.stepsDone++;
+            t.secondsLeft = Math.max(0, t.secondsLeft - FIDUCIAL_ESTIMATE_S);
+            t.detail.put("fiducials", fiducialDetail(res.fiducials));
+            t.send();
+        }, step -> {
+            phase(r, step);
+            t.send();
+        });
+        double[] from = cameraXY();
+        List<FiducialLocator.Found> found;
+        try {
+            found = from == null ? locator.locateAll(targets) : locator.locateAll(targets, from[0], from[1]);
+        }
+        catch (FiducialLocator.Failure e) {
+            if (e.target != null) {
+                fidResult(res, e.target.name).state = FiducialLocator.Failure.AMBIGUOUS.equals(e.code) ? "ambiguous"
+                        : FiducialLocator.Failure.NOT_CENTRED.equals(e.code) ? "not-centred" : "not-found";
+            }
+            throw refused(e.messageFor(job));
+        }
+        phase(r, "fiducials: fit");
+        FiducialLocator.Fit prevFit = prev == null ? null : FiducialLocator.Fit.of(prev.transform(), prev.method,
+                prev.atMs);
+        FiducialLocator.Fit fit;
+        try {
+            fit = FiducialLocator.fit(found, prevFit, ls);
+        }
+        catch (FiducialLocator.Failure e) {
+            throw refused(e.getMessage());
+        }
+        res.fit = fitResult(fit, ls, prev);
+
+        // the seat
+        List<BoardRegistration.Fid> now = new ArrayList<>();
+        for (FiducialLocator.Found x : found) {
+            BoardRegistration.Fid fd = new BoardRegistration.Fid();
+            fd.name = x.target.name;
+            fd.bx = x.target.boardX;
+            fd.by = x.target.boardY;
+            fd.x = x.x;
+            fd.y = x.y;
+            fd.expectedX = x.target.expectedX;
+            fd.expectedY = x.target.expectedY;
+            fd.iterations = x.iterations;
+            fd.frames = x.frames;
+            fd.offsetPx = x.lastOffsetPx;
+            fd.diameterMm = x.detection == null ? x.target.diameterMm : x.detection.diameterMm;
+            fd.score = x.detection == null ? 0 : x.detection.score;
+            now.add(fd);
+        }
+        long atMs = System.currentTimeMillis();
+        boolean announced = false;
+        if (prev == null) {
+            res.seat = "first";
+        }
+        else {
+            double moved = prev.maxMovedMm(now);
+            announced = c.newSeatAtMs != null && c.newSeatAtMs > prev.atMs;
+            res.movedMm = Double.isNaN(moved) ? null : moved;
+            res.previousAtMs = prev.atMs;
+            res.seat = announced || !(moved <= c.fiducialCheck.seatToleranceMm) ? "reseated" : "same";
+            for (BoardRegistration.Fid fd : now) {
+                for (BoardRegistration.Fid p : prev.fiducials) {
+                    if (fd.name.equals(p.name)) {
+                        fidResult(res, fd.name).movedMm = Math.hypot(fd.x - p.x, fd.y - p.y);
+                    }
+                }
+            }
+        }
+        t.detail.put("seat", res.seat);
+        t.detail.put("movedMm", res.movedMm);
+        BoardRegistration reg;
+        if ("same".equals(res.seat)) {
+            reg = new Gson().fromJson(new Gson().toJson(prev), BoardRegistration.class);
+            reg.lastCheckedAtMs = atMs;
+            reg.lastCheckMovedMm = res.movedMm;
+        }
+        else {
+            reg = new BoardRegistration();
+            reg.id = java.util.UUID.randomUUID().toString();
+            reg.boardKey = req.boardKey;
+            reg.boardName = board.getName();
+            reg.nominal = req.nominalSeat;
+            reg.setTransform(fit.boardToMachine);
+            reg.method = fit.method;
+            reg.rotationDeg = fit.rotationDeg;
+            reg.scaleX = fit.scaleX;
+            reg.scaleY = fit.scaleY;
+            reg.shearDeg = fit.shearDeg;
+            reg.maxResidualMm = fit.maxResidualMm;
+            reg.fiducials = now;
+            reg.atMs = atMs;
+            reg.simulated = sim;
+            reg.runId = r.runId;
+        }
+        if (aborted.getAsBoolean()) {
+            throw new DispenseExecutor.AbortedException(abortReason(s.exec, "stopped during the fiducial check"));
+        }
+        storeRegistration(reg, r.runId);
+        res.registrationId = reg.id;
+        res.registrationStored = true;
+        try {
+            probeBoard(req, res, t, f, reg, announced, sim);
+        }
+        finally {
+            // the registration is real (also after a refused probe or a STOP): plan the board with it
+            String was = t.stage;
+            t.stage = "plan";
+            if (req.replanner != null) {
+                try {
+                    res.newPlanId = req.replanner.replan(reg);
+                    r.nextPlanId = res.newPlanId;
+                    phase(r, "plan: planned again");
+                }
+                catch (Exception e) {
+                    r.warnings.add("plan again failed: " + e.getMessage());
+                }
+            }
+            t.stepsDone = t.stepsPlanned;
+            t.secondsLeft = 0;
+            t.send();
+            t.stage = was;
+        }
+        s.ok();
+    }
+
+    /** The probe part of Register board: the same-seat check, or every target; the surface saved and tied. */
+    private void probeBoard(RegisterRequest req, RegistrationResult res, Task t, BoardFeatures f, BoardRegistration reg,
+            boolean announced, boolean sim) throws Exception {
+        Session s = t.s;
+        DispenseConfig c = cfg;
+        ProbeReport pr = res.probe;
+        String tie = boardRegistration(reg.applyTo(req.nominal));
+        if (req.probe == RegisterRequest.ProbeMode.NEVER) {
+            pr.skipped = true;
+            pr.why = "registration only (probe: never)";
+            return;
+        }
+        DispenseConfig.SurfaceMap surf = c.surface(c.boardSurfaceName);
+        boolean tied = surf != null && tie.equals(surf.boardFingerprint) && surf.points != null
+                && surf.points.size() >= 3 && (sim || !Boolean.TRUE.equals(surf.simulated));
+        boolean full = req.probe == RegisterRequest.ProbeMode.ALWAYS || !"same".equals(res.seat) || !tied;
+        pr.needed = full;
+        pr.why = req.probe == RegisterRequest.ProbeMode.ALWAYS ? "probe: always"
+                : "first".equals(res.seat) ? "first registration of this board"
+                        : "reseated".equals(res.seat) ? (announced ? "a new seat was announced" : "re-seated")
+                                : !tied ? "no surface tied to this registration" : "same seat: 3 stored points touched again";
+        Probe p = new Probe(s, t::aborted, pt -> t.point("same-seat".equals(t.stage) ? "same seat" : "probe",
+                "same-seat".equals(t.stage) ? 3 : Math.max(1, t.points.size()), pt));
+        pr.window = VacuumProber.preflight(c, true, "the board top Z", req.nominalZ, p.travelZ, p.settings,
+                p.n1.getNozzle());
+        if (!full) {
+            t.stage = "same-seat";
+            res.sameSeat = sameSeat(t, p, surf, reg);
+            if (res.sameSeat.pass) {
+                pr.surfaceSetAtMs = surf.setAtMs;
+                return;
+            }
+            pr.needed = true;
+            pr.why = "same seat, surface changed: probed again";
+            res.sameSeat.note = pr.why;
+        }
+        probeAll(req, res, t, p, f, reg.transform(), tie, "registration " + reg.shortId(), sim);
+    }
+
+    /**
+     * Register board on a board without fiducials (F10), asked with probe "always" on a plan without a registration:
+     * no fiducial fit and no registration stored; N1 probes the board's targets where the
+     * plan puts the board (each spot looked at first), the surface is tied to that seat (a board planned at another
+     * X/Y, rotation or side is not tied to it), and the board is planned again on it.
+     */
+    private void probeOnly(RegisterRequest req, RegistrationResult res, Task t, BoardFeatures f, String few,
+            boolean sim) throws Exception {
+        RunResult r = t.r;
+        DispenseConfig c = cfg;
+        ProbeReport pr = res.probe;
+        if (req.probe != RegisterRequest.ProbeMode.ALWAYS) {
+            throw refused(few);
+        }
+        String tie = boardRegistration(req.nominal);
+        if (!tie.equals(req.plan.boardRegistration)) {
+            throw refused("REG: probe only needs a plan of the board where its file or job puts it, without a "
+                    + "registration: plan the board again with registration none");
+        }
+        res.probeOnly = true;
+        t.stage = "probe";
+        pr.needed = true;
+        pr.why = PROBE_ONLY_NOTE;
+        Probe p = new Probe(t.s, t::aborted, pt -> t.point("probe", Math.max(1, t.points.size()), pt));
+        pr.window = VacuumProber.preflight(c, true, "the board top Z", req.nominalZ, p.travelZ, p.settings,
+                p.n1.getNozzle());
+        try {
+            probeAll(req, res, t, p, f, req.planToBoard.createInverse(), tie, pr.why, sim);
+        }
+        finally {
+            // a new surface: plan the board on it (nothing else changed when the probe was refused or stopped)
+            if (pr.saved && req.replanner != null) {
+                String was = t.stage;
+                t.stage = "plan";
+                try {
+                    res.newPlanId = req.replanner.replan(null);
+                    r.nextPlanId = res.newPlanId;
+                    phase(r, "plan: planned again");
+                }
+                catch (Exception e) {
+                    r.warnings.add("plan again failed: " + e.getMessage());
+                }
+                t.stepsDone = t.stepsPlanned;
+                t.secondsLeft = 0;
+                t.send();
+                t.stage = was;
+            }
+        }
+    }
+
+    /** The result's word for a probe-only Register board (F10). */
+    static final String PROBE_ONLY_NOTE = "no fiducials: probed only, X/Y as planned";
+
+    /**
+     * Every target of the board probed (§5.2), the plane checked and saved as the board surface tied to {@code tie}:
+     * the targets and the plan's dots go to the machine through {@code boardToMachine} (the registration's affine, or
+     * the plan's own seat when probing only); {@code what} names it in the surface's note.
+     */
+    private void probeAll(RegisterRequest req, RegistrationResult res, Task t, Probe p, BoardFeatures f,
+            AffineTransform boardToMachine, String tie, String what, boolean sim) throws Exception {
+        RunResult r = t.r;
+        Session s = t.s;
+        DispenseConfig c = cfg;
+        ProbeReport pr = res.probe;
+        t.stage = "probe";
+        t.points.clear();
+        List<VacuumProber.Target> targets = ProbeTargets.map(ProbeTargets.forBoard(f, ProbeTargets.dotsBoard(req.plan,
+                req.planToBoard), c, req.keepOuts), boardToMachine);
+        t.stepsPlanned = t.stepsDone + targets.size() + 1;
+        t.secondsLeft = targets.size() * PROBE_POINT_ESTIMATE_S;
+        for (VacuumProber.Target x : targets) {
+            VacuumProber.Point todo = new VacuumProber.Point();
+            todo.n = x.n;
+            todo.x = x.x;
+            todo.y = x.y;
+            t.points.put(x.n, todo);
+        }
+        t.send();
+        List<VacuumProber.Point> pts = p.run("board probe", targets, pr.window);
+        pr.points = pts;
+        String why = VacuumProber.refusal(pts);
+        if (why != null) {
+            throw refused(why);
+        }
+        List<DispenseConfig.SurfacePoint> sp = surfacePoints(pts);
+        SurfacePlane plane = fitProbed(sp);
+        pr.plane = PlaneReport.of(plane);
+        String flat = flatness(plane, pts, c, true);
+        if (flat != null) {
+            throw refused(flat);
+        }
+        String band = band(pts, req.nominalZ, "the board top Z", c.zFrameToleranceMm);
+        if (band != null) {
+            throw refused(band);
+        }
+        AffineTransform planToMachine = new AffineTransform(boardToMachine);
+        planToMachine.concatenate(req.planToBoard);
+        int outside = 0;
+        for (DispensePlan.PlannedDot d : req.plan.dots) {
+            Point2D q = planToMachine.transform(new Point2D.Double(d.xMm, d.yMm), null);
+            if (plane.distanceOutside(q.getX(), q.getY()) > c.surfaceMarginMm + 1e-9) {
+                outside++;
+            }
+        }
+        if (outside > 0) {
+            throw refused(String.format(Locale.ROOT, "PROBE: the probed points leave %d dots more than %.1f mm outside "
+                    + "the probed area (an alternate moved inward): probe by hand, or try again", outside,
+                    c.surfaceMarginMm));
+        }
+        t.stage = "save";
+        if (t.aborted()) {
+            throw new DispenseExecutor.AbortedException(abortReason(s.exec, "stopped before the surface was saved"));
+        }
+        String note = String.format(Locale.ROOT, "Register board %s: %d points by N1 vacuum touch (%s, run %s)",
+                ZCheck.clock(System.currentTimeMillis()), sp.size(), what, shortRun(r.runId));
+        setSurface(c.boardSurfaceName, sp, note, tie, sim ? Boolean.TRUE : null);
+        pr.saved = true;
+        pr.surfaceSetAtMs = cfg.surface(c.boardSurfaceName).setAtMs;
+        db.event(r.runId, "INFO", "PROBE", new Gson().toJson(pr));
+        phase(r, "surface: saved");
+        setNewSeat(false);
+    }
+
+    /**
+     * The same-seat check (§3.6): the 3 stored points of the tied surface that span the largest
+     * triangle, each touched again with the window around its stored Z. Passes when all 3 agree within
+     * {@link ZCheck#TOLERANCE_MM}; then, if they predate the last home, it is that home's Z check too.
+     */
+    private SameSeatReport sameSeat(Task t, Probe p, DispenseConfig.SurfaceMap surf, BoardRegistration reg)
+            throws Exception {
+        SameSeatReport rep = new SameSeatReport();
+        int[] idx = largestTriangle(surf.points);
+        List<VacuumProber.Target> targets = new ArrayList<>();
+        AffineTransform toBoard = reg.transform().createInverse();
+        for (int k = 0; k < 3; k++) {
+            DispenseConfig.SurfacePoint sp = surf.points.get(idx[k]);
+            VacuumProber.Target x = new VacuumProber.Target();
+            x.n = k + 1;
+            x.x = sp.x;
+            x.y = sp.y;
+            x.storedZ = sp.z;
+            Point2D b = toBoard.transform(new Point2D.Double(sp.x, sp.y), null);
+            x.bx = b.getX();
+            x.by = b.getY();
+            targets.add(x);
+        }
+        t.stepsPlanned = t.stepsDone + 3 + 1;
+        t.secondsLeft = 3 * PROBE_POINT_ESTIMATE_S;
+        List<VacuumProber.Point> pts = p.run("same seat", targets, VacuumProber.Window.around(targets.get(0).storedZ,
+                p.travelZ, p.settings));
+        boolean pass = true;
+        SameSeatReport.Point worst = null;
+        for (int k = 0; k < 3; k++) {
+            VacuumProber.Point pt = pts.get(k);
+            SameSeatReport.Point q = new SameSeatReport.Point();
+            q.n = k + 1;
+            q.x = targets.get(k).x;
+            q.y = targets.get(k).y;
+            q.bx = targets.get(k).bx;
+            q.by = targets.get(k).by;
+            q.storedZ = targets.get(k).storedZ;
+            q.z = "contact".equals(pt.state) && pt.alternate == 0 ? pt.z : null;
+            q.deltaMm = q.z == null ? null : q.z - q.storedZ;
+            q.pass = q.deltaMm != null && Math.abs(q.deltaMm) <= ZCheck.TOLERANCE_MM + 1e-9;
+            pass &= q.pass;
+            if (q.deltaMm != null && (worst == null || Math.abs(q.deltaMm) > Math.abs(worst.deltaMm))) {
+                worst = q;
+            }
+            rep.points.add(q);
+        }
+        rep.pass = pass;
+        Long home = homeTracker.getLastHomeAtMs();
+        if (pass && home != null && surf.setAtMs != null && surf.setAtMs < home && worst != null) {
+            ZCheck.Reference ref = new ZCheck.Reference();
+            ref.name = cfg.boardSurfaceName;
+            ref.point = idx[worst.n - 1];
+            ref.x = worst.x;
+            ref.y = worst.y;
+            ref.z = worst.storedZ;
+            ref.atMs = surf.setAtMs;
+            ref.homeAtMs = surf.homeAtMs;
+            ZCheck.Result zc = ZCheck.vouch(ZCheck.result(ref, worst.z, System.currentTimeMillis(), home), ref, cfg,
+                    homeTracker.getZCheck());
+            homeTracker.setZCheck(zc);
+            db.event(t.r.runId, "INFO", "ZCHECK", new Gson().toJson(zc));
+            restampZFrame(zc);
+            rep.zCheckStamped = true;
+        }
+        return rep;
+    }
+
+    /** Indices of the 3 points spanning the largest triangle (the first such triple). */
+    static int[] largestTriangle(List<DispenseConfig.SurfacePoint> pts) {
+        int[] best = {0, 1, 2};
+        double area = -1;
+        for (int i = 0; i < pts.size(); i++) {
+            for (int j = i + 1; j < pts.size(); j++) {
+                for (int k = j + 1; k < pts.size(); k++) {
+                    DispenseConfig.SurfacePoint a = pts.get(i), b = pts.get(j), q = pts.get(k);
+                    double s = Math.abs((b.x - a.x) * (q.y - a.y) - (q.x - a.x) * (b.y - a.y));
+                    if (s > area + 1e-12) {
+                        area = s;
+                        best = new int[] {i, j, k};
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Probe the blank (or another needle-frame surface) with N1 (§5.7): home if needed, targets around
+     * the purge row (or the request's), the window from the place Z, the plane checks, saved untied.
+     * Nothing is saved unless every point touched and the plane passed.
+     */
+    public Future<SurfaceProbeResult> probeSurface(SurfaceProbeRequest req) throws Exception {
+        requireAvailable();
+        RunResult r = newRun("surface-probe", null, req.surfaceName, 0, 0);
+        SurfaceProbeResult res = new SurfaceProbeResult();
+        res.run = r;
+        res.surfaceName = req.surfaceName;
+        res.home = new HomeReport();
+        Task t = new Task(r, "home");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> probeSurfaceBody(req, res, t)), () -> {
+            res.ok = r.status == RunResult.Status.OK || r.status == RunResult.Status.RUNNING;
+            res.stoppedStage = r.status == RunResult.Status.ABORTED ? t.endedIn : null;
+            res.message = res.ok ? String.format(Locale.ROOT, "'%s' surface probed: %d points, Z %.3f..%.3f",
+                    req.surfaceName, res.points.size(), res.plane.minZ, res.plane.maxZ) : r.message;
+            if (res.ok) {
+                r.message = res.message;
+            }
+        });
+    }
+
+    private void probeSurfaceBody(SurfaceProbeRequest req, SurfaceProbeResult res, Task t) throws Exception {
+        RunResult r = t.r;
+        DispenseConfig c = cfg;
+        if (req.surfaceName == null || req.surfaceName.equals(c.boardSurfaceName)) {
+            throw refused("PROBE: the '" + c.boardSurfaceName + "' surface is probed by Register board (Run › Register)");
+        }
+        String reserved = couponReservation(req.surfaceName);
+        if (reserved != null) {
+            throw refused(reserved);
+        }
+        Session s = t.start(c);
+        HomeTracker.Plan hp = homePlan();
+        t.detail.put("home", homeDetail(hp));
+        homeIfNeeded(s, res.home, t::aborted);
+        r.interlocks = Interlocks.checkBasic(interlockInputs(c, null, 0, null, false, false));
+        if (!r.interlocks.ok()) {
+            throw refused(r.interlocks.toString());
+        }
+        if (req.coupon != null) {
+            // a coupon is probed in a narrow window around its place Z: from a Z that moved N1 would start inside it
+            String moved = placeMovedRefusal(req.surfaceName, c.location(req.surfaceName));
+            if (moved != null) {
+                throw refused(moved);
+            }
+            t.stage = "look";
+            couponLook(req, t);
+        }
+        t.stage = "probe";
+        List<VacuumProber.Target> targets = req.targets == null ? ProbeTargets.forRow(c, req.surfaceName)
+                : ProbeTargets.explicit(req.targets, c.vacuumProbe.alternates);
+        t.stepsPlanned = targets.size() + 1;
+        t.secondsLeft = targets.size() * PROBE_POINT_ESTIMATE_S;
+        Probe p = new Probe(s, t::aborted, pt -> t.point("probe", targets.size(), pt));
+        String what = "the '" + req.surfaceName + "' place Z";
+        // a surface off the needle frame (a weigh coupon) is checked as a board is: against its own Z only
+        res.window = VacuumProber.preflight(c, !req.frameCheck, what, req.nominalZ, req.windowMm, p.travelZ,
+                p.settings, p.n1.getNozzle());
+        List<VacuumProber.Point> pts = p.run("'" + req.surfaceName + "' probe", targets, res.window);
+        res.points = pts;
+        String why = VacuumProber.refusal(pts);
+        if (why != null) {
+            throw refused(why);
+        }
+        List<DispenseConfig.SurfacePoint> sp = surfacePoints(pts);
+        SurfacePlane plane = fitProbed(sp);
+        res.plane = PlaneReport.of(plane);
+        String flat = flatness(plane, pts, c, false);
+        if (flat != null) {
+            throw refused(flat);
+        }
+        if (c.needleAnchor != null && req.frameCheck) {
+            String band = band(pts, c.needleAnchor.surfaceZMm, "the needle-frame surface", c.zFrameToleranceMm);
+            if (band != null) {
+                throw refused(band);
+            }
+        }
+        List<double[]> cover = new ArrayList<>();
+        DispenseConfig.PurgeRow row = c.purgeRow;
+        if (row.isDefined() && req.surfaceName.equals(row.surfaceName)) {
+            for (int i = 0; i < row.spots; i++) {
+                cover.add(row.spot(i));
+            }
+        }
+        DispenseConfig.NamedLocation place = c.location(req.surfaceName);
+        if (place != null) {
+            cover.add(new double[] {place.x, place.y});
+        }
+        int outside = 0;
+        for (double[] xy : cover) {
+            if (plane.distanceOutside(xy[0], xy[1]) > c.surfaceMarginMm - 0.5 + 1e-9) {
+                outside++;
+            }
+        }
+        res.plane.spots = cover.size();
+        res.plane.coversSpots = outside == 0;
+        if (outside > 0) {
+            throw refused(String.format(Locale.ROOT, "PROBE: the probed points leave %d spot(s) of the purge row or the "
+                    + "place more than %.1f mm outside the probed area: give the targets, or probe by hand", outside,
+                    c.surfaceMarginMm - 0.5));
+        }
+        t.stage = "save";
+        if (t.aborted()) {
+            throw new DispenseExecutor.AbortedException(abortReason(s.exec, "stopped before the surface was saved"));
+        }
+        boolean sim = isSimulatorConfirmed();
+        String note = String.format(Locale.ROOT, "Probe the %s %s: %d points by N1 vacuum touch (run %s)", req.surfaceName,
+                ZCheck.clock(System.currentTimeMillis()), sp.size(), shortRun(r.runId));
+        setSurface(req.surfaceName, sp, note, null, sim ? Boolean.TRUE : null);
+        res.saved = true;
+        phase(r, "surface: saved");
+        t.stepsDone = t.stepsPlanned;
+        t.send();
+        s.ok();
+    }
+
+    /**
+     * Check Z (§5.8): the Z check alone, behind the I4 "Z not checked" refusal of prime, the test dot,
+     * the touch-off, the dot ladder and shots. It never homes.
+     */
+    public Future<RunResult> checkZ() throws Exception {
+        requireAvailable();
+        RunResult r = newRun("z-check", null, "z check", 0, 0);
+        return submit(r, () -> {
+            DispenseConfig c = cfg;
+            Session s = new Session(c, r);
+            r.interlocks = Interlocks.checkBasic(interlockInputs(c, null, 0, null, false, false));
+            if (!r.interlocks.ok()) {
+                return s.refuse(r.interlocks.toString());
+            }
+            r.zCheck = zCheckIfNeeded(s, null, needleTasksScope(c), s.exec::isAbortRequested);
+            r.message = r.zCheck == null ? "Z data were measured after the last home: nothing to check"
+                    : String.format(Locale.ROOT, "Z checked: N1 touched %s at Z %.3f, %.3f mm from %.3f", ZCheck.describe(
+                            r.zCheck.refName), r.zCheck.z, r.zCheck.deltaMm, r.zCheck.refZ);
+            return s.ok();
+        });
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Pad calibration (docs/instancelabs/PROFILE_CALIBRATION_DESIGN.md §7)
+    // ------------------------------------------------------------------------------------------
+
+    /** Incremented by every STOP ({@link #abort}); a task queued at another value refuses at its start (§7.8). */
+    public long stopEpoch() {
+        return stopEpoch.get();
+    }
+
+    /**
+     * The camera look at a weigh coupon before N1 touches it (§7.2 step 2): its colour is the blank's,
+     * its middle is clean, and the margin around the weigh grid lies on it (the corners' looks cover the
+     * margin up to the coupon's edge). A coupon off its place is told by where its edge is.
+     */
+    private void couponLook(SurfaceProbeRequest req, Task t) throws Exception {
+        SurfaceProbeRequest.Coupon k = req.coupon;
+        DotImager im = imager();
+        if (im == null || !im.isAvailable()) {
+            throw refused(NO_CAMERA_PCAL);
+        }
+        phase(t.r, "coupon: look");
+        double[] blank = null;
+        if (k.blankSpot != null) {
+            DotImager.Frame f = im.captureLit(k.blankSpot[0], k.blankSpot[1], null);
+            if (f != null && f.image != null) {
+                BareSpotCheck.Result b = BareSpotCheck.check(f.image, f.mmPerPxX, f.mmPerPxY, null);
+                blank = new double[] {b.refB, b.refG, b.refR};
+            }
+        }
+        double[] centre = k.looks.get(k.looks.size() - 1);
+        DotImager.Frame cf = im.captureLit(centre[0], centre[1], req.nominalZ);
+        if (cf == null || cf.image == null) {
+            throw refused(NO_CAMERA_PCAL);
+        }
+        BareSpotCheck.Result cr = BareSpotCheck.check(cf.image, cf.mmPerPxX, cf.mmPerPxY, null);
+        double[] ref = {cr.refB, cr.refG, cr.refR};
+        if (blank != null && PadLadder.colourDistance(ref, blank) > PadLadder.COUPON_COLOUR_DELTA) {
+            throw refused(String.format(Locale.ROOT, "%s is missing or is not blank PCB: at X %.1f, Y %.1f its colour "
+                    + "is %.0f from the blank's (at most %.0f): lay a clean coupon of the blank's PCB on %s", k.label,
+                    centre[0], centre[1], PadLadder.colourDistance(ref, blank), PadLadder.COUPON_COLOUR_DELTA,
+                    req.surfaceName));
+        }
+        if (!cr.bare) {
+            throw refused(String.format(Locale.ROOT, "%s is not clean at X %.1f, Y %.1f (%s): wipe it and lay it back on "
+                    + "%s", k.label, centre[0], centre[1], cr.reason, req.surfaceName));
+        }
+        BareSpotCheck.Settings corner = PadLadder.couponCornerSettings();
+        for (int i = 0; i < k.looks.size() - 1; i++) {
+            if (t.aborted()) {
+                throw new DispenseExecutor.AbortedException(abortReason(t.s == null ? null : t.s.exec,
+                        "stopped during the coupon look"));
+            }
+            double[] at = k.looks.get(i);
+            DotImager.Frame f = im.captureLit(at[0], at[1], req.nominalZ);
+            if (f == null || f.image == null) {
+                throw refused(NO_CAMERA_PCAL);
+            }
+            // where its edges are: the margin around the weigh grid must lie on the coupon
+            double shift = k.rect == null ? Double.NaN : PadLadder.couponEdgeShift(f, k.rect, ref);
+            if (shift > k.slackMm + COUPON_SHIFT_MM) {
+                throw refused(String.format(Locale.ROOT, "%s is not at its place: its edge is %.1f mm inside the weigh "
+                        + "grid's margin (lay it on %s again, or set the place where it lies: Setup › Places)", k.label,
+                        shift, req.surfaceName));
+            }
+            BareSpotCheck.Result b = BareSpotCheck.check(f.image, f.mmPerPxX, f.mmPerPxY, corner);
+            if (!b.bare) {
+                throw refused(String.format(Locale.ROOT, "%s is not clean or not flat in the weigh grid's margin at X "
+                        + "%.1f, Y %.1f (%s): wipe it and lay it straight on %s", k.label, at[0], at[1], b.reason,
+                        req.surfaceName));
+            }
+        }
+    }
+
+    /** A coupon edge this much farther inside its nominal place than the grid allows is a coupon off its place (mm). */
+    static final double COUPON_SHIFT_MM = 0.1;
+    static final String NO_CAMERA_PCAL = "the pad calibration needs the top camera: it looks at every spot before "
+            + "dispensing and measures every dot";
+
+    /**
+     * Why an engine task may not dispense on or probe a coupon place now (§7.5 reservation): it carries
+     * weigh dots whose readings are still to be typed. Null when it may.
+     */
+    public String couponReservation(String place) {
+        if (place == null) {
+            return null;
+        }
+        DispenseConfig c = cfg;
+        long now = System.currentTimeMillis();
+        try {
+            DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerConnectedAtMs(), isSimulatorConfirmed());
+            for (DoseRecord r : db.pendingCoupons(now - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3))) {
+                if (place.equals(r.couponPlace) && weighable(r, now, c, ep)) {
+                    return String.format(Locale.ROOT, "%s carries %d dots waiting to be weighed: type the readings or "
+                            + "skip them (Calibrate › Pad calibration)", place, r.n);
+                }
+            }
+        }
+        catch (SQLException e) {
+            return "the weigh coupons waiting for their readings could not be read: " + e.getMessage();
+        }
+        return null;
+    }
+
+    /**
+     * A coupon record can still be weighed: its reading would be a fresh mass record (§1.7: the
+     * recipe, the regulator, the tip, the paste, the age and the simulator flag; a reconnect does not
+     * change what lies on the coupon).
+     */
+    public static boolean weighable(DoseRecord coupon, long nowMs, DispenseConfig c, DoseRecord.Epochs epochs) {
+        DoseRecord asMass = new DoseRecord();
+        asMass.kind = DoseRecord.MASS;
+        asMass.createdAtMs = coupon.createdAtMs;
+        asMass.steps = coupon.steps;
+        asMass.doseFp = coupon.doseFp;
+        asMass.regulatorPsi = coupon.regulatorPsi;
+        asMass.tipKey = coupon.tipKey;
+        asMass.pasteKey = coupon.pasteKey;
+        asMass.simulated = coupon.simulated;
+        return asMass.whyStale(nowMs, c, epochs) == null;
+    }
+
+    /** Stamps a band of the calibration area as used (before streaming: an aborted ladder leaves it dirty). */
+    private synchronized void reserveArea(Double heightMm, String runId) {
+        if (heightMm == null || heightMm <= 0) {
+            return;
+        }
+        try {
+            DispenseConfig c = cfg.copy();
+            double from = c.calibrationArea.reserve(heightMm);
+            updateConfig(c);
+            db.event(runId, "INFO", "PCAL", String.format(Locale.ROOT, "calibration area %.1f..%.1f mm used (%.1f mm "
+                    + "left)", from, from + heightMm, c.calibrationArea.leftMm()));
+        }
+        catch (IOException e) {
+            throw new IllegalStateException("could not record the used calibration area: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * One engine step of the pad calibration (§7.3): the ladder on the blank or the weigh dots on the
+     * coupons, as dose blocks in one pressure session with the board runs' phase rules. Home and Z
+     * check when needed; every spot looked at before (a spot that is not bare refuses everything);
+     * after the stream every dot found, landed, phased, its thread to the next dot told; crops; the
+     * head parked over the next purge spot. The Future never throws for task failures; see the result.
+     */
+    public Future<DoseBlocksResult> runDoseBlocks(DoseBlocksRequest req) throws Exception {
+        requireAvailable();
+        boolean weigh = DoseBlocksRequest.WEIGH.equals(req.kind);
+        RunResult r = newRun(req.kind, null, weigh ? "weigh coupons" : "blank", 0, req.dots());
+        DoseBlocksResult res = new DoseBlocksResult();
+        res.run = r;
+        res.home = new HomeReport();
+        Task t = new Task(r, "home");
+        cameraTourAbort = false;
+        // a STOP since the job built the request refuses it at its start too (the body checks req.stopEpoch)
+        return submitResult(r, res, () -> t.run(() -> doseBlocks(req, res, t)), () -> {
+            res.ok = r.status == RunResult.Status.OK || r.status == RunResult.Status.RUNNING;
+            res.stoppedStage = r.status == RunResult.Status.ABORTED ? t.endedIn : null;
+            if (res.ok) {
+                int found = 0;
+                for (DoseBlocksResult.BlockOut b : res.blocks) {
+                    found += b.found();
+                }
+                res.message = String.format(Locale.ROOT, "%d %s laid %s, %d found by the camera", req.dots(),
+                        req.dots() == 1 ? "dot" : "dots", weigh ? "on the weigh coupons" : "on the blank", found);
+                r.message = res.message;
+            }
+            else {
+                res.message = r.message;
+            }
+        });
+    }
+
+    private void doseBlocks(DoseBlocksRequest req, DoseBlocksResult res, Task t) throws Exception {
+        RunResult r = t.r;
+        DispenseConfig c = cfg;
+        if (stopEpoch.get() != req.stopEpoch) {
+            throw refused(STOPPED_SINCE_QUEUED);
+        }
+        if (req.blocks.isEmpty() || req.dots() == 0) {
+            throw refused("PCAL: nothing to dispense");
+        }
+        for (DoseBlocksRequest.Block b : req.blocks) {
+            String why = couponReservation(b.couponPlace);
+            if (why != null) {
+                throw refused(why);
+            }
+        }
+        Session s = t.start(c);
+        HomeTracker.Plan hp = homePlan();
+        t.detail.put("home", homeDetail(hp));
+        t.detail.put("blocks", req.blocks.size());
+        t.detail.put("dots", req.dots());
+        t.stepsPlanned = req.dots();
+        t.send();
+        homeIfNeeded(s, res.home, t::aborted);
+        r.interlocks = Interlocks.checkBasic(interlockInputs(c, null, 0, null, false, false));
+        if (!r.interlocks.ok()) {
+            throw refused(r.interlocks.toString());
+        }
+        // the dots on their surfaces: the area's plane (I4 like the blank), a coupon's own plane (floor only)
+        int flush = c.padCalibration.flushDots;
+        List<GcodeStreamBuilder.BlockSpec> specs = new ArrayList<>();
+        List<DoseBlocks.Run> runs = new ArrayList<>();
+        Interlocks.Scope scope = new Interlocks.Scope();
+        List<double[]> all = new ArrayList<>();
+        List<Integer> blockOf = new ArrayList<>();
+        int w = 0;
+        for (int k = 0; k < req.blocks.size(); k++) {
+            DoseBlocksRequest.Block b = req.blocks.get(k);
+            if (!DoseBlocks.isAllowed(b.netSteps, c)) {
+                throw refused(String.format(Locale.ROOT, "PCAL: %d steps is not a dot the %s takes (a quarter, half or "
+                        + "one turn, %d steps at least)", b.netSteps, c.tip.name, c.tip.minDotSteps));
+            }
+            SurfacePlane plane = planeOf(c, b.surfaceName);
+            if (plane == null) {
+                throw refused("I4: no '" + b.surfaceName + "' surface: probe it first");
+            }
+            Double floorRef = null;
+            if (b.couponPlace != null) {
+                DispenseConfig.NamedLocation place = c.location(b.couponPlace);
+                if (place == null) {
+                    throw refused("PCAL: the weigh coupon place '" + b.couponPlace + "' is not set (Setup › Places)");
+                }
+                String why = couponPlane(c, b, place, plane, isSimulatorConfirmed());
+                if (why == null) {
+                    why = placeMovedRefusal(b.couponPlace, place);
+                }
+                if (why != null) {
+                    throw refused(why);
+                }
+                floorRef = place.z;
+            }
+            else if (scope.surfaceName == null || scope.surfaceName.equals(b.surfaceName)) {
+                scope.surfaceName = b.surfaceName;
+                scope.surfaceTargets.addAll(b.xy);
+            }
+            else {
+                scope.moreSurfaces.computeIfAbsent(b.surfaceName, n -> new ArrayList<>()).addAll(b.xy);
+            }
+            List<GcodeStreamBuilder.DotSpec> dots = new ArrayList<>();
+            for (int i = 0; i < b.xy.size(); i++) {
+                double[] xy = b.xy.get(i);
+                double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
+                dots.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm, b.netSteps / c.bStepsPerDeg,
+                        w + i, b.label + "#" + (i + 1)));
+                all.add(xy);
+                blockOf.add(k);
+            }
+            GcodeStreamBuilder.BlockSpec bs = new GcodeStreamBuilder.BlockSpec(b.netSteps, dots, b.label);
+            bs.floorRefZ = floorRef;
+            specs.add(bs);
+            runs.add(new DoseBlocks.Run(b.netSteps, w, dots.size()));
+            w += dots.size();
+        }
+        int need = DoseBlocks.purgeSpotsNeeded(runs, c, flush);
+        boolean partial = DoseBlocks.anyPartial(runs, c);
+        DispenseConfig.PurgeRow row = c.purgeRow;
+        if (need > 0 && row.isDefined()) {
+            List<double[]> spots = new ArrayList<>();
+            for (int i = 0; i < Math.min(need, row.spotsLeft()); i++) {
+                spots.add(row.spot(row.usedSpots + i));
+            }
+            scope.moreSurfaces.computeIfAbsent(row.surfaceName, n -> new ArrayList<>()).addAll(spots);
+        }
+        t.stage = "z check";
+        res.zCheck = zCheckIfNeeded(s, null, scope, t::aborted);
+        for (DoseBlocksRequest.Block b : req.blocks) {
+            String why = b.couponPlace == null ? null : couponFrame(b.surfaceName);
+            if (why != null) {
+                throw refused(why);
+            }
+        }
+        t.stage = "interlocks";
+        r.interlocks = Interlocks.check(blockInputs(c, scope, 0, need, partial, null));
+        if (!r.interlocks.ok()) {
+            throw refused(r.interlocks.toString());
+        }
+        List<GcodeStreamBuilder.DotSpec> purge = purgeSpecs(c, need);
+        GcodeProgram estimate = GcodeStreamBuilder.forBlocks(c, s.mapper, specs, purge, flush, bZeroed.get(),
+                s.keepalive, 0L, null);
+        r.interlocks = Interlocks.check(blockInputs(c, scope, estimate.estimatedPressurisedSeconds, need, partial,
+                estimate.blocks));
+        if (!r.interlocks.ok()) {
+            throw refused(r.interlocks.toString());
+        }
+        // before frames: camera only, and every spot must be bare
+        DotImager im = req.image ? imager() : null;
+        if (req.image && (im == null || !im.isAvailable())) {
+            throw refused(NO_CAMERA_PCAL);
+        }
+        List<PadLadder.Tile> tiles = req.image ? PadLadder.tiles(all, im.fieldOfViewMm(), PadLadder.TILE_INSET_MM)
+                : new ArrayList<>();
+        int[] tileOf = new int[all.size()];
+        List<DotImager.Frame> before = new ArrayList<>();
+        if (req.image) {
+            t.stage = "before images";
+            phase(r, "pad calibration: looking at " + all.size() + " spots (" + frames(tiles.size()) + ")");
+            for (int k = 0; k < tiles.size(); k++) {
+                if (t.aborted()) {
+                    throw new DispenseExecutor.AbortedException(abortReason(s.exec, "stopped before dispensing"));
+                }
+                PadLadder.Tile tile = tiles.get(k);
+                DotImager.Frame f = im.capture(tile.cx, tile.cy);
+                res.frames++;
+                before.add(f);
+                for (int i : tile.dots) {
+                    tileOf[i] = k;
+                    double[] xy = all.get(i);
+                    int steps = req.blocks.get(blockOf.get(i)).netSteps;
+                    BareSpotCheck.Result b = PadLadder.bareAt(f, xy[0], xy[1],
+                            PadLadder.spotSettings(DoseModel.dHiMm(steps)));
+                    if (b == null || !b.bare) {
+                        res.refusedSpots.add(String.format(Locale.ROOT, "%.2f,%.2f: %s", xy[0], xy[1],
+                                b == null ? "the spot is not inside the camera frame" : b.reason));
+                    }
+                }
+            }
+            if (!res.refusedSpots.isEmpty()) {
+                String first = res.refusedSpots.get(0);
+                String[] xy = first.substring(0, first.indexOf(':')).split(",");
+                boolean coupon = req.blocks.get(0).couponPlace != null;
+                throw refused(String.format(Locale.ROOT, "the %s is not clean or not flat under %d of the dots (first at "
+                        + "X %s, Y %s: %s): %s", coupon ? "weigh coupon" : "calibration area", res.refusedSpots.size(),
+                        xy[0], xy[1], first.substring(first.indexOf(':') + 2), coupon
+                                ? "wipe it and lay it back on its place" : "wipe it, or move the calibration area "
+                                        + "(Calibrate › Pad calibration)"));
+            }
+        }
+        if (stopEpoch.get() != req.stopEpoch) {
+            throw refused(STOPPED_SINCE_QUEUED);
+        }
+        // the stream, block by block on the progress
+        t.stage = "dispensing";
+        int[] lastBlock = {-1};
+        DispenseListener progress = new DispenseListener() {
+            @Override
+            public void onDot(RunResult run, RunResult.DotTiming timing, int done, int total) {
+                if (run != r || timing.dotIndex < 0 || timing.dotIndex >= blockOf.size()) {
+                    return;
+                }
+                int k = blockOf.get(timing.dotIndex);
+                if (k != lastBlock[0]) {
+                    lastBlock[0] = k;
+                    phase(r, String.format(Locale.ROOT, "pad calibration: dispensing block %d of %d (%s)", k + 1,
+                            req.blocks.size(), DoseBlocks.turnName(req.blocks.get(k).netSteps)));
+                }
+                t.detail.put("block", k + 1);
+                t.detail.put("dot", timing.dotIndex + 1);
+                t.stepsDone = timing.dotIndex + 1;
+                double end = estimate.dotEndSeconds == null ? 0 : estimate.dotEndSeconds[timing.dotIndex];
+                t.secondsLeft = Math.max(0, estimate.estimatedSeconds - end) + 0.9 * tiles.size();
+                t.send();
+            }
+        };
+        addListener(progress);
+        GcodeProgram p;
+        try {
+            p = s.runSegment(() -> {
+                Long count = s.readBCount(false);
+                if (count == null && partial) {
+                    throw new RunRefusedException("I11: the controller did not report the B step count (M114 Count): the "
+                            + "start angle of a partial-turn dose cannot be set. Nothing was sent.", null);
+                }
+                return GcodeStreamBuilder.forBlocks(c, s.mapper, specs, purge, flush, bZeroed.get(), s.keepalive, count,
+                        null);
+            }, "pad calibration: dispensing", () -> {
+                reservePurgeSpots(purge.size(), r.runId);
+                reserveArea(req.areaReserveMm, r.runId);
+            });
+        }
+        finally {
+            removeListener(progress);
+        }
+        r.purgeDots = p.purgeDotCount;
+        r.bCountAtStart = p.bCountAtStart;
+        r.workStartAngleDeg = p.workStartAngleDeg;
+        res.bCountAtStart = p.bCountAtStart;
+        // what the camera finds
+        for (int k = 0; k < req.blocks.size(); k++) {
+            DoseBlocksRequest.Block b = req.blocks.get(k);
+            DoseBlocksResult.BlockOut o = new DoseBlocksResult.BlockOut();
+            o.netSteps = b.netSteps;
+            o.label = b.label;
+            o.couponPlace = b.couponPlace;
+            o.hopMm = b.hopMm;
+            res.blocks.add(o);
+        }
+        int startAngle = c.profile.startAngleSteps(c);
+        for (int i = 0; i < all.size(); i++) {
+            DoseBlocksRequest.Block b = req.blocks.get(blockOf.get(i));
+            DoseBlocksResult.DotOut d = new DoseBlocksResult.DotOut();
+            d.x = all.get(i)[0];
+            d.y = all.get(i)[1];
+            if (p.dotStartCount != null && i < p.dotStartCount.length) {
+                d.startCount = p.dotStartCount[i];
+                d.phase = DoseBlocks.isPartial(b.netSteps, c.bStepsPerRev)
+                        ? LadderStats.phaseOf(d.startCount, startAngle, b.netSteps) : 0;
+            }
+            res.blocks.get(blockOf.get(i)).dots.add(d);
+        }
+        if (req.image) {
+            t.stage = "after images";
+            phase(r, "pad calibration: measuring the dots (" + frames(tiles.size()) + ")");
+            afterImages(req, res, t, im, tiles, tileOf, before, all, blockOf);
+        }
+        if (req.parkAfter) {
+            park(r);
+        }
+        t.stepsDone = t.stepsPlanned;
+        t.secondsLeft = 0;
+        t.send();
+        s.ok();
+    }
+
+    /**
+     * The program of dose blocks as {@link #runDoseBlocks} would build it now, for the time it takes (the
+     * pad calibration's preview): every dot on its surface, or at its place's Z when the surface is not
+     * probed yet; the purge row's next spots.
+     */
+    public GcodeProgram estimateBlocks(List<DoseBlocksRequest.Block> blocks) throws Exception {
+        requireAvailable();
+        DispenseConfig c = cfg;
+        List<GcodeStreamBuilder.BlockSpec> specs = new ArrayList<>();
+        List<DoseBlocks.Run> runs = new ArrayList<>();
+        int w = 0;
+        for (DoseBlocksRequest.Block b : blocks) {
+            SurfacePlane plane = planeOf(c, b.surfaceName);
+            DispenseConfig.NamedLocation place = c.location(b.couponPlace != null ? b.couponPlace : c.blankLocationName);
+            double fallback = place != null ? place.z : c.needleAnchor != null ? c.needleAnchor.surfaceZMm : 0;
+            List<GcodeStreamBuilder.DotSpec> dots = new ArrayList<>();
+            for (double[] xy : b.xy) {
+                double z = (plane != null ? plane.z(xy[0], xy[1]) : fallback) + c.needleZOffsetMm + c.gapMm();
+                dots.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm,
+                        b.netSteps / c.bStepsPerDeg, w++, b.label));
+            }
+            GcodeStreamBuilder.BlockSpec bs = new GcodeStreamBuilder.BlockSpec(b.netSteps, dots, b.label);
+            bs.floorRefZ = b.couponPlace != null && place != null ? place.z : null;
+            specs.add(bs);
+            runs.add(new DoseBlocks.Run(b.netSteps, w - dots.size(), dots.size()));
+        }
+        int need = DoseBlocks.purgeSpotsNeeded(runs, c, c.padCalibration.flushDots);
+        OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) configuration.getMachine(), nozzle,
+                c.bAxisName);
+        return GcodeStreamBuilder.forBlocks(c, mapper, specs, purgeSpecs(c, need), c.padCalibration.flushDots,
+                bZeroed.get(), false, 0L, null);
+    }
+
+    /** The Interlocks of a block program: I4 by the scope, I9 for its purge spots, I11 for a partial turn, I6-feed. */
+    private Interlocks.Inputs blockInputs(DispenseConfig c, Interlocks.Scope scope, double est, int purge,
+            boolean partial, List<GcodeProgram.BlockInfo> blocks) {
+        Interlocks.Inputs in = interlockInputs(c, null, est, scope, false, false);
+        in.purgeDots = purge;
+        in.partialTurn = partial;
+        in.programBlocks = blocks;
+        return in;
+    }
+
+    /**
+     * A weigh coupon's plane (§7.3 step 2): probed on this connection's kind of machine, flat, near its
+     * place's Z, and under every weigh dot of the coupon's rectangle. Null when it is fine.
+     */
+    private static String couponPlane(DispenseConfig c, DoseBlocksRequest.Block b, DispenseConfig.NamedLocation place,
+            SurfacePlane plane, boolean simulator) {
+        DispenseConfig.SurfaceMap m = c.surface(b.surfaceName);
+        if (m != null && Boolean.TRUE.equals(m.simulated) && !simulator) {
+            return "I4: the '" + b.surfaceName + "' coupon was probed on the simulator: probe it again on this machine";
+        }
+        if (plane.maxAbsResidualMm > c.surfaceMaxResidualMm) {
+            return String.format(Locale.ROOT, "I4: the '%s' coupon is not flat: largest residual %.3f mm, limit %.3f mm",
+                    b.surfaceName, plane.maxAbsResidualMm, c.surfaceMaxResidualMm);
+        }
+        double window = c.padCalibration.couponWindowMm;
+        if (plane.minZ < place.z - window - 1e-9 || plane.maxZ > place.z + window + 1e-9) {
+            return String.format(Locale.ROOT, "I4: the '%s' coupon was touched at Z %.3f..%.3f, more than %.2f mm from "
+                    + "its place Z %.3f: probe it again", b.surfaceName, plane.minZ, plane.maxZ, window, place.z);
+        }
+        return null;
+    }
+
+    /**
+     * I4 refusal (code included) of a place set before this home while the Z check of this home failed (rc1 review: a
+     * coupon's Z moved with the surfaces), or null.
+     */
+    private String placeMovedRefusal(String name, DispenseConfig.NamedLocation place) {
+        ZCheck.Result z = homeTracker.getZCheck();
+        Long home = homeTracker.getLastHomeAtMs();
+        return ZCheck.failed(z, home) && ZCheck.placeBefore(place, home) ? "I4: " + ZCheck.placeMovedMessage(name, place,
+                z) : null;
+    }
+
+    /** "1 frame", "4 frames": the camera frames of a pad calibration step, as its phase text says them. */
+    private static String frames(int n) {
+        return n + (n == 1 ? " frame" : " frames");
+    }
+
+    /**
+     * I4 for a weigh coupon's plane: no Z check touches a coupon, so its touches count only in the Z frame they were
+     * made in (measured after the last home), or when this home's Z check vouched for that frame. Null when it may
+     * be used.
+     */
+    private String couponFrame(String surfaceName) {
+        Long home = homeTracker.getLastHomeAtMs();
+        DispenseConfig.SurfaceMap m = cfg.surface(surfaceName);
+        if (home == null || m == null || m.setAtMs != null && m.setAtMs >= home) {
+            return null;
+        }
+        ZCheck.Stale d = new ZCheck.Stale(ZCheck.surfaceDatum(surfaceName), m.setAtMs, m.homeAtMs);
+        if (ZCheck.unchecked(homeTracker.getZCheck(), home, Collections.singletonList(d)).isEmpty()) {
+            return null;
+        }
+        return "I4: the '" + surfaceName + "' coupon was touched before the home at " + ZCheck.clock(home)
+                + ", and no Z check since vouches for its Z: touch it again before laying dots on it";
+    }
+
+    /** After frames of every tile; every dot found, landed, its thread to the next told; 3 crops per block. */
+    private void afterImages(DoseBlocksRequest req, DoseBlocksResult res, Task t, DotImager im, List<PadLadder.Tile> tiles,
+            int[] tileOf, List<DotImager.Frame> before, List<double[]> all, List<Integer> blockOf) throws Exception {
+        List<PadLadder.FramePair> pairs = new ArrayList<>();
+        List<List<double[]>> blobs = new ArrayList<>();
+        List<List<Dot>> blobDots = new ArrayList<>();
+        for (int k = 0; k < tiles.size(); k++) {
+            PadLadder.Tile tile = tiles.get(k);
+            DotImager.Frame after = im.capture(tile.cx, tile.cy);
+            res.frames++;
+            pairs.add(new PadLadder.FramePair(before.get(k), after));
+            List<double[]> at = new ArrayList<>();
+            List<Dot> found = im.inspectAll(before.get(k), after);
+            for (Dot d : found) {
+                at.add(new double[] {tile.cx + d.xMm, tile.cy + d.yMm});
+            }
+            blobs.add(at);
+            blobDots.add(found);
+        }
+        // the nearest new blob within the block's radius; the blob a dot was matched to (two dots, one blob: a thread)
+        int[] blobOf = new int[all.size()];
+        int w = 0;
+        for (int k = 0; k < res.blocks.size(); k++) {
+            DoseBlocksRequest.Block b = req.blocks.get(k);
+            for (DoseBlocksResult.DotOut d : res.blocks.get(k).dots) {
+                int tile = tileOf[w];
+                List<double[]> at = blobs.get(tile);
+                int best = -1;
+                double bestD = b.matchRadiusMm;
+                for (int j = 0; j < at.size(); j++) {
+                    double dist = Math.hypot(at.get(j)[0] - d.x, at.get(j)[1] - d.y);
+                    if (dist <= bestD) {
+                        bestD = dist;
+                        best = j;
+                    }
+                }
+                blobOf[w] = best < 0 ? -1 : tile * 100000 + best;
+                if (best >= 0) {
+                    Dot f = blobDots.get(tile).get(best);
+                    d.dxMm = at.get(best)[0] - d.x;
+                    d.dyMm = at.get(best)[1] - d.y;
+                    d.found = new Dot(d.dxMm, d.dyMm, f.diameterMm, f.areaMm2, f.circularity);
+                    d.string = f.circularity < Limits.STRING_CIRCULARITY;
+                }
+                w++;
+            }
+        }
+        // threads between consecutive dots of a block (§7.4), crops
+        w = 0;
+        for (int k = 0; k < res.blocks.size(); k++) {
+            DoseBlocksResult.BlockOut o = res.blocks.get(k);
+            double model = DoseModel.dHiMm(o.netSteps) / 2;
+            for (int i = 0; i < o.dots.size(); i++) {
+                DoseBlocksResult.DotOut a = o.dots.get(i);
+                if (i + 1 < o.dots.size()) {
+                    DoseBlocksResult.DotOut b = o.dots.get(i + 1);
+                    if (blobOf[w] >= 0 && blobOf[w] == blobOf[w + 1]) {
+                        a.threadToNext = true;
+                    }
+                    else {
+                        List<PadLadder.FramePair> fp = new ArrayList<>();
+                        fp.add(pairs.get(tileOf[w]));
+                        if (tileOf[w + 1] != tileOf[w]) {
+                            fp.add(pairs.get(tileOf[w + 1]));
+                        }
+                        double ra = a.found != null ? a.found.diameterMm / 2 : model;
+                        double rb = b.found != null ? b.found.diameterMm / 2 : model;
+                        double share = PadLadder.corridorShare(fp, a.found != null ? a.x + a.dxMm : a.x,
+                                a.found != null ? a.y + a.dyMm : a.y, ra, b.found != null ? b.x + b.dxMm : b.x,
+                                b.found != null ? b.y + b.dyMm : b.y, rb);
+                        a.threadToNext = share > PadLadder.THREAD_SHARE;
+                    }
+                }
+                w++;
+            }
+            crops(res, k, o, pairs, tileOf, w - o.dots.size());
+        }
+    }
+
+    /** First found, median and worst dot of a block (by area; a miss is the worst), before and after. */
+    private static void crops(DoseBlocksResult res, int k, DoseBlocksResult.BlockOut o, List<PadLadder.FramePair> pairs,
+            int[] tileOf, int first) throws IOException {
+        List<Integer> found = new ArrayList<>();
+        int miss = -1;
+        for (int i = 0; i < o.dots.size(); i++) {
+            if (o.dots.get(i).found != null) {
+                found.add(i);
+            }
+            else if (miss < 0) {
+                miss = i;
+            }
+        }
+        if (found.isEmpty() && miss < 0) {
+            return;
+        }
+        List<int[]> picks = new ArrayList<>();
+        if (!found.isEmpty()) {
+            picks.add(new int[] {found.get(0), 0});
+            List<Integer> byArea = new ArrayList<>(found);
+            byArea.sort((x, y) -> Double.compare(o.dots.get(x).found.areaMm2, o.dots.get(y).found.areaMm2));
+            int median = byArea.get(byArea.size() / 2);
+            picks.add(new int[] {median, 1});
+            double m = o.dots.get(median).found.areaMm2;
+            int worst = miss;
+            if (worst < 0) {
+                double dev = -1;
+                for (int i : found) {
+                    double d = Math.abs(o.dots.get(i).found.areaMm2 / m - 1);
+                    if (d > dev) {
+                        dev = d;
+                        worst = i;
+                    }
+                }
+            }
+            picks.add(new int[] {worst, 2});
+        }
+        else {
+            picks.add(new int[] {miss, 2});
+        }
+        String[] what = {"first", "median", "worst"};
+        for (int[] pick : picks) {
+            DoseBlocksResult.DotOut d = o.dots.get(pick[0]);
+            PadLadder.FramePair fp = pairs.get(tileOf[first + pick[0]]);
+            DoseBlocksResult.Crop c = new DoseBlocksResult.Crop();
+            c.id = "b" + (k + 1) + "-d" + (pick[0] + 1) + "-" + what[pick[1]];
+            c.block = k;
+            c.dot = pick[0];
+            c.what = what[pick[1]];
+            c.beforePng = PadLadder.cropPng(fp.before, d.x, d.y);
+            c.afterPng = PadLadder.cropPng(fp.after, d.x, d.y);
+            res.crops.add(c);
+        }
+    }
+
+    /** N2 at travel height over the next unused purge spot (a park failure is only a warning). */
+    private void park(RunResult r) {
+        DispenseConfig cur = cfg;
+        if (!cur.purgeRow.isDefined() || cur.purgeRow.spotsLeft() <= 0) {
+            return;
+        }
+        double[] xy = cur.purgeRow.spot(cur.purgeRow.usedSpots);
+        try {
+            phase(r, "pad calibration: parking over the purge row");
+            Location at = nozzle.getLocation().convertToUnits(LengthUnit.Millimeters);
+            org.openpnp.util.MovableUtils.moveToLocationAtSafeZ(nozzle, new Location(LengthUnit.Millimeters, xy[0],
+                    xy[1], at.getZ(), at.getRotation()));
+        }
+        catch (Exception e) {
+            r.warnings.add("the head was not parked over the purge row: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Writes the outcome of one pad type's calibration (§7.7): the type's new version, when the
+     * calibration wrote one, and the {@code pad_calibrations} row. The engine-side rule: a
+     * {@code characterized} version needs a record whose every check passed; a calibration never
+     * writes {@code validated} (that stays the user's decision after a test board).
+     */
+    public synchronized PadCalibrationRecord applyPadCalibration(PadCalibrationRecord rec, PadType version)
+            throws SQLException {
+        if (version != null) {
+            if (!version.typeKey.equals(rec.typeKey)) {
+                throw new IllegalArgumentException("the version is of pad type '" + version.typeKey + "', the "
+                        + "calibration of '" + rec.typeKey + "'");
+            }
+            if (version.status == PadTypeStatus.VALIDATED) {
+                throw new IllegalArgumentException("a pad calibration never writes validated: that is the user's "
+                        + "decision after a test board (Validate)");
+            }
+            if (version.status == PadTypeStatus.CHARACTERIZED
+                    && !(PadCalibrationRecord.CHARACTERIZED.equals(rec.outcome) && rec.allChecksPass())) {
+                throw new IllegalArgumentException("characterized needs every check of the calibration passed");
+            }
+        }
+        if (PadCalibrationRecord.CHARACTERIZED.equals(rec.outcome)
+                && (version == null || version.status != PadTypeStatus.CHARACTERIZED)) {
+            throw new IllegalArgumentException("a characterized calibration writes the characterized version");
+        }
+        if (version != null) {
+            PadType stored = savePadType(version);
+            rec.versionTo = stored.version;
+        }
+        PadCalibrationRecord stored = db.insertPadCalibration(rec);
+        db.event(null, PadCalibrationRecord.CHARACTERIZED.equals(rec.outcome) ? "INFO" : "WARN", "PCAL",
+                new Gson().toJson(stored));
+        return stored;
+    }
+
+    /** Sets (true, now) or clears the engine's new-seat flag (§3.6); returns it. */
+    public synchronized Long setNewSeat(boolean newSeat) throws IOException {
+        DispenseConfig c = cfg.copy();
+        Long was = c.newSeatAtMs;
+        c.newSeatAtMs = newSeat ? Long.valueOf(System.currentTimeMillis()) : null;
+        if (was == null && c.newSeatAtMs == null) {
+            return null;
+        }
+        updateConfig(c);
+        db.event(null, "INFO", "REG", newSeat ? "new seat: the next registration probes again" : "new-seat flag cleared");
+        return c.newSeatAtMs;
+    }
+
+    private synchronized void storeRegistration(BoardRegistration reg, String runId) throws IOException {
+        DispenseConfig c = cfg.copy();
+        c.putBoardRegistration(reg);
+        updateConfig(c);
+        db.event(runId, "INFO", "REG", new Gson().toJson(reg));
+    }
+
+    static final String NO_CAMERA = "REG: no top camera in OpenPnP: Register board needs it. Check the board X/Y in the "
+            + "Board step and probe by hand.";
+
+    /** The §6.2 text when the board has fewer fiducials than Register board needs, else null. */
+    public static String fewFiducials(BoardFeatures f, int min) {
+        if (f.fiducials.size() >= min) {
+            return null;
+        }
+        List<String> names = new ArrayList<>();
+        for (BoardFeatures.Fiducial x : f.fiducials) {
+            names.add(x.name);
+        }
+        int n = f.fiducials.size();
+        return "REG: the board has " + n + (n == 1 ? " fiducial" : " fiducials") + (n == 0 ? "" : " ("
+                + String.join(", ", names) + ")") + "; Register board needs at least " + min + ". Check the board X/Y "
+                + "in the Board step (Use camera X/Y on the board origin) and probe by hand (Do it by hand).";
+    }
+
+    private static RegistrationResult.FidResult fidResult(RegistrationResult res, String name) {
+        for (RegistrationResult.FidResult f : res.fiducials) {
+            if (f.name.equals(name)) {
+                return f;
+            }
+        }
+        throw new IllegalStateException("no fiducial " + name);
+    }
+
+    private static List<Map<String, Object>> fiducialDetail(List<RegistrationResult.FidResult> l) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (RegistrationResult.FidResult f : l) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("name", f.name);
+            m.put("expected", xy(f.expectedX, f.expectedY));
+            m.put("found", f.x == null ? null : xy(f.x, f.y));
+            m.put("state", f.state);
+            m.put("iterations", f.iterations);
+            m.put("frames", f.frames);
+            out.add(m);
+        }
+        return out;
+    }
+
+    private static Map<String, Object> xy(double x, double y) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("x", x);
+        m.put("y", y);
+        return m;
+    }
+
+    private static RegistrationResult.FitResult fitResult(FiducialLocator.Fit fit, FiducialLocator.Settings ls,
+            BoardRegistration prev) {
+        RegistrationResult.FitResult f = new RegistrationResult.FitResult();
+        f.method = fit.method;
+        f.affine = new double[6];
+        fit.boardToMachine.getMatrix(f.affine);
+        f.rotationDeg = fit.rotationDeg;
+        f.scaleX = fit.scaleX;
+        f.scaleY = fit.scaleY;
+        f.shearDeg = fit.shearDeg;
+        f.maxResidualMm = fit.maxResidualMm;
+        f.limits = new RegistrationResult.FitResult.Limits();
+        f.limits.scalePct = ls.maxScaleErrorPct;
+        f.limits.shearDeg = ls.maxShearDeg;
+        f.limits.residualMm = ls.maxResidualMm;
+        f.limits.scaleChangePct = ls.maxScaleChangePct;
+        f.limits.shearChangeDeg = ls.maxShearChangeDeg;
+        if (prev != null) {
+            f.previous = new RegistrationResult.FitResult.Previous();
+            f.previous.atMs = prev.atMs;
+            FiducialLocator.Fit pf = FiducialLocator.Fit.of(prev.transform(), prev.method, prev.atMs);
+            f.previous.scaleX = pf.scaleX;
+            f.previous.scaleY = pf.scaleY;
+            f.previous.shearDeg = pf.shearDeg;
+        }
+        return f;
+    }
+
+    private static List<DispenseConfig.SurfacePoint> surfacePoints(List<VacuumProber.Point> pts) {
+        List<DispenseConfig.SurfacePoint> l = new ArrayList<>();
+        for (VacuumProber.Point p : pts) {
+            l.add(new DispenseConfig.SurfacePoint(p.x, p.y, p.z));
+        }
+        return l;
+    }
+
+    private static SurfacePlane fitProbed(List<DispenseConfig.SurfacePoint> sp) throws RunRefusedException {
+        try {
+            return SurfacePlane.fit(sp);
+        }
+        catch (IllegalArgumentException e) {
+            throw refused("PROBE: the probed points do not give a plane (" + e.getMessage() + "): probe by hand");
+        }
+    }
+
+    /** The flatness refusal (§6.2) when a point lies off the plane by more than the residual limit, else null. */
+    private static String flatness(SurfacePlane plane, List<VacuumProber.Point> pts, DispenseConfig c, boolean board) {
+        if (plane.maxAbsResidualMm <= c.surfaceMaxResidualMm + 1e-9) {
+            return null;
+        }
+        int worst = 0;
+        for (int i = 1; i < plane.residuals.length; i++) {
+            worst = Math.abs(plane.residuals[i]) > Math.abs(plane.residuals[worst]) ? i : worst;
+        }
+        VacuumProber.Point p = pts.get(worst);
+        String where = p.bx != null ? String.format(Locale.ROOT, "board X %.1f, Y %.1f", p.bx, p.by)
+                : String.format(Locale.ROOT, "X %.2f, Y %.2f", p.x, p.y);
+        return String.format(Locale.ROOT, "PROBE: the %s is not flat enough for one plane: point %d (%s) is %.3f mm off "
+                + "(limit %.3f). Press the %s flat (clamp it) and %s; by hand needs the same flatness.", board ? "board"
+                        : "surface", p.n, where, Math.abs(plane.residuals[worst]), c.surfaceMaxResidualMm,
+                board ? "board" : "surface", board ? "register again" : "probe again");
+    }
+
+    /** The frame-band refusal: a contact further than the tolerance from the surface's reference, else null. */
+    private static String band(List<VacuumProber.Point> pts, double refZ, String refName, double tol) {
+        for (VacuumProber.Point p : pts) {
+            if (Math.abs(p.z - refZ) > tol + 1e-9) {
+                return String.format(Locale.ROOT, "I4: N1 touched at Z %.3f at point %d, %.3f mm %s %s %.3f (tolerance "
+                        + "%.2f): %s or the surface is off", p.z, p.n, Math.abs(p.z - refZ), p.z < refZ ? "below" : "above",
+                        refName, refZ, tol, refName);
+            }
+        }
+        return null;
+    }
+
+    /** The result card's first sentence of a registration that ended OK. */
+    private static String registrationSentence(RegistrationResult res) {
+        StringBuilder sb = new StringBuilder("Registered " + ZCheck.clock(System.currentTimeMillis()) + ": ");
+        ProbeReport p = res.probe;
+        if (res.probeOnly) {
+            sb.append(p.why);
+            if (p.saved) {
+                sb.append(String.format(Locale.ROOT, "; board probed at %d points", p.points.size()));
+            }
+            return sb.append('.').toString();
+        }
+        sb.append("first".equals(res.seat) ? "first seat" : "same".equals(res.seat) ? "same seat" : "re-seated");
+        if (res.movedMm != null) {
+            sb.append(String.format(Locale.ROOT, " (moved %.2f mm)", res.movedMm));
+        }
+        if (p != null && p.saved) {
+            sb.append(String.format(Locale.ROOT, ", board probed at %d points", p.points.size()));
+        }
+        else if (res.sameSeat != null && res.sameSeat.pass) {
+            sb.append(", surface kept (3 points agree)");
+        }
+        else if (p != null && p.skipped) {
+            sb.append(", not probed");
+        }
+        return sb.append('.').toString();
+    }
+
+    private static String shortRun(String runId) {
+        return runId == null ? "?" : runId.length() > 4 ? runId.substring(0, 4) + "…" : runId;
+    }
+
+    /**
+     * Where the top camera is now (machine mm), or null when the frames do not come from OpenPnP's top
+     * camera (a test imager): the fiducial search then starts at the first fiducial.
+     */
+    private double[] cameraXY() {
+        if (dotImagerOverride != null) {
+            return null;
+        }
+        try {
+            Camera cam = configuration.getMachine().getDefaultHead().getDefaultCamera();
+            Location l = cam.getLocation().convertToUnits(LengthUnit.Millimeters);
+            return new double[] {l.getX(), l.getY()};
+        }
+        catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** The home part of a task's live detail. */
+    private static Map<String, Object> homeDetail(HomeTracker.Plan hp) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("needed", hp.needed);
+        m.put("whyCode", hp.whyCode);
+        m.put("why", hp.why);
+        m.put("estimateS", hp.estimateS);
+        return m;
+    }
+
+    private void detail(RunResult r, Map<String, Object> d) {
+        Map<String, Object> copy = Collections.unmodifiableMap(new LinkedHashMap<>(d));
+        for (DispenseListener l : listeners) {
+            try {
+                l.onDetail(r, copy);
+            }
+            catch (Exception e) {
+                Logger.warn(e, "dispense listener failed");
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1098,25 +3601,31 @@ public final class DispenseService {
         if (!busy.compareAndSet(false, true)) {
             throw new IllegalStateException("a dispense task is already running");
         }
+        long epoch = stopEpoch.get();
+        Queued q = new Queued(r);
+        queued = q;
         try {
-            return configuration.getMachine().submit(() -> {
+            Future<RunResult> f = configuration.getMachine().submit(() -> {
+                if (!q.began.compareAndSet(false, true)) {
+                    return r; // ended as dropped meanwhile (releaseDroppedTask)
+                }
                 try {
+                    refuseIfStoppedSince(epoch);
+                    refuseUnlessStarted();
+                    refuseWhilePressureHeld();
                     return body.call();
                 }
                 catch (Exception e) {
-                    if (r.status == RunResult.Status.RUNNING) {
-                        r.status = e instanceof RunRefusedException ? RunResult.Status.REFUSED
-                                : e instanceof DispenseExecutor.AbortedException ? RunResult.Status.ABORTED
-                                        : RunResult.Status.ERROR;
-                        r.message = String.valueOf(e.getMessage());
-                    }
+                    classifyFailure(r, e);
                     Logger.error(e, "dispense {} failed", r.kind);
                     return r;
                 }
                 finally {
                     finish(r);
                 }
-            });
+            }, null, true);
+            q.future = f;
+            return f;
         }
         catch (Exception e) {
             busy.set(false);
@@ -1130,33 +3639,105 @@ public final class DispenseService {
     }
 
     private <T> Future<T> submitResult(RunResult r, T result, Body body) throws Exception {
+        return submitResult(r, result, body, null);
+    }
+
+    /**
+     * As above; {@code after} fills the result from the run once it has ended, also when the task was refused
+     * before its body (a STOP since it was queued, the machine not started).
+     */
+    private <T> Future<T> submitResult(RunResult r, T result, Body body, Runnable after) throws Exception {
         if (!busy.compareAndSet(false, true)) {
             throw new IllegalStateException("a dispense task is already running");
         }
+        long epoch = stopEpoch.get();
+        Queued q = new Queued(r);
+        queued = q;
         try {
-            return configuration.getMachine().submit(() -> {
+            Future<T> f = configuration.getMachine().submit(() -> {
+                if (!q.began.compareAndSet(false, true)) {
+                    return result; // ended as dropped meanwhile (releaseDroppedTask)
+                }
                 try {
+                    refuseIfStoppedSince(epoch);
+                    refuseUnlessStarted();
+                    refuseWhilePressureHeld();
                     body.run();
                 }
                 catch (Exception e) {
-                    if (r.status == RunResult.Status.RUNNING) {
-                        r.status = e instanceof RunRefusedException ? RunResult.Status.REFUSED
-                                : e instanceof DispenseExecutor.AbortedException ? RunResult.Status.ABORTED
-                                        : RunResult.Status.ERROR;
-                        r.message = String.valueOf(e.getMessage());
-                    }
+                    classifyFailure(r, e);
                     Logger.error(e, "dispense {} failed", r.kind);
                 }
                 finally {
+                    if (after != null) {
+                        try {
+                            after.run();
+                        }
+                        catch (RuntimeException e) {
+                            Logger.warn(e, "dispense {}: the result was not completed", r.kind);
+                        }
+                    }
                     finish(r);
                 }
                 return result;
-            });
+            }, null, true);
+            q.future = f;
+            return f;
         }
         catch (Exception e) {
             busy.set(false);
             throw e;
         }
+    }
+
+    /**
+     * The status of a task that ended by an exception. A STOP is told by the executor's abort flag,
+     * not by the exception: a STOP during a home, a camera move or a position read surfaces as that
+     * call's exception, and must still end ABORTED (the UI opens Recovery) with the STOP's reason.
+     */
+    private void classifyFailure(RunResult r, Exception e) {
+        if (r.status != RunResult.Status.RUNNING) {
+            return;
+        }
+        DispenseExecutor x = activeExecutor;
+        boolean stop = e instanceof DispenseExecutor.AbortedException || (x != null && x.isAbortRequested());
+        r.status = stop ? RunResult.Status.ABORTED
+                : e instanceof RunRefusedException ? RunResult.Status.REFUSED : RunResult.Status.ERROR;
+        r.message = stop && !(e instanceof DispenseExecutor.AbortedException)
+                ? abortReason(x, String.valueOf(e.getMessage())) : String.valueOf(e.getMessage());
+    }
+
+    /**
+     * Engine tasks are submitted with ignoreEnabled, so a task queued while the machine is stopped
+     * still ends (and clears the busy flag): it is refused here, before anything is sent.
+     */
+    private void refuseUnlessStarted() throws RunRefusedException {
+        Machine m = configuration.getMachine();
+        if (m == null || !m.isEnabled()) {
+            throw refused("MACHINE: the machine is not started: press Start first");
+        }
+    }
+
+    /** A STOP since the task was queued: nothing is sent (§7.8). */
+    private void refuseIfStoppedSince(long epoch) throws RunRefusedException {
+        if (stopEpoch.get() != epoch) {
+            throw refused(STOPPED_SINCE_QUEUED);
+        }
+    }
+
+    /**
+     * On the machine thread, where the pressure hold's start is serialised with the engine's tasks: every
+     * task refuses at its start while the hold is on (prime, the test dot and the clean-pad check as well as
+     * runs, the probes and the calibrations), not only at the API's check before it was queued.
+     */
+    private void refuseWhilePressureHeld() throws RunRefusedException {
+        if (pressureHoldActive.getAsBoolean()) {
+            throw refused("the pressure hold is on: Pressure off first");
+        }
+    }
+
+    private static RunRefusedException refused(String why) {
+        return new RunRefusedException(why, null);
     }
 
     private void finish(RunResult r) {
@@ -1209,6 +3790,11 @@ public final class DispenseService {
         }
     };
 
+    /** What one before/after pair of a calibration dot gives (the dot nearest the centre, the dot at its spot). */
+    private interface FrameMeasure<T> {
+        T of(DotImager im, int i, DotImager.Frame before, DotImager.Frame after) throws Exception;
+    }
+
     /** One task on the machine thread: OpenPnP motion settled, mapper, channel, executor. */
     private final class Session {
         final DispenseConfig c;
@@ -1232,7 +3818,8 @@ public final class DispenseService {
             channel = new DriverGcodeChannel(mapper.getDriver());
             exec = new DispenseExecutor(c, channel, mapper.letterB(), System::currentTimeMillis);
             activeExecutor = exec;
-            keepalive = c.keepaliveEnabled && probeKeepalive();
+            boolean watchdog = probeKeepalive(); // also notes the simulator identity (M115) of this connection
+            keepalive = c.keepaliveEnabled && watchdog;
             r.keepaliveActive = keepalive;
         }
 
@@ -1244,7 +3831,9 @@ public final class DispenseService {
          */
         private boolean probeKeepalive() throws RunRefusedException {
             try {
-                for (String line : channel.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, c.commandTimeoutMs)) {
+                List<String> reply = channel.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, c.commandTimeoutMs);
+                noteIdentity(reply);
+                for (String line : reply) {
                     if (line.contains(ControllerCommands.WATCHDOG_CAPABILITY)) {
                         return true;
                     }
@@ -1269,7 +3858,8 @@ public final class DispenseService {
 
         /** Interlocks for calibration/shots runs (no plan rules, no I9-I11; I4 per the scope). */
         boolean preflight(Interlocks.Scope scope, double estimatedPressurisedSeconds) {
-            r.interlocks = Interlocks.check(interlockInputs(c.copy(), null, estimatedPressurisedSeconds, scope));
+            r.interlocks = Interlocks.check(interlockInputs(c.copy(), null, estimatedPressurisedSeconds, scope, false,
+                    false));
             if (!r.interlocks.ok()) {
                 refuse(r.interlocks.toString());
                 return false;
@@ -1292,7 +3882,7 @@ public final class DispenseService {
             configuration.getMachine().getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
             GcodeProgram p = build.call();
             List<String> problems = GcodeStreamValidator.validate(p, c, mapper.letterB(),
-                    GcodeStreamValidator.zWindow(c, mapper));
+                    GcodeStreamValidator.zWindow(c, mapper, p.floorReferenceZMm));
             if (!problems.isEmpty()) {
                 throw new IllegalStateException("generated G-code failed validation: " + problems);
             }
@@ -1326,9 +3916,17 @@ public final class DispenseService {
          * count is taken as 0 (with a warning); on a real link a missing count returns null.
          */
         Long readBCount() throws Exception {
+            return readBCount(true);
+        }
+
+        /**
+         * As above; without {@code assumeOnSimulator} a missing count is null on any link (the pad
+         * calibration measures per-phase statistics: a count taken as 0 would mislabel every phase).
+         */
+        Long readBCount(boolean assumeOnSimulator) throws Exception {
             channel.send("M400", -1);
             Long n = parseBCount(channel.sendAndCollect("M114", c.commandTimeoutMs), mapper.letterB());
-            if (n == null && channel.isLoopbackSimulator()) {
+            if (n == null && assumeOnSimulator && channel.isLoopbackSimulator()) {
                 r.warnings.add("simulated controller (no M114 Count): B step count taken as 0 for the start angle");
                 return 0L;
             }
@@ -1338,6 +3936,28 @@ public final class DispenseService {
         /** Before/after images of every spec around one pressure session; returns the dot per spec. */
         List<Dot> imageDots(List<GcodeStreamBuilder.DotSpec> specs, boolean primeAtWaste, double primeExtra,
                 double radius) throws Exception {
+            return imageEach(specs, primeAtWaste, primeExtra, (im, i, before, after) -> TestDotCheck.nearest(
+                    im.inspect(before, after), radius));
+        }
+
+        /**
+         * As {@link #imageDots}, each dot found at its spot with the strings cut off ({@link DotImager#inspectSpots}):
+         * the frame of dot i is centred on it, the other dots are its neighbours there.
+         */
+        List<SpotDot> imageSpots(List<GcodeStreamBuilder.DotSpec> specs, boolean primeAtWaste, double primeExtra,
+                double cutMm, double radiusMm) throws Exception {
+            return imageEach(specs, primeAtWaste, primeExtra, (im, i, before, after) -> {
+                List<double[]> spots = new ArrayList<>();
+                for (GcodeStreamBuilder.DotSpec d : specs) {
+                    spots.add(new double[] {d.x - specs.get(i).x, d.y - specs.get(i).y});
+                }
+                return im.inspectSpots(before, after, spots, cutMm, radiusMm).get(i);
+            });
+        }
+
+        /** Before images of every spec, one pressure session, then each spec's after image and its measure. */
+        private <T> List<T> imageEach(List<GcodeStreamBuilder.DotSpec> specs, boolean primeAtWaste, double primeExtra,
+                FrameMeasure<T> measure) throws Exception {
             DotImager im = imager();
             if (im == null || !im.isAvailable()) {
                 throw new IllegalStateException("no top camera / dot vision available");
@@ -1350,10 +3970,10 @@ public final class DispenseService {
             runSegment(() -> GcodeStreamBuilder.forDots(c, mapper, specs, bZeroed.get(), keepalive, primeAtWaste,
                     primeExtra, "calibration dots"), "dispensing calibration dots");
             phase(r, "after images");
-            List<Dot> found = new ArrayList<>();
+            List<T> found = new ArrayList<>();
             for (int i = 0; i < specs.size(); i++) {
                 DotImager.Frame after = im.capture(specs.get(i).x, specs.get(i).y);
-                found.add(TestDotCheck.nearest(im.inspect(before.get(i), after), radius));
+                found.add(measure.of(im, i, before.get(i), after));
             }
             return found;
         }

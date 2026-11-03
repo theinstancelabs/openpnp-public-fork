@@ -1,10 +1,33 @@
 package org.openpnp.instancelabs.dispense;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+
 /**
  * One version of a pad type (plan §5.7). Rows are append-only; the current definition of a type is
  * its highest version.
+ *
+ * <p>Schema 2 (profile calibration design §5.1): a type may carry its own dose (net steps per dot,
+ * dots per pad), the tip and recipe it was calibrated with, the opening area its dot plan was made
+ * for and its weighed mass per pad. All are null on older rows: the profile's dot and DotSizer, as
+ * before.</p>
  */
 public class PadType {
+    /** Net screw steps a type's dot may turn (of 1600 per revolution): quarter, half, one turn (§1.2 R1). */
+    public static final List<Integer> DOT_STEPS = Collections.unmodifiableList(Arrays.asList(400, 800, 1600));
+    static final String DOT_STEPS_TEXT = "400, 800, 1600";
+    public static final int MAX_DOTS_PER_PAD = 6;
+    /** Every pad gets at least half a screw turn in a row (§1.2 R6). */
+    public static final int MIN_STEPS_PER_PAD = 800;
+
+    public static final String ORIGIN_SEED = "seed";
+    public static final String ORIGIN_MANUAL = "manual";
+    public static final String ORIGIN_SUGGESTED = "suggested";
+    public static final String ORIGIN_AUTO_CALIBRATED = "auto-calibrated";
+    static final List<String> ORIGINS = Arrays.asList(ORIGIN_SEED, ORIGIN_MANUAL, ORIGIN_SUGGESTED,
+            ORIGIN_AUTO_CALIBRATED);
+
     /** Pad layout used when a package has no footprint pads in packages.xml. */
     public enum Layout {
         /** One pad at the part origin. */
@@ -56,6 +79,20 @@ public class PadType {
     public String notes;
     public long createdAtMs;
     public String operator;
+    /** Net steps per dot (one of {@link #DOT_STEPS}); null = the profile's netStepsPerDot. */
+    public Integer dotSteps;
+    /** Dots per pad, 1..{@link #MAX_DOTS_PER_PAD}; null = DotSizer with the type's rule. */
+    public Integer dotsPerPad;
+    /** The tip ({@link TipSpec#key}) the dose was set or calibrated for; null = not tied to a tip. */
+    public String tipKey;
+    /** {@link DispenseProfile#doseFingerprint()} at calibration; null = not calibrated. */
+    public String doseFp;
+    /** Opening area (mm²) the dot plan was made for; null = the type's own pad area. */
+    public Double calAreaMm2;
+    /** Weighed, confirmed mass per pad at calibration (mg): the source of an anchor (§1.3). */
+    public Double massPerPadMg;
+    /** seed | manual | suggested | auto-calibrated; null on rows from before schema 2. */
+    public String origin;
 
     public PadType() {
     }
@@ -93,7 +130,43 @@ public class PadType {
         p.notes = notes;
         p.createdAtMs = createdAtMs;
         p.operator = operator;
+        p.dotSteps = dotSteps;
+        p.dotsPerPad = dotsPerPad;
+        p.tipKey = tipKey;
+        p.doseFp = doseFp;
+        p.calAreaMm2 = calAreaMm2;
+        p.massPerPadMg = massPerPadMg;
+        p.origin = origin;
         return p;
+    }
+
+    public static boolean isAllowedDotSteps(Integer steps) {
+        return steps != null && DOT_STEPS.contains(steps);
+    }
+
+    /**
+     * Why this type's own dose cannot be stored (null if it can): the dose is a quarter, half or
+     * whole turn, at most {@link #MAX_DOTS_PER_PAD} dots, and every pad gets at least half a turn.
+     * The tip's minimum is checked where the tip is known (planner, pad type endpoints).
+     */
+    public String doseProblem() {
+        if (dotSteps != null && !isAllowedDotSteps(dotSteps)) {
+            return "dotSteps must be " + DOT_STEPS_TEXT + " (a quarter, half or whole screw turn), not " + dotSteps;
+        }
+        if (dotsPerPad != null && (dotsPerPad < 1 || dotsPerPad > MAX_DOTS_PER_PAD)) {
+            return "dotsPerPad must be 1 to " + MAX_DOTS_PER_PAD + ", not " + dotsPerPad;
+        }
+        if (dotSteps != null && dotsPerPad != null && dotSteps * dotsPerPad < MIN_STEPS_PER_PAD) {
+            return "dotsPerPad x dotSteps must be at least " + MIN_STEPS_PER_PAD
+                    + " steps (half a screw turn per pad), not " + dotsPerPad + " x " + dotSteps;
+        }
+        if ((calAreaMm2 != null && !(calAreaMm2 > 0)) || (massPerPadMg != null && !(massPerPadMg > 0))) {
+            return "calAreaMm2 and massPerPadMg must be > 0 when set";
+        }
+        if (origin != null && !ORIGINS.contains(origin)) {
+            return "origin must be one of " + ORIGINS + ", not '" + origin + "'";
+        }
+        return null;
     }
 
     @Override

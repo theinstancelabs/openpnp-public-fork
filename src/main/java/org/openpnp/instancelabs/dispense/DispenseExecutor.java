@@ -20,6 +20,14 @@ public class DispenseExecutor {
         }
     }
 
+    /**
+     * What a gated line belongs to: {@link #PROBE} lines pass {@link ControllerCommands#checkProbe}
+     * (the N1 vacuum and VAC1 lines), every other scope {@link ControllerCommands#check}.
+     */
+    public enum Scope {
+        DISPENSE, HOME, PROBE
+    }
+
     private final DispenseConfig cfg;
     private final GcodeChannel channel;
     private final LongSupplier clock;
@@ -47,6 +55,11 @@ public class DispenseExecutor {
 
     public boolean isAbortRequested() {
         return abortReason != null;
+    }
+
+    /** Why the abort was requested ("STOP pressed in the web UI"), or null. */
+    public String getAbortReason() {
+        return abortReason;
     }
 
     /**
@@ -102,6 +115,67 @@ public class DispenseExecutor {
                 gate.notifyAll();
             }
         }
+    }
+
+    /**
+     * One line outside a program (homing's Z lift, the N1 probe), on the same path as a streamed
+     * line: the allowlist of its scope, then the abort flag under the gate, marked in flight for
+     * {@link #awaitLineWritten} (a Stop cannot be overtaken by it). Recorded in the result.
+     *
+     * @param timeoutMs > 0: the caller passes the command timeout plus the move's own time, so its
+     *        own limits (the probe's vacuum on-time) can act between lines
+     */
+    public void sendGated(Scope scope, String line, long timeoutMs, RunResult r) throws Exception {
+        gated(scope, line, timeoutMs, r, false);
+    }
+
+    /** As {@link #sendGated}, returning every response line up to the confirmation (M114, M261). */
+    public List<String> queryGated(Scope scope, String line, long timeoutMs, RunResult r) throws Exception {
+        return gated(scope, line, timeoutMs, r, true);
+    }
+
+    private List<String> gated(Scope scope, String line, long timeoutMs, RunResult r, boolean collect)
+            throws Exception {
+        if (timeoutMs <= 0) {
+            throw new IllegalArgumentException("a gated line needs a timeout > 0 ms: '" + line + "'");
+        }
+        boolean probe = scope == Scope.PROBE;
+        if (probe) {
+            ControllerCommands.requireProbeAllowed(line);
+        }
+        else {
+            ControllerCommands.requireAllowed(line);
+        }
+        synchronized (gate) {
+            if (abortReason != null) {
+                throw new AbortedException(abortReason);
+            }
+            inFlight = true;
+            inFlightSinceNanos = System.nanoTime();
+        }
+        List<String> reply = null;
+        try {
+            if (collect) {
+                reply = probe ? channel.collectProbe(line, timeoutMs) : channel.sendAndCollect(line, timeoutMs);
+            }
+            else if (probe) {
+                channel.sendProbe(line, timeoutMs);
+            }
+            else {
+                channel.send(line, timeoutMs);
+            }
+        }
+        finally {
+            synchronized (gate) {
+                inFlight = false;
+                gate.notifyAll();
+            }
+        }
+        if (r != null) {
+            r.linesSent++;
+            r.streamedLines.add(line);
+        }
+        return reply;
     }
 
     /**
@@ -180,6 +254,12 @@ public class DispenseExecutor {
             }
         }
         catch (Exception e) {
+            shutdown(result);
+            throw e;
+        }
+        catch (Error e) {
+            // I1 on anything that ends the stream (rc1 review: an OutOfMemoryError, or a listener's Error, left the
+            // pump and the valve on: no M410, no vents, no I7 limit after it)
             shutdown(result);
             throw e;
         }

@@ -1,0 +1,201 @@
+/* boardimport.css: the upload dialog (#dlg-board-import), the Board step additions (upload, board pictures, where the
+   drawing comes from, Camera is on FID1) and the hero's board controls (picture, pad inspector, the board before
+   planning). Spec docs/instancelabs/BOARD_IMPORT_DESIGN.md §5.8, §5.9, §5.13. Loaded after board.css; uses the tokens
+   of app.css and the board palette of board.css. */
+
+/* ================================================================ dialog */
+.dialog--wide { width: min(1080px, 100%); }
+#dlg-board-import .dialog__body { padding-bottom: 14px; }
+.bi-body { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+
+/* state 1: drop zone */
+.bi-drop { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 300px; padding: 32px 24px;
+  border: 2px dashed var(--line-2); border-radius: var(--r-lg); background: var(--tile); text-align: center; transition: border-color .12s, background .12s; }
+.bi-drop[hidden] { display: none; }
+.bi-drop--over { border-color: var(--accent); background: var(--accent-tint); }
+.bi-drop__ic { width: 44px; height: 44px; color: var(--ink-3); stroke-width: 1.5; }
+.bi-drop--over .bi-drop__ic { color: var(--accent-ink); }
+.bi-drop__t { font: 650 17px/1.35 var(--font-ui); color: var(--ink); }
+.bi-drop__s { font-size: 14px; color: var(--ink-2); max-width: 520px; line-height: 1.45; }
+
+/* state 2 and errors */
+.bi-status { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border-radius: var(--r-md); background: var(--tile); border: 1px solid var(--line); }
+.bi-status[hidden] { display: none; }
+.bi-status__t { font: 650 15px/1.35 var(--font-ui); font-variant-numeric: tabular-nums; }
+.bi-status__s { font-size: 13.5px; color: var(--ink-2); }
+.bi-status--block { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; background: var(--block-bg); border-color: var(--block-line); }
+.bi-status--block .reason { margin: 0; flex: 1 1 360px; font-size: 14.5px; font-weight: 600; }
+.bi-status--block .reason .st { flex: none; margin-top: 1px; }
+
+/* state 3: the preview. The board stays in view (sticky) while the lists scroll beside it. */
+.bi-grid { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.bi-grid[hidden] { display: none; }
+.bi-grid--busy { opacity: .55; pointer-events: none; }
+.bi-left { position: sticky; top: 0; display: flex; flex-direction: column; gap: 8px; }
+.bi-board { height: 340px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--pv-bg); overflow: hidden; }
+.bi-size { font-size: 13.5px; color: var(--ink-2); line-height: 1.4; }
+.bi-size--need { color: var(--need); font-weight: 600; }
+.bi-key { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--ink-2); }
+.bi-key span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.bi-sw { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--pv-o-ap); background: var(--pv-a-bare); flex: none; }
+.bi-sw--block { border-color: var(--pv-o-block); background: repeating-linear-gradient(45deg, rgba(180, 35, 24, .16) 0 2px, var(--pv-o-block) 2px 3px, rgba(180, 35, 24, .16) 3px 5px); }
+.bi-sw--wait { border-color: var(--pv-o-check); background: repeating-linear-gradient(45deg, rgba(176, 111, 0, .14) 0 2px, var(--pv-o-check) 2px 3px, rgba(176, 111, 0, .14) 3px 5px); }
+.bi-sw--dim { border-color: var(--line-2); background: var(--pv-bg); opacity: .8; }
+.bi-right { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.bi-found { display: flex; flex-direction: column; gap: 4px; font-size: 14px; line-height: 1.45; color: var(--ink-2); }
+.bi-found__a { font-size: 15.5px; }
+.bi-found b { color: var(--ink); font-weight: 700; }
+.bi-found .bi-found--block { color: var(--block); }
+.bi-found .bi-found--need { color: var(--need); }
+.bi-found .bi-found--none { color: var(--ink-2); }
+.bi-dot { color: var(--ink-3); }
+.bi-attach { display: flex; flex-direction: column; gap: 6px; }
+.bi-attach[hidden], .bi-attach .btn-row:empty { display: none; }
+.bi-attach__s { font-size: 13.5px; color: var(--ink-2); }
+.bi-attach .btn-row { margin-top: 4px; }
+.bi-dnp { min-height: 36px; font-size: 14.5px; }
+.bi-dnp[hidden] { display: none; }
+
+/* warnings, in the order of §2.10 */
+.bi-warn { display: flex; flex-direction: column; gap: 10px; }
+.bi-wg ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.bi-wg__t { display: flex; align-items: center; gap: 8px; font: 700 12px/1.2 var(--font-ui); letter-spacing: .07em; text-transform: uppercase; color: var(--ink-2); margin: 0 0 6px; }
+.bi-wg__t .count { margin-left: 2px; }
+.bi-w { font-size: 14px; line-height: 1.45; padding: 8px 12px; border-radius: 10px; background: var(--tile); border: 1px solid var(--line); overflow-wrap: anywhere; }
+.bi-wg--1 .bi-w { background: var(--block-bg); border-color: var(--block-line); }
+.bi-wg--1 .bi-wg__t { color: var(--block); }
+.bi-wg--2 .bi-w, .bi-wg--3 .bi-w { background: var(--need-bg); border-color: var(--need-line); }
+.bi-wg--4 > summary, .bi-wg__more > summary { padding: 4px 0; }
+.bi-wg__more ul { margin-top: 6px; }
+.bi-wg--4 ul { margin-top: 6px; }
+.bi-wg--4 .bi-w { background: transparent; border-color: var(--line); color: var(--ink-2); }
+.bi-wg--none { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--ink-2); }
+
+/* packages */
+.bi-pkgs { table-layout: fixed; }
+.bi-pkgs th:nth-child(1) { width: 44%; }
+.bi-pkgs th:nth-child(2), .bi-pkgs th:nth-child(3) { width: 10%; }
+.bi-pkgs td { vertical-align: top; padding: 8px 8px; }
+.bi-pkgs th { padding: 8px 8px; }
+.bi-pkgs tr[data-package] { cursor: default; }
+.bi-pkgs tr[data-package]:focus { outline: none; background: var(--accent-tint); }
+.bi-pkgs tr[data-package]:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.bi-pkg__id { font-weight: 650; overflow-wrap: break-word; line-height: 1.3; }
+.bi-pkg__refs { font-size: 12.5px; color: var(--ink-3); margin-top: 2px; }
+.bi-pkg__s { font-size: 12.5px; color: var(--ink-2); margin-top: 3px; line-height: 1.35; }
+.bi-pkgs td.bi-pt { font-size: 13.5px; line-height: 1.35; overflow-wrap: break-word; }
+.bi-pt__t + .bi-pt__t { margin-top: 6px; }
+.bi-pt__s { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+.bi-pt__s--need { color: var(--need); }
+.bi-pt__none { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: var(--block); }
+.bi-pt__t--need b { color: var(--need); }
+
+/* state 6: saved */
+.bi-saved { display: flex; flex-direction: column; gap: 16px; padding: 8px 2px; outline: none; }
+.bi-saved[hidden] { display: none; }
+.bi-saved__head { display: flex; gap: 12px; align-items: flex-start; font-size: 16px; line-height: 1.5; padding: 14px 16px; border-radius: var(--r-md);
+  background: var(--ok-bg); border: 1px solid var(--ok-line); }
+.bi-saved__head > .st { flex: none; margin-top: 2px; }
+.bi-saved__head b { font-weight: 700; }
+.bi-todo h3 { font: 700 15px/1.35 var(--font-ui); margin: 0 0 8px; }
+.bi-todo ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-md); }
+.bi-todo li { display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 14px; font-size: 14px; }
+.bi-todo li + li { border-top: 1px solid var(--line); }
+.bi-todo__t { flex: 1; min-width: 0; overflow-wrap: anywhere; line-height: 1.35; }
+.bi-todo .btn { flex: none; }
+.bi-saved__next { margin: 0; font-size: 14.5px; line-height: 1.5; color: var(--ink-2); }
+
+/* foot: refusals on their own line, the name, then the actions */
+.dialog__foot.bi-foot { flex-wrap: wrap; align-items: flex-end; row-gap: 10px; }
+.bi-refusals { flex: 1 1 100%; order: -1; }
+.bi-refusals:empty { display: none; }
+.bi-refusals .refusal { margin: 0; }
+.bi-name { flex: 0 1 420px; min-width: 260px; gap: 4px; }
+.bi-name[hidden] { display: none; }
+.bi-name .input { height: 42px; }
+.bi-slug { overflow-wrap: anywhere; }
+.bi-why { margin: 0 0 12px; max-width: 260px; }
+.bi-foot > .btn { flex: none; margin-bottom: 1px; }
+.bi-foot > .btn--lg { min-width: 160px; justify-content: center; }
+.bi-foot .spacer { flex: 1 1 0; }
+
+/* the preview's parts: no pad type hatched, not dispensed dimmed (the hit rects of boardview's part layer) */
+#board-import-preview .pv.pv--art .pv-l-parts rect.pv-part.bi-part--block { fill: url(#bi-hatch-block); stroke: var(--pv-o-block); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+#board-import-preview .pv.pv--art .pv-l-parts rect.pv-part.bi-part--wait { fill: url(#bi-hatch-wait); stroke: var(--pv-o-check); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+#board-import-preview .pv.pv--art .pv-l-parts rect.pv-part.bi-part--dim { fill: var(--pv-bg); fill-opacity: .5; }
+#board-import-preview .bi-hatch--block .bi-hatch__bg { fill: rgba(180, 35, 24, .12); }
+#board-import-preview .bi-hatch--block .bi-hatch__line { stroke: var(--pv-o-block); stroke-opacity: .85; }
+#board-import-preview .bi-hatch--wait .bi-hatch__bg { fill: rgba(176, 111, 0, .10); }
+#board-import-preview .bi-hatch--wait .bi-hatch__line { stroke: #b06f00; stroke-opacity: .9; }
+
+/* ================================================================ Board step: upload, board pictures, Camera is on FID1 */
+.bf-boards { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.bf-upload { display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 40px; padding: 6px 12px;
+  border: 1.5px dashed var(--accent); border-radius: 10px; background: var(--accent-tint); color: var(--accent-ink); font: 650 14px/1.2 var(--font-ui); white-space: normal; }
+.bf-upload .ic { width: 18px; height: 18px; }
+.bf-upload:hover:not(:disabled) { background: var(--surface); }
+.bf-upload:disabled { border-color: var(--line-2); background: var(--disabled-bg); color: var(--ink-disabled); }
+.board-thumbs { display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; min-width: 0; padding-bottom: 4px; scrollbar-width: thin;
+  scroll-snap-type: x mandatory; }
+.board-thumbs[hidden] { display: none; }
+.board-thumbs--l { -webkit-mask-image: linear-gradient(to right, transparent 0, #000 28px); mask-image: linear-gradient(to right, transparent 0, #000 28px); }
+.board-thumbs--r { -webkit-mask-image: linear-gradient(to left, transparent 0, #000 28px); mask-image: linear-gradient(to left, transparent 0, #000 28px); }
+.board-thumbs--l.board-thumbs--r { -webkit-mask-image: linear-gradient(to right, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%); }
+.board-thumb { flex: 0 0 calc(50% - 4px); min-width: 150px; scroll-snap-align: start; display: flex; align-items: center; gap: 8px; height: 64px; padding: 5px 8px 5px 5px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); color: var(--ink); text-align: left; font: inherit; cursor: pointer; }
+.board-thumb:hover:not(:disabled) { background: var(--tile); }
+.board-thumb[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-tint); }
+.board-thumb:disabled { cursor: default; opacity: .6; }
+.board-thumb__img { width: 56px; height: 48px; flex: none; border-radius: 6px; background: var(--pv-bg); object-fit: contain; }
+.board-thumb__t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.board-thumb__n { font: 650 13px/1.2 var(--font-ui); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* name, size, parts (BOARD_IMPORT_DESIGN.md §5.9): with the size the name keeps one line (its full text is the
+   title and the list above), so the three lines fit the 64 px picture */
+.board-thumb__t:has(.board-thumb__size) .board-thumb__n { display: block; white-space: nowrap; text-overflow: ellipsis; }
+.board-thumb__s { font-size: 12px; color: var(--ink-2); line-height: 1.3; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.board-thumb__tag { font: 700 10px/1 var(--font-ui); letter-spacing: .06em; text-transform: uppercase; padding: 2px 5px; border-radius: 4px; background: var(--info-bg); color: var(--info); border: 1px solid var(--info-line); }
+.board-thumbs__more { flex: none; align-self: center; font-size: 13px; color: var(--ink-2); padding: 0 6px; white-space: nowrap; }
+.bf-imported { margin-top: 0; flex-direction: column; gap: 4px; }
+.bf-imported[hidden] { display: none; }
+.bf-next { color: var(--ink); font-weight: 600; }
+#btn-board-use-fid { flex: 1 1 100%; }
+
+/* ================================================================ hero: picture, pad inspector, path preview note */
+.bf-pic { display: flex; flex: none; }
+.bf-pic[hidden] { display: none; }
+.bf-pic__cycle { display: none; height: 40px; padding: 0 12px; gap: 6px; }
+.bf-pic__cycle .ic { width: 18px; height: 18px; }
+.bf-pic__seg button { padding: 0 11px; }
+.bf-inspect { flex: none; width: 44px; height: 44px; padding: 0; }
+.bf-inspect[hidden] { display: none; }
+.bf-inspect .ic { width: 20px; height: 20px; }
+/* narrower stage bars (boardflow.fit: only when a legend item would be cut): the picture segment becomes one button,
+   then its icon only, then "Preview path" its icon only */
+.bf-bar--l1 .bf-pic__seg, .bf-bar--l2 .bf-pic__seg, .bf-bar--l3 .bf-pic__seg { display: none; }
+.bf-bar--l1 .bf-pic__cycle, .bf-bar--l2 .bf-pic__cycle, .bf-bar--l3 .bf-pic__cycle { display: inline-flex; }
+.bf-bar--l2 .bf-pic__t, .bf-bar--l3 .bf-pic__t { display: none; }
+.bf-bar--l2 .bf-pic__cycle, .bf-bar--l3 .bf-pic__cycle { width: 44px; padding: 0; justify-content: center; }
+.bf-bar--l3 #pv-play .pv-play__t { display: none; }
+.bf-bar--l3 #pv-play { width: 44px; padding: 0; justify-content: center; }
+.stage-bar.bf-bar--l4 { gap: 6px; }
+.bf-bar--l4 .bf-pic__seg, .bf-bar--l4 .bf-pic__t { display: none; }
+.bf-bar--l4 .bf-pic__cycle { display: inline-flex; width: 44px; padding: 0; justify-content: center; }
+.bf-bar--l4 #pv-play .pv-play__t { display: none; }
+.bf-bar--l4 #pv-play { width: 44px; padding: 0; justify-content: center; }
+.bf-bar--l4 .zoom { gap: 4px; }
+/* while the path preview runs, the hero note says that nothing moves, and the drawing takes the room of the plan tiles
+   (the preview row has the times) */
+.hero--preview #plan-summary { display: none; }
+.hero--preview .hero__note:empty { display: block; }
+.hero--preview .hero__note:empty::before { content: 'Preview · nothing moves'; font-weight: 600; color: var(--ink); }
+
+/* the board before planning (no plan yet): the drawing at the form's seat, the live top camera, a caption */
+.hero--board .hero__empty { display: none; }
+.hero--board .stage-bar > :not(.bf-cap) { display: none; }
+.bf-cap { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 14px; color: var(--ink-2); min-width: 0; flex: 1; }
+.bf-cap[hidden] { display: none; }
+.bf-cap b { font: 650 15px/1.3 var(--font-ui); color: var(--ink); }
+.bf-cap__cam { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.bf-cap__cam--far .bf-cap__ring { display: none; }
+.bf-cap__ring { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--pv-o-probe); box-shadow: 0 0 0 1.5px var(--pv-o-case-l), inset 0 0 0 1.5px var(--pv-o-case-l); }

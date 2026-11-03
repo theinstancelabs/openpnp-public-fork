@@ -24,6 +24,20 @@ public interface GcodeChannel {
     }
 
     /**
+     * Sends one line of the N1 vacuum probe ({@link DispenseExecutor#sendGated} with scope PROBE):
+     * implementations guard it with {@link ControllerCommands#checkProbe} instead of
+     * {@link ControllerCommands#check}. The default sends it as any line.
+     */
+    default void sendProbe(String line, long timeoutMs) throws Exception {
+        send(line, timeoutMs);
+    }
+
+    /** As {@link #sendProbe}, returning every response line up to the confirmation (the M261 reply). */
+    default List<String> collectProbe(String line, long timeoutMs) throws Exception {
+        return sendAndCollect(line, timeoutMs);
+    }
+
+    /**
      * True only for a simulated controller on this computer (a TCP link to a loopback address): a
      * real Marlin reports the B step count with M114, OpenPnP's simulator does not.
      */

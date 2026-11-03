@@ -34,6 +34,10 @@ final class RunTracker implements DispenseListener {
         volatile long lastDotEndMs;
         /** When the run's pressure session started (its first pressurised phase), 0 before. */
         volatile long pressureOnAtMs;
+        /** The latest structured progress (Register board, the probes, a run's home and Z check), or null. */
+        volatile Map<String, Object> detail;
+        /** Register board: the plan made at its end (another page follows it). */
+        volatile String nextPlanId;
         final List<Integer> doneDots = new ArrayList<>();
         final List<String> phases = new ArrayList<>();
     }
@@ -94,9 +98,15 @@ final class RunTracker implements DispenseListener {
     }
 
     @Override
+    public void onDetail(RunResult run, Map<String, Object> detail) {
+        forRun(run).detail = detail == null ? null : java.util.Collections.unmodifiableMap(new LinkedHashMap<>(detail));
+    }
+
+    @Override
     public void onFinished(RunResult run) {
         Progress p = forRun(run);
         p.message = run.message;
+        p.nextPlanId = run.nextPlanId;
         p.finishedAtMs = run.endedAtMs > 0 ? run.endedAtMs : System.currentTimeMillis();
         p.dotsDone = run.dotsDone;
         p.status = String.valueOf(run.status);
@@ -125,6 +135,8 @@ final class RunTracker implements DispenseListener {
         m.put("finishedAtMs", p.finishedAtMs == 0 ? null : p.finishedAtMs);
         m.put("elapsedS", ((running ? now : p.finishedAtMs) - p.startedAtMs) / 1000.0);
         m.put("pressureOnAtMs", p.pressureOnAtMs == 0 ? null : p.pressureOnAtMs);
+        m.put("detail", p.detail);
+        m.put("nextPlanId", p.nextPlanId);
         synchronized (p) {
             m.put("dotsDone", p.dotsDone);
             m.put("dotsPlanned", p.dotsPlanned);

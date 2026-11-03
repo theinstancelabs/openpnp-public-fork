@@ -6,17 +6,23 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 import org.openpnp.instancelabs.dispense.Calibration;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
+import org.openpnp.instancelabs.dispense.DispenseDb;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DotMath;
 import org.openpnp.instancelabs.dispense.DotSizer;
+import org.openpnp.instancelabs.dispense.PadCalibrationRecord;
+import org.openpnp.instancelabs.dispense.PadInstances;
 import org.openpnp.instancelabs.dispense.PadRule;
 import org.openpnp.instancelabs.dispense.PadType;
 import org.openpnp.instancelabs.dispense.PadTypeStatus;
+import org.openpnp.instancelabs.padprofile.DoseEvidence;
+import org.openpnp.instancelabs.padprofile.DoseModel;
 
 import com.google.gson.JsonObject;
 
@@ -25,6 +31,10 @@ import com.google.gson.JsonObject;
  * appends a version (nothing is overwritten), status not-started -> provisional -> characterized
  * -> validated. "Delete" retires a type: a new version in the "Retired" family with no package
  * pattern and status not-started, so it can never be matched or dispensed; its history stays.
+ *
+ * <p>A type may carry its own dose (PROFILE_CALIBRATION_DESIGN.md §5.1, §12.7): a turn per dot the tip takes and dots
+ * per pad that give every pad at least half a turn. Raising such a type to characterized needs the evidence engine-side
+ * (409 status-evidence), and an edit of the pad or the dose drops the calibration it had (decision 17).</p>
  */
 final class PadTypeEndpoints {
     /** Display order of the families (plan §5.7); others follow alphabetically, Retired last. */
@@ -96,8 +106,9 @@ final class PadTypeEndpoints {
         m.put("targetVolumeMm3", v);
         m.put("targetMassMg", v * svc.getConfig().pasteDensityMgMm3);
         DispenseConfig c = svc.getConfig();
-        m.put("dotsPerPad", DotSizer.layout(t.padWMm, t.padHMm, area, rule).size());
-        m.put("rotationPerDotDeg", c.profile.netDeg(c));
+        m.put("dotsPerPad", t.dotsPerPad != null ? t.dotsPerPad
+                : DotSizer.layout(t.padWMm, t.padHMm, area, rule).size());
+        m.put("rotationPerDotDeg", t.dotSteps != null ? t.dotSteps / c.bStepsPerDeg : c.profile.netDeg(c));
         m.put("profileName", c.profile.name);
         m.put("rule", rule == null ? null : Views.map("maxDots", rule.maxDots, "fitFactor", rule.fitFactor,
                 "largestSingleDotPadMm2", rule.largestSingleDotPadMm2, "version", rule.version));
@@ -111,6 +122,8 @@ final class PadTypeEndpoints {
             }
         }
         m.put("lastValidatedAtMs", validatedAt);
+        List<PadCalibrationRecord> cals = svc.getDb().padCalibrations(t.typeKey, 1);
+        m.put("lastCalibration", cals.isEmpty() ? null : cals.get(0));
         m.put("dispensable", t.status.atLeast(svc.getConfig().minPadTypeStatus()));
         return m;
     }
@@ -147,18 +160,41 @@ final class PadTypeEndpoints {
         t.typeKey = key;
         t.tMm = svc.getConfig().pasteThicknessMm;
         t.layout = null; // PadType defaults to two-terminal; a new type picks its layout below
+        t.origin = PadType.ORIGIN_MANUAL;
+        if (Json.has(b, "origin")) {
+            // a suggestion edited before saving keeps its origin (§4.2: a later calibration keeps the edited plan)
+            t.origin = Json.str(b, "origin", null);
+            if (!PadType.ORIGIN_MANUAL.equals(t.origin) && !PadType.ORIGIN_SUGGESTED.equals(t.origin)) {
+                throw ApiException.badRequest("origin of a new pad type must be 'manual' or 'suggested'");
+            }
+        }
         apply(t, b);
         if (t.layout == null) {
             t.layout = t.pitchMm != null ? PadType.Layout.TWO_TERMINAL : PadType.Layout.SINGLE;
         }
+        checkDose(svc, null, t);
+        JsonObject mapping = b.has("mapping") && b.get("mapping").isJsonObject() ? b.getAsJsonObject("mapping") : null;
+        String pkg = mapping == null ? null : Json.str(mapping, "packageId", null);
+        if (mapping != null && pkg == null) {
+            throw ApiException.badRequest("'mapping' needs a packageId (and padNames for some pads only)");
+        }
+        List<String> names = mapping == null ? null : Json.strings(mapping, "padNames");
+        DispenseDb.joinPadNames(names); // checks the names before saving (400)
         PadType stored = svc.savePadType(t);
-        return ApiServer.Response.json(201, Views.map("padType", Views.padType(stored)));
+        if (pkg != null) {
+            svc.getDb().mapPackage(pkg, names, stored.typeKey);
+            svc.getDb().event(null, "INFO", "PAD_TYPE", "package " + pkg + (names.isEmpty() ? "" : " pads "
+                    + String.join(",", names)) + " mapped to " + stored.typeKey);
+        }
+        return ApiServer.Response.json(201, Views.map("padType", Views.padType(stored), "mapping", pkg == null ? null
+                : Views.map("packageId", pkg, "padNames", names.isEmpty() ? null : names)));
     }
 
     Object update(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
         DispenseService svc = ctx.svc();
-        PadType t = require(svc, r.group(1)).copy();
+        PadType was = require(svc, r.group(1));
+        PadType t = was.copy();
         if (Json.has(b, "typeKey") && !r.group(1).equals(Json.str(b, "typeKey", null))) {
             throw ApiException.badRequest("the key of a pad type cannot change; create a new type instead");
         }
@@ -169,6 +205,7 @@ final class PadTypeEndpoints {
             t.family = Json.str(b, "family", t.family);
         }
         apply(t, b);
+        checkDose(svc, was, t);
         PadType stored = svc.savePadType(t);
         return Views.map("padType", Views.padType(stored));
     }
@@ -265,6 +302,15 @@ final class PadTypeEndpoints {
         if (b.has("notes")) {
             t.notes = Json.str(b, "notes", null);
         }
+        if (b.has("dotSteps")) {
+            t.dotSteps = Json.integer(b, "dotSteps", null);
+        }
+        if (b.has("dotsPerPad")) {
+            t.dotsPerPad = Json.integer(b, "dotsPerPad", null);
+        }
+        if (b.has("calAreaMm2")) {
+            t.calAreaMm2 = Json.num(b, "calAreaMm2", null);
+        }
         t.operator = Json.str(b, "operator", t.operator);
         if (t.padWMm <= 0 || t.padHMm <= 0 || t.padWMm > 50 || t.padHMm > 50) {
             throw ApiException.badRequest("pad width and height must be above 0 and at most 50 mm");
@@ -274,6 +320,62 @@ final class PadTypeEndpoints {
         }
         if (t.k <= 0) {
             throw ApiException.badRequest("k must be above 0");
+        }
+    }
+
+    /**
+     * The dose of a type version to be saved (§5.1): allowed for the mounted tip, every pad at least half a turn, and
+     * the status evidence of an own-dose type raised to characterized or validated (409 status-evidence). An edit of
+     * the pad or the dose drops the calibration it had: origin manual, no recipe or weighed mass (decision 17).
+     */
+    static void checkDose(DispenseService svc, PadType was, PadType t) throws Exception {
+        String problem = t.doseProblem();
+        if (problem != null) {
+            throw ApiException.badRequest(problem);
+        }
+        DispenseConfig c = svc.getConfig();
+        if (t.dotSteps != null && t.dotSteps < c.tip.minDotSteps) {
+            throw ApiException.badRequest("the " + c.tip.name + " takes " + DoseModel.turnWithArticle(c.tip.minDotSteps)
+                    + " per dot at least (" + c.tip.minDotSteps + " steps), not " + t.dotSteps + " steps");
+        }
+        boolean padChanged = was != null && (was.padWMm != t.padWMm || was.padHMm != t.padHMm
+                || was.padRoundness != t.padRoundness);
+        boolean doseChanged = was == null ? t.dotSteps != null || t.dotsPerPad != null
+                : !Objects.equals(was.dotSteps, t.dotSteps) || !Objects.equals(was.dotsPerPad, t.dotsPerPad);
+        if (was != null && (padChanged || doseChanged)) {
+            t.origin = PadType.ORIGIN_MANUAL;
+            t.doseFp = null;
+            t.massPerPadMg = null;
+        }
+        if (doseChanged && (t.dotSteps != null || t.dotsPerPad != null)) {
+            t.tipKey = c.tip.key;
+        }
+        boolean raised = was == null || !was.status.atLeast(t.status);
+        if (t.dotSteps == null || t.dotSteps == c.profile.netStepsPerDot || !t.status.atLeast(PadTypeStatus.CHARACTERIZED)
+                || !(raised || doseChanged)) {
+            return;
+        }
+        String turn = DoseModel.turnName(t.dotSteps);
+        if (t.status == PadTypeStatus.VALIDATED) {
+            boolean characterized = false;
+            for (PadType h : was == null ? new ArrayList<PadType>() : svc.getDb().padTypeHistory(t.typeKey)) {
+                characterized |= h.status.atLeast(PadTypeStatus.CHARACTERIZED) && Objects.equals(h.dotSteps, t.dotSteps)
+                        && Objects.equals(h.dotsPerPad, t.dotsPerPad);
+            }
+            if (!characterized) {
+                throw new ApiException(409, "status-evidence", t.name + " can be validated on a board only after its "
+                        + turn + " dots were characterized: calibrate it first (Calibrate automatically or by hand).");
+            }
+            return;
+        }
+        DoseEvidence e = PadInstances.inputs(svc, new ArrayList<>(), false).evidence.get(t.dotSteps);
+        boolean optical = e != null && e.opticalFresh && e.opticalPass;
+        boolean mass = e != null && e.massConfirmed;
+        if (!optical || !mass) {
+            throw new ApiException(409, "status-evidence", t.name + " uses " + turn + " dots, which have "
+                    + (!optical ? "no fresh camera check on the blank" : "") + (!optical && !mass ? " and " : "")
+                    + (!mass ? "no confirmed weighing at this recipe" : "") + ": run the ladder and Weigh dots "
+                    + "(Calibrate) first.");
         }
     }
 

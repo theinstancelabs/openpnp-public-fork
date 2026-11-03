@@ -6,6 +6,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
+import org.openpnp.instancelabs.board.BoardImporter;
 import org.openpnp.instancelabs.dispense.DispensePlan;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.InterlockReport;
@@ -21,7 +22,11 @@ final class ApiContext {
     final Configuration configuration;
     final RunTracker tracker = new RunTracker();
     final PlanStore plans = new PlanStore();
+    /** The paste on each seated board (every tab and browser sees the same board). */
+    final BoardPaste paste = new BoardPaste(plans);
     final PressureHold pressure;
+    /** The pad calibrations (PROFILE_CALIBRATION_DESIGN.md §7): one at a time, its lock on the other tasks. */
+    final PadCalibrationJobs padCalJobs = new PadCalibrationJobs(this);
     private DispenseService listened;
 
     ApiContext(Configuration configuration) {
@@ -70,9 +75,12 @@ final class ApiContext {
         if (listened != null) {
             listened.removeListener(tracker);
             listened.removeListener(pressure);
+            listened.removeListener(paste);
         }
         s.addListener(tracker);
         s.addListener(pressure);
+        s.addListener(paste);
+        s.setPressureHoldCheck(pressure::isActive);
         listened = s;
     }
 
@@ -85,9 +93,32 @@ final class ApiContext {
         }
     }
 
+    /**
+     * No engine task runs, no pad calibration is between its engine steps (§7.1), and no board upload is reading
+     * its file (BI §3.4: no parse runs while a dispense, registration or probe task streams).
+     */
     void requireEngineIdle(DispenseService s) throws ApiException {
-        if (s.isBusy()) {
+        String job = padCalJobs.lockReason();
+        if (job != null) {
+            throw ApiException.refused(job);
+        }
+        // a task OpenPnP dropped (one of its own ahead of it failed) never ends by itself: it ends here (rc1 review)
+        if (s.isBusy() && !s.releaseDroppedTask()) {
             throw ApiException.refused("a dispense task is already running; wait for it or press STOP");
+        }
+        if (BoardImporter.reading()) {
+            throw ApiException.refused("a board file is being read (an upload takes up to about 20 s): wait for it "
+                    + "to finish");
+        }
+    }
+
+    /**
+     * A task queued behind another OpenPnP machine task that fails is dropped and never runs: the
+     * tasks that home or move refuse while OpenPnP is busy.
+     */
+    void requireMachineIdle() throws ApiException {
+        if (machine().isBusy()) {
+            throw ApiException.refused("OpenPnP is busy (homing or moving): wait for it to finish");
         }
     }
 
@@ -101,6 +132,12 @@ final class ApiContext {
 
     InterlockReport preflightPlan(DispenseService s, DispensePlan plan, double estimatedPressurisedSeconds) {
         return s.checkInterlocks(plan, estimatedPressurisedSeconds);
+    }
+
+    /** As above for a run that homes first and / or checks Z itself after the home. */
+    InterlockReport preflightPlan(DispenseService s, DispensePlan plan, double estimatedPressurisedSeconds,
+            boolean homeFirst, boolean zCheckFirst) {
+        return s.checkInterlocks(plan, estimatedPressurisedSeconds, homeFirst, zCheckFirst);
     }
 
     static void refuseUnlessOk(InterlockReport r, String what) throws ApiException {
@@ -137,6 +174,7 @@ final class ApiContext {
     }
 
     void shutdown() {
+        padCalJobs.shutdown();
         pressure.shutdown();
         synchronized (this) {
             if (listened != null) {

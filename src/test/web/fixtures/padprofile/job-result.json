@@ -1,0 +1,393 @@
+{
+ "id": "pc-1793295391429",
+ "state": "done",
+ "step": "plan",
+ "manual": null,
+ "startedAtMs": 1793295391429,
+ "endedAtMs": 1793295930567,
+ "planId": "1a347d89-a338-43d7-9024-1b84422a234b",
+ "boardFile": null,
+ "groups": [
+  "g3946f65377f7"
+ ],
+ "typeKeys": [
+  "sw-spst-3-9x2-9mm-183x86"
+ ],
+ "steps": [
+  {
+   "key": "blank",
+   "state": "done",
+   "text": "blank surface probed: 11 points, Z 5.500..5.600"
+  },
+  {
+   "key": "coupons",
+   "state": "done",
+   "text": "coupon1 and coupon2 found and touched"
+  },
+  {
+   "key": "ladder",
+   "state": "done",
+   "text": "6 dots: half ok"
+  },
+  {
+   "key": "weigh",
+   "state": "done",
+   "text": "30 half-turn dots on coupon1, 30 half-turn dots on coupon2"
+  },
+  {
+   "key": "readings",
+   "state": "done",
+   "text": "coupon1 35 mg (1.167 mg per half-turn dot), coupon2 35 mg (1.167 mg per half-turn dot)"
+  },
+  {
+   "key": "decide",
+   "state": "done",
+   "text": "0 of 1 characterized"
+  },
+  {
+   "key": "plan",
+   "state": "done",
+   "text": "planned again"
+  }
+ ],
+ "ladder": [
+  {
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 66,
+   "found": 66,
+   "hops": 63,
+   "threads": 10,
+   "residCv": 0.066,
+   "phase": 0.047,
+   "phaseLimit": 0.13,
+   "dMeanMm": 1.109,
+   "d95Mm": 1.17,
+   "driftPct": -0.036,
+   "landingMeanMm": 0.001,
+   "mgPerDot": 1.167,
+   "massConfirmed": true,
+   "pass": false,
+   "failures": [
+    "half-turn dots trailed a paste thread to the next dot 10 times in 63 moves (at most 4 allowed)"
+   ]
+  }
+ ],
+ "coupons": [
+  {
+   "place": "coupon1",
+   "label": "Coupon 1",
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 30,
+   "recordId": 2,
+   "found": 30,
+   "totalMg": 35.0,
+   "mgPerDot": 1.1666666666666667,
+   "skipped": false
+  },
+  {
+   "place": "coupon2",
+   "label": "Coupon 2",
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 30,
+   "recordId": 3,
+   "found": 30,
+   "totalMg": 35.0,
+   "mgPerDot": 1.1666666666666667,
+   "skipped": false
+  }
+ ],
+ "awaiting": null,
+ "pendingCoupons": [],
+ "balance": {
+  "kind": "sim",
+  "connected": false
+ },
+ "estimatedSecondsLeft": null,
+ "warnings": [],
+ "result": {
+  "outcome": "provisional",
+  "sentence": "Not characterized 10:45: SW_SPST_3.9x2.9mm · 1.83 × 0.86 mm stays provisional: half-turn dots trailed a paste thread to the next dot 10 times in 63 moves (at most 4 allowed); planned again.",
+  "atMs": 1793295930567,
+  "newPlanId": "04ccb09c-19e8-4cd8-acbd-63d738543419",
+  "planError": null,
+  "refusal": null,
+  "groups": [
+   {
+    "group": "g3946f65377f7",
+    "label": "SW_SPST_3.9x2.9mm · 1.83 × 0.86 mm",
+    "typeKey": "sw-spst-3-9x2-9mm-183x86",
+    "outcome": "provisional",
+    "text": "SW_SPST_3.9x2.9mm · 1.83 × 0.86 mm stays provisional: half-turn dots trailed a paste thread to the next dot 10 times in 63 moves (at most 4 allowed)",
+    "steps": 800,
+    "perPad": 2,
+    "turn": "half turn",
+    "mgPerPad": 2.333,
+    "targetMg": 2.292,
+    "errorPct": 2,
+    "dMeanMm": 1.109,
+    "d95Mm": 1.17,
+    "residCv": 0.066,
+    "phase": 0.047,
+    "phaseLimit": 0.13,
+    "threads": 10,
+    "hops": 63,
+    "massReadings": 2,
+    "massConfirmed": true,
+    "padRipplePct": [
+     0.0,
+     0.0
+    ],
+    "measuredRipplePct": 0.0,
+    "replaced": false,
+    "replacedText": null,
+    "notes": [],
+    "checks": [
+     {
+      "key": "optical",
+      "ok": false,
+      "predicted": null,
+      "measured": "66 dots",
+      "limit": "transfer, threads, repeat, phase, drift, landing",
+      "text": "half-turn dots trailed a paste thread to the next dot 10 times in 63 moves (at most 4 allowed)"
+     },
+     {
+      "key": "mass",
+      "ok": true,
+      "predicted": "1.06 mg per dot",
+      "measured": "1.17 mg per dot",
+      "limit": "two readings within 5 %",
+      "text": null
+     },
+     {
+      "key": "amount",
+      "ok": true,
+      "predicted": "2.29 mg per pad",
+      "measured": "2.33 mg per pad",
+      "limit": "-25 % to +10 %",
+      "text": null
+     },
+     {
+      "key": "r6",
+      "ok": true,
+      "predicted": null,
+      "measured": "1600 steps per pad",
+      "limit": "at least half a screw turn per pad",
+      "text": null
+     },
+     {
+      "key": "geometry",
+      "ok": true,
+      "predicted": "overhang, dot gap, copper gap with the model's dots",
+      "measured": "overhang 0.12, dot gap 2.83, copper gap 2.98 mm",
+      "limit": "overhang 0.20, gaps 0.30 / 0.15 mm",
+      "text": null
+     },
+     {
+      "key": "control",
+      "ok": true,
+      "predicted": null,
+      "measured": null,
+      "limit": null,
+      "text": null
+     },
+     {
+      "key": "tip",
+      "ok": true,
+      "predicted": null,
+      "measured": null,
+      "limit": "ad22tta-b",
+      "text": null
+     },
+     {
+      "key": "regulator",
+      "ok": true,
+      "predicted": null,
+      "measured": null,
+      "limit": null,
+      "text": null
+     },
+     {
+      "key": "validated",
+      "ok": true,
+      "predicted": null,
+      "measured": null,
+      "limit": null,
+      "text": null
+     }
+    ],
+    "version": null,
+    "calibrationId": 2
+   }
+  ],
+  "crops": [
+   {
+    "id": "lb1-d1-first",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 1,
+    "what": "first",
+    "weigh": false,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/lb1-d1-first-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/lb1-d1-first-after.png",
+    "alt": "half turn dot 1 (first)"
+   },
+   {
+    "id": "lb1-d1-median",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 1,
+    "what": "median",
+    "weigh": false,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/lb1-d1-median-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/lb1-d1-median-after.png",
+    "alt": "half turn dot 1 (median)"
+   },
+   {
+    "id": "lb1-d3-worst",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 3,
+    "what": "worst",
+    "weigh": false,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/lb1-d3-worst-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/lb1-d3-worst-after.png",
+    "alt": "half turn dot 3 (worst)"
+   },
+   {
+    "id": "wb1-d1-first",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 1,
+    "what": "first",
+    "weigh": true,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/wb1-d1-first-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/wb1-d1-first-after.png",
+    "alt": "half turn dot 1 (first)"
+   },
+   {
+    "id": "wb1-d3-median",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 3,
+    "what": "median",
+    "weigh": true,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/wb1-d3-median-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/wb1-d3-median-after.png",
+    "alt": "half turn dot 3 (median)"
+   },
+   {
+    "id": "wb1-d22-worst",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 22,
+    "what": "worst",
+    "weigh": true,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/wb1-d22-worst-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/wb1-d22-worst-after.png",
+    "alt": "half turn dot 22 (worst)"
+   },
+   {
+    "id": "wb2-d1-first",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 1,
+    "what": "first",
+    "weigh": true,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/wb2-d1-first-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/wb2-d1-first-after.png",
+    "alt": "half turn dot 1 (first)"
+   },
+   {
+    "id": "wb2-d6-median",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 6,
+    "what": "median",
+    "weigh": true,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/wb2-d6-median-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/wb2-d6-median-after.png",
+    "alt": "half turn dot 6 (median)"
+   },
+   {
+    "id": "wb2-d5-worst",
+    "steps": 800,
+    "turn": "half turn",
+    "dot": 5,
+    "what": "worst",
+    "weigh": true,
+    "before": "/api/pad-calibrations/pc-1793295391429/crops/wb2-d5-worst-before.png",
+    "after": "/api/pad-calibrations/pc-1793295391429/crops/wb2-d5-worst-after.png",
+    "alt": "half turn dot 5 (worst)"
+   }
+  ],
+  "predictions": [
+   {
+    "id": "P1",
+    "prediction": "mass per step equal across doses, 1.32 µg/step at 18 psi",
+    "band": "within ±5 % of each other, each ±10 % of 1.32",
+    "measured": "half turn 1.46 µg/step",
+    "pass": false
+   },
+   {
+    "id": "P2",
+    "prediction": "two readings of one dose agree",
+    "band": "±5 %",
+    "measured": "confirmed",
+    "pass": true
+   },
+   {
+    "id": "P3",
+    "prediction": "blank dot inside the model's band",
+    "band": "as stated per dose",
+    "measured": "half turn d 1.11 mm (1.07–1.25)",
+    "pass": true
+   },
+   {
+    "id": "P4",
+    "prediction": "phase: half split ≤ 13 %, quarter amplitude ≤ 0.20",
+    "band": "upper 95 % bound inside",
+    "measured": "half turn 0.047 (≤ 0.13)",
+    "pass": true
+   },
+   {
+    "id": "P5",
+    "prediction": "residual area CV ≤ 13 %",
+    "band": "upper 95 % bound inside",
+    "measured": "half turn 0.066 (≤ 0.13)",
+    "pass": true
+   },
+   {
+    "id": "P6",
+    "prediction": "threads between consecutive dots ≤ 3 %",
+    "band": "≤ k95(hops, 3 %) in ≥ 60 hops",
+    "measured": "half turn 10 in 63 (at most 4)",
+    "pass": false
+   },
+   {
+    "id": "P7",
+    "prediction": "after a block switch the first 2 dots are within 2σ of their block",
+    "band": "reported, ≥ 95 %",
+    "measured": "2 of 2 within 2σ",
+    "pass": true
+   },
+   {
+    "id": "P8",
+    "prediction": "the control matches the bench: 1.057 mm² ± 15 %",
+    "band": "as stated",
+    "measured": "0.982 mm²",
+    "pass": true
+   }
+  ],
+  "control": {
+   "pass": true,
+   "text": null,
+   "medianAreaMm2": 0.982,
+   "drift": "the validated half turn now gives 1.17 mg, 10 % more than the 1.06 mg weighed on 2026-10-27"
+  },
+  "pendingCoupons": false,
+  "finishable": false
+ }
+}

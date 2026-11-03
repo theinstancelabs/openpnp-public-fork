@@ -1,8 +1,11 @@
 package org.openpnp.instancelabs.dispense;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+
+import org.openpnp.instancelabs.padprofile.Texts;
 
 /**
  * The dispense recipe: one per pressure session, the same for the purge row and the work (bench,
@@ -57,6 +60,12 @@ public class DispenseProfile {
      * first one sets the start angle.
      */
     public int purgeDots = 8;
+    /**
+     * Highest paste demand (mg/s) a block of dots may ask of the screw (§1.2 R7): the bench saw 2.56
+     * mg/s sustained at 18 psi (36 one-turn dots at 180 rpm and 250 ms dwell, runs/p18_blank). A
+     * screw asked for more pulls in air. Not part of a dot, so not in the fingerprints.
+     */
+    public double sustainedFeedMgS = 2.6;
     public String notes = "Window is narrow: 16 psi starved the screw, 20 psi drooled. Never run the screw "
             + "faster than the paste feeds it (it pulls in air; 30-50 turns to recover).";
 
@@ -117,7 +126,15 @@ public class DispenseProfile {
      * one revolution more.
      */
     public long phaseSteps(DispenseConfig c, long restCount, int dotsAfter) {
-        long target = startAngleSteps(c) - (long) c.bExtrudeSign * dotsAfter * netStepsPerDot;
+        return phaseSteps(c, restCount, dotsAfter, netStepsPerDot);
+    }
+
+    /**
+     * As {@link #phaseSteps(DispenseConfig, long, int)} for {@code dotsAfter} dots of {@code stepsPerDot}
+     * net steps each: the phase dot of a block switch (the flush dots of the new dose follow it).
+     */
+    public long phaseSteps(DispenseConfig c, long restCount, int dotsAfter, int stepsPerDot) {
+        long target = startAngleSteps(c) - (long) c.bExtrudeSign * dotsAfter * stepsPerDot;
         long n = Math.floorMod(c.bExtrudeSign * (target - restCount), (long) c.bStepsPerRev);
         if (n < Math.round(MIN_PHASE_TURN_DEG / 360.0 * c.bStepsPerRev)) {
             n += c.bStepsPerRev;
@@ -132,6 +149,31 @@ public class DispenseProfile {
                 dwellMs, gapMm, purgeDots);
     }
 
+    /**
+     * Identity of everything but the turn that sets how much paste a turn lays (pressure, suck-back,
+     * speed, acceleration, dwell, gap): dose records and calibrated pad types carry it (§1.7). The
+     * net turn is the record's own, the start angle has its own rule, purge count and name are no
+     * part of a dot.
+     */
+    public String doseFingerprint() {
+        return String.format(Locale.ROOT, "psi=%.3f suck=%.3f rpm=%.3f acc=%.1f dwell=%d gap=%.4f", pressurePsi,
+                suckBackDeg, screwRpm, screwAccelDegS2, dwellMs, gapMm);
+    }
+
+    /**
+     * What differs between two fingerprints in words, e.g. {@code "dwell 250 -> 300, gap 0.1 -> 0.12"}
+     * (keys only one side has are listed with "none"); empty when equal. The one recipe formatter of
+     * the dose records and the profile check ({@link Texts#recipeDiff}).
+     */
+    public static String fingerprintDiff(String was, String now) {
+        return Texts.recipeDiff(was, now);
+    }
+
+    /** A number without trailing zeros (18.000 -> "18", 0.1000 -> "0.1"). */
+    static String plain(double v) {
+        return BigDecimal.valueOf(v).stripTrailingZeros().toPlainString();
+    }
+
     /** Problems with this profile (empty if OK). */
     public List<String> validate(DispenseConfig c) {
         List<String> p = new ArrayList<>();
@@ -139,10 +181,12 @@ public class DispenseProfile {
             p.add(String.format(Locale.ROOT, "profile pressurePsi must be > 0 and <= %.1f (DV-5005 1.5 bar)", MAX_PSI));
         }
         int rev = c.bStepsPerRev;
-        if (!(netStepsPerDot > 0 && netStepsPerDot <= 2 * rev
-                && (rev % netStepsPerDot == 0 || netStepsPerDot % rev == 0))) {
-            p.add("profile netStepsPerDot must divide a revolution (" + rev + " steps: 1600, 800, 400, ...) or be "
-                    + "one or two revolutions, so the start angle repeats");
+        // R1 (profile calibration §1.2): the start angle repeats, and a purge dot (the profile's dose) stays
+        // within the stream validator's one revolution and the 20° phase turn
+        if (!(netStepsPerDot == rev || 2 * netStepsPerDot == rev || 4 * netStepsPerDot == rev)) {
+            p.add("profile netStepsPerDot must be " + rev / 4 + ", " + rev / 2 + " or " + rev + " steps (a quarter, "
+                    + "half or whole turn of the " + rev + " steps of a revolution): the start angle repeats and a "
+                    + "purge dot turns at most one revolution");
         }
         if (!(suckBackDeg >= 0 && suckBackDeg <= 30)) {
             p.add("profile suckBackDeg must be 0 to 30");
@@ -173,6 +217,9 @@ public class DispenseProfile {
             p.add("profile purgeDots must be at least 2 for a partial turn: the first purge dot sets the start angle "
                     + "and at least one normal dot must flush its odd size before the work");
         }
+        if (!(sustainedFeedMgS > 0 && sustainedFeedMgS <= 10)) {
+            p.add("profile sustainedFeedMgS must be > 0 and <= 10 mg/s (the bench saw 2.56 at 18 psi)");
+        }
         return p;
     }
 
@@ -189,6 +236,7 @@ public class DispenseProfile {
         x.dwellMs = dwellMs;
         x.gapMm = gapMm;
         x.purgeDots = purgeDots;
+        x.sustainedFeedMgS = sustainedFeedMgS;
         x.notes = notes;
         return x;
     }

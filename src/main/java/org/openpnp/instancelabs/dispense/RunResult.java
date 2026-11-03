@@ -28,7 +28,7 @@ public class RunResult {
     }
 
     public String runId;
-    /** board | dot-ladder | touch-off | shots */
+    /** board | dot-ladder | touch-off | shots | board-registration | surface-probe | z-check */
     public String kind;
     public String planId;
     public String boardName;
@@ -59,6 +59,13 @@ public class RunResult {
     public int purgeDots;
     public Long bCountAtStart;
     public Double workStartAngleDeg;
+    /** Register board: the plan made at the end of the task (the page and other clients follow it). */
+    public String nextPlanId;
+    /** Board runs: whether the run homed first (homeBeforeRun), and its Z check after the home. */
+    public Boolean homedFirst;
+    public ZCheck.Result zCheck;
+    /** Board runs: pads the operator chose to skip for this run (pad ids), shown in Records. */
+    public final List<String> skippedPads = new ArrayList<>();
 
     /** Seconds from the first dot's start to the last dot's end. */
     public Double motionSeconds() {

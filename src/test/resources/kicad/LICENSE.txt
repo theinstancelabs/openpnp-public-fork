@@ -1,0 +1,107 @@
+KiCad board fixtures for the board import tests (org.openpnp.instancelabs.kicad).
+
+Each file below is a copy, or a stripped copy, of a published design. The copies
+are used only as test input. Files larger than 1 MB are stored gzipped (*.gz)
+and the tests read them through GZIPInputStream. The stripped copies were made
+by a script that removes whole S-expression items (it never edits geometry);
+the removed items have no pads and are not on Edge.Cuts, so the placements and
+the board outline do not change.
+
+----
+
+Files:
+ftp.kicad_pcb.gz
+secondary-fid-pcb.kicad_pcb
+pi-interface-k7.kicad_pcb
+
+Source:
+https://github.com/opulo-inc/lumenpnp at commit 5ec657b
+  ftp.kicad_pcb.gz             <- pnp/pcb/ftp/ftp.kicad_pcb (KiCad 8)
+  secondary-fid-pcb.kicad_pcb  <- pnp/pcb/secondary-fid-pcb/secondary-fid-pcb.kicad_pcb (KiCad 9)
+  pi-interface-k7.kicad_pcb    <- pnp/pcb/pi-interface/pi-interface.kicad_pcb (KiCad 7)
+
+Files:
+pi-interface-k10.kicad_pcb.gz
+ftp0402.kicad_pcb.gz
+
+Source:
+https://github.com/opulo-inc/lumenpnp at commit 64cf68d
+  pi-interface-k10.kicad_pcb.gz <- src/PCB/pi-interface/pi-interface.kicad_pcb (KiCad 10)
+  ftp0402.kicad_pcb.gz          <- src/PCB/ftp/ftp0402/ftp0402.kicad_pcb (KiCad 9)
+These are the same designs as ./pnp/pcb in the commit above: the project moved
+its PCBs to src/PCB without updating its LICENSE, whose item 1 still names
+./pnp/pcb. They are treated as CERN-OHL-W v2, like the rest of its PCBs.
+
+Files:
+mobo.kicad_pcb.gz
+
+Source:
+https://github.com/opulo-inc/feeder at commit 05843dd
+  mobo.kicad_pcb.gz <- pcb/mobo/mobo.kicad_pcb (KiCad 9)
+
+License (all files above):
+The hardware designs are available under the CERN Open Hardware Licence
+Version 2 - Weakly Reciprocal (CERN-OHL-W v2): https://cern.ch/cern-ohl
+The projects' notice, which must be included with derivative works:
+
+    LumenPnP is (c) by Opulo
+
+The projects' logo, branding and marks are reserved, and derivative works must
+remove them (items 4 and 5 of each project's LICENSE). These copies remove them:
+
+  ftp.kicad_pcb.gz: the logo footprint G1 (mfg library) removed; the board
+    text "Functional Test Placement REV00\n<<hash>>\n<url>" cut to
+    "Functional Test Placement REV00\n<<hash>>"; the 3-D model references
+    (model ...) removed.
+  ftp0402.kicad_pcb.gz: the logo footprint G1 (mfg library) removed; the board
+    text cut to "Functional Test Placement REV00 (0402)"; model references
+    removed.
+  pi-interface-k7.kicad_pcb: the two kibuzzard-* text footprints removed;
+    model references removed.
+  pi-interface-k10.kicad_pcb.gz: the five kibuzzard-* text footprints removed;
+    model references removed (they held absolute designer paths).
+  mobo.kicad_pcb.gz: the six pad-less logo footprints (LOGO twice,
+    index:goblin, feeder:pulsar, index:logo_mask, the OSHW symbol) and the
+    board text naming the project and the company removed.
+  secondary-fid-pcb.kicad_pcb: unchanged.
+
+----
+
+Files:
+NanoV3.3.kicad_pcb.gz
+NanoV3.3-F_Paste.gbr
+NanoV3.3-PTH.drl
+NanoV3.3-NPTH.drl
+
+Source:
+https://github.com/theinstancelabs/lumenpnp-handoff at commit 6a78577
+  NanoV3.3.kicad_pcb.gz <- nano/source/kicad/NanoV3.3.kicad_pcb (KiCad 6),
+    unchanged (gzipped)
+  NanoV3.3-F_Paste.gbr, NanoV3.3-PTH.drl, NanoV3.3-NPTH.drl <- inside
+    nano/source/order/arduino-nano-gerbers.zip (KiCad 10.0.5 exports of the
+    same board); unchanged except line endings converted from CRLF to LF
+
+The board is a KiCad port of the Arduino Nano V3.3 PCB design (originally made
+for EAGLE and published by Arduino: https://store.arduino.cc/products/arduino-nano),
+modified slightly by the port to avoid ERC/DRC errors. Credit: Arduino, and the
+authors of the "Nano_KiCAD" port.
+
+License:
+Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0):
+https://creativecommons.org/licenses/by-sa/4.0/
+(nano/source/kicad/LICENSE.md). The Gerber and drill files are outputs of the
+licensed design and are under the same licence. These four files stay under
+CC BY-SA 4.0.
+
+----
+
+Files:
+ftp.board.xml
+
+Source:
+The bench's OpenPnP board file for the functional test board above (its
+placements come from OpenPnP's KiCad .pos import of ftp.kicad_pcb). FID1 was
+moved by hand on the bench to (62.4466, 4.6910); KiCad has it at (62.5, 5.0).
+
+License:
+As ftp.kicad_pcb.gz (CERN-OHL-W v2, "LumenPnP is (c) by Opulo").

@@ -163,13 +163,22 @@ public class BoardPlanningTest {
         assertEquals(0.5, m.get("R1.1").rotationDeg, 1e-6);
     }
 
+    /**
+     * The seed types with the toy QFN's dispensable pads pasted anyway: its 0.25 mm perimeter pad
+     * cannot be dispensed with the 22G tip, so by default the part gets no paste (decision 4).
+     */
+    static PadTypeResolver pastePartialQfn() {
+        return new PadTypeResolver(types, null).withPastePartial(java.util.Collections.singleton("QFN-16_3x3mm"));
+    }
+
     /** One profile dot per pad (no dose model): the plan carries the profile and its fingerprint. */
     @Test
     public void plannerProfileDotsFlagsAndOrder() {
         DispenseConfig cfg = new DispenseConfig();
         cfg.minPadTypeStatus = "provisional";
         cfg.needleZOffsetMm = -2.59;
-        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(types, null));
+        // the toy QFN's 0.25 mm perimeter pad is too narrow for the 22G tip: its part is pasted only by choice
+        DispensePlanner planner = new DispensePlanner(cfg, pastePartialQfn());
         BoardLocation bl = new BoardLocation(board());
         bl.setLocation(new Location(LengthUnit.Millimeters, 100, 50, 5.5, 0));
         DispensePlan plan = planner.planBoard(bl, 100, 50);
@@ -200,8 +209,11 @@ public class BoardPlanningTest {
         assertTrue(x1.isBlocked());
         assertEquals(0.5 * 1.7 * 1.7 * 0.1, centre.targetVolumeMm3, 1e-12);
         assertEquals(1, centre.dotCount, "no pad rule: one dot even on the QFN centre pad");
-        // 10 dispensable pads -> 10 dots, each cites the pad and has Z = surface + offset + gap (+hop)
-        assertEquals(10, plan.dots.size());
+        // the perimeter pad itself is never pasted (decision 4: only the part's dispensable pads)
+        DispensePlan.PlannedPad perimeter = plan.pads.stream().filter(p -> p.padId.equals("U1.1")).findFirst().get();
+        assertEquals(java.util.Collections.singletonList("PART_NOT_DISPENSABLE"), perimeter.flagNames());
+        // 9 dispensable pads -> 9 dots, each cites the pad and has Z = surface + offset + gap (+hop)
+        assertEquals(9, plan.dots.size());
         Set<String> pads = new HashSet<>();
         for (int i = 0; i < plan.dots.size(); i++) {
             DispensePlan.PlannedDot d = plan.dots.get(i);
@@ -211,8 +223,8 @@ public class BoardPlanningTest {
             assertEquals(d.dispenseZMm + 1.0, d.hopZMm, 1e-12);
             assertEquals(cfg.profile.netDeg(cfg), d.rotationDeg, 0);
         }
-        assertEquals(10, pads.size());
-        assertEquals(10 * 800 / 4.44, plan.totalRotationDeg(), 1e-9);
+        assertEquals(9, pads.size());
+        assertEquals(9 * 800 / 4.44, plan.totalRotationDeg(), 1e-9);
         assertTrue(plan.pathLengthMm <= plan.pathLengthNearestNeighbourMm + 1e-9);
         // first dot is the one nearest the start point (100, 50): R1.1 at (109.175, 60)
         assertEquals("R1.1", plan.dots.get(0).padId);
@@ -226,7 +238,17 @@ public class BoardPlanningTest {
         cfg.minPadTypeStatus = "provisional";
         Map<String, PadRule> rules = new HashMap<>();
         rules.put("qfn-centre", new PadRule("qfn-centre", 4, null, 0.8));
-        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(types, null)).withRules(rules);
+        // the perimeter pad below the gate: its dot, 1.08 mm from a grid dot, would bridge (MAY_BRIDGE)
+        List<PadType> gated = new ArrayList<>();
+        for (PadType t : types) {
+            PadType x = t.copy();
+            if (x.typeKey.equals("qfn-dfn-perimeter")) {
+                x.status = PadTypeStatus.NOT_STARTED;
+            }
+            gated.add(x);
+        }
+        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(gated, null)
+                .withPastePartial(java.util.Collections.singleton("QFN-16_3x3mm"))).withRules(rules);
         BoardLocation bl = new BoardLocation(board());
         bl.setLocation(new Location(LengthUnit.Millimeters, 100, 50, 5.5, 0));
         DispensePlan plan = planner.planBoard(bl, 100, 50);
@@ -243,7 +265,17 @@ public class BoardPlanningTest {
             assertEquals(1.7 / 4, Math.abs(d.yMm - 90), 1e-9);
             assertEquals(cfg.profile.netDeg(cfg), d.rotationDeg, 0);
         }
-        assertEquals(13, plan.dots.size());
+        assertEquals(12, plan.dots.size());
+        // the grid's dots follow one another (a pad is dispensed in one go)
+        int first = -1;
+        for (DispensePlan.PlannedDot d : plan.dots) {
+            if (d.padId.equals("U1.17") && first < 0) {
+                first = d.index;
+            }
+        }
+        for (int i = first; i < first + 4; i++) {
+            assertEquals("U1.17", plan.dots.get(i).padId);
+        }
     }
 
     @Test

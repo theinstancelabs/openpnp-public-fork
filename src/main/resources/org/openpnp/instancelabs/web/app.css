@@ -193,15 +193,27 @@ kbd {
 .cell--live { color: var(--on-live); background: var(--live); border-color: var(--live); }
 .cell--verdict { margin-left: auto; padding-right: 12px; }
 .cell--verdict .cell__v { font-size: 16px; }
+/* the last resort after every shorter form (t1 to t4, below): the verdict ends in "…" instead of running under STOP;
+   it is measured at its full width (cells--fit) to decide what goes first */
+.cell--verdict { flex: 0 1 auto; }
+.cell--verdict .cell__v { overflow: hidden; text-overflow: ellipsis; }
+.cells--fit .cell--verdict { flex: none; }
 .cell-act { height: 44px; padding: 0 16px; border-radius: 10px; border: 0; background: var(--accent); color: var(--on-accent); font: 700 15px/1 var(--font-ui); flex: none; position: relative; overflow: hidden; white-space: nowrap; }
 .cell-act:hover { background: var(--accent-hover); }
 .cell-act:disabled { background: var(--disabled-bg); color: var(--ink-disabled); }
 .cells .sep { width: 1px; height: 36px; background: var(--line); flex: none; margin: 0 2px; }
-/* too narrow for the full values (IL measures after each change): t1 drops the level-1 .long parts ("Connected · ",
-   " · vented", " · wipe"), t2 drops every .long part and tightens spacing; the cell titles keep the long form */
-.cells--t1 .long[data-l="1"], .cells--t1 .cell__sep, .cells--t2 .long, .cells--t2 .cell__sep { display: none; }
+/* too narrow for the full values (IL measures after each change): the other cells shorten before the verdict. t1 drops
+   their level-1 .long parts ("Connected · ", " · vented", " · wipe"), t2 all their .long parts (" · set 18 psi") and
+   tightens spacing, t2v then the verdict's own (" · homes first (≈ 25 s)", the time of a stop, a task's progress);
+   the cell titles keep the long form */
+.cells--t1 .cell:not(.cell--verdict) .long[data-l="1"], .cells--t1 .cell__sep, .cells--t2 .cell:not(.cell--verdict) .long,
+.cells--t2 .cell__sep, .cells--t2v .cell--verdict .long { display: none; }
 .cells--t2 { gap: 5px; }
 .cells--t2 .cell { padding: 0 11px 0 8px; gap: 8px; }
+/* still too long after t2v (IL measures): t3 drops the pressure cell while it is plain "off", t4 the other cells'
+   labels; the verdict keeps its label and value (cells never truncate, §4) */
+.cells--t3 #pill-pressure.cell--off { display: none; }
+.cells--t4 .cell:not(.cell--verdict) .cell__k { display: none; }
 
 /* ---------- STOP ---------- */
 .stop-bay { order: 99; flex: none; width: calc(var(--stop-w) + 21px); height: calc(100% + 1px); align-self: flex-start; padding-left: 20px; border-left: 1px solid var(--line); background: var(--surface); position: relative; z-index: 2; }
@@ -497,7 +509,8 @@ h3 { font: 650 15.5px/1.25 var(--font-ui); margin: 0; }
 .step--done::after { background: var(--ok-line); }
 .step[aria-current="step"] { border-bottom-color: var(--accent); }
 .step__t { font: 650 14px/1.15 var(--font-ui); color: var(--ink); }
-.step__s { font: 500 12px/1.15 var(--font-ui); color: var(--ink-3); white-space: nowrap; }
+/* its line box holds the descenders: overflow (the ellipsis of a long board name) clips at the line box ("reqistered" at 1.15) */
+.step__s { font: 500 12px/1.35 var(--font-ui); color: var(--ink-3); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .step--need .step__s { color: var(--need); font-weight: 650; }
 .step--live .step__s { color: var(--live); font-weight: 650; }
 .step--block .step__s { color: var(--block); font-weight: 650; }
@@ -722,6 +735,8 @@ label.tick.on, label.tick:has(input:checked) { border-color: var(--accent); back
      the strip (the page bands while the main column is in view: they live in it) */
   .stop-band { position: sticky; top: var(--strip-h); }
   .msg-area { top: calc(var(--strip-h) + var(--stop-band-h, 0px)); }
+  /* a deep link's card scrolls to just under them, not behind the strip (#setup/places at 1024 px hid its title) */
+  html { scroll-padding-top: calc(var(--strip-h) + var(--stop-band-h, 0px) + 12px); }
   .nav { grid-row: 3 / 5; }
   .main { overflow: visible; }
   .panel { grid-row: 4; grid-column: 2; border-left: 0; border-top: 1px solid var(--line); }

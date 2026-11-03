@@ -10,4 +10,11 @@ public interface DispenseListener {
 
     default void onFinished(RunResult run) {
     }
+
+    /**
+     * Structured live progress (Register board, the probes, a run's home and Z check): a small copy,
+     * sent at every phase, fiducial capture and probe Z step.
+     */
+    default void onDetail(RunResult run, java.util.Map<String, Object> detail) {
+    }
 }

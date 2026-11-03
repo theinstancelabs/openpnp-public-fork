@@ -9,11 +9,19 @@ import org.openpnp.instancelabs.dispense.Calibration;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispensePlan;
 import org.openpnp.instancelabs.dispense.DispenseProfile;
+import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.BoardRegistration;
 import org.openpnp.instancelabs.dispense.DotLadderRow;
+import org.openpnp.instancelabs.dispense.HomeReport;
+import org.openpnp.instancelabs.dispense.HomeTracker;
 import org.openpnp.instancelabs.dispense.InterlockReport;
 import org.openpnp.instancelabs.dispense.PadCleanReport;
 import org.openpnp.instancelabs.dispense.PadType;
+import org.openpnp.instancelabs.dispense.PlaneReport;
+import org.openpnp.instancelabs.dispense.RegistrationResult;
 import org.openpnp.instancelabs.dispense.RunResult;
+import org.openpnp.instancelabs.dispense.SurfaceProbeResult;
+import org.openpnp.instancelabs.dispense.VacuumProber;
 
 /** JSON shapes of engine objects (stable names for the web UI; engine enums as their db names). */
 final class Views {
@@ -139,6 +147,7 @@ final class Views {
         o.put("setAtMs", m.setAtMs);
         o.put("note", m.note);
         o.put("boundToBoard", m.boardFingerprint != null);
+        o.put("simulated", Boolean.TRUE.equals(m.simulated));
         try {
             org.openpnp.instancelabs.dispense.SurfacePlane pl = org.openpnp.instancelabs.dispense.SurfacePlane
                     .fit(m.points);
@@ -185,6 +194,9 @@ final class Views {
         m.put("purgeDots", r.purgeDots);
         m.put("bCountAtStart", r.bCountAtStart);
         m.put("workStartAngleDeg", r.workStartAngleDeg);
+        m.put("nextPlanId", r.nextPlanId);
+        m.put("homedFirst", r.homedFirst);
+        m.put("zCheck", r.zCheck);
         if (withLines) {
             List<Map<String, Object>> dots = new ArrayList<>();
             for (RunResult.DotTiming t : r.dotTimings) {
@@ -203,6 +215,11 @@ final class Views {
     }
 
     static Map<String, Object> plan(PlanStore.Entry e, InterlockReport preflight) {
+        return plan(e, preflight, null);
+    }
+
+    /** As above; {@code newSeatAtMs} is the engine's new-seat flag (the registration's beforeNextBoard). */
+    static Map<String, Object> plan(PlanStore.Entry e, InterlockReport preflight, Long newSeatAtMs) {
         DispensePlan p = e.plan;
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("planId", p.planId);
@@ -287,7 +304,135 @@ final class Views {
         m.put("interlocks", interlocks(preflight));
         m.put("cleanCheck", cleanCheck(e.cleanCheck()));
         m.put("cleanCheckRunning", e.cleanCheckRunning());
+        m.put("registration", registrationSummary(e.registrationRecord, newSeatAtMs));
+        m.put("registrationTargets", e.registrationTargets);
+        m.put("registrationRun", registration(e.registration()));
+        m.put("registrationRunning", e.registrationRunning());
+        BoardPlanView.addTo(m, e);
+        PadProfileViews.addTo(m, e, DispenseService.get());
         return m;
+    }
+
+    /** The registration a plan was made with (§7.1), or null. */
+    static Map<String, Object> registrationSummary(BoardRegistration r, Long newSeatAtMs) {
+        if (r == null) {
+            return null;
+        }
+        List<Map<String, Object>> fids = new ArrayList<>();
+        for (BoardRegistration.Fid f : r.fiducials) {
+            fids.add(map("name", f.name, "x", f.x, "y", f.y));
+        }
+        return map("id", r.id, "atMs", r.atMs, "method", r.method, "fiducials", fids, "rotationDeg", r.rotationDeg,
+                "scaleX", r.scaleX, "scaleY", r.scaleY, "shearDeg", r.shearDeg, "simulated", r.simulated,
+                "lastCheckedAtMs", r.lastCheckedAtMs, "lastCheckMovedMm", r.lastCheckMovedMm, "beforeNextBoard",
+                newSeatAtMs != null && r.atMs < newSeatAtMs);
+    }
+
+    /** Whether a task homes first, and why (machine.home, the 202 bodies). */
+    static Map<String, Object> home(HomeTracker.Plan p) {
+        if (p == null) {
+            return null;
+        }
+        return map("needed", p.needed, "whyCode", p.whyCode, "why", p.why, "sinceMs", p.sinceMs, "policy", p.policy,
+                "homedAtMs", p.homedAtMs, "estimateS", p.estimateS);
+    }
+
+    static Map<String, Object> homeReport(HomeReport h) {
+        if (h == null) {
+            return null;
+        }
+        return map("needed", h.needed, "whyCode", h.whyCode, "why", h.why, "done", h.done, "seconds", h.seconds,
+                "n1RaisedFromZ", h.n1RaisedFromZ);
+    }
+
+    static Map<String, Object> window(VacuumProber.Window w) {
+        if (w == null) {
+            return null;
+        }
+        return map("nominalZ", w.nominalZ, "refZ", w.refZ, "startZ", w.startZ, "floorZ", w.floorZ);
+    }
+
+    static Map<String, Object> plane(PlaneReport p) {
+        if (p == null) {
+            return null;
+        }
+        return map("a", p.a, "b", p.b, "c", p.c, "maxResidualMm", p.maxResidualMm, "slopeMmPerMm", p.slopeMmPerMm,
+                "minZ", p.minZ, "maxZ", p.maxZ, "coversSpots", p.coversSpots, "spots", p.spots);
+    }
+
+    /** A probed point as the result card and the board view show it. */
+    static Map<String, Object> probePoint(VacuumProber.Point p) {
+        Map<String, Object> m = map("n", p.n, "board", p.bx == null ? null : map("x", p.bx, "y", p.by), "x", p.x, "y",
+                p.y, "z", p.z, "state", p.state, "alternate", p.alternate, "baseline", p.baseline, "drop", p.drop,
+                "fine", p.fine, "lastOpenZ", p.lastOpenZ, "retried", p.retried, "notes", new ArrayList<>(p.notes));
+        m.put("look", p.look == null ? null : map("bare", p.look.bare, "foreignShare", p.look.foreignShare,
+                "ringSpread", p.look.ringSpread, "reason", p.look.reason));
+        m.put("failure", p.failure);
+        return m;
+    }
+
+    static List<Map<String, Object>> probePoints(List<VacuumProber.Point> l) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (l != null) {
+            for (VacuumProber.Point p : l) {
+                out.add(probePoint(p));
+            }
+        }
+        return out;
+    }
+
+    /** The registration view (§7.2) of a finished Register board, or null. */
+    static Map<String, Object> registration(RegistrationResult r) {
+        if (r == null) {
+            return null;
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ok", r.ok);
+        m.put("status", r.run == null ? null : String.valueOf(r.run.status));
+        m.put("message", r.message);
+        m.put("runId", r.run == null ? null : r.run.runId);
+        m.put("atMs", r.run == null ? null : r.run.endedAtMs);
+        m.put("simulated", r.simulated);
+        m.put("stoppedStage", r.stoppedStage);
+        m.put("home", homeReport(r.home));
+        List<Map<String, Object>> fids = new ArrayList<>();
+        for (RegistrationResult.FidResult f : r.fiducials) {
+            fids.add(map("name", f.name, "board", map("x", f.bx, "y", f.by), "expected", map("x", f.expectedX, "y",
+                    f.expectedY), "found", f.x == null ? null : map("x", f.x, "y", f.y), "state", f.state, "iterations",
+                    f.iterations, "frames", f.frames, "offsetPx", f.offsetPx, "offsetFromExpectedMm",
+                    f.offsetFromExpectedMm, "movedMm", f.movedMm, "searchRadiusMm", f.searchRadiusMm));
+        }
+        m.put("fiducials", fids);
+        m.put("fit", r.fit);
+        m.put("seat", r.seat);
+        m.put("movedMm", r.movedMm);
+        m.put("previousAtMs", r.previousAtMs);
+        m.put("registrationId", r.registrationId);
+        m.put("registrationStored", r.registrationStored);
+        m.put("sameSeat", r.sameSeat);
+        Map<String, Object> p = null;
+        if (r.probe != null) {
+            p = map("mode", r.probe.mode, "needed", r.probe.needed, "why", r.probe.why, "skipped", r.probe.skipped,
+                    "window", window(r.probe.window), "points", probePoints(r.probe.points), "plane",
+                    plane(r.probe.plane), "saved", r.probe.saved, "surfaceSetAtMs", r.probe.surfaceSetAtMs);
+        }
+        m.put("probe", p);
+        m.put("newPlanId", r.newPlanId);
+        m.put("probeOnly", r.probeOnly);
+        m.put("warnings", r.run == null ? new ArrayList<>() : new ArrayList<>(r.run.warnings));
+        return m;
+    }
+
+    /** A finished surface probe (§7.4). */
+    static Map<String, Object> surfaceProbe(SurfaceProbeResult r) {
+        if (r == null) {
+            return null;
+        }
+        return map("ok", r.ok, "status", r.run == null ? null : String.valueOf(r.run.status), "message", r.message,
+                "runId", r.run == null ? null : r.run.runId, "stoppedStage", r.stoppedStage, "home", homeReport(r.home),
+                "surfaceName", r.surfaceName, "window", window(r.window), "points", probePoints(r.points), "plane",
+                plane(r.plane), "saved", r.saved, "warnings", r.run == null ? new ArrayList<>()
+                        : new ArrayList<>(r.run.warnings));
     }
 
     static Map<String, Object> padType(PadType t) {
@@ -308,6 +453,7 @@ final class Views {
         m.put("notes", t.notes);
         m.put("createdAtMs", t.createdAtMs);
         m.put("operator", t.operator);
+        PadProfileViews.padTypeFields(m, t);
         return m;
     }
 

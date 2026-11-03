@@ -1,0 +1,73 @@
+{
+ "generator": "tools/fid.py (sha256 c941a34775cf1eb1cc6a110fc2118f949f9c4d20eac6e0246ac08e42f6a3bd7f) run once offline in ~/instancelabs/venv (OpenCV 5.0.0) on these raw frames; px, py, d (2r, minimum enclosing circle), circ and score are fid.py's best tuple at full precision",
+ "mmPerPxX": 0.01074,
+ "mmPerPxY": 0.01106,
+ "frames": [
+  {
+   "file": "board2_FID1_0.jpg",
+   "width": 1920,
+   "height": 1080,
+   "px": 920.098198,
+   "py": 962.049099,
+   "d": 85.337952,
+   "circ": 0.89938,
+   "score": 157.601887,
+   "printed": "920.1 962.0 d=85 circ=0.90 score=158"
+  },
+  {
+   "file": "reflow1_FID1_0.jpg",
+   "width": 1920,
+   "height": 1080,
+   "px": 980.029366,
+   "py": 283.206868,
+   "d": 93.477562,
+   "circ": 0.892471,
+   "score": 128.905252,
+   "printed": "980.0 283.2 d=93 circ=0.89 score=129"
+  },
+  {
+   "file": "reflow1_FID3_0.jpg",
+   "width": 1920,
+   "height": 1080,
+   "px": 674.066651,
+   "py": 267.75042,
+   "d": 93.284645,
+   "circ": 0.881008,
+   "score": 125.521152,
+   "printed": "674.1 267.8 d=93 circ=0.88 score=126"
+  },
+  {
+   "file": "board3_FID2_1.jpg",
+   "width": 1920,
+   "height": 1080,
+   "px": 958.248602,
+   "py": 539.219876,
+   "d": 93.862579,
+   "circ": 0.891923,
+   "score": 172.614883,
+   "printed": "958.2 539.2 d=94 circ=0.89 score=173"
+  },
+  {
+   "file": "chk_FID3_0.jpg",
+   "width": 1920,
+   "height": 1080,
+   "px": 1524.201882,
+   "py": 516.910812,
+   "d": 88.690758,
+   "circ": 0.889479,
+   "score": 162.684101,
+   "printed": "1524.2 516.9 d=89 circ=0.89 score=163"
+  },
+  {
+   "file": "w5_FID1_1.jpg",
+   "width": 1920,
+   "height": 1080,
+   "px": 961.200859,
+   "py": 543.919641,
+   "d": 93.412369,
+   "circ": 0.888716,
+   "score": 154.230319,
+   "printed": "961.2 543.9 d=93 circ=0.89 score=154"
+  }
+ ]
+}

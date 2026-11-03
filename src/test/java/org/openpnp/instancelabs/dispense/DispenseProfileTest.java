@@ -60,20 +60,25 @@ public class DispenseProfileTest {
         assertEquals(p.netDeg(C), p.forwardDeg(C), 0);
     }
 
-    /** A dot turns a whole number of steps that divides a revolution (or 1-2 revolutions): the angle repeats. */
+    /**
+     * A dot turns a quarter, half or whole revolution (R1): the angle repeats. Review 1: two turns (3200 steps)
+     * passed here while the stream validator caps a purge dot, which turns the profile's dose, at one revolution
+     * and the 20° phase turn, so every board run of such a profile was refused only after its home and Z check.
+     */
     @Test
     public void netStepsPerDotMustRepeatTheAngle() {
-        for (int ok : new int[] {1600, 800, 400, 200, 3200}) {
+        for (int ok : new int[] {1600, 800, 400}) {
             DispenseProfile p = new DispenseProfile();
             p.netStepsPerDot = ok;
             assertTrue(p.validate(C).isEmpty(), ok + ": " + p.validate(C));
         }
-        for (int bad : new int[] {600, 0, -800, 4800, 1000, 2400}) {
+        for (int bad : new int[] {3200, 200, 100, 600, 0, -800, 4800, 1000, 2400}) {
             DispenseProfile p = new DispenseProfile();
             p.netStepsPerDot = bad;
             List<String> v = p.validate(C);
-            assertFalse(v.isEmpty(), "" + bad);
-            assertTrue(v.get(0).contains("netStepsPerDot"), v.toString());
+            assertEquals(Arrays.asList("profile netStepsPerDot must be 400, 800 or 1600 steps (a quarter, half or "
+                    + "whole turn of the 1600 steps of a revolution): the start angle repeats and a purge dot turns "
+                    + "at most one revolution"), v, "" + bad);
         }
     }
 
@@ -126,6 +131,80 @@ public class DispenseProfileTest {
         DispenseConfig neg = new DispenseConfig();
         neg.bExtrudeSign = -1;
         assertEquals(1600 - 1324, p.phaseSteps(neg, 0, 0));
+    }
+
+    /**
+     * The phase dot of a block switch (profile calibration design §1.2 R3): after it and F flush
+     * dots of the new dose, the screw rests at the start angle, for every dose.
+     */
+    @Test
+    public void phaseStepsForAnyDose() {
+        DispenseProfile p = new DispenseProfile();
+        for (int sign : new int[] {1, -1}) {
+            DispenseConfig c = new DispenseConfig();
+            c.bExtrudeSign = sign;
+            for (int s : new int[] {400, 800, 1600}) {
+                for (long rest = -3300; rest <= 3300; rest += 13) {
+                    long n = p.phaseSteps(c, rest, 4, s);
+                    assertTrue(n >= 89 && n < 1600 + 89, "sign " + sign + " s " + s + " rest " + rest + ": " + n);
+                    assertEquals(1324, Math.floorMod(rest + sign * (n + 4L * s), 1600), "s " + s + " rest " + rest);
+                }
+            }
+        }
+        // the three-argument form is the profile's own dose
+        for (long rest = 0; rest < 1600; rest += 37) {
+            assertEquals(p.phaseSteps(C, rest, 7), p.phaseSteps(C, rest, 7, 800));
+        }
+        // whole turns need no phase dot, but the arithmetic holds: a quarter-turn block after a half-turn one
+        assertEquals(524, p.phaseSteps(C, 0, 7, 800));
+        assertEquals(Math.floorMod(1324 - 4 * 400, 1600), p.phaseSteps(C, 0, 4, 400));
+    }
+
+    /**
+     * The dose recipe (design §1.7, §5.4): what sets the paste a turn lays, without the net turn
+     * (a record's own), the start angle (its own rule), the purge count or the name.
+     */
+    @Test
+    public void doseFingerprintIsTheRecipeWithoutTheTurn() {
+        DispenseProfile base = new DispenseProfile();
+        assertEquals("psi=18.000 suck=10.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000", base.doseFingerprint());
+        List<Consumer<DispenseProfile>> recipe = Arrays.asList(p -> p.dwellMs = 300, p -> p.pressurePsi = 17,
+                p -> p.gapMm = 0.12, p -> p.suckBackDeg = 12, p -> p.screwRpm = 200, p -> p.screwAccelDegS2 = 15000);
+        for (Consumer<DispenseProfile> ch : recipe) {
+            DispenseProfile p = new DispenseProfile();
+            ch.accept(p);
+            assertNotEquals(base.doseFingerprint(), p.doseFingerprint(), p.doseFingerprint());
+        }
+        List<Consumer<DispenseProfile>> notRecipe = Arrays.asList(p -> p.netStepsPerDot = 1600,
+                p -> p.startAngleDeg = 118, p -> p.purgeDots = 6, p -> p.name = "x", p -> p.startAngleSetAtMs = 5L,
+                p -> p.sustainedFeedMgS = 3.0, p -> p.notes = "y");
+        for (Consumer<DispenseProfile> ch : notRecipe) {
+            DispenseProfile p = new DispenseProfile();
+            ch.accept(p);
+            assertEquals(base.doseFingerprint(), p.doseFingerprint());
+        }
+        DispenseProfile p = new DispenseProfile();
+        p.dwellMs = 300;
+        p.pressurePsi = 17.5;
+        assertEquals("psi 18 -> 17.5, dwell 250 -> 300",
+                DispenseProfile.fingerprintDiff(base.doseFingerprint(), p.doseFingerprint()));
+        assertEquals("", DispenseProfile.fingerprintDiff(base.doseFingerprint(), base.doseFingerprint()));
+        assertEquals("psi none -> 18, suck none -> 10, rpm none -> 180, acc none -> 20000, dwell none -> 250, "
+                + "gap none -> 0.1", DispenseProfile.fingerprintDiff(null, base.doseFingerprint()));
+    }
+
+    /** R7: the highest paste demand a block may ask (2.56 mg/s sustained at 18 psi on the bench). */
+    @Test
+    public void sustainedFeed() {
+        DispenseProfile p = new DispenseProfile();
+        assertEquals(2.6, p.sustainedFeedMgS, 0);
+        p.sustainedFeedMgS = 3.1;
+        assertEquals(3.1, p.copy().sustainedFeedMgS, 0);
+        assertEquals(new DispenseProfile().fingerprint(), p.fingerprint(), "a limit, not part of a dot");
+        assertRefused(x -> x.sustainedFeedMgS = 0, "sustainedFeedMgS");
+        assertRefused(x -> x.sustainedFeedMgS = 11, "sustainedFeedMgS");
+        DispenseConfig old = DispenseConfig.fromJson("{\"profile\":{\"dwellMs\":250}}");
+        assertEquals(2.6, old.profile.sustainedFeedMgS, 0, "older files get the default");
     }
 
     /** Screw angle = Marlin's M114 step count of B ("Count ... B:<n>"), never the B position. */

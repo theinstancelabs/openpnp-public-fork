@@ -3,6 +3,7 @@ package org.openpnp.instancelabs.dispense;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.openpnp.instancelabs.sim.SimGuard;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.machine.reference.driver.GcodeDriver.CommandType;
 import org.pmw.tinylog.Logger;
@@ -11,7 +12,8 @@ import org.pmw.tinylog.Logger;
  * {@link GcodeChannel} over an OpenPnP GcodeDriver: {@code sendCommand()} applies the driver's own
  * flow control (GcodeDriver: wait for the confirmation of each line; GcodeAsyncDriver: its queue),
  * its error regex and its logging. Must be used from the machine thread, except
- * {@link #sendCritical} on the Stop path. Every line passes {@link ControllerCommands#check}.
+ * {@link #sendCritical} on the Stop path. Every line passes {@link ControllerCommands#check}, except the
+ * N1 probe's lines ({@link #sendProbe}, {@link #collectProbe}), which pass {@link ControllerCommands#checkProbe}.
  */
 public class DriverGcodeChannel implements GcodeChannel {
     private final GcodeDriver driver;
@@ -22,16 +24,7 @@ public class DriverGcodeChannel implements GcodeChannel {
 
     @Override
     public boolean isLoopbackSimulator() {
-        if (driver.getCommunicationsType() != org.openpnp.machine.reference.driver.AbstractReferenceDriver
-                .CommunicationsType.tcp) {
-            return false;
-        }
-        try {
-            return java.net.InetAddress.getByName(driver.getIpAddress()).isLoopbackAddress();
-        }
-        catch (Exception e) {
-            return false;
-        }
+        return SimGuard.isLoopbackTcp(driver);
     }
 
     /** Prefix of GcodeDriver.bailOnError()'s exception for a pending controller error line. */
@@ -74,9 +67,26 @@ public class DriverGcodeChannel implements GcodeChannel {
         }
     }
 
+    /** The N1 probe's lines: {@link ControllerCommands#checkProbe}, otherwise as {@link #send}. */
+    @Override
+    public void sendProbe(String line, long timeoutMs) throws Exception {
+        ControllerCommands.requireProbeAllowed(line);
+        driver.sendCommand(line, timeoutMs);
+    }
+
+    @Override
+    public List<String> collectProbe(String line, long timeoutMs) throws Exception {
+        ControllerCommands.requireProbeAllowed(line);
+        return collect(line, timeoutMs);
+    }
+
     @Override
     public List<String> sendAndCollect(String line, long timeoutMs) throws Exception {
         ControllerCommands.requireAllowed(line);
+        return collect(line, timeoutMs);
+    }
+
+    private List<String> collect(String line, long timeoutMs) throws Exception {
         driver.receiveResponses(); // drop stale lines; throws (and clears) a pending controller error
         driver.sendCommand(line, timeoutMs);
         String confirm = driver.getCommand(null, CommandType.COMMAND_CONFIRM_REGEX);

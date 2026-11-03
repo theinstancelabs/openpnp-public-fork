@@ -1,9 +1,13 @@
-/* calibrate.js: the Calibrate workspace (docs/instancelabs/UI_DESIGN.md §8.4). Records only: boards use the dispense
-   profile. Cards (route #calibrate/<card>): touch-off (#to-*, result + offset change in place, "Use for the needle
-   offset", history), start angle (#pf-angle, #btn-pf-angle-set, guided dot pairs), scale shots (#shots-*, record form
-   #ss-*), dot batch (#sd-*), dot ladder (#dl-*), records (#cal-current, #cal-table, #ladder-table, #cal-result).
+/* calibrate.js: the Calibrate workspace (docs/instancelabs/UI_DESIGN.md §8.4). Boards use the profile's dot unless a
+   pad type has its own turn (set by the pad calibration, PROFILE_CALIBRATION_DESIGN.md §7, §8, §13.6); the ladder and
+   scale cards are records. Cards (route #calibrate/<card>): touch-off (#to-*, result + offset change in place, "Use for
+   the needle offset", history), pad calibration (#cal-padcal: area #pca-*, blank wiped, new paste, coupons and their
+   pending readings), start angle (#pf-angle, #btn-pf-angle-set, guided dot pairs), weigh dots (#cal-weigh, #wd-*: the
+   by-hand weighing of §8), scale shots (#shots-*, record form #ss-*; under "Older method"), dot batch (#sd-*), dot
+   ladder (#dl-*), records (#cal-current, #cal-table, #ladder-table, #cal-result).
    Each moving card lists its prerequisites as readiness rows with fix-it links and shows progress / result in place;
-   moving actions are two-press. #setup-guide is filled by Set up / Validate from a pad type (IL.pcr.openGuide).
+   moving actions are two-press. #setup-guide is filled by Set up / Validate from a pad type, or by "I'll do it by hand"
+   from a suggestion (IL.pcr.openGuide(t, {suggestion}): #btn-guide-ladder lays the phase-locked ladder).
    Context panel `cal`: the running procedure, the last result, prerequisites and the head position.
    Shared helpers: IL.pcr (profile.js). Styles: profile.css. */
 'use strict';
@@ -11,9 +15,10 @@
   const { el, $, S } = IL;
   const pcr = IL.pcr;
   const { isNum } = IL;
-  const CAL_TASKS = new Set(['needle touch-off', 'dot ladder', 'scale shots']);
+  const CAL_TASKS = new Set(['needle touch-off', 'dot ladder', 'scale shots', 'pad calibration']);
   const C = { data: null, ver: 0, loading: false, again: false, error: null, ladderOf: null, ladder: null, ladderErr: null,
-    guide: null, toReq: null, applyTouched: false, prefill: {}, angleShown: undefined, lastResult: null, lastEndedId: null };
+    guide: null, toReq: null, applyTouched: false, prefill: {}, angleShown: undefined, lastResult: null, lastEndedId: null,
+    area: null, areaErr: null, areaAt: 0, pending: [] };
 
   // ================================================================================== data
   async function loadCalibrations() {
@@ -28,6 +33,17 @@
     return C.data;
   }
   pcr.calibrations = () => C.data;
+  /** The calibration area (GET /api/calibration-area) and the coupons whose readings are still to be typed. */
+  async function loadArea() {
+    C.areaAt = Date.now();
+    try {
+      const [a, p] = await Promise.all([IL.api('GET', '/api/calibration-area'), IL.api('GET', '/api/coupons/pending')]);
+      C.area = a;
+      C.pending = (p || []).filter((x) => !x.error);
+      C.areaErr = null;
+    } catch (e) { C.areaErr = IL.errorText(e); }
+    IL.render();
+  }
   pcr.loadCalibrations = loadCalibrations;
   async function loadLadder(id) {
     C.ladderOf = id;
@@ -49,6 +65,17 @@
       delta: isNum(row.previous_offset_mm) ? row.z_offset_mm - row.previous_offset_mm : null,
       method: ladder ? (/not applied/.test(row.method) ? 'Touch-off (shown only)' : 'Touch-off (used)') : /needle-frame/.test(row.method || '') ? 'Needle frame recorded' : /manual/.test(row.method || '') ? 'Offset entered or confirmed' : row.method,
       note: det ? null : row.details };
+  };
+  /**
+   * Dot i of a touch-off analysis: {text, note}. Paste the camera could not measure as one dot ('unmeasured': joined to
+   * a neighbour, strings, a smear) reads "not measured" with the engine's note; "no dot" only for 'none' (and in rows
+   * from before the dot states, without a diameter).
+   */
+  pcr.touchOffDot = function (a, i) {
+    const st = ((a && a.dotStates) || [])[i];
+    const d = ((a && a.diametersMm) || [])[i];
+    if (st === 'unmeasured') return { text: 'not measured', note: ((a.dotNotes || [])[i]) || null };
+    return { text: isNum(d) ? IL.fmt(d, 3) : !st || st === 'none' ? 'no dot' : '—', note: null };
   };
   const taskOf = (s) => (s && s.run && CAL_TASKS.has(s.run.label) ? s.run : null);
   /** The engine ends a touch-off OK even when its analysis found no contact (then nothing is recorded): say so. */
@@ -91,6 +118,12 @@
     if (need.engine && (!d.running || !d.available)) rows.push({ kind: 'block', title: 'Dispenser available', value: 'unavailable', title2: d.unavailableReason || '' });
     if (need.frame) rows.push(n.anchored ? { kind: 'ok', title: 'Needle Z frame recorded', value: IL.fmtSigned(n.anchorOffsetMm, 3) + ' mm' }
       : { kind: 'block', title: 'Needle Z frame recorded', value: 'not set', fix: { href: '#setup/needle', label: 'Needle Z frame' } });
+    // after a failed Z check the blank's dots wait for the needle frame, the blank and the places (the prime at the
+    // waste) to be measured again (the remedy's order, IL.zMoved): the touch-off comes after them
+    const zm = need.zmoved ? IL.zMoved(s) : null;
+    if (zm && (zm.step === 'frame' || zm.step === 'blank' || zm.step === 'places')) {
+      rows.push({ kind: 'block', title: 'Z moved at the home: measured again', value: zm.step === 'frame' ? 'needle frame next' : zm.step === 'blank' ? 'the blank next' : 'the places next', fix: zm.fixes[0] });
+    }
     if (need.touched) rows.push(n.touchedOff ? { kind: 'ok', title: 'Needle touched off', value: n.setAtMs ? IL.fmtTime(n.setAtMs - S.skewMs) : 'yes' }
       : { kind: 'need', title: 'Needle touched off', value: 'not yet', fix: { href: '#calibrate/touch-off', label: 'Touch-off' } });
     place = place || d.blankLocationName;
@@ -149,7 +182,9 @@
   // ================================================================================== cards
   function touchOffCard() {
     const run = runBtn('btn-to-run', 'Run touch-off', 'i-needle');
-    IL.press2(run, 'run touch-off', startTouchOff, { ok: (r) => 'Touch-off started' + (r && r.apply ? ': the result will be used for the needle offset.' : ': the result is shown only.') });
+    // null: the pitch was refused (its reason is at the field, the toast said so)
+    IL.press2(run, 'run touch-off', startTouchOff, { ok: (r) => (r ? 'Touch-off started' + (isNum(r.pitchMm) ? ', dots ' + pitchText(r.pitchMm) + ' apart' : '')
+      + (r.apply ? ': the result will be used for the needle offset.' : ': the result is shown only.') : '') });
     const apply = el('input', { type: 'checkbox', id: 'to-apply' });
     apply.addEventListener('change', () => { C.applyTouched = true; });
     return card('cal-touch-off', [abbr('Needle touch-off', 'Finding where the needle tip touches: dots at falling gaps; where the tip reaches the surface, the dots squash or stop forming')],
@@ -163,6 +198,8 @@
           el('div', { class: 'fgrid' },
             pcr.field('to-rot', 'Screw turn per dot', '°', pcr.numInput('to-rot', null, '0.01', { placeholder: 'one profile dot' }),
               'Empty: one profile dot (other partial turns vary with the screw angle and hide the squash).'),
+            pcr.field('to-pitch', 'Pitch', 'mm', pcr.numInput('to-pitch', null, '0.05', { min: '0', placeholder: '1.6' }),
+              'at least the dot + 0.4 mm'),
             pcr.field('to-place', 'Place', null, placeSel('to-place'))),
           el('div', { class: 'cal-gaps', id: 'to-plan' }),
           el('label', { class: 'check' }, apply, 'Use the result for the needle offset')),
@@ -194,12 +231,79 @@
         reasonEl('cal-angle-reason')],
       null);
   }
+  /** Calibrate › Pad calibration (§13.6): where the test dots go, how much is left, the paste, the coupons. */
+  function padcalCard() {
+    const save = el('button', { type: 'button', class: 'btn', id: 'btn-pca-save' }, 'Save the area');
+    save.addEventListener('click', () => IL.act(save, () => saveArea(false), { ok: (a) => 'Calibration area ' + IL.fmt(a.widthMm, 1) + ' × ' + IL.fmt(a.heightMm, 1) + ' mm saved.' }));
+    const dflt = el('button', { type: 'button', class: 'btn btn--quiet', id: 'btn-pca-default' }, 'Use the default');
+    dflt.addEventListener('click', () => IL.act(dflt, () => saveArea(true), { ok: 'The calibration area is the default again: 40 × 20 mm at the blank place.' }));
+    const wiped = el('button', { type: 'button', class: 'btn', id: 'btn-pca-wiped' }, IL.icon('i-wipe'), 'Blank wiped');
+    IL.press2(wiped, 'blank wiped', async () => { const a = await IL.api('POST', '/api/calibration-area/reset', {}); C.area = a; return a; },
+      { ok: (a) => 'The calibration area is free again: ' + IL.fmt(a.leftMm, 1) + ' mm left.' });
+    const paste = el('button', { type: 'button', class: 'btn', id: 'btn-pca-paste' }, IL.icon('i-paste'), 'New paste loaded');
+    IL.press2(paste, 'new paste loaded', async () => { const r = await IL.api('POST', '/api/paste', {}); IL.loadConfig(); return r; },
+      { ok: 'New paste noted: weighings and camera results from before stop counting.' });
+    return card('cal-padcal', 'Pad calibration', 'where the test dots go on the blank, the paste, the weigh coupons',
+      [el('div', { class: 'cal-split' },
+        el('div', { class: 'cal-form' },
+          el('figure', { class: 'pca-fig' }, IL.svgEl('svg', { id: 'pca-map', class: 'pca-map', role: 'img', 'aria-label': 'Calibration area, purge row and coupons, machine mm' }),
+            el('figcaption', { class: 'pca-key' }, el('span', { class: 'pca-key__a' }, 'calibration area'), el('span', { class: 'pca-key__u' }, 'used'),
+              el('span', { class: 'pca-key__p' }, 'purge row'), el('span', { class: 'pca-key__c' }, 'coupons'), el('span', { class: 'pca-far', id: 'pca-far' }))),
+          el('div', { class: 'fgrid', 'data-enter-submits': 'btn-pca-save' },
+            pcr.field('pca-x0', 'X', 'mm', pcr.numInput('pca-x0', null, '0.5')),
+            pcr.field('pca-y0', 'Y', 'mm', pcr.numInput('pca-y0', null, '0.5')),
+            pcr.field('pca-w', 'Width', 'mm', pcr.numInput('pca-w', null, '0.5', { min: '1' })),
+            pcr.field('pca-h', 'Height', 'mm', pcr.numInput('pca-h', null, '0.5', { min: '1' }))),
+          el('div', { class: 'field__h', id: 'pca-hint', text: 'Lower-left corner and size. Default: 40 × 20 mm at the blank place, off the purge row.' }),
+          el('div', { class: 'btn-row' }, save, dflt), reasonEl('pca-reason')),
+        el('div', { class: 'cal-side' },
+          sub('Left on the blank'),
+          el('div', { class: 'pca-left', id: 'pca-left' }),
+          el('div', { class: 'btn-row' }, wiped), el('div', { class: 'field__h', text: 'Wipe the area with a lint-free wipe and isopropyl alcohol first.' }), reasonEl('pca-wiped-reason'),
+          sub('Paste'),
+          el('div', { id: 'pca-paste-now', class: 'pca-line' }),
+          el('div', { class: 'btn-row' }, paste), el('div', { class: 'field__h', text: 'After a new syringe or lot: weighings and camera results from before stop counting.' }),
+          sub('Weigh coupons'),
+          el('div', { id: 'pca-coupons', class: 'pca-line' }),
+          el('div', { id: 'pca-pending' })))],
+      null, 'span2');
+  }
+  /** Calibrate › Weigh dots (§8 step 3): dots of one turn on a coupon, then the readings (the job's weigh step by hand). */
+  function weighCard() {
+    const run = runBtn('btn-wd-run', 'Lay the weigh dots', 'i-play');
+    IL.press2(run, 'lay the weigh dots', () => IL.padProfile.startManual(weighRequest()),
+      { ok: (r) => 'Weigh dots started (' + r.id + '): the readings are asked for in the panel when they are laid.' });
+    const steps = el('select', { class: 'input', id: 'wd-steps' },
+      el('option', { value: '400', text: 'quarter turn (400 steps)' }), el('option', { value: '800', text: 'half turn (800)' }), el('option', { value: '1600', text: 'one turn (1600)' }));
+    steps.value = '800';
+    return card('cal-weigh', 'Weigh dots', 'dots of one turn on a weigh coupon, then weigh it, wipe it and weigh it again',
+      [el('div', { class: 'fgrid' },
+        pcr.field('wd-type', 'Pad type', null, el('select', { class: 'input', id: 'wd-type' }, el('option', { value: '', text: 'Loading…' }))),
+        pcr.field('wd-steps', 'Turn per dot', null, steps),
+        pcr.field('wd-count', 'Dots per coupon', '30 to 200', pcr.numInput('wd-count', null, '1', { min: '30', max: '200' }), 'A whole number of screw turns in total: the angle ripple cancels.', 'span2')),
+      el('div', { class: 'cal-gaps', id: 'wd-plan' }),
+      sub('Before it runs'), el('div', { id: 'wd-pre' })],
+      [run, reasonEl('wd-reason')]);
+  }
+  function weighRequest() {
+    const n = IL.num('wd-count');
+    return { typeKeys: [$('wd-type').value], steps: ['weigh'], doseSteps: Number($('wd-steps').value), weighDots: Number.isInteger(n) ? n : undefined };
+  }
+  async function saveArea(reset) {
+    const body = reset ? { x0Mm: null, y0Mm: null, widthMm: null, heightMm: null }
+      : { x0Mm: IL.num('pca-x0'), y0Mm: IL.num('pca-y0'), widthMm: IL.num('pca-w'), heightMm: IL.num('pca-h') };
+    if (!reset && Object.values(body).some((v) => !Number.isFinite(v))) throw new Error('Type the corner and the size in mm (all four).');
+    const a = await IL.api('PUT', '/api/calibration-area', body);
+    C.area = a;
+    for (const id of ['pca-x0', 'pca-y0', 'pca-w', 'pca-h']) delete C.prefill[id];
+    return a;
+  }
   function ladderCard() {
     const run = runBtn('btn-dl-run', 'Run dot ladder', 'i-play');
     IL.press2(run, 'run dot ladder', startLadder, { ok: (r) => 'Dot ladder started: ' + IL.plural((r && r.dots) || 0, 'dot') + '. Results appear in the records below.' });
     const rots = pcr.textInput('dl-rots', '30, 45, 58, 75, 90');
     return card('cal-ladder', [abbr('Dot ladder', 'A grid of dots made with different screw turns, measured by the camera before and after')],
-      'camera · a history, not a dose',
+      'camera · records only (no phase lock)',
       [el('div', { class: 'fgrid' },
         pcr.field('dl-rots', 'Screw turns', '° · comma separated', rots, null, 'span2'),
         pcr.field('dl-rep', 'Repeats', '1 to 50', pcr.numInput('dl-rep', '5', '1', { min: '1', max: '50' })),
@@ -260,7 +364,7 @@
       [save, reasonEl('sd-reason')], 'span2');
   }
   function recordsCard() {
-    return card('cal-records', 'Records', 'history of the scale and ladder calibrations: boards use the dispense profile',
+    return card('cal-records', 'Records', 'history of the scale and ladder calibrations (records only)',
       [el('p', { class: 'cal-current', id: 'cal-current' }),
         el('p', { class: 'cal-result', id: 'cal-result', role: 'status' }),
         sub('Calibrations'),
@@ -278,12 +382,17 @@
   }
 
   // ================================================================================== actions
+  /** The dose and pitch a touch-off refusal of the pitch was for: it stands until one of them changes. */
+  const pitchKey = (pitch, rot) => JSON.stringify([pitch, rot, ((S.status && S.status.dispense && S.status.dispense.profile) || {}).netStepsPerDot]);
   function touchOffPlan() {
     const a = pcr.check('to-start', { required: true, max: 2, unit: 'mm' });
     const b = pcr.check('to-step', { required: true, min: 0, minExcl: true, max: 0.5, unit: 'mm' });
     const n = pcr.check('to-steps', { required: true, int: true, min: 2, max: 20 });
     const rot = pcr.check('to-rot', { min: 0, minExcl: true, max: 720, unit: '°' });
-    const errs = { 'to-start': a.err, 'to-step': b.err, 'to-steps': n.err, 'to-rot': rot.err };
+    const pitch = pcr.check('to-pitch', { min: 0, minExcl: true, max: 10, unit: 'mm' });
+    // the smallest pitch is the engine's (the dot of the dose + 0.4 mm): its refusal shows at the field (F14)
+    const refused = C.pitchErr && C.pitchErr.key === pitchKey(pitch.v, rot.v) ? C.pitchErr.text : null;
+    const errs = { 'to-start': a.err, 'to-step': b.err, 'to-steps': n.err, 'to-rot': rot.err, 'to-pitch': pitch.err || refused };
     let gaps = null, lowest = null;
     if (!a.err && !b.err && !n.err) {
       gaps = [];
@@ -291,14 +400,32 @@
       lowest = gaps[gaps.length - 1];
       if (lowest < -0.1 - 1e-9) errs['to-steps'] = 'The lowest gap would be ' + IL.fmt(lowest, 3) + ' mm: keep it at −0.100 mm or above.';
     }
-    return { errs, gaps, lowest, body: { startGapMm: a.v, stepMm: b.v, steps: n.v, rotationDeg: rot.v, locationName: $('to-place').value || undefined, apply: $('to-apply').checked } };
+    return { errs, gaps, lowest, body: { startGapMm: a.v, stepMm: b.v, steps: n.v, rotationDeg: rot.v, pitchMm: pitch.v, locationName: $('to-place').value || undefined, apply: $('to-apply').checked } };
   }
   async function startTouchOff() {
     const p = touchOffPlan();
     const e = Object.values(p.errs).find(Boolean);
     if (e) throw new Error(e);
     C.toReq = { gaps: p.gaps, at: Date.now() };
-    return IL.api('POST', '/api/calibrations/touch-off', p.body);
+    try {
+      return await IL.api('POST', '/api/calibrations/touch-off', p.body);
+    } catch (x) {
+      // a pitch with no room between these dots (400 before anything moves): the reason goes to the Pitch field
+      if (x.status !== 400 || !/^the touch-off pitch /.test(x.message)) throw x;
+      C.pitchErr = { key: pitchKey(p.body.pitchMm, p.body.rotationDeg), text: x.message };
+      IL.toast('Not accepted: ' + x.message, 'block');
+      return null;
+    }
+  }
+  /** "1.6 mm" as typed (1.56 stays 1.56). */
+  const pitchText = (v) => IL.fmt(v, Math.abs(v * 10 - Math.round(v * 10)) < 1e-9 ? 1 : 2) + ' mm';
+  /** The pitch the plan line names: the typed one, else the engine's 1.6 mm (more for a dot above half a turn). */
+  function pitchLine(s, pitch) {
+    if (isNum(pitch)) return pitchText(pitch) + ' apart';
+    const prof = (s.dispense && s.dispense.profile) || {};
+    const rot = IL.num('to-rot');
+    const steps = isNum(rot) && isNum(prof.stepsPerDeg) ? rot * prof.stepsPerDeg : prof.netStepsPerDot;
+    return isNum(steps) && isNum(prof.stepsPerRev) && steps > prof.stepsPerRev / 2 + 1e-9 ? 'the dot + 0.4 mm apart (at least 1.6 mm)' : '1.6 mm apart';
   }
   function ladderPlan() {
     const txt = String($('dl-rots').value || '');
@@ -431,9 +558,11 @@
     const p = touchOffPlan();
     showErrs(p.errs);
     IL.setText($('to-plan'), p.gaps ? IL.plural(p.gaps.length, 'dot') + (place ? ' on “' + place + '”' : '') + ' at gaps ' + p.gaps.map((g) => IL.fmt(g, 3)).join(', ') + ' mm'
-      + ' · one profile dot each' + (IL.num('to-rot') ? ' (here ' + IL.fmt(IL.num('to-rot'), 2) + '°)' : '') : 'Enter the gaps to see the dots.');
-    const blockers = renderPrereqs($('to-pre'), prereqs(s, { machine: true, engine: true, frame: true, place: true, surface: true, pressure: true }, place));
-    const own = Object.values(p.errs).find(Boolean) || (!place ? 'Choose the place.' : null);
+      + ' · one profile dot each' + (IL.num('to-rot') ? ' (here ' + IL.fmt(IL.num('to-rot'), 2) + '°)' : '') + ' · ' + pitchLine(s, p.body.pitchMm) : 'Enter the gaps to see the dots.');
+    const blockers = renderPrereqs($('to-pre'), prereqs(s, { machine: true, engine: true, frame: true, zmoved: true, place: true, surface: true, pressure: true }, place));
+    const first = Object.values(p.errs).find(Boolean);
+    // the engine's long pitch refusal stands at its field: the line under the button points there
+    const own = (first && C.pitchErr && first === C.pitchErr.text ? 'The pitch is too small for these dots: see the Pitch field.' : first) || (!place ? 'Choose the place.' : null);
     IL.gate($('btn-to-run'), runReason(s, blockers, own), $('to-reason'));
     renderLive($('to-live'), s, 'needle touch-off', (run) => {
       const g = C.toReq && C.toReq.gaps;
@@ -449,14 +578,16 @@
     const v = pcr.touchOffView(latest);
     const needle = (s.dispense && s.dispense.needle) || {};
     const inUse = v && isNum(needle.zOffsetMm) && Math.abs(needle.zOffsetMm - v.row.z_offset_mm) < 5e-4;
-    IL.keyed(host, JSON.stringify([v ? v.row.id : null, inUse, C.ver]), () => {
+    // after a run that recorded nothing (its reason is in the box above) the one below is an older run's
+    const older = noContact(s.run);
+    IL.keyed(host, JSON.stringify([v ? v.row.id : null, inUse, C.ver, older]), () => {
       if (!v) return [sub('Last touch-off'), el('p', { class: 'muted cal-none', text: C.data ? 'No touch-off with dots yet.' : C.error ? 'Could not load the records: ' + C.error : 'Loading the records…' })];
       const a = v.analysis || {};
-      const gaps = a.gapsMm || [], dia = a.diametersMm || [];
+      const gaps = a.gapsMm || [];
       const inBracket = (g) => isNum(a.bracketHighMm) && isNum(a.bracketLowMm) && g <= a.bracketHighMm + 1e-9 && g >= a.bracketLowMm - 1e-9;
       const use = el('button', { type: 'button', class: 'btn btn--sm', id: 'to-use' }, 'Use for the needle offset');
       use.addEventListener('click', () => IL.act(use, () => useTouchOff(v), { ok: 'Needle offset set to ' + IL.fmtSigned(v.row.z_offset_mm, 3) + ' mm from the touch-off: plan the board again.' }));
-      return [sub('Last touch-off · ' + IL.fmtDateTime(v.row.created_at - S.skewMs)),
+      return [sub((older ? 'Last recorded touch-off · ' : 'Last touch-off · ') + IL.fmtDateTime(v.row.created_at - S.skewMs)),
         el('div', { class: 'cal-to' },
           el('div', { class: 'cal-to__s', id: 'to-sum' },
             el('div', { class: 'cal-to__big' }, isNum(a.contactGapMm) ? 'Contact at a gap of ' + IL.fmtSigned(a.contactGapMm, 3) + ' mm' : 'No contact found'),
@@ -465,9 +596,13 @@
             v.applied || inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
               : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
           el('table', { class: 'tbl cal-to__t' }, el('thead', {}, el('tr', {}, el('th', { class: 'r' }, IL.unitText('Gap mm')), el('th', { class: 'r' }, IL.unitText('Dot Ø mm')), el('th', { text: '' }))),
-            el('tbody', {}, gaps.map((g, i) => el('tr', { class: inBracket(g) ? 'is-contact' : null },
-              el('td', { class: 'r', text: IL.fmtSigned(g, 3) }), el('td', { class: 'r', text: isNum(dia[i]) ? IL.fmt(dia[i], 3) : 'no dot' }),
-              el('td', { class: 'dim', text: isNum(a.contactGapMm) && Math.abs(g - a.contactGapMm) < 1e-9 ? 'contact' : inBracket(g) ? 'bracket' : '' })))))),
+            el('tbody', {}, gaps.map((g, i) => {
+              const dot = pcr.touchOffDot(a, i);
+              // the note keeps each number with its unit in its narrow column ("a smear (0.10 mm²)", not "(0.10" / "mm²)")
+              return el('tr', { class: inBracket(g) ? 'is-contact' : null, 'data-state': ((a.dotStates || [])[i]) || null },
+                el('td', { class: 'r', text: IL.fmtSigned(g, 3) }), el('td', { class: 'r', text: dot.text, title: dot.note }),
+                el('td', { class: 'dim', text: isNum(a.contactGapMm) && Math.abs(g - a.contactGapMm) < 1e-9 ? 'contact' : inBracket(g) ? 'bracket' : dot.note ? IL.nb(dot.note) : '' }));
+            })))),
         el('button', { type: 'button', class: 'btn btn--sm btn--quiet', onclick: () => IL.go('#records/touch-offs') }, 'Last 20 touch-offs', IL.icon('i-chev'))];
     });
     IL.gate($('to-use'), IL.lockReason(s, { pressureOff: false }));
@@ -512,7 +647,7 @@
     const ok = !Object.values(p.errs).some(Boolean);
     IL.setText($('dl-plan'), ok ? IL.plural(p.rots.length * p.body.repeats, 'dot') + ': ' + p.rots.length + ' turns × ' + p.body.repeats + ' repeats' + (place ? ' on “' + place + '”' : '') + ' at '
       + IL.fmt(p.body.pitchMm, 1) + ' mm, imaged before and after' + ($('dl-prime').checked ? '; a prime on the waste first' : '') + '.' : 'Fix the marked fields to see the dots.');
-    const blockers = renderPrereqs($('dl-pre'), prereqs(s, { machine: true, engine: true, frame: true, touched: true, place: true, surface: true, pressure: true }, place));
+    const blockers = renderPrereqs($('dl-pre'), prereqs(s, { machine: true, engine: true, frame: true, zmoved: true, touched: true, place: true, surface: true, pressure: true }, place));
     const n = d.needle || {};
     const own = Object.values(p.errs).find(Boolean) || (!place ? 'Choose the place.' : !n.touchedOff ? 'Touch off the needle first (the ladder needs the touched-off offset).' : null);
     IL.gate($('btn-dl-run'), runReason(s, blockers, own), $('dl-reason'));
@@ -598,10 +733,117 @@
         el('td', { class: 'r', text: IL.fmt(r.mgPerDotMean, 3) }), el('td', { class: 'r', text: IL.fmt(r.heightMm, 3) }), el('td', { text: r.method || '' })));
     });
   }
+  function renderPadcal(s) {
+    const a = C.area;
+    const d = s.dispense || {};
+    if (Date.now() - C.areaAt > 15000) loadArea();
+    const eff = a && a.effective;
+    const cfg = S.config || {};
+    const pc = cfg.padCalibration || {};
+    for (const [id, k] of [['pca-x0', 'x0Mm'], ['pca-y0', 'y0Mm'], ['pca-w', 'widthMm'], ['pca-h', 'heightMm']]) if (eff) prefill(id, IL.inputNum(eff[k], 1));
+    const left = a ? a.leftMm : null;
+    const total = eff ? eff.heightMm : a && a.default ? a.default.heightMm : null;
+    setState('cal-padcal', !a ? '' : !eff ? 'block' : left < 4 ? 'need' : 'ok', !a ? '' : !eff ? 'No area' : IL.fmt(left, 1) + ' mm left');
+    IL.setText($('pca-left'), !a ? (C.areaErr ? 'Could not read the area: ' + C.areaErr : 'Reading…') : !eff ? 'No calibration area: set the blank place (Setup › Places) or type an area here.'
+      : IL.fmt(left, 1) + ' of ' + IL.fmt(total, 1) + ' mm left' + (a.resetAtMs ? ' · wiped ' + IL.fmtTime(IL.toClient(a.resetAtMs)) : '') + '.');
+    const ps = cfg.paste;
+    IL.setText($('pca-paste-now'), ps ? (ps.name || ps.key) + (ps.lot ? ' · lot ' + ps.lot : '') + (ps.loadedAtMs ? ' · loaded ' + IL.fmtDateTime(IL.toClient(ps.loadedAtMs)) : ' · no load noted yet') : 'Reading the configuration…');
+    const places = pc.couponPlaces || ['coupon1', 'coupon2'];
+    const have = places.filter((n) => d.locations && d.locations[n]);
+    IL.keyed($('pca-coupons'), JSON.stringify([places, have]), () => (have.length === places.length
+      ? [IL.glyph('ok', 'xs'), ' ' + places.join(' and ') + ' set (Setup › Places)']
+      : [IL.glyph(have.length ? 'need' : 'block', 'xs'), ' ' + (have.length ? have.join(', ') + ' set; ' : '') + 'set ' + places.filter((n) => !have.includes(n)).join(' and ') + ' where the coupons lie: ',
+        el('button', { type: 'button', class: 'link', text: 'Setup › Places', onclick: () => IL.go('#setup/places') })]));
+    const j = s.padCalibration;
+    const jobPending = j && j.state === 'awaiting-reading';
+    if (IL.padProfile) IL.padProfile.pendingForm($('pca-pending'), jobPending ? [] : (j ? (j.pendingCoupons || []).filter((x) => !x.error) : C.pending));
+    renderAreaMap(s, a, eff, pc, have);
+    const lock = IL.lockReason(s, { idle: true, pressureOff: false }) || (IL.padProfile && IL.padProfile.jobLock(s) ? 'Locked while the pad calibration runs' : null);
+    IL.gate($('btn-pca-save'), lock, $('pca-reason'));
+    IL.gate($('btn-pca-default'), lock);
+    IL.gate($('btn-pca-wiped'), lock || (a && a.usedMm <= 0 ? 'Nothing used since the last wipe.' : null), $('pca-wiped-reason'));
+    IL.gate($('btn-pca-paste'), lock);
+  }
+  /** The blank's purge row, the calibration area (its used part shaded) and the coupons, to scale in machine mm. */
+  function renderAreaMap(s, a, eff, pc, have) {
+    const svg = $('pca-map');
+    const d = s.dispense || {};
+    const row = d.purgeRow || {};
+    const size = pc.couponSizeMm || [40, 30];
+    const spots = [];
+    if (row.defined) for (let i = 0; i < row.spots; i++) spots.push({ x: row.x0Mm + i * (row.pitchXMm || 0), y: row.y0Mm + i * (row.pitchYMm || 0), used: i < (row.usedSpots || 0) });
+    // coupons far from the blank would shrink the drawing to nothing: those are named under it instead
+    const near = (c) => !eff || Math.hypot(c.x - (eff.x0Mm + eff.widthMm / 2), c.y - (eff.y0Mm + eff.heightMm / 2)) < 80;
+    const all = have.map((n) => ({ n, x: d.locations[n].x, y: d.locations[n].y }));
+    const coupons = all.filter(near);
+    const blank = d.locations && d.locations[d.blankLocationName];
+    IL.setText($('pca-far'), all.length > coupons.length ? all.filter((c) => !near(c)).map((c) => c.n + ' at X ' + IL.fmt(c.x, 0) + ', Y ' + IL.fmt(c.y, 0)).join(' and ') + ' (away from the blank, not drawn)' : '');
+    const key = JSON.stringify([eff, a && a.usedMm, spots.length, row.usedSpots, coupons, blank]);
+    if (svg.dataset.key === key) return;
+    svg.dataset.key = key;
+    const pts = spots.map((p) => [p.x, p.y]);
+    if (eff) pts.push([eff.x0Mm, eff.y0Mm], [eff.x0Mm + eff.widthMm, eff.y0Mm + eff.heightMm]);
+    for (const c of coupons) pts.push([c.x - size[0] / 2, c.y - size[1] / 2], [c.x + size[0] / 2, c.y + size[1] / 2]);
+    svg.replaceChildren();
+    if (!pts.length) { IL.setAttr(svg, 'viewBox', '0 0 100 40'); return; }
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    const x0 = Math.min(...xs) - 4, x1 = Math.max(...xs) + 4, y0 = Math.min(...ys) - 4, y1 = Math.max(...ys) + 4;
+    IL.setAttr(svg, 'viewBox', [x0, -y1, x1 - x0, y1 - y0].map((v) => v.toFixed(2)).join(' '));
+    const k = Math.max(x1 - x0, y1 - y0) / 320;
+    const add = (tag, at, title) => svg.appendChild(IL.svgEl(tag, at, title));
+    for (const c of coupons) {
+      add('rect', { class: 'pca-coupon', x: c.x - size[0] / 2, y: -(c.y + size[1] / 2), width: size[0], height: size[1], rx: 1 }, c.n + ': ' + size[0] + ' × ' + size[1] + ' mm');
+      const t = add('text', { class: 'pca-t', x: c.x, y: -c.y, 'text-anchor': 'middle', 'dominant-baseline': 'middle', 'font-size': (11 * k).toFixed(2) });
+      t.textContent = c.n;
+    }
+    if (eff) {
+      add('rect', { class: 'pca-area', x: eff.x0Mm, y: -(eff.y0Mm + eff.heightMm), width: eff.widthMm, height: eff.heightMm }, 'Calibration area ' + IL.fmt(eff.widthMm, 1) + ' × ' + IL.fmt(eff.heightMm, 1) + ' mm');
+      const used = Math.min(eff.heightMm, (a && a.usedMm) || 0);
+      if (used > 0) add('rect', { class: 'pca-used', x: eff.x0Mm, y: -(eff.y0Mm + used), width: eff.widthMm, height: used }, 'Used: ' + IL.fmt(used, 1) + ' mm');
+    }
+    for (const p of spots) add('circle', { class: 'pca-spot' + (p.used ? ' pca-spot--used' : ''), cx: p.x, cy: -p.y, r: Math.max(0.6, 2.4 * k) });
+    if (blank) add('path', { class: 'pca-place', d: 'M' + (blank.x - 6 * k) + ' ' + -blank.y + 'h' + 12 * k + 'M' + blank.x + ' ' + (-blank.y - 6 * k) + 'v' + 12 * k }, 'Blank place X ' + IL.fmt(blank.x, 1) + ', Y ' + IL.fmt(blank.y, 1));
+  }
+  function renderWeigh(s) {
+    const sel = $('wd-type');
+    // the pad types (Profile reads them; this card may be the first to need them)
+    if (!(IL.pcr.padTypes && IL.pcr.padTypes()) && !C.ptAsked && IL.pcr.loadPadTypes) { C.ptAsked = true; IL.pcr.loadPadTypes(); }
+    const types = (IL.pcr.padTypes && IL.pcr.padTypes() ? IL.pcr.padTypes().families.filter((f) => !f.retired).flatMap((f) => f.types) : []);
+    const tkey = types.map((t) => t.typeKey).join('|');
+    if (sel.dataset.key !== tkey) {
+      const keep = sel.value || (C.guide && C.guide.t.typeKey) || '';
+      sel.dataset.key = tkey;
+      sel.replaceChildren(...(types.length ? types.map((t) => el('option', { value: t.typeKey, text: t.name + ' (' + t.typeKey + ')' })) : [el('option', { value: '', text: 'No pad types yet' })]));
+      if (keep && types.some((t) => t.typeKey === keep)) sel.value = keep;
+    }
+    if (C.wdType && types.some((t) => t.typeKey === C.wdType)) { sel.value = C.wdType; C.wdType = null; }
+    const cfg = S.config || {};
+    const places = ((cfg.padCalibration || {}).couponPlaces) || ['coupon1', 'coupon2'];
+    const req = weighRequest();
+    const e = req.typeKeys[0] && IL.padProfile ? IL.padProfile.estimate(Object.assign({}, req, { weighDots: undefined })) : null;
+    const pv = e && e.s;
+    const ks = (pv && pv.coupons) || [];
+    const k0 = ks[0];
+    if (k0) prefill('wd-count', String(k0.dots));
+    const n = IL.num('wd-count');
+    // the job lays the dots on every coupon place (a second weighing confirms the mass, §7.5)
+    const t = types.find((x) => x.typeKey === req.typeKeys[0]);
+    const on = ks.length ? (ks.length === 1 ? ' on ' + k0.place : ' on each of ' + ks.map((k) => k.place).join(' and ')) : '';
+    IL.setText($('wd-plan'), req.typeKeys[0] ? (Number.isInteger(n) ? IL.plural(n, IL.padProfile.turnAdj(req.doseSteps) + ' dot') : 'The count from the target') + ' of ' + (t ? t.name : req.typeKeys[0])
+      + on + (k0 ? ', about ' + Math.round(n > 0 ? k0.expectedMg * n / k0.dots : k0.expectedMg) + ' mg' + (ks.length > 1 ? ' each.' : '.') : '.') : 'Choose the pad type.');
+    const d = s.dispense || {};
+    const rows = prereqs(s, { machine: true, engine: true, frame: true, pressure: true });
+    for (const pl of places) rows.push(d.locations && d.locations[pl] ? { kind: 'ok', title: 'Coupon place “' + pl + '”', value: 'X ' + IL.fmt(d.locations[pl].x, 1) + ' · Y ' + IL.fmt(d.locations[pl].y, 1) }
+      : { kind: 'need', title: 'Coupon place “' + pl + '”', value: 'not set', fix: { href: '#setup/places', label: 'Places' } });
+    const blockers = renderPrereqs($('wd-pre'), rows);
+    const own = !req.typeKeys[0] ? 'Choose the pad type.' : pv && pv.refusal ? pv.refusal : null;
+    IL.gate($('btn-wd-run'), runReason(s, blockers, own) || (IL.padProfile && IL.padProfile.jobLock(s) ? 'Locked while the pad calibration runs' : null), $('wd-reason'));
+  }
   function renderGuide() {
     const g = $('setup-guide');
     IL.show(g, !!C.guide);
     if (!C.guide) return;
+    if (C.guide.suggestion) { renderSuggGuide(g); return; }
     IL.keyed(g, JSON.stringify([C.guide.key, C.guide.validate]), () => {
       const t = C.guide.t, r = t.rotationPerDotDeg;
       const close = el('button', { type: 'button', class: 'btn btn--sm btn--quiet', 'aria-label': 'Close the guide' }, IL.icon('i-close'), 'Close');
@@ -619,9 +861,54 @@
         ]), el('div', {}, back)];
     });
   }
-  /** Set up / Validate from a pad type: fill the turns around one profile dot and show the steps. */
-  pcr.openGuide = function (t, validate) {
-    C.guide = { t, validate: !!validate, key: t.typeKey };
+  /**
+   * "I'll do it by hand" from a suggestion (PROFILE_CALIBRATION_DESIGN.md §8): the phase-locked ladder of its turn on the
+   * blank (#btn-guide-ladder), the weighing (Weigh dots card, prefilled), then the type's dots and status in Profile.
+   */
+  function renderSuggGuide(g) {
+    const t = C.guide.t, sg = C.guide.suggestion;
+    const d = sg.dots || {}, pr = sg.predicted || {}, am = sg.amount || {};
+    const turn = IL.padProfile.turnAdj(d.steps);
+    const pc = (S.config && S.config.padCalibration) || {};
+    const j = S.status && S.status.padCalibration;
+    const mine = j && j.manual && (j.typeKeys || []).includes(t.typeKey) ? j : null;
+    const lad = mine ? (mine.ladder || []).find((x) => x.steps === d.steps) : null;
+    IL.keyed(g, JSON.stringify([C.guide.key, sg.id, lad ? [lad.dots, lad.pass] : null, !!S.config]), () => {
+      const close = el('button', { type: 'button', class: 'btn btn--sm btn--quiet', 'aria-label': 'Close the guide' }, IL.icon('i-close'), 'Close');
+      close.addEventListener('click', () => { C.guide = null; IL.render(); });
+      const ladder = el('button', { type: 'button', class: 'btn btn--hold btn--sm', id: 'btn-guide-ladder' }, IL.icon('i-play'), 'Lay the ladder');
+      IL.press2(ladder, 'lay the ladder', () => IL.padProfile.startManual({ typeKeys: [t.typeKey], steps: ['ladder'], doseSteps: d.steps }),
+        { ok: 'Ladder started: its dots and checks are in the panel.' });
+      const weigh = el('button', { type: 'button', class: 'btn btn--sm' }, 'Weigh dots', IL.icon('i-chev'));
+      weigh.addEventListener('click', () => IL.flash($('cal-weigh')));
+      const prof = el('button', { type: 'button', class: 'btn btn--sm' }, 'Open ' + (t.name || t.typeKey) + ' in Profile', IL.icon('i-chev'));
+      prof.addEventListener('click', () => IL.go('#profile/pad-types/' + t.typeKey));
+      const limits = 'Limits: residual spread at most ' + IL.fmt(100 * (pc.maxResidCv || 0.13), 0) + ' %, ' + (d.steps === 400 ? 'the four screw angles within ' + IL.fmt(pc.maxQuarterAmplitude || 0.2, 2)
+        : 'the two half-turn angles within ' + IL.fmt(pc.maxHalfSplit || 0.13, 2)) + ', paste threads at most ' + IL.fmt(100 * (pc.threadRateOk || 0.03), 0) + ' % of the moves, at least '
+        + (pc.minLadderDots || 28) + ' dots.';
+      return [el('div', { class: 'cal-guide__h' }, IL.glyph('info', 'sm'), el('b', { text: 'By hand: ' + (t.name || t.typeKey) + ' (' + t.typeKey + ', provisional)' }), el('span', { class: 'spacer' }), close),
+        el('p', { class: 'cal-guide__t', id: 'guide-target', text: IL.fmt(am.targetMg, 2) + ' mg per pad; predicted ' + IL.fmt(pr.mgPerPad, 2) + ' mg with ' + d.perPad + ' ' + turn + ' ' + (d.perPad === 1 ? 'dot' : 'dots') + '.' }),
+        el('ol', {},
+          el('li', { text: 'Needle Z frame recorded, blank place and blank surface set, needle touched off (the touch-off card below).' }),
+          el('li', {}, 'Lay the ladder: ' + turn + ' dots on the blank with the profile’s dot first as the control, the same phase-locked dots as Calibrate automatically. ' + limits + ' ',
+            lad ? el('b', { text: lad.pass === null || lad.pass === undefined ? 'Measuring…' : lad.pass ? 'Last ladder: every check passed.' : 'Last ladder: ' + ((lad.failures || [])[0] || 'a check failed') + '.' }) : null,
+            el('div', { class: 'btn-row', 'data-refusals': '' }, ladder)),
+          el('li', {}, 'Weigh dots: ' + turn + ' dots on a coupon, then weigh it, wipe it and weigh it again. ', el('div', { class: 'btn-row' }, weigh)),
+          el('li', {}, 'In Profile, set the dots per pad (' + d.perPad + ') and the turn (' + turn + ') and then the status: characterized needs a passing ladder and a confirmed weighing at this turn. ',
+            el('div', { class: 'btn-row' }, prof)))];
+    });
+  }
+  /** Set up / Validate from a pad type: fill the turns around one profile dot and show the steps. opts: true (validate) or {validate, suggestion}. */
+  pcr.openGuide = function (t, opts) {
+    const o = typeof opts === 'object' && opts ? opts : { validate: !!opts };
+    const validate = o.validate;
+    C.guide = { t, validate: !!validate, key: t.typeKey + (o.suggestion ? '|' + o.suggestion.id : ''), suggestion: o.suggestion || null };
+    if (o.suggestion && o.suggestion.dots) {
+      $('wd-steps').value = String(o.suggestion.dots.steps);
+      $('wd-count').value = '';
+      delete C.prefill['wd-count'];
+      C.wdType = t.typeKey;
+    }
     C.guideFlash = true;
     const r = t.rotationPerDotDeg;
     if (isNum(r)) {
@@ -652,7 +939,9 @@
       const kind = running ? 'live' : nc ? 'need' : pcr.statusKind(run.status);
       const word = (pcr.TASK[run.label] || run.label) + (nc ? ' · no contact found' : '');
       const pct = run.dotsPlanned ? Math.round(100 * run.dotsDone / run.dotsPlanned) : 0;
-      const phases = (run.phases || []).slice(-6);
+      // "pad calibration: dispensing" under the title "Pad calibration": the phase without the run's own name
+      const own = new RegExp('^' + String(run.label || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':\\s*', 'i');
+      const phases = (run.phases || []).slice(-6).map((ph) => IL.cap(String(ph).replace(own, '')));
       const sig = JSON.stringify([run.runId, kind, run.dotsDone, run.phase, Math.floor(run.elapsedS || 0), run.message]);
       if (now.dataset.sig !== sig) {
         now.dataset.sig = sig;
@@ -684,25 +973,32 @@
         el('div', { class: 'page-head' }, el('div', { class: 'page-head__text' },
           el('div', { class: 'eyebrow', text: 'Calibrate · records and experiments' }),
           el('h1', {}, 'Calibrate'),
-          el('div', { class: 'meta' }, el('span', { text: 'The touch-off sets the needle offset and the start angle sets where dots start. Everything else is a record.' })))),
+          el('div', { class: 'meta' }, el('span', { text: 'The touch-off sets the needle offset, the start angle sets where dots start and the pad calibration sets a pad type’s dots. Everything else is a record.' })))),
         el('div', { class: 'notebox notebox--info cal-note', id: 'cal-history-note' }, IL.glyph('info', 'sm'),
-          el('div', {}, el('b', { text: 'Records only: boards use the dispense profile. ' }),
-            'A dot is a whole number of screw motor steps at a fixed start angle; partial turns vary about ±50 % with the screw angle, so ladder sizes and scale masses are a history, not a dose.')),
+          el('div', {}, el('b', { text: 'Boards use the profile’s dot unless a pad type has its own turn (set by Calibrate automatically or by hand). ' }),
+            'The dot ladder and scale cards below are records only: their dots are not phase-locked, so partial turns there vary about ±50 % with the screw angle.')),
         el('div', { class: 'notebox notebox--info cal-guide', id: 'setup-guide', hidden: true }),
-        el('div', { class: 'grid-cards cal-grid' }, touchOffCard(), angleCard(), ladderCard(), shotsCard(), dotsCard(), recordsCard()));
+        el('div', { class: 'grid-cards cal-grid' }, touchOffCard(), padcalCard(), angleCard(), weighCard(), ladderCard(), dotsCard(),
+          el('details', { class: 'disclose cal-older span2', id: 'cal-shots-older' }, el('summary', { text: 'Older method: shots into a cup (records only)' }), shotsCard()),
+          recordsCard()));
       for (const n of root.querySelectorAll('input, select')) n.addEventListener(n.tagName === 'SELECT' || n.type === 'checkbox' ? 'change' : 'input', () => IL.render());
       pcr.stickyTop(root);
-      IL.on('taskend', (run) => { if (CAL_TASKS.has(run.label) || C.data) loadCalibrations(); });
+      IL.on('taskend', (run) => { if (CAL_TASKS.has(run.label) || C.data) loadCalibrations(); if (run.label === 'pad calibration') loadArea(); });
+      IL.on('coupon-reading', () => loadArea());   // a pending coupon weighed or skipped (padprofile.js pendingForm)
     },
-    show() { loadCalibrations(); },
+    show() { loadCalibrations(); loadArea(); if (!S.config) IL.loadConfig(); },
     route(r) {
-      const map = { 'touch-off': 'cal-touch-off', angle: 'cal-angle', shots: 'cal-shots', dots: 'cal-dots', ladder: 'cal-ladder', records: 'cal-records' };
+      const map = { 'touch-off': 'cal-touch-off', angle: 'cal-angle', shots: 'cal-shots', dots: 'cal-dots', ladder: 'cal-ladder', records: 'cal-records',
+        padcal: 'cal-padcal', weigh: 'cal-weigh' };
+      if (r.section === 'shots') $('cal-shots-older').open = true;
       if (C.guideFlash) { C.guideFlash = false; requestAnimationFrame(() => requestAnimationFrame(() => IL.flash($('setup-guide')))); }
       else if (r.section && map[r.section]) requestAnimationFrame(() => IL.flash($(map[r.section])));
     },
     render(s) {
       renderGuide();
       renderTouchOff(s);
+      renderPadcal(s);
+      renderWeigh(s);
       renderAngle(s);
       renderLadder(s);
       renderShots(s);
@@ -713,7 +1009,7 @@
     nav(s) {
       if (IL.taskRunning(s)) {
         const run = taskOf(s);
-        return run ? { sub: (pcr.TASK[run.label] || run.label) + ' running', kind: 'live' } : { sub: 'Locked · running' };
+        return run ? { sub: run.label === 'pad calibration' ? 'Calibrating pads' : (pcr.TASK[run.label] || run.label) + ' running', kind: 'live' } : { sub: 'Locked · running' };
       }
       const n = (s.dispense && s.dispense.needle) || {};
       if (!n.anchored) return { sub: 'Needle frame first', kind: '' };

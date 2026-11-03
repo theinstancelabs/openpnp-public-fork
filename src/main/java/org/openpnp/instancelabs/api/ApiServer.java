@@ -113,8 +113,14 @@ public final class ApiServer {
         machineEndpoints.register(this);
         DispenseEndpoints dispense = new DispenseEndpoints(context, machineEndpoints);
         dispense.register(this);
+        dispense.registration.register(this);
         new CalibrationEndpoints(context, dispense).register(this);
         new PadTypeEndpoints(context).register(this);
+        PadProfileEndpoints padProfile = new PadProfileEndpoints(context, dispense);
+        padProfile.register(this);
+        new PadCalibrationEndpoints(context, dispense, padProfile).register(this);
+        new SimEndpoints(context).register(this);
+        new BoardImportEndpoints(context, dispense).register(this);
         server.setExecutor(executor);
         server.createContext("/", this::handle);
         server.start();
@@ -160,17 +166,42 @@ public final class ApiServer {
         final String method;
         final Pattern pattern;
         final Handler handler;
+        final int maxBodyBytes;
+        /** The 413 reason, or null for the generic one. */
+        final String tooLarge;
 
-        Route(String method, String regex, Handler handler) {
+        Route(String method, String regex, Handler handler, int maxBodyBytes, String tooLarge) {
             this.method = method;
             this.pattern = Pattern.compile(regex);
             this.handler = handler;
+            this.maxBodyBytes = maxBodyBytes;
+            this.tooLarge = tooLarge;
         }
     }
 
     /** Registers a route; {@code regex} must match the whole path, groups are path parameters. */
     void route(String method, String regex, Handler handler) {
-        routes.add(new Route(method, regex, handler));
+        route(method, regex, handler, MAX_BODY);
+    }
+
+    /** As above with its own request body limit (uploads); every other route keeps {@value #MAX_BODY} bytes. */
+    void route(String method, String regex, Handler handler, int maxBodyBytes) {
+        route(method, regex, handler, maxBodyBytes, null);
+    }
+
+    /** As above with the 413 reason the operator reads. */
+    void route(String method, String regex, Handler handler, int maxBodyBytes, String tooLargeReason) {
+        routes.add(new Route(method, regex, handler, maxBodyBytes, tooLargeReason));
+    }
+
+    /** The route a request will be dispatched to (path and method match), or null. */
+    private Route routeFor(String method, String path) {
+        for (Route r : routes) {
+            if (r.method.equals(method) && r.pattern.matcher(path).matches()) {
+                return r;
+            }
+        }
+        return null;
     }
 
     public static final class Request {
@@ -178,23 +209,32 @@ public final class ApiServer {
         public final String path;
         public final Map<String, String> query;
         private final HttpExchange exchange;
-        private final String body;
+        private final byte[] raw;
+        private String body;
         private String[] groups = new String[0];
 
-        Request(HttpExchange ex, String body) {
+        Request(HttpExchange ex, byte[] raw) {
             this.exchange = ex;
             this.method = ex.getRequestMethod().toUpperCase(Locale.ROOT);
             URI uri = ex.getRequestURI();
             this.path = uri.getRawPath();
             this.query = parseQuery(uri.getRawQuery());
-            this.body = body;
+            this.raw = raw;
         }
 
         public String group(int i) {
             return groups[i - 1];
         }
 
+        /** The request body as sent (an upload). */
+        public byte[] bytes() {
+            return raw;
+        }
+
         public JsonObject json() throws ApiException {
+            if (body == null) {
+                body = new String(raw, StandardCharsets.UTF_8);
+            }
             return Json.parseObject(body);
         }
 
@@ -248,11 +288,18 @@ public final class ApiServer {
         final int status;
         final String contentType;
         final byte[] body;
+        /** Set after the defaults, so a handler can override one (Cache-Control). */
+        final Map<String, String> headers = new LinkedHashMap<>();
 
         private Response(int status, String contentType, byte[] body) {
             this.status = status;
             this.contentType = contentType;
             this.body = body;
+        }
+
+        public Response header(String name, String value) {
+            headers.put(name, value);
+            return this;
         }
 
         public static Response json(int status, Object o) {
@@ -275,7 +322,9 @@ public final class ApiServer {
         String path = ex.getRequestURI().getRawPath();
         try {
             checkBrowserSafety(ex, method);
-            String body = readBody(ex);
+            Route route = routeFor(method, path);
+            byte[] body = readBody(ex, route == null ? MAX_BODY : route.maxBodyBytes,
+                    route == null ? null : route.tooLarge);
             Request req = new Request(ex, body);
             resp = dispatch(req);
         }
@@ -386,18 +435,32 @@ public final class ApiServer {
         return h.equals("localhost") || h.matches("127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}");
     }
 
-    private static String readBody(HttpExchange ex) throws IOException, ApiException {
+    /** The body, at most {@code max} bytes: a larger Content-Length is refused before anything is read. */
+    private static byte[] readBody(HttpExchange ex, int max, String tooLarge) throws IOException, ApiException {
+        ApiException large = new ApiException(413, "too-large",
+                tooLarge != null ? tooLarge : "request body larger than " + max + " bytes");
+        String declared = ex.getRequestHeaders().getFirst("Content-Length");
+        if (declared != null) {
+            try {
+                if (Long.parseLong(declared.trim()) > max) {
+                    throw large;
+                }
+            }
+            catch (NumberFormatException e) {
+                throw ApiException.badRequest("Content-Length is not a number");
+            }
+        }
         try (InputStream in = ex.getRequestBody()) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[8192];
+            byte[] buf = new byte[65536];
             int n;
             while ((n = in.read(buf)) > 0) {
                 out.write(buf, 0, n);
-                if (out.size() > MAX_BODY) {
-                    throw new ApiException(413, "too-large", "request body larger than " + MAX_BODY + " bytes");
+                if (out.size() > max) {
+                    throw large;
                 }
             }
-            return new String(out.toByteArray(), StandardCharsets.UTF_8);
+            return out.toByteArray();
         }
     }
 
@@ -461,6 +524,9 @@ public final class ApiServer {
                         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
                                 + "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; "
                                 + "base-uri 'none'; form-action 'none'");
+            }
+            for (Map.Entry<String, String> h : r.headers.entrySet()) {
+                ex.getResponseHeaders().set(h.getKey(), h.getValue());
             }
             boolean head = "HEAD".equalsIgnoreCase(ex.getRequestMethod());
             ex.sendResponseHeaders(r.status, head ? -1 : r.body.length);

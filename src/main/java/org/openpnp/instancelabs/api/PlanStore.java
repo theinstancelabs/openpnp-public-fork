@@ -1,6 +1,7 @@
 package org.openpnp.instancelabs.api;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,6 +29,11 @@ final class PlanStore {
         /** Cross after the purge to the last dot (the bench's DPH window), s. */
         Double estimatedWorkSeconds;
         String estimateError;
+        /** Per dot (plan order): arrive and end, s from the program start (the path preview's clock); null if unknown. */
+        double[] dotArriveS;
+        double[] dotEndS;
+        /** Dot diameter from the current calibration's ladder at the plan's turn, mm; null if not measured there. */
+        Double dotDiameterMm;
         /** The last camera-only clean-pad check of this plan (POST /api/plan/{id}/clean-check). */
         volatile java.util.concurrent.Future<org.openpnp.instancelabs.dispense.PadCleanReport> cleanCheckFuture;
 
@@ -44,6 +50,32 @@ final class PlanStore {
 
         boolean cleanCheckRunning() {
             java.util.concurrent.Future<?> f = cleanCheckFuture;
+            return f != null && !f.isDone();
+        }
+
+        /**
+         * The last Register board of this plan (POST /api/plan/{id}/register); the plan made at its end
+         * carries the same Future.
+         */
+        volatile java.util.concurrent.Future<org.openpnp.instancelabs.dispense.RegistrationResult> registrationFuture;
+        /** The fiducial registration the plan was made with (source.registrationId), or null. */
+        volatile org.openpnp.instancelabs.dispense.BoardRegistration registrationRecord;
+        /** What Register board would do, computed when the plan was made (GET .../registration-targets: now). */
+        volatile Map<String, Object> registrationTargets;
+
+        /** The finished registration, or null (none, still running or failed). */
+        org.openpnp.instancelabs.dispense.RegistrationResult registration() {
+            java.util.concurrent.Future<org.openpnp.instancelabs.dispense.RegistrationResult> f = registrationFuture;
+            try {
+                return f != null && f.isDone() ? f.get() : null;
+            }
+            catch (Exception e) {
+                return null;
+            }
+        }
+
+        boolean registrationRunning() {
+            java.util.concurrent.Future<?> f = registrationFuture;
             return f != null && !f.isDone();
         }
 
@@ -83,9 +115,9 @@ final class PlanStore {
     }
 
     /**
-     * A plan restricted to some pads and/or the first {@code maxDots} dots in path order. The path
-     * order of the full plan is kept and dots are re-indexed from 0. Returns the plan itself if
-     * nothing is excluded.
+     * A plan restricted to some pads and/or the first {@code maxDots} dots in path order, cut before
+     * the pad that would be split (a pad's dose is all its dots: R5, R6). The path order of the full
+     * plan is kept and dots are re-indexed from 0. Returns the plan itself if nothing is excluded.
      */
     static DispensePlan subset(DispensePlan p, List<String> padIds, Integer maxDots) {
         Set<String> wanted = padIds == null || padIds.isEmpty() ? null : new HashSet<>(padIds);
@@ -109,20 +141,40 @@ final class PlanStore {
         }
         List<DispensePlan.PlannedDot> dots = new ArrayList<>();
         for (DispensePlan.PlannedDot d : p.dots) {
-            if (wanted != null && !wanted.contains(d.padId)) {
-                continue;
+            if (wanted == null || wanted.contains(d.padId)) {
+                dots.add(d);
             }
-            if (maxDots != null && dots.size() >= maxDots) {
-                break;
+        }
+        boolean cut = false;
+        if (maxDots != null && dots.size() > maxDots) {
+            int n = maxDots;
+            while (n > 0 && samePad(dots.get(n - 1), dots.get(n))) {
+                n--;
             }
-            dots.add(d);
+            if (n == 0) {
+                int first = 1;
+                while (first < dots.size() && samePad(dots.get(0), dots.get(first))) {
+                    first++;
+                }
+                throw new IllegalArgumentException("a test run lays whole pads: the first pad, " + dots.get(0).padId
+                        + ", has " + first + " dots, so ask for at least " + first);
+            }
+            cut = n < maxDots;
+            dots = new ArrayList<>(dots.subList(0, n));
         }
         if (dots.size() == p.dots.size()) {
             return p;
         }
-        Set<String> padsWithDots = new HashSet<>();
+        // the kept dots' pads by index where the plan has one (two pads of a footprint may share a name)
+        Set<Integer> padsWithDots = new HashSet<>();
+        Set<String> idsWithDots = new HashSet<>();
         for (DispensePlan.PlannedDot d : dots) {
-            padsWithDots.add(d.padId);
+            if (d.padIndex >= 0) {
+                padsWithDots.add(d.padIndex);
+            }
+            else {
+                idsWithDots.add(d.padId);
+            }
         }
         DispensePlan s = new DispensePlan();
         s.planId = p.planId + "-subset-" + UUID.randomUUID().toString().substring(0, 8);
@@ -137,7 +189,9 @@ final class PlanStore {
         s.surfaceFingerprint = p.surfaceFingerprint;
         s.boardFingerprint = p.boardFingerprint;
         s.boardRegistration = p.boardRegistration;
+        s.boardZMm = p.boardZMm;
         s.padTypesFingerprint = p.padTypesFingerprint;
+        p.copyBoardFieldsTo(s);
         double path = 0;
         for (int i = 1; i < dots.size(); i++) {
             path += Math.hypot(dots.get(i).xMm - dots.get(i - 1).xMm, dots.get(i).yMm - dots.get(i - 1).yMm);
@@ -145,8 +199,11 @@ final class PlanStore {
         // Dot-to-dot length of the kept dots (the parent's start leg is not included).
         s.pathLengthMm = path;
         s.pathLengthNearestNeighbourMm = Double.NaN;
-        for (DispensePlan.PlannedPad pad : p.pads) {
-            if (padsWithDots.contains(pad.padId)) {
+        Map<Integer, Integer> padAt = new HashMap<>();
+        for (int i = 0; i < p.pads.size(); i++) {
+            DispensePlan.PlannedPad pad = p.pads.get(i);
+            if (padsWithDots.contains(i) || idsWithDots.contains(pad.padId)) {
+                padAt.put(i, s.pads.size());
                 s.pads.add(pad);
             }
         }
@@ -161,11 +218,20 @@ final class PlanStore {
             d.dispenseZMm = o.dispenseZMm;
             d.hopZMm = o.hopZMm;
             d.rotationDeg = o.rotationDeg;
+            d.netSteps = o.netSteps;
+            d.padIndex = padAt.getOrDefault(o.padIndex, -1);
             s.dots.add(d);
         }
         s.warnings.addAll(p.warnings);
         s.warnings.add("subset of plan " + p.planId + ": " + dots.size() + " of " + p.dots.size() + " dots on "
-                + s.pads.size() + " of " + p.pads.size() + " pads (path order kept)");
+                + s.pads.size() + " of " + p.pads.size() + " pads (path order kept" + (cut ? "; whole pads, so "
+                        + dots.size() + " of the " + maxDots + " dots asked for" : "") + ")");
         return s;
+    }
+
+    /** Consecutive dots of one pad: the plan's pad index, else the pad id (a plan made without the index). */
+    private static boolean samePad(DispensePlan.PlannedDot a, DispensePlan.PlannedDot b) {
+        return a.padIndex >= 0 || b.padIndex >= 0 ? a.padIndex == b.padIndex : java.util.Objects.equals(a.padId,
+                b.padId);
     }
 }

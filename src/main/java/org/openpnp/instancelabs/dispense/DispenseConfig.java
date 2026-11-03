@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import com.google.gson.Gson;
@@ -80,6 +81,8 @@ public class DispenseConfig {
     public double needleZOffsetMm = 0.0;
     /** Epoch ms of the last needle touch-off; null = never (I4). */
     public Long needleZOffsetSetAtMs = null;
+    /** The Z frame of the touch-off ({@link ZCheck}: the home it was measured or last checked under); null = unknown. */
+    public Long needleZOffsetHomeAtMs = null;
     /** Epoch ms of the last needle change; I4 requires a touch-off after it. */
     public Long needleChangedAtMs = null;
     /**
@@ -177,6 +180,38 @@ public class DispenseConfig {
     public boolean includeDisabledPlacements = true;
     public int twoOptMaxPasses = 50;
 
+    // --- board registration, automatic N1 probe, homing (registration design §6.1) -------------
+    /** Register board, the blank probe and a board run home first: "whenNeeded" or "always". */
+    public String homeBeforeRun = HOME_WHEN_NEEDED;
+    /** Fiducial check of Register board (search, minimum count, same-seat tolerance). */
+    public FiducialCheck fiducialCheck = new FiducialCheck();
+    /** The automatic N1 vacuum probe (bench probe.py window, open-air limits, timings, spots). */
+    public VacuumProbe vacuumProbe = new VacuumProbe();
+    /**
+     * Engine-stamped: the latest registration per board key ("file:<path>" or "job:<id>"), at most
+     * {@link #MAX_BOARD_REGISTRATIONS}; set only by Register board.
+     */
+    public Map<String, BoardRegistration> boardRegistrations = new LinkedHashMap<>();
+    /**
+     * Engine-stamped: when the operator said the next registration is a new seat (Next board, "new
+     * seat"); null when cleared. A registration older than this is never a "same seat".
+     */
+    public Long newSeatAtMs = null;
+
+    // --- pad calibration (profile calibration design §5.4) ---------------------------------------
+    /** The needle: pad types and dose records name it; its OD sets the same-pad dot pitch. */
+    public TipSpec tip = new TipSpec();
+    /** The paste in the syringe; "New paste loaded" stamps it. */
+    public PasteSpec paste = new PasteSpec();
+    /** Where on the blank the pad calibration lays its test dots (default: 40 x 20 mm at the blank place). */
+    public CalibrationArea calibrationArea = new CalibrationArea();
+    /** Limits and sizes of the pad calibration. */
+    public PadCalibrationSettings padCalibration = new PadCalibrationSettings();
+
+    public static final String HOME_WHEN_NEEDED = "whenNeeded";
+    public static final String HOME_ALWAYS = "always";
+    public static final int MAX_BOARD_REGISTRATIONS = 20;
+
     /** Needle XY correction on top of the N2 head offset (calibration value). */
     public static class NeedleXyTrim {
         public double dxMm, dyMm;
@@ -226,8 +261,104 @@ public class DispenseConfig {
         public double boxHMm = 0.807;
     }
 
+    /**
+     * Fiducial check of Register board. The detector, centring and fit limits are code constants
+     * (bench fid.py / locate.py); only these are site settings.
+     */
+    public static class FiducialCheck {
+        /** Bench camera frame (1920 x 1080 px at OpenPnP's 0.01068376 x 0.01072961 mm/px). */
+        public static final double DEFAULT_FRAME_W_MM = 1920 * 0.01068376;
+        public static final double DEFAULT_FRAME_H_MM = 1080 * 0.01072961;
+        /** Most camera frames the search of one fiducial may take. */
+        public static final int MAX_SEARCH_FRAMES = 9;
+
+        public int minFiducials = 2;
+        /**
+         * How far from its expected position (the previous registration, else the nominal board) a
+         * fiducial may be found (bench re-seats moved up to 6.9 mm).
+         */
+        public double searchRadiusMm = 8.0;
+        /** Every fiducial within this of the previous registration: the same seat. */
+        public double seatToleranceMm = 0.10;
+
+        /**
+         * Camera frames needed to cover the search circle: frames centred at the prediction + (i 2hx,
+         * j 2hy), where hx, hy are the usable half-frame (the 2r ring of a fiducial of diameter d,
+         * 1.20 d, stays inside), counted while they touch the circle.
+         */
+        public static int framesNeeded(double radiusMm, double frameWMm, double frameHMm, double fiducialDiameterMm) {
+            double m = 1.20 * fiducialDiameterMm;
+            double hx = frameWMm / 2 - m, hy = frameHMm / 2 - m;
+            if (!(hx > 0 && hy > 0)) {
+                return Integer.MAX_VALUE;
+            }
+            int ni = (int) Math.ceil(radiusMm / (2 * hx)) + 1, nj = (int) Math.ceil(radiusMm / (2 * hy)) + 1;
+            int n = 0;
+            for (int i = -ni; i <= ni; i++) {
+                for (int j = -nj; j <= nj; j++) {
+                    double dx = Math.max(0, Math.abs(i) * 2 * hx - hx), dy = Math.max(0, Math.abs(j) * 2 * hy - hy);
+                    if (Math.hypot(dx, dy) <= radiusMm) {
+                        n++;
+                    }
+                }
+            }
+            return n;
+        }
+
+        /** Why the search radius does not fit a camera frame of this size, or null if it does. */
+        public String searchProblem(double frameWMm, double frameHMm, double fiducialDiameterMm) {
+            int n = framesNeeded(searchRadiusMm, frameWMm, frameHMm, fiducialDiameterMm);
+            if (n > MAX_SEARCH_FRAMES) {
+                return String.format(Locale.ROOT, "fiducialCheck.searchRadiusMm %.1f needs %s camera frames of "
+                        + "%.1f x %.1f mm per fiducial (at most %d): use a smaller radius", searchRadiusMm,
+                        n == Integer.MAX_VALUE ? "endless" : Integer.toString(n), frameWMm, frameHMm,
+                        MAX_SEARCH_FRAMES);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * The automatic N1 vacuum probe (bench probe.py / register.py). The step sizes, feeds, read
+     * counts, drop rule, release wait and safety limits are code constants
+     * ({@link VacuumProber.Settings}); only these are site settings.
+     */
+    public static class VacuumProbe {
+        /** The real VAC1 needs a settle of at least this (a read 0.3 s after the valve opened looked sealed). */
+        public static final int REAL_MIN_SETTLE_MS = 1000;
+        /** M260 B27 sets 62.5 ms sleep-mode conversion: closer reads repeat stale values. */
+        public static final int REAL_MIN_READ_DELAY_MS = 65;
+
+        /** The descent starts this far above the nominal surface Z (register.py: 8.0 for a top of 5.5). */
+        public double startAboveMm = 2.5;
+        /** The floor lies this far below the higher of the nominal Z and the needle-frame surface. */
+        public double floorBelowMm = 1.5;
+        /** Open-air baseline window (counts): toward 0 = no tip, a leak or the pump off; below = blocked. */
+        public int openAirMinCounts = -1900000;
+        public int openAirMaxCounts = -1200000;
+        /**
+         * Nearby spots tried when a spot gives no contact or is not bare (board targets: 5 mm away and
+         * spread in direction, so a mounting hole's ring cannot take them all).
+         */
+        public int alternates = 4;
+        /** Target centre to pad edge (1.0 mm plus N1's measured 0.4 mm offset error). */
+        public double padKeepOutMm = 1.4;
+        /** Pump + valve ON -> first read (probe.py G4 P1500). */
+        public int vacuumSettleMs = 1500;
+        /** Host wait before each read (probe.py 70 ms). */
+        public int readDelayMs = 70;
+        /** Proven bare spots per board file name: 3..9 [bx, by] pairs in board mm (replace the computed ones). */
+        public Map<String, java.util.List<double[]>> boardSpots = new LinkedHashMap<>();
+    }
+
     public static class NamedLocation {
         public double x, y, z;
+        /**
+         * When the place was set, and the Z frame then (the home in effect, {@link HomeTracker#frameHomeAtMs()}); null
+         * for a place saved before they were kept. After a failed Z check of a home, a place set before that home is
+         * refused where its Z is used (I4, {@link ZCheck#placeMovedMessage}).
+         */
+        public Long setAtMs, homeAtMs;
 
         public NamedLocation() {
         }
@@ -253,6 +384,8 @@ public class DispenseConfig {
         /** Where (informational). */
         public Double xMm, yMm;
         public long setAtMs;
+        /** Its Z frame ({@link ZCheck}: the home it was measured or last checked under); null = unknown. */
+        public Long homeAtMs;
         /**
          * Set when the needle contact came from the bench relation "needle contact raw Z = K - N1
          * contact Z" (side camera): K, else null (needle touched the surface).
@@ -293,6 +426,8 @@ public class DispenseConfig {
     public static class SurfaceMap {
         public java.util.List<SurfacePoint> points = new java.util.ArrayList<>();
         public Long setAtMs;
+        /** Its Z frame ({@link ZCheck}: the home it was measured or last checked under); null = unknown. */
+        public Long homeAtMs;
         public String note;
         /**
          * Board surfaces: the board registration the points were probed on (board X/Y/rotation, side
@@ -300,6 +435,14 @@ public class DispenseConfig {
          * new registration, and I4 then asks for new probes; an untied board surface is refused.
          */
         public String boardFingerprint;
+        /** True when probed on OpenPnP's simulator: refused on a machine that is not (I4). */
+        public Boolean simulated;
+        /**
+         * The blank's points that a probe after a home replaced ({@link ZCheck#kept}): still a Z-check reference of
+         * their Z frame, so a check of older data (the needle frame, the touch-off) has a point to touch. Null when
+         * none was kept.
+         */
+        public SurfaceMap replaced;
     }
 
     public NamedLocation location(String name) {
@@ -336,10 +479,56 @@ public class DispenseConfig {
      * frame tolerance, plus the offset, minus the deepest touch-off gap (0.1 mm). NaN without anchor.
      */
     public double needleFloorZMm() {
+        return needleFloorZMm(null);
+    }
+
+    /**
+     * As above for dots that take their Z from a surface with its own frame reference (a board
+     * surface is checked against the board's top Z, not the anchor): the lower of the anchor surface
+     * and that reference. Null = the anchor alone.
+     */
+    public double needleFloorZMm(Double surfaceReferenceZMm) {
         if (needleAnchor == null) {
             return Double.NaN;
         }
-        return needleAnchor.surfaceZMm - zFrameToleranceMm + needleZOffsetMm - 0.1;
+        double ref = needleAnchor.surfaceZMm;
+        if (surfaceReferenceZMm != null && Double.isFinite(surfaceReferenceZMm)) {
+            ref = Math.min(ref, surfaceReferenceZMm);
+        }
+        return ref - zFrameToleranceMm + needleZOffsetMm - 0.1;
+    }
+
+    /**
+     * Stores a registration as the latest of its board key, keeping at most
+     * {@link #MAX_BOARD_REGISTRATIONS} keys (the oldest {@code atMs} goes).
+     */
+    public void putBoardRegistration(BoardRegistration reg) {
+        boardRegistrations.remove(reg.boardKey);
+        while (boardRegistrations.size() >= MAX_BOARD_REGISTRATIONS) {
+            String oldest = null;
+            long at = Long.MAX_VALUE;
+            for (Map.Entry<String, BoardRegistration> e : boardRegistrations.entrySet()) {
+                if (oldest == null || e.getValue() == null || e.getValue().atMs < at) {
+                    oldest = e.getKey();
+                    at = e.getValue() == null ? Long.MIN_VALUE : e.getValue().atMs;
+                }
+            }
+            boardRegistrations.remove(oldest);
+        }
+        boardRegistrations.put(reg.boardKey, reg);
+    }
+
+    /** The registration stored with this id, or null. */
+    public BoardRegistration boardRegistrationById(String id) {
+        if (id == null || boardRegistrations == null) {
+            return null;
+        }
+        for (BoardRegistration r : boardRegistrations.values()) {
+            if (r != null && id.equals(r.id)) {
+                return r;
+            }
+        }
+        return null;
     }
 
     public PadTypeStatus minPadTypeStatus() {
@@ -376,6 +565,39 @@ public class DispenseConfig {
         }
         if (c.needleXyTrim == null) {
             c.needleXyTrim = new NeedleXyTrim();
+        }
+        if (c.homeBeforeRun == null) {
+            c.homeBeforeRun = HOME_WHEN_NEEDED;
+        }
+        if (c.fiducialCheck == null) {
+            c.fiducialCheck = new FiducialCheck();
+        }
+        if (c.vacuumProbe == null) {
+            c.vacuumProbe = new VacuumProbe();
+        }
+        if (c.vacuumProbe.boardSpots == null) {
+            c.vacuumProbe.boardSpots = new LinkedHashMap<>();
+        }
+        if (c.boardRegistrations == null) {
+            c.boardRegistrations = new LinkedHashMap<>();
+        }
+        if (c.tip == null) {
+            c.tip = new TipSpec();
+        }
+        if (c.paste == null) {
+            c.paste = new PasteSpec();
+        }
+        if (c.calibrationArea == null) {
+            c.calibrationArea = new CalibrationArea();
+        }
+        if (c.padCalibration == null) {
+            c.padCalibration = new PadCalibrationSettings();
+        }
+        if (c.padCalibration.couponPlaces == null) {
+            c.padCalibration.couponPlaces = new PadCalibrationSettings().couponPlaces;
+        }
+        if (c.padCalibration.couponSizeMm == null) {
+            c.padCalibration.couponSizeMm = new PadCalibrationSettings().couponSizeMm;
         }
         c.migrate();
         return c;
@@ -504,6 +726,87 @@ public class DispenseConfig {
         if (pasteThicknessMm <= 0 || pasteDensityMgMm3 <= 0) {
             p.add("paste thickness and density must be > 0");
         }
+        validateRegistration(p);
+        validatePadCalibration(p);
         return p;
+    }
+
+    /** The tip, paste, calibration area and pad calibration settings (PUT /api/config may null an object). */
+    private void validatePadCalibration(java.util.List<String> p) {
+        if (tip == null || paste == null || calibrationArea == null || padCalibration == null) {
+            p.add("tip, paste, calibrationArea and padCalibration must be objects");
+            return;
+        }
+        tip.validate(p);
+        paste.validate(p);
+        padCalibration.validate(p);
+        calibrationArea.validate(this, p);
+    }
+
+    /** Ranges of the registration, probe and homing settings. */
+    private void validateRegistration(java.util.List<String> p) {
+        if (!HOME_WHEN_NEEDED.equals(homeBeforeRun) && !HOME_ALWAYS.equals(homeBeforeRun)) {
+            p.add("homeBeforeRun must be '" + HOME_WHEN_NEEDED + "' or '" + HOME_ALWAYS + "'");
+        }
+        FiducialCheck f = fiducialCheck;
+        if (f.minFiducials < 2 || f.minFiducials > 10) {
+            p.add("fiducialCheck.minFiducials must be 2 to 10");
+        }
+        if (!(f.searchRadiusMm >= 1 && f.searchRadiusMm <= 12)) {
+            p.add("fiducialCheck.searchRadiusMm must be 1 to 12 mm");
+        }
+        else {
+            String why = f.searchProblem(FiducialCheck.DEFAULT_FRAME_W_MM, FiducialCheck.DEFAULT_FRAME_H_MM, 1.0);
+            if (why != null) {
+                p.add(why);
+            }
+        }
+        if (!(f.seatToleranceMm >= 0.01 && f.seatToleranceMm <= 1)) {
+            p.add("fiducialCheck.seatToleranceMm must be 0.01 to 1 mm");
+        }
+        VacuumProbe v = vacuumProbe;
+        if (!(v.startAboveMm >= 0.5 && v.startAboveMm <= 10)) {
+            p.add("vacuumProbe.startAboveMm must be 0.5 to 10 mm");
+        }
+        if (!(v.floorBelowMm >= 0.2 && v.floorBelowMm <= 3)) {
+            p.add("vacuumProbe.floorBelowMm must be 0.2 to 3 mm");
+        }
+        if (!(v.openAirMinCounts < v.openAirMaxCounts && v.openAirMaxCounts < 0)) {
+            p.add("vacuumProbe.openAirMinCounts must be below openAirMaxCounts, and both below 0");
+        }
+        if (v.alternates < 0 || v.alternates > 4) {
+            p.add("vacuumProbe.alternates must be 0 to 4");
+        }
+        if (!(v.padKeepOutMm >= 0.5 && v.padKeepOutMm <= 5)) {
+            p.add("vacuumProbe.padKeepOutMm must be 0.5 to 5 mm");
+        }
+        if (v.vacuumSettleMs < 0 || v.vacuumSettleMs > 5000) {
+            p.add("vacuumProbe.vacuumSettleMs must be 0 to 5000 ms");
+        }
+        if (v.readDelayMs < 0 || v.readDelayMs > 500) {
+            p.add("vacuumProbe.readDelayMs must be 0 to 500 ms");
+        }
+        for (Map.Entry<String, java.util.List<double[]>> e : v.boardSpots.entrySet()) {
+            java.util.List<double[]> spots = e.getValue();
+            boolean ok = e.getKey() != null && !e.getKey().isEmpty() && spots != null && spots.size() >= 3
+                    && spots.size() <= 9;
+            for (int i = 0; ok && i < spots.size(); i++) {
+                double[] xy = spots.get(i);
+                ok = xy != null && xy.length == 2 && Double.isFinite(xy[0]) && Double.isFinite(xy[1]);
+            }
+            if (!ok) {
+                p.add("vacuumProbe.boardSpots['" + e.getKey() + "'] must be 3 to 9 [x, y] pairs of numbers (board mm)");
+            }
+        }
+        if (boardRegistrations.size() > MAX_BOARD_REGISTRATIONS) {
+            p.add("boardRegistrations: at most " + MAX_BOARD_REGISTRATIONS + " boards");
+        }
+        for (Map.Entry<String, BoardRegistration> e : boardRegistrations.entrySet()) {
+            BoardRegistration r = e.getValue();
+            if (r == null || !e.getKey().equals(r.boardKey) || !r.isAffineValid()) {
+                p.add("boardRegistrations['" + e.getKey() + "'] must carry its board key and a finite, invertible "
+                        + "affine (6 numbers)");
+            }
+        }
     }
 }

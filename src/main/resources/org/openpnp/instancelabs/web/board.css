@@ -1,0 +1,245 @@
+/* board.css: the board picture under the job overlay (spec docs/instancelabs/BOARD_IMPORT_DESIGN.md §5.3–5.7).
+   One physical palette for both themes (a board looks the same in light and dark; only the stage around it and the
+   board edge follow the theme), overlay marks restated for the board under .pv--art with a two-tone casing, the
+   Full / Quiet / Off picture modes, the path preview row (#run-preview) and the pad inspector (#panel[data-view=pad]).
+   Loaded after run.css (whose .pv rules stay untouched: picture Off is exactly today's drawing). */
+
+/* ================================================================ tokens */
+:root {
+  /* the board (art SVG) */
+  --pv-a-sub: #c8bd9a;            /* bare FR-4: substrate, mask openings */
+  --pv-a-cu: #a8783f;             /* copper under the mask */
+  --pv-a-mask: #24424e;           /* solder mask (slate), drawn at --pv-a-mask-op over the substrate and copper */
+  --pv-a-mask-op: .86;
+  --pv-a-bare: #ddd5c1;           /* exposed copper (finish): pads, fiducials, untented vias */
+  --pv-a-silk: #f3f3ee;
+  --pv-a-hole: #121719;
+  --pv-a-edge: #0e1416;           /* the only theme-dependent board token */
+  --pv-a-fab: rgba(255, 255, 255, .3);
+  --pv-a-ref: rgba(255, 255, 255, .85);
+  --pv-a-fabref: rgba(255, 255, 255, .45);   /* a reference the board does not print (no KiCad silkscreen label) */
+  --pv-a-paste: #8c939a;          /* paste apertures in the upload preview */
+
+  /* overlay marks on the board (same in both themes; >= 3:1 on --pv-a-bare, casing >= 6.5:1 elsewhere) */
+  --pv-o-ap: #4d5559;
+  --pv-o-dot: #1f5fd1;
+  --pv-o-next: #a84c08;
+  --pv-o-block: #b42318;
+  --pv-o-check: #7a5000;
+  --pv-o-probe: #145e4b;
+  --pv-o-case-d: #0b1012;
+  --pv-o-case-l: #ffffff;
+  --pv-o-ghost: #ffffff;
+  --pv-o-path: #ffffff;
+  /* the path on the Quiet mask (one known tone, §5.3), uncased: light theme 4.5:1 / 3.4:1 on that mask, 6.7:1 / 5.0:1 on the
+     finish; dark theme 13.6:1 / 6.4:1 on its mask, the dark casing kept for the finish */
+  --pv-o-path-q: #3d4548;         /* planned path */
+  --pv-o-trail-q: #1a50b8;        /* done and previewed path */
+}
+[data-theme="dark"] { --pv-a-edge: #8ca2ab; --pv-o-path-q: #ffffff; --pv-o-trail-q: #8fb3f7; }
+
+/* ================================================================ hosts and the two stacked SVGs */
+.pv-host { position: relative; }
+.pv-host--lite > svg.pv { position: absolute; inset: 0; width: 100%; height: 100%; }
+svg.pv-art { pointer-events: none; will-change: transform; }
+svg.pv-art[hidden] { display: none; }
+
+/* mask palettes (finish.mask) and silkscreen colours (finish.silk) */
+svg.pv-art[data-mask="green"] { --pv-a-mask: #1f5a2e; }
+svg.pv-art[data-mask="red"] { --pv-a-mask: #8a1c1c; }
+svg.pv-art[data-mask="blue"] { --pv-a-mask: #1c3f8a; }
+svg.pv-art[data-mask="purple"] { --pv-a-mask: #4a2a6e; }
+svg.pv-art[data-mask="black"] { --pv-a-mask: #15181a; }
+svg.pv-art[data-mask="white"] { --pv-a-mask: #e9ecec; --pv-a-fab: rgba(0, 0, 0, .35); --pv-a-ref: rgba(0, 0, 0, .85); --pv-a-fabref: rgba(0, 0, 0, .5); }
+svg.pv-art[data-mask="yellow"] { --pv-a-mask: #c9a81c; --pv-a-fab: rgba(0, 0, 0, .35); --pv-a-ref: rgba(0, 0, 0, .85); --pv-a-fabref: rgba(0, 0, 0, .5); }
+svg.pv-art[data-silk="black"] { --pv-a-silk: #15181a; }
+svg.pv-art[data-silk="yellow"] { --pv-a-silk: #e8d44d; }
+
+/* layers, bottom to top */
+.pv-art .pv-a-sub { fill: var(--pv-a-sub); fill-rule: evenodd; }
+.pv-art .pv-a-cu { fill: var(--pv-a-cu); }
+.pv-art .pv-a-tracks path { fill: none; stroke: var(--pv-a-cu); stroke-linecap: round; stroke-linejoin: round; }
+.pv-art .pv-a-mask { fill: var(--pv-a-mask); fill-opacity: var(--pv-a-mask-op); fill-rule: evenodd; }
+.pv-art .pv-a-open { fill: var(--pv-a-sub); }
+.pv-art .pv-a-exposed { fill: var(--pv-a-bare); }
+.pv-art .pv-a-paste { fill: var(--pv-a-paste); display: none; }
+.pv-art .pv-a-silk { fill: var(--pv-a-silk); }
+.pv-art .pv-a-silklines path { fill: none; stroke: var(--pv-a-silk); stroke-linecap: round; stroke-linejoin: round; }
+.pv-art .pv-a-text text { fill: var(--pv-a-silk); font-family: var(--font-ui); font-weight: 650; dominant-baseline: central; }
+.pv-art .pv-a-hole--pth, .pv-art .pv-a-hole--npth, .pv-art .pv-a-hole--via { fill: var(--pv-a-hole); }
+.pv-art .pv-a-fab path { fill: none; stroke: var(--pv-a-fab); stroke-linecap: round; stroke-linejoin: round; }
+.pv-art .pv-a-edge { fill: none; stroke: var(--pv-a-edge); stroke-width: 1px; vector-effect: non-scaling-stroke; fill-rule: evenodd; }
+/* dark theme: a dark board (a black mask, every board in Quiet) is within 1.4:1 of the dark stage, so a 3 px light rim
+   (3.2:1 on the stage) sets it off: the substrate's own stroke, under every other layer, shows only outside the edge and
+   round its cut-outs */
+[data-theme="dark"] .pv-art .pv-a-sub { stroke: rgba(140, 162, 171, .6); stroke-width: 6px; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.pv-art .pv-a-refs text { fill: var(--pv-a-ref); font-family: var(--font-ui); font-weight: 650; text-anchor: middle; dominant-baseline: central; }
+/* a reference KiCad does not put on the silkscreen (boardart: at the body centre, like KiCad's fab text): fainter than the
+   silkscreen, so a board without printed references (nano) does not look printed, and the overlay over the part wins */
+.pv-art .pv-a-refs text.pv-a-ref--fab { fill: var(--pv-a-fabref); font-weight: 600; }
+.pv-art .pv-a-origin { display: none; }
+.pv-art .pv-a-origin path { fill: none; stroke: var(--pv-o-case-l); stroke-width: 1.5px; vector-effect: non-scaling-stroke; stroke-linecap: round; }
+.pv-art .pv-a-origin .pv-a-origin__case { stroke: var(--pv-o-case-d); stroke-width: 4px; }
+.pv-art .pv-a-origin text { fill: var(--pv-o-case-l); stroke: var(--pv-o-case-d); stroke-width: 3px; paint-order: stroke; stroke-linejoin: round;
+  font-family: var(--font-ui); font-weight: 700; vector-effect: non-scaling-stroke; }   /* size in board mm (boardart.originMarker) */
+
+/* reference labels: a size bucket shows only when its smallest label is >= 9 px tall on screen (boardview.relayout) */
+.pv-art .pv-lb1, .pv-art .pv-lb2, .pv-art .pv-lb3 { display: none; }
+.pv-art.pv-art--lb1 .pv-lb1, .pv-art.pv-art--lb2 .pv-lb2, .pv-art.pv-art--lb3 .pv-lb3 { display: inline; }
+
+/* art-only mode (upload preview, the hero before planning): paste apertures and the origin marker */
+.pv-art.pv-art--board .pv-a-paste, .pv-art.pv-art--board .pv-a-origin { display: inline; }
+
+/* Quiet: copper under the mask, tracks, silkscreen, references and fab off; the mask lightened toward the stage
+   (svg.pv-art.pv-art--quiet has the specificity of the svg.pv-art[data-mask] palettes above and comes later, so it wins) */
+svg.pv-art.pv-art--quiet { --pv-a-mask: #aab2b1; --pv-a-mask-op: 1; }
+[data-theme="dark"] svg.pv-art.pv-art--quiet { --pv-a-mask: #243034; }
+.pv-art--quiet .pv-a-cu, .pv-art--quiet .pv-a-tracks, .pv-art--quiet .pv-a-silk, .pv-art--quiet .pv-a-silklines,
+.pv-art--quiet .pv-a-text, .pv-art--quiet .pv-a-fab, .pv-art.pv-art--quiet .pv-a-refs text { display: none; }
+/* light theme: the via drills (mobo: hundreds) a field of black dots over the light mask; kept (probe spots avoid them),
+   at less than full black. The dark theme's Quiet mask is dark: drills there already read quietly */
+:root:not([data-theme="dark"]) svg.pv-art.pv-art--quiet .pv-a-hole--via { fill-opacity: .4; }
+
+/* ================================================================ the overlay on the board (.pv--art) */
+.pv--art .pv-l-board { display: none; }
+
+/* in-pad marks on the finish (rule 1): >= 3:1 against --pv-a-bare */
+.pv--art rect.pad { fill: none; stroke: var(--pv-o-ap); stroke-width: 1px; pointer-events: visible; }   /* unfilled: still a click target */
+.pv--art rect.pad:hover { stroke: var(--pv-o-case-d); stroke-width: 1.6px; }   /* run.css hovers in --ink: 1.24:1 on the finish in dark */
+.pv--art rect.pad.blocked { fill: rgba(180, 35, 24, .15); stroke: var(--pv-o-block); stroke-dasharray: 2 1.5; }
+.pv--art rect.pad.pasted { fill: rgba(31, 95, 209, .18); stroke: var(--pv-o-dot); stroke-opacity: 1; }
+.pv--art rect.pad.check { fill: rgba(122, 80, 0, .15); stroke: var(--pv-o-check); }
+.pv--art rect.pad.dirty { fill: var(--pv-o-block); stroke: var(--pv-o-block); }
+.pv--art.pv--no-dirty rect.pad.dirty { fill: none; stroke: var(--pv-o-ap); }
+.pv--art rect.pad.sel { stroke: var(--pv-o-case-d); stroke-width: 2.5px; }
+.pv rect.pad.sel { stroke-width: 2.5px; }
+.pv--art circle.dot { fill: rgba(31, 95, 209, .15); stroke: var(--pv-o-dot); }
+/* a dot under 3 px radius on screen (boardview.resizeDots): a 1 px ring, so an undone dot keeps its light centre */
+.pv.pv--dots-thin circle.dot { stroke-width: 1px; }
+.pv--art circle.dot.done { fill: var(--pv-o-dot); stroke: var(--pv-o-dot); }
+
+/* cased marks (rule 2): a light then a dark stroke under the coloured one; only on the board */
+.pv:not(.pv--art) .pv-case { display: none; }
+.pv.pv--art .pv-case { fill: none; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: none; }
+.pv.pv--art .pv-case.pv-case--l { stroke: var(--pv-o-case-l); stroke-width: calc(var(--cw, 1.5px) + 3px); }
+.pv.pv--art .pv-case.pv-case--d { stroke: var(--pv-o-case-d); stroke-width: calc(var(--cw, 1.5px) + 1.5px); }
+.pv--art .pv-path { stroke: var(--pv-o-path); }
+.pv--art .pv-path--done, .pv--art .pv-path--pre, .pv--art .pv-path--leg { stroke: var(--pv-o-dot); }
+.pv--art .pv-first { stroke: var(--pv-o-dot); }
+.pv--art .pv-next { stroke: var(--pv-o-next); }
+.pv--art .pv-next-halo { fill: var(--pv-o-next); }
+.pv--art .pv-check { stroke: var(--pv-o-check); }
+.pv--art .pv-dirty-ring { stroke: var(--pv-o-block); }
+.pv--art .pv-hull { fill: var(--pv-o-probe); stroke: var(--pv-o-probe); }
+.pv--art .pv-probe circle:not(.pv-case) { stroke: var(--pv-o-probe); fill: var(--pv-o-case-l); }
+.pv--art .pv-probe--done circle:not(.pv-case) { fill: var(--pv-o-probe); }
+.pv--art .pv-probe path:not(.pv-case) { stroke: var(--pv-o-probe); }
+.pv--art .pv-probe text { fill: var(--pv-o-probe); stroke: var(--pv-o-case-l); stroke-width: .5px; paint-order: stroke; }
+.pv--art .pv-n1 circle:not(.pv-case), .pv--art .pv-n1 path:not(.pv-case) { stroke: var(--pv-o-probe); }
+.pv--art .pv-callout path:not(.pv-case) { stroke-width: 1.5px; }
+.pv--no-path .pv-cased--path, .pv--no-dots .pv-cased--first, .pv--no-dirty .pv-cased--dirty { visibility: hidden; }
+/* the first-dot marker is part of the order: it goes with the path (the inspector's path numbers already say "1") */
+.pv--art.pv--no-path .pv-cased--first { visibility: hidden; }
+/* the path's core is white, i.e. already the light tone: only the dark casing goes under it (a light one as well drew a
+   five-stripe "rail" that outweighed the dots over the whole board) */
+.pv.pv--art .pv-cased--path:not(.pv-cased--done):not(.pv-cased--pre) > .pv-case--l { display: none; }
+/* Quiet: the mask is the stage's tone, one known background, so the path lines need no light casing: one line in a tone
+   made for that mask, thinner than a dot (cased, the planned path read as a three-stripe rail across the board, and the
+   done or previewed path was wider than the dots it passed and hid them). The dark theme keeps the dark casing, for
+   where a line crosses a pad's finish */
+.pv.pv--art.pv--quiet .pv-cased--path > .pv-case--l { display: none; }
+:root:not([data-theme="dark"]) .pv.pv--art.pv--quiet .pv-cased--path > .pv-case--d { display: none; }
+.pv--art.pv--quiet .pv-path { stroke: var(--pv-o-path-q); }
+.pv--art.pv--quiet .pv-path--done, .pv--art.pv--quiet .pv-path--pre, .pv--art.pv--quiet .pv-path--leg { stroke: var(--pv-o-trail-q); }
+
+/* parts: hit rects (click opens the inspector), selection outlines */
+.pv .pv-l-parts { display: none; }
+.pv--art .pv-l-parts { display: inline; }
+.pv .pv-l-parts rect.pv-part { fill: transparent; stroke: none; pointer-events: auto; }
+.pv--pick .pv-l-parts rect.pv-part { cursor: pointer; }   /* the view has an onPart handler */
+.pv--pick .pv-l-parts rect.pv-part:hover { stroke: var(--pv-o-case-l); stroke-width: 1.5px; vector-effect: non-scaling-stroke; stroke-dasharray: 3 2; }
+.pv .pv-l-sel .pv-sel { fill: none; stroke: var(--data); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.pv--art .pv-l-sel .pv-sel { stroke: var(--pv-o-case-l); }
+
+/* path preview: dots reached so far filled, the rest dimmed, the done styling suspended */
+.pv--preview circle.dot { opacity: .45; }
+.pv--preview circle.dot.done { fill: var(--surface); stroke: var(--data); }
+.pv--preview.pv--art circle.dot.done { fill: rgba(31, 95, 209, .15); stroke: var(--pv-o-dot); }
+.pv--preview circle.dot.pv-pre { opacity: 1; fill: var(--data); stroke: var(--data); }
+.pv--preview.pv--art circle.dot.pv-pre { fill: var(--pv-o-dot); stroke: var(--pv-o-dot); }
+.pv--preview .pv-path:not(.pv-path--pre):not(.pv-path--leg) { opacity: .45; }
+.pv--preview .pv-cased--done, .pv--preview .pv-path--done { display: none; }
+.pv .pv-path--pre, .pv .pv-path--leg { fill: none; stroke: var(--pv-path-done); stroke-width: 1.5px; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+.pv:not(.pv--preview) .pv-l-ghost { display: none; }
+.pv .pv-ghost circle:not(.pv-case) { fill: none; stroke: var(--ink); stroke-width: 2px; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; }
+.pv .pv-ghost path:not(.pv-case) { fill: none; stroke: var(--ink); stroke-width: 1.4px; vector-effect: non-scaling-stroke; }
+.pv--art .pv-ghost circle:not(.pv-case), .pv--art .pv-ghost path:not(.pv-case) { stroke: var(--pv-o-ghost); }
+
+/* live top camera (the hero before planning) and the scale bar */
+.pv .pv-cam circle:not(.pv-case), .pv .pv-cam path:not(.pv-case) { fill: none; stroke: var(--accent); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.pv--art .pv-cam circle:not(.pv-case), .pv--art .pv-cam path:not(.pv-case) { stroke: var(--pv-o-probe); }
+.pv .pv-scale path:not(.pv-case) { fill: none; stroke: var(--ink); stroke-width: 2px; vector-effect: non-scaling-stroke; }
+.pv--art .pv-scale path:not(.pv-case) { stroke: var(--pv-o-case-d); }
+/* the label's size is its font-size attribute (boardview.placeScale: 12 px on screen, in mm); a CSS font size here
+   would be read in mm too (user units), so 12px would draw a 12 mm label */
+.pv .pv-scale text { font-family: var(--font-ui); font-weight: 650; fill: var(--ink); }
+.pv--art .pv-scale text { fill: var(--pv-o-case-d); stroke: var(--pv-o-case-l); stroke-width: 3px; paint-order: stroke; stroke-linejoin: round;
+  vector-effect: non-scaling-stroke; }
+
+/* path numbers next to dots (inspector) */
+.pv .pv-dotlabel { font-family: var(--font-ui); font-weight: 700; fill: var(--pv-o-case-d); stroke: var(--pv-o-case-l); stroke-width: 3px; paint-order: stroke;
+  stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+
+/* legend swatches use the marks' colours while the board is drawn (boardflow sets .hero--art on the hero) */
+.hero--art .lg-pad { background: var(--pv-a-bare); border-color: var(--pv-o-ap); }
+.hero--art .lg-dot { border-color: var(--pv-o-dot); background: rgba(31, 95, 209, .15); }
+.hero--art .lg-done { background: var(--pv-o-dot); }
+.hero--art .lg-next { border-color: var(--pv-o-next); }
+.hero--art .lg-dirty { background: var(--pv-o-block); }
+
+/* ================================================================ path preview row (#run-preview, §5.6) */
+.pv-preview { display: flex; align-items: center; gap: 10px; row-gap: 0; padding: 3px 14px; margin: 0 14px 8px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--r-md); flex-wrap: wrap; min-width: 0; flex: none; container: pv-preview / inline-size; }
+.pv-preview[hidden] { display: none; }
+.pv-preview__scrub { flex: 1 1 160px; min-width: 120px; accent-color: var(--data); height: 28px; }
+.pv-preview .seg button { height: 34px; padding: 0 10px; }
+.pv-readout { font: 600 13.5px/1.3 var(--font-ui); color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  flex: 0 1 auto; font-variant-numeric: tabular-nums; }
+.pv-preview .link { flex: none; }
+.pv-preview .pv-preview__toggle { flex: none; width: 34px; height: 34px; }   /* as tall as the speed buttons: a two-line row stays low */
+/* in the stage bar the button never shrinks into "Preview pat": the legend (overflow hidden in run.css) gives way first */
+#pv-play { flex: none; }
+/* the readout is never cut ("… · 0:48 of 1:36" is what the preview is for): below one line's width it gets its own line
+   under the controls (a query on the row's own width: the stage is narrower than the window by the nav and the panel) */
+@container pv-preview (max-width: 900px) {
+  .pv-readout { order: 9; flex-basis: 100%; }
+}
+@media (max-width: 1100px) {
+  #pv-play .pv-play__t { display: none; }
+  #pv-play { width: 40px; padding: 0; }
+}
+
+/* ================================================================ pad inspector (panel view `pad`, §5.7) */
+.pad-insp-head { display: flex; align-items: flex-start; gap: 10px; }
+.pad-insp-head__t { flex: 1; min-width: 0; }
+.pad-insp-head__ref { font: 700 19px/1.25 var(--font-ui); }
+.pad-insp-head__s { font-size: 13.5px; color: var(--ink-2); overflow-wrap: anywhere; margin-top: 2px; white-space: pre-line; }
+.pad-insp-head .btn { flex: none; }
+#pad-insp-svg { height: 240px; border: 1px solid var(--line); border-radius: 12px; background: var(--pv-bg); margin: 12px 0; overflow: hidden; }
+#pad-insp-pads { width: 100%; }
+#pad-insp-pads td, #pad-insp-dots td { white-space: nowrap; padding: 8px 6px; }
+#pad-insp-pads td.pad-insp-type { white-space: normal; }   /* "QFN / DFN perimeter pad" wraps; the numbers do not */
+#pad-insp-pads.pad-insp-pads--one .pad-insp-type { display: none; }   /* one pad type for all: said once, in #pad-insp-types */
+.pad-insp-types { font-size: 14px; color: var(--ink-2); margin: 0 0 2px; }
+#pad-insp-pads th, #pad-insp-dots th { padding: 8px 6px; }
+#pad-insp-pads tr[data-pad] { cursor: pointer; }
+#pad-insp-pads tr[aria-selected="true"] td { background: var(--accent-tint); }
+#pad-insp-pads button.link { font-weight: 700; }
+#pad-insp-rule { font-size: 14px; line-height: 1.45; margin: 12px 0 4px; }
+#pad-insp-rule details { margin-top: 4px; }
+#pad-insp-rule .mono { overflow-wrap: anywhere; }
+#pad-insp-flags .notebox { margin: 8px 0 0; }
+#pad-insp-dots { width: 100%; }
+.pad-insp-why { font-size: 14px; color: var(--ink-2); margin: 8px 0 0; }
+.pad-insp-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+#pad-insp-edit { white-space: normal; height: auto; min-height: 40px; padding: 6px 12px; line-height: 1.25; text-align: left; max-width: 100%; }

@@ -1,0 +1,190 @@
+{
+ "id": "pc-1793295391429",
+ "state": "awaiting-reading",
+ "step": "readings",
+ "manual": null,
+ "startedAtMs": 1793295391429,
+ "endedAtMs": null,
+ "planId": "1a347d89-a338-43d7-9024-1b84422a234b",
+ "boardFile": null,
+ "groups": [
+  "g3946f65377f7"
+ ],
+ "typeKeys": [
+  "sw-spst-3-9x2-9mm-183x86"
+ ],
+ "steps": [
+  {
+   "key": "blank",
+   "state": "done",
+   "text": "blank surface probed: 11 points, Z 5.500..5.600"
+  },
+  {
+   "key": "coupons",
+   "state": "done",
+   "text": "coupon1 and coupon2 found and touched"
+  },
+  {
+   "key": "ladder",
+   "state": "done",
+   "text": "6 dots: half ok"
+  },
+  {
+   "key": "weigh",
+   "state": "done",
+   "text": "30 half-turn dots on coupon1, 30 half-turn dots on coupon2"
+  },
+  {
+   "key": "readings",
+   "state": "now",
+   "text": null
+  },
+  {
+   "key": "decide",
+   "state": "todo",
+   "text": null
+  },
+  {
+   "key": "plan",
+   "state": "todo",
+   "text": null
+  }
+ ],
+ "ladder": [
+  {
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 66,
+   "found": 66,
+   "hops": 63,
+   "threads": 10,
+   "residCv": 0.066,
+   "phase": 0.047,
+   "phaseLimit": 0.13,
+   "dMeanMm": 1.109,
+   "d95Mm": 1.17,
+   "driftPct": -0.036,
+   "landingMeanMm": 0.001,
+   "mgPerDot": null,
+   "massConfirmed": false,
+   "pass": false,
+   "failures": [
+    "half-turn dots trailed a paste thread to the next dot 10 times in 63 moves (at most 4 allowed)"
+   ]
+  }
+ ],
+ "coupons": [
+  {
+   "place": "coupon1",
+   "label": "Coupon 1",
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 30,
+   "recordId": 2,
+   "found": 30,
+   "totalMg": null,
+   "mgPerDot": null,
+   "skipped": false
+  },
+  {
+   "place": "coupon2",
+   "label": "Coupon 2",
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 30,
+   "recordId": 3,
+   "found": 30,
+   "totalMg": null,
+   "mgPerDot": null,
+   "skipped": false
+  }
+ ],
+ "awaiting": {
+  "kind": "readings",
+  "text": "The dots are laid and the head is parked over the purge row. For each coupon: put it on the balance and type the reading; wipe the paste off with a lint-free wipe and isopropyl alcohol, let it dry, put it back on the balance and type the second reading. Coupon 1 has 30 half-turn dots (about 0.032 g); Coupon 2 has 30 half-turn dots (about 0.032 g). Waiting for you since 10:42.",
+  "sinceMs": 1793295769255,
+  "confirmAfterMs": 1793296669250,
+  "staleAtMs": 1793324569250,
+  "coupons": [
+   {
+    "place": "coupon1",
+    "label": "Coupon 1",
+    "steps": 800,
+    "turn": "half turn",
+    "dots": 30,
+    "found": 30,
+    "expectedMg": 32,
+    "recordId": 2,
+    "laidAtMs": 1793295769249,
+    "crop": {
+     "id": "wb1-d3-median",
+     "steps": 800,
+     "turn": "half turn",
+     "dot": 3,
+     "what": "median",
+     "weigh": true,
+     "before": "/api/pad-calibrations/pc-1793295391429/crops/wb1-d3-median-before.png",
+     "after": "/api/pad-calibrations/pc-1793295391429/crops/wb1-d3-median-after.png",
+     "alt": "half turn dot 3 (median)"
+    }
+   },
+   {
+    "place": "coupon2",
+    "label": "Coupon 2",
+    "steps": 800,
+    "turn": "half turn",
+    "dots": 30,
+    "found": 30,
+    "expectedMg": 32,
+    "recordId": 3,
+    "laidAtMs": 1793295769250,
+    "crop": {
+     "id": "wb2-d6-median",
+     "steps": 800,
+     "turn": "half turn",
+     "dot": 6,
+     "what": "median",
+     "weigh": true,
+     "before": "/api/pad-calibrations/pc-1793295391429/crops/wb2-d6-median-before.png",
+     "after": "/api/pad-calibrations/pc-1793295391429/crops/wb2-d6-median-after.png",
+     "alt": "half turn dot 6 (median)"
+    }
+   }
+  ],
+  "unit": "g",
+  "resolutionMg": 1.0
+ },
+ "pendingCoupons": [
+  {
+   "recordId": 2,
+   "place": "coupon1",
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 30,
+   "found": 30,
+   "expectedMg": 32,
+   "laidAtMs": 1793295769249,
+   "staleAtMs": 1793324569249,
+   "jobId": "pc-1793295391429"
+  },
+  {
+   "recordId": 3,
+   "place": "coupon2",
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 30,
+   "found": 30,
+   "expectedMg": 32,
+   "laidAtMs": 1793295769250,
+   "staleAtMs": 1793324569250,
+   "jobId": "pc-1793295391429"
+  }
+ ],
+ "balance": {
+  "kind": "sim",
+  "connected": false
+ },
+ "estimatedSecondsLeft": null,
+ "warnings": [],
+ "result": null
+}

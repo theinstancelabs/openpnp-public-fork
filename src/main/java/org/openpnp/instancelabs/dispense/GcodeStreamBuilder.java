@@ -1,8 +1,10 @@
 package org.openpnp.instancelabs.dispense;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Builds the raw G-code block for one pressure session (plan §4.5, bench recipe 2026-10-28):
@@ -13,6 +15,13 @@ import java.util.Locale;
  * {@code M204 S<screw accel>}, B forward (net + suck-back), dwell, B back (suck-back),
  * {@code M204 S<XY/Z accel>}, Z up. Session end: M400, valve OFF, pump OFF, re-zero B (aborts:
  * the Stop sequence, see {@link #abortLines}).
+ *
+ * <p>Dose blocks (profile calibration design §1.2 R2/R3, §6.2): the dots of one net turn are laid
+ * together. Before every block after the first the needle goes back to the purge row: for a partial
+ * turn a phase dot that leaves the screw, after the flush dots, at the start angle, then the flush
+ * dots of the new dose (they carry the old dose's paste out of the screw), then the cross to the
+ * block. The purge row lies on the blank, so its dots keep the needle-frame floor; the work dots take
+ * their own surface's.</p>
  *
  * <p>All XYZ coordinates go through {@link RawMapper} (OpenPnP's transform chain) and
  * {@link BacklashEmulator}. B targets are whole motor steps from the session's G92 B0 (Marlin
@@ -26,9 +35,16 @@ public class GcodeStreamBuilder {
         public final double x, y, dispenseZ, hopZ, rotationDeg;
         public final int index;
         public final String label;
+        /** Index of the dot's pad in its plan (the validator keeps a pad's dots together), -1 if none. */
+        public final int padIndex;
 
         public DotSpec(double x, double y, double dispenseZ, double hopZ, double rotationDeg, int index,
                 String label) {
+            this(x, y, dispenseZ, hopZ, rotationDeg, index, label, -1);
+        }
+
+        public DotSpec(double x, double y, double dispenseZ, double hopZ, double rotationDeg, int index,
+                String label, int padIndex) {
             this.x = x;
             this.y = y;
             this.dispenseZ = dispenseZ;
@@ -36,10 +52,33 @@ public class GcodeStreamBuilder {
             this.rotationDeg = rotationDeg;
             this.index = index;
             this.label = label;
+            this.padIndex = padIndex;
         }
 
         public static DotSpec of(DispensePlan.PlannedDot d) {
             return new DotSpec(d.xMm, d.yMm, d.dispenseZMm, d.hopZMm, d.rotationDeg, d.index, d.padId);
+        }
+    }
+
+    /**
+     * Dots of one dose laid together (§1.2 R2): {@code netSteps} per dot, in the given order. A
+     * board plan's blocks come from its dots ({@link #forPlan}); calibration builds its own
+     * ({@link #forBlocks}).
+     */
+    public static final class BlockSpec {
+        public final int netSteps;
+        public final List<DotSpec> dots;
+        public final String label;
+        /**
+         * Frame reference of these dots' surface for the needle floor (a coupon place's own Z), or
+         * null: the program's.
+         */
+        public Double floorRefZ;
+
+        public BlockSpec(int netSteps, List<DotSpec> dots, String label) {
+            this.netSteps = netSteps;
+            this.dots = dots;
+            this.label = label;
         }
     }
 
@@ -66,14 +105,20 @@ public class GcodeStreamBuilder {
     private boolean pumpOn, valveOn, armed;
     private final boolean keepalive;
     private double t;
+    /** Estimated time when the last dot's XY move ended (per-dot times of board programs). */
+    private double lastDotArriveT;
     private double pumpOnT = -1;
     private double accel = Double.NaN;
     /** M201 B sent at session start (caps the screw acceleration). */
     private double bAccelLimit = Double.NaN;
+    /** Frame reference of the dots' surface when it is not the needle frame (board top Z), or null. */
+    private Double floorReferenceZ;
     private GcodeProgram.Marker pending;
     private int pendingIndex;
     private String pendingPad;
     private double pendingRot;
+    private int pendingNetSteps;
+    private int pendingPadIndex;
 
     public GcodeStreamBuilder(DispenseConfig cfg, RawMapper mapper, boolean bZeroedAtStart, boolean keepalive) {
         this.cfg = cfg;
@@ -94,6 +139,7 @@ public class GcodeStreamBuilder {
         this.bZeroed = bZeroedAtStart;
         this.bOrigin = bZeroedAtStart ? cfg.bExtrudeSign * mapper.currentB() : Double.NaN;
         prog.bZeroedAtStart = bZeroedAtStart;
+        prog.bStartSteps = bZeroedAtStart ? Math.round(bOrigin * cfg.bStepsPerDeg) : 0;
         prog.keepalive = keepalive;
         checkTravelZ();
     }
@@ -128,10 +174,12 @@ public class GcodeStreamBuilder {
      * above the travel Z (a hop above travel Z would push N1 below its safe zone on the see-saw).
      */
     private void checkDotZ(DotSpec d) {
-        double floor = cfg.needleFloorZMm();
+        double floor = cfg.needleFloorZMm(floorReferenceZ);
         if (!Double.isNaN(floor) && d.dispenseZ < floor - 1e-9) {
             throw new IllegalStateException(String.format(Locale.ROOT, "I4: dot %d (%s) at N2 Z %.3f is below the needle "
-                    + "floor %.3f (needle-frame surface - tolerance + offset)", d.index, d.label, d.dispenseZ, floor));
+                    + "floor %.3f (%s - tolerance + offset)", d.index, d.label, d.dispenseZ, floor,
+                    floorReferenceZ == null ? "needle-frame surface"
+                            : "the lower of the needle-frame surface and the board top Z"));
         }
         if (!(d.hopZ > d.dispenseZ)) {
             throw new IllegalStateException(String.format(Locale.ROOT, "dot %d (%s): lift Z %.3f is not above the "
@@ -151,46 +199,191 @@ public class GcodeStreamBuilder {
     /**
      * Program for a board plan: one pressure session with the purge row first (same recipe as the
      * work), then a cross to the first dot at travel Z with no M400 or dwell (any pause with the
-     * pressure on lets paste ooze onto the tip), then every dot.
+     * pressure on lets paste ooze onto the tip), then every dot. A plan with dots of several doses
+     * lays them block by block (consecutive dots of one dose), with a switch on the purge row
+     * before every block after the first.
      *
      * @param purge purge spots (dot specs at the purge row; their rotation is replaced by the
-     *        profile's), possibly empty
+     *        block's dose), possibly empty: the initial purge, then the switch spots of every
+     *        further block ({@link DoseBlocks#purgeSpotsNeeded}; refused if there are fewer)
      * @param bCount Marlin step count of B at the start of the program (M114 Count), or null if the
-     *        controller did not report it: then the start angle cannot be set (refused for a
-     *        partial-turn profile)
+     *        controller did not report it: then the start angle cannot be set (refused when a
+     *        block is a partial turn)
      */
     public static GcodeProgram forPlan(DispenseConfig cfg, RawMapper mapper, DispensePlan plan,
             List<DotSpec> purge, boolean bZeroed, boolean keepalive, Long bCount) throws Exception {
-        List<DotSpec> dots = new ArrayList<>();
-        for (DispensePlan.PlannedDot d : plan.dots) {
-            dots.add(DotSpec.of(d));
+        Map<String, Integer> padIndex = new HashMap<>();
+        for (int i = 0; i < plan.pads.size(); i++) {
+            padIndex.putIfAbsent(plan.pads.get(i).padId, i);
+        }
+        int[] doses = DoseBlocks.dosesOf(plan, cfg.profile.netStepsPerDot);
+        List<BlockSpec> blocks = new ArrayList<>();
+        for (DoseBlocks.Run r : DoseBlocks.blocksOf(doses)) {
+            List<DotSpec> dots = new ArrayList<>();
+            for (int i = r.first; i < r.first + r.count; i++) {
+                DispensePlan.PlannedDot d = plan.dots.get(i);
+                dots.add(new DotSpec(d.xMm, d.yMm, d.dispenseZMm, d.hopZMm, d.rotationDeg, d.index, d.padId,
+                        padIndexOf(plan, d, padIndex)));
+            }
+            blocks.add(new BlockSpec(r.netSteps, dots, DoseBlocks.turnName(r.netSteps)));
         }
         GcodeStreamBuilder b = new GcodeStreamBuilder(cfg, mapper, bZeroed, keepalive);
         b.bCountAtStart = bCount;
+        b.prog.floorReferenceZMm = plan.boardZMm;
         b.comment("; instancelabs dispense plan " + plan.planId + " board " + plan.boardName + " profile '"
                 + cfg.profile.name + "' " + cfg.profile.fingerprint());
-        b.sessionStart();
-        if (!purge.isEmpty()) {
-            b.travelTo(purge.get(0).x, purge.get(0).y);
-        }
-        else if (!dots.isEmpty()) {
-            b.travelTo(dots.get(0).x, dots.get(0).y);
-        }
-        b.pressurize();
-        b.purge(purge);
-        double workT0 = b.t;
-        for (int i = 0; i < dots.size(); i++) {
-            if (i == 0) {
-                b.travelTo(dots.get(0).x, dots.get(0).y);
-                b.markWorkStart();
-            }
-            // whole steps from the profile (not the plan's degrees: a changed bStepsPerDeg would drift)
-            b.dot(dots.get(i), cfg.profile.netStepsPerDot);
-        }
-        // From the cross after the purge to the last dot's lift: what the bench's DPH counts.
-        b.prog.estimatedWorkSeconds = b.t - workT0;
-        b.endSession();
+        // the purge dots lie on the blank (the anchor's floor); only the board dots take the board's reference
+        b.blocks(blocks, purge, cfg.padCalibration.flushDots, plan.boardZMm);
         return b.build();
+    }
+
+    /**
+     * The dot's pad in the plan: the planner's {@link DispensePlan.PlannedDot#padIndex} (two pads of one
+     * footprint may share a name, and so a pad id), else the first pad of its id (a plan made without it).
+     */
+    private static int padIndexOf(DispensePlan plan, DispensePlan.PlannedDot d, Map<String, Integer> byId) {
+        int i = d.padIndex;
+        if (i >= 0 && i < plan.pads.size() && java.util.Objects.equals(plan.pads.get(i).padId, d.padId)) {
+            return i;
+        }
+        return byId.getOrDefault(d.padId, -1);
+    }
+
+    /**
+     * Program for dose blocks of calibration dots (the pad ladder and the weigh dots): the same
+     * session, purge, switches and phase rules as a board plan, every block in its given order.
+     *
+     * @param purgeSpots the initial purge and the switch spots ({@link DoseBlocks#purgeSpotsNeeded})
+     * @param flush flush dots of every switch (R3; {@link PadCalibrationSettings#flushDots})
+     * @param floorRefZ frame reference of the dots' surface for the needle floor (null: the needle
+     *        frame); a block's own {@link BlockSpec#floorRefZ} replaces it for that block
+     */
+    public static GcodeProgram forBlocks(DispenseConfig cfg, RawMapper mapper, List<BlockSpec> blocks,
+            List<DotSpec> purgeSpots, int flush, boolean bZeroed, boolean keepalive, Long bCount, Double floorRefZ)
+            throws Exception {
+        GcodeStreamBuilder b = new GcodeStreamBuilder(cfg, mapper, bZeroed, keepalive);
+        b.bCountAtStart = bCount;
+        Double lowest = floorRefZ;
+        List<String> labels = new ArrayList<>();
+        for (BlockSpec bs : blocks) {
+            Double ref = bs.floorRefZ != null ? bs.floorRefZ : floorRefZ;
+            if (ref != null && (lowest == null || ref < lowest)) {
+                lowest = ref;
+            }
+            labels.add(bs.label + " x" + bs.dots.size());
+        }
+        // one Z window for the validator: the floor of the lowest reference the program uses
+        b.prog.floorReferenceZMm = lowest;
+        b.comment("; instancelabs dispense blocks: " + String.join(", ", labels) + " profile '" + cfg.profile.name
+                + "' " + cfg.profile.fingerprint());
+        b.blocks(blocks, purgeSpots, flush, floorRefZ);
+        return b.build();
+    }
+
+    /**
+     * The body of a block program: session start, pressure, the initial purge (its first dot sets
+     * the phase when the step count is known), every block (a switch on the purge row before each
+     * after the first), the per-dot times and counts, session end.
+     */
+    private void blocks(List<BlockSpec> blocks, List<DotSpec> purge, int flush, Double floorRef) throws Exception {
+        int rev = cfg.bStepsPerRev;
+        List<DoseBlocks.Run> runs = new ArrayList<>();
+        int total = 0;
+        for (BlockSpec bs : blocks) {
+            runs.add(new DoseBlocks.Run(bs.netSteps, total, bs.dots.size()));
+            total += bs.dots.size();
+        }
+        int switches = 0;
+        for (int k = 1; k < blocks.size(); k++) {
+            switches += DoseBlocks.switchSpots(blocks.get(k).netSteps, flush, rev);
+        }
+        if (blocks.size() > 1 && purge.size() < DoseBlocks.initialPurge(runs, cfg, flush) + switches) {
+            // the spots the row has free: the caller passes none at all when they are too few (rc1 review: "gives 0")
+            int need = DoseBlocks.initialPurge(runs, cfg, flush) + switches;
+            int free = !purge.isEmpty() ? purge.size() : cfg.purgeRow.isDefined() ? cfg.purgeRow.spotsLeft() : 0;
+            throw new IllegalStateException(String.format(Locale.ROOT, "this program lays %d dot sizes: it needs %d "
+                    + "purge spots (%d to start and %d for the block switches), the purge row has %d free: %s",
+                    blocks.size(), need, DoseBlocks.initialPurge(runs, cfg, flush), switches, free,
+                    cfg.purgeRow.spots < need ? "give the row more spots" : "wipe the purge row and reset it"));
+        }
+        boolean partial = DoseBlocks.anyPartial(runs, cfg);
+        if (partial && bCountAtStart == null && (!purge.isEmpty() || blocks.size() > 1)) {
+            throw new IllegalStateException("the controller did not report the B step count (M114 Count): the "
+                    + "screw start angle of a partial-turn dose cannot be set");
+        }
+        DotSpec first = blocks.isEmpty() || blocks.get(0).dots.isEmpty() ? null : blocks.get(0).dots.get(0);
+        sessionStart();
+        if (!purge.isEmpty()) {
+            travelTo(purge.get(0).x, purge.get(0).y);
+        }
+        else if (first != null) {
+            travelTo(first.x, first.y);
+        }
+        pressurize();
+        int initial = purge.size() - switches;
+        purgeDots(purge.subList(0, initial), blocks.isEmpty() ? profile.netStepsPerDot : blocks.get(0).netSteps,
+                bCountAtStart != null, null);
+        int spot = initial;
+        double workT0 = t;
+        double[] arrive = new double[total];
+        double[] end = new double[total];
+        long[] counts = bCountAtStart == null ? null : new long[total];
+        double mgPerStep = DoseBlocks.modelMgPerStep(cfg);
+        prog.blocks = new ArrayList<>();
+        int w = 0;
+        for (int k = 0; k < blocks.size(); k++) {
+            BlockSpec bs = blocks.get(k);
+            GcodeProgram.BlockInfo bi = new GcodeProgram.BlockInfo();
+            bi.netSteps = bs.netSteps;
+            bi.firstDot = w;
+            bi.dots = bs.dots.size();
+            if (k > 0) {
+                boolean phase = DoseBlocks.isPartial(bs.netSteps, rev);
+                int n = DoseBlocks.switchSpots(bs.netSteps, flush, rev);
+                comment(String.format(Locale.ROOT, "; block %d (%s, %d dots): purge row, %s%d flush dots", k + 1,
+                        DoseBlocks.turnName(bs.netSteps), bs.dots.size(), phase ? "phase dot and " : "", flush));
+                floorReferenceZ = null; // the purge row lies on the blank: the needle-frame anchor's floor
+                List<DotSpec> sw = purge.subList(spot, spot + n);
+                spot += n;
+                travelTo(sw.get(0).x, sw.get(0).y);
+                purgeDots(sw, bs.netSteps, phase, k + 1);
+            }
+            double blockT0 = t;
+            floorReferenceZ = bs.floorRefZ != null ? bs.floorRefZ : floorRef;
+            for (int i = 0; i < bs.dots.size(); i++) {
+                DotSpec d = bs.dots.get(i);
+                if (i == 0) {
+                    travelTo(d.x, d.y);
+                    if (k == 0) {
+                        markWorkStart();
+                    }
+                    if (bCountAtStart != null) {
+                        bi.restCountAtStart = restCount();
+                        bi.startAngleDeg = DispenseProfile.angleOfCount(restCount(), rev);
+                    }
+                }
+                if (counts != null) {
+                    counts[w] = restCount();
+                }
+                // whole steps of the block's dose (not the plan's degrees: a changed bStepsPerDeg would drift)
+                dot(d, bs.netSteps);
+                arrive[w] = lastDotArriveT;
+                end[w] = t;
+                w++;
+            }
+            if (bi.dots > 0) {
+                bi.seconds = t - blockT0;
+                bi.switchSeconds = arrive[bi.firstDot] - (k == 0 ? workT0 : end[bi.firstDot - 1]);
+                bi.demandMgS = DoseBlocks.demandMgS(bi.dots, bs.netSteps, mgPerStep, bi.seconds);
+            }
+            prog.blocks.add(bi);
+        }
+        prog.dotArriveSeconds = arrive;
+        prog.dotEndSeconds = end;
+        prog.dotStartCount = counts;
+        // From the cross after the purge to the last dot's lift: what the bench's DPH counts.
+        prog.estimatedWorkSeconds = t - workT0;
+        endSession();
     }
 
     /**
@@ -310,33 +503,30 @@ public class GcodeStreamBuilder {
     }
 
     /**
-     * Purge row: one profile dot per spot. If the B step count is known, the first purge dot turns
-     * the screw so that, after the other purge dots, it rests at the profile's start angle for the
-     * first work dot (required for a partial turn: its dose depends on the angle). The other purge
-     * dots flush the odd-sized first one.
+     * Purge-row dots of {@code steps} each (the purge row: the same recipe as the work). With
+     * {@code phase} (the B step count known) the first dot turns the screw so that, after the others,
+     * it rests at the profile's start angle for the next work dot (required for a partial turn: its
+     * dose depends on the angle); the others flush the odd-sized first one and the previous dose.
+     * {@code block}: the 1-based block a switch leads to, null for the initial purge.
      */
-    public void purge(List<DotSpec> spots) throws Exception {
-        long net = profile.netStepsPerDot;
-        if (spots.isEmpty()) {
-            return; // a partial-turn profile always has purge dots (DispenseProfile.validate, I9)
-        }
-        if (profile.isPartialTurn(cfg) && bCountAtStart == null) {
-            throw new IllegalStateException("the controller did not report the B step count (M114 Count): the "
-                    + "screw start angle of a partial-turn profile cannot be set");
-        }
+    private void purgeDots(List<DotSpec> spots, int steps, boolean phase, Integer block) throws Exception {
         for (int i = 0; i < spots.size(); i++) {
             DotSpec d = spots.get(i);
-            long steps = net;
-            if (i == 0 && bCountAtStart != null) {
-                steps = profile.phaseSteps(cfg, restCount(), spots.size() - 1);
-                comment(String.format(Locale.ROOT, "; first purge dot sets the phase: rest %.1f deg -> %.1f deg, the "
-                        + "work starts at %.1f deg", DispenseProfile.angleOfCount(restCount(), cfg.bStepsPerRev),
-                        DispenseProfile.angleOfCount(restCount() + cfg.bExtrudeSign * steps, cfg.bStepsPerRev),
-                        profile.startAngleSteps(cfg) * 360.0 / cfg.bStepsPerRev));
+            long n = steps;
+            if (i == 0 && phase) {
+                n = profile.phaseSteps(cfg, restCount(), spots.size() - 1, steps);
+                double from = DispenseProfile.angleOfCount(restCount(), cfg.bStepsPerRev);
+                double to = DispenseProfile.angleOfCount(restCount() + cfg.bExtrudeSign * n, cfg.bStepsPerRev);
+                double start = profile.startAngleSteps(cfg) * 360.0 / cfg.bStepsPerRev;
+                comment(block == null
+                        ? String.format(Locale.ROOT, "; first purge dot sets the phase: rest %.1f deg -> %.1f deg, the "
+                                + "work starts at %.1f deg", from, to, start)
+                        : String.format(Locale.ROOT, "; phase dot: rest %.1f deg -> %.1f deg, block %d starts at %.1f "
+                                + "deg", from, to, block, start));
             }
-            dot(new DotSpec(d.x, d.y, d.dispenseZ, d.hopZ, steps / cfg.bStepsPerDeg, PURGE_INDEX, d.label), steps);
+            dot(new DotSpec(d.x, d.y, d.dispenseZ, d.hopZ, n / cfg.bStepsPerDeg, PURGE_INDEX, d.label), n);
         }
-        prog.purgeDotCount = spots.size();
+        prog.purgeDotCount += spots.size();
     }
 
     /** Records the screw state where the work starts (after the purge). */
@@ -373,8 +563,11 @@ public class GcodeStreamBuilder {
         pendingIndex = d.index;
         pendingPad = d.label;
         pendingRot = d.rotationDeg;
+        pendingNetSteps = (int) netSteps;
+        pendingPadIndex = d.padIndex;
         double x = trimX(d.x), y = trimY(d.y);
         moveNozzle(x, y, nozzle[2], cfg.travelFeedMmS, "G0");
+        lastDotArriveT = t;
         moveNozzle(x, y, d.dispenseZ, cfg.zDownFeedMmS, "G1");
         long suck = profile.suckBackSteps(cfg);
         setAccel(profile.screwAccelDegS2);
@@ -522,6 +715,8 @@ public class GcodeStreamBuilder {
         int idx = -9;
         String pad = null;
         double rot = 0;
+        int net = 0;
+        int padIdx = -1;
         List<GcodeProgram.Marker> extra = null;
         if (pending != null && !text.startsWith(";")) {
             if (marker != GcodeProgram.Marker.NONE) {
@@ -532,9 +727,11 @@ public class GcodeStreamBuilder {
             idx = pendingIndex;
             pad = pendingPad;
             rot = pendingRot;
+            net = pendingNetSteps;
+            padIdx = pendingPadIndex;
             pending = null;
         }
-        prog.lines.add(new GcodeProgram.Line(text, marker, idx, pad, rot, extra));
+        prog.lines.add(new GcodeProgram.Line(text, marker, idx, pad, rot, extra, net, padIdx));
     }
 
     private void markLast(GcodeProgram.Marker m, int index, String pad, double rot) {
@@ -551,7 +748,7 @@ public class GcodeStreamBuilder {
             else {
                 extra.add(m);
             }
-            prog.lines.set(i, new GcodeProgram.Line(l.text, primary, index, pad, rot, extra));
+            prog.lines.set(i, new GcodeProgram.Line(l.text, primary, index, pad, rot, extra, l.netSteps, l.padIndex));
             return;
         }
     }

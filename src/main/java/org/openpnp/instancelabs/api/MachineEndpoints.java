@@ -4,6 +4,7 @@ import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +21,7 @@ import javax.imageio.ImageIO;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.HomeReport;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
@@ -53,6 +55,7 @@ final class MachineEndpoints {
         t.setDaemon(true);
         return t;
     });
+    private volatile boolean noJpegLogged;
 
     MachineEndpoints(ApiContext ctx) {
         this.ctx = ctx;
@@ -76,6 +79,8 @@ final class MachineEndpoints {
         String reason = "STOP pressed in the web UI";
         DispenseService svc = ctx.svcOrNull();
         boolean engineWasBusy = svc != null && svc.isBusy();
+        // a pad calibration first: it queues no further engine step once its stop flag is set (§7.8)
+        ctx.padCalJobs.stop(reason);
         if (svc != null) {
             svc.abort(reason);
             actions.add(engineWasBusy
@@ -186,21 +191,62 @@ final class MachineEndpoints {
             ctx.requireEngineIdle(svc);
         }
         ctx.requireNoPressureHold();
+        // OpenPnP homing or jogging by itself: a home queued behind a task of its own that fails is dropped (rc1 review)
+        ctx.requireMachineIdle();
         boolean wait = Json.bool(r.json(), "wait", false);
+        // With the engine: N1 raised first when a STOP left it low, and a STOP during the home stops the
+        // head for good (the drivers are disconnected), as the engine's own homes (§2.3).
+        boolean safe = svc != null && svc.isAvailable();
+        Object held = new Object();
         Future<Object> f = m.submit(() -> {
-            m.home();
-            return null;
-        });
+            // Again on the machine thread, where the hold's start is serialised with this home (§2.7): a
+            // hold queued between the check above and this task must not see the head home under
+            // pressure. Returned, not thrown: OpenPnP drops every task queued behind one that throws.
+            if (ctx.pressure.isActive()) {
+                Logger.info("web home not started: the pressure hold came on before it");
+                return held;
+            }
+            // A failed or stopped home is returned too (and the task never meets OpenPnP's "not started"
+            // throw): an engine task queued behind it would be dropped, and its busy flag stay set for good.
+            try {
+                if (!m.isEnabled()) {
+                    throw new Exception("the machine is not started: press Start first");
+                }
+                if (safe) {
+                    return svc.homeSafely();
+                }
+                m.home();
+                return null;
+            }
+            catch (Exception e) {
+                Logger.warn(e, "web home failed");
+                return e;
+            }
+        }, null, true);
         if (!wait) {
             return ApiServer.Response.json(202, Views.map("started", true, "homing", true));
         }
+        Object rep;
         try {
-            f.get(5, TimeUnit.MINUTES);
+            rep = f.get(5, TimeUnit.MINUTES);
         }
         catch (ExecutionException e) {
             throw ApiException.refused("homing failed: " + rootMessage(e));
         }
-        return Views.map("homed", m.isHomed());
+        catch (TimeoutException e) {
+            // OpenPnP dropped the home (a task of its own ahead of it failed), or it never ended: nothing homed
+            throw ApiException.refused("the home did not start or did not end within 5 min: nothing homed; press Home "
+                    + "again");
+        }
+        if (rep == held) {
+            throw ApiException.refused("the pressure hold came on before the home started: switch the pressure off "
+                    + "first, then home");
+        }
+        if (rep instanceof Exception) {
+            throw ApiException.refused("homing failed: " + rootMessage((Exception) rep));
+        }
+        return Views.map("homed", m.isHomed(), "n1RaisedFromZ", rep instanceof HomeReport
+                ? ((HomeReport) rep).n1RaisedFromZ : null);
     }
 
     static String rootMessage(Throwable t) {
@@ -226,6 +272,36 @@ final class MachineEndpoints {
         s.put("connected", m.isEnabled());
         s.put("homed", m.isHomed());
         s.put("busy", m.isBusy());
+        DispenseService svc = ctx.svcOrNull();
+        if (svc != null) {
+            Map<String, Object> home = Views.home(svc.homePlan());
+            double[] n1 = svc.probeNozzleZ();
+            home.put("n1Z", n1 == null ? null : n1[0]);
+            home.put("n1Low", n1 != null && n1[1] > 0);
+            // which tool is low: N1 under its safe zone, or N1 above it, which on the shared Z puts the needle low
+            home.put("lowTool", n1 == null || n1[1] <= 0 ? null : n1[2] > 0 ? "needle" : "N1");
+            s.put("home", home);
+            DispenseService.ZCheckPlan zc = svc.zCheckPlan(null, false);
+            // a board run's check after the home it does first (every height predates it): what Run announces
+            DispenseService.ZCheckPlan za = svc.boardRunZCheckPlan(true);
+            List<Map<String, Object>> stale = new ArrayList<>();
+            for (org.openpnp.instancelabs.dispense.ZCheck.Stale x : zc.stale) {
+                stale.add(Views.map("what", x.what, "atMs", x.atMs));
+            }
+            // after a failed check of this home: the places set before it (their Z moved too), the derived test dot aside
+            List<Map<String, Object>> places = new ArrayList<>();
+            DispenseConfig cfg = svc.getConfig();
+            for (String name : org.openpnp.instancelabs.dispense.ZCheck.movedPlaces(cfg, zc.last, zc.homeAtMs)) {
+                if (!DispenseEndpoints.TEST_DOT_LOCATION.equals(name)) {
+                    places.add(Views.map("name", name, "atMs", cfg.location(name).setAtMs));
+                }
+            }
+            s.put("zCheck", Views.map("needed", zc.needed, "stale", stale, "homeAtMs", zc.homeAtMs, "reference",
+                    zc.reference == null ? null : Views.map("name", zc.reference.name, "x", zc.reference.x, "y",
+                            zc.reference.y, "z", zc.reference.z), "last", zc.last, "estimateS",
+                    DispenseService.PROBE_POINT_ESTIMATE_S, "touches", zc.touches, "touchesAfterHome", za.touches,
+                    "places", places));
+        }
         List<Map<String, Object>> drivers = new ArrayList<>();
         for (Driver d : m.getDrivers()) {
             Map<String, Object> dm = new LinkedHashMap<>();
@@ -376,9 +452,27 @@ final class MachineEndpoints {
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
         g.drawImage(img, 0, 0, w, h, null);
         g.dispose();
+        return encodeFrame(rgb);
+    }
+
+    /** JPEG, else PNG: never an empty 200. */
+    ApiServer.Response encodeFrame(BufferedImage rgb) throws IOException, ApiException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        ImageIO.write(rgb, "jpg", out);
-        return ApiServer.Response.bytes(200, "image/jpeg", out.toByteArray());
+        if (ImageIO.write(rgb, "jpg", out) && out.size() > 0) {
+            return ApiServer.Response.bytes(200, "image/jpeg", out.toByteArray());
+        }
+        // ImageIO answers false (no exception) when it has no writer for the image. Seen in real mode on the bench
+        // ThinkPad (2026-10-28): the JVM's writers were tif, bmp, gif, wbmp, png, no JPEG. PNG is always there.
+        if (!noJpegLogged) {
+            noJpegLogged = true;
+            Logger.warn("Top camera snapshot: no JPEG writer in this JVM (writers: {}); sending PNG",
+                    String.join(",", ImageIO.getWriterFormatNames()));
+        }
+        out.reset();
+        if (!ImageIO.write(rgb, "png", out) || out.size() == 0) {
+            throw ApiException.unavailable("the camera frame could not be encoded (no JPEG or PNG writer)");
+        }
+        return ApiServer.Response.bytes(200, "image/png", out.toByteArray());
     }
 
     void shutdown() {

@@ -1,0 +1,202 @@
+package org.openpnp.instancelabs.api;
+
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
+
+import org.openpnp.instancelabs.dispense.DispensePlan;
+import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.DoseBlocks;
+import org.openpnp.instancelabs.dispense.PadInstances;
+import org.openpnp.instancelabs.dispense.PadType;
+import org.openpnp.instancelabs.padprofile.Anchor;
+import org.openpnp.instancelabs.padprofile.CheckInputs;
+import org.openpnp.instancelabs.padprofile.DoseModel;
+import org.openpnp.instancelabs.padprofile.ProfileCheck;
+import org.openpnp.instancelabs.padprofile.Suggester;
+import org.pmw.tinylog.Logger;
+
+/**
+ * The profile check as JSON (PROFILE_CALIBRATION_DESIGN.md §3.5) and what a plan view adds for it (§12.5): the
+ * check, per pad its group, dose, predicted and anchored mass, dot size and clearance, per dot its dose, block and
+ * pad, and the plan's dose blocks. The check of a plan is memoised per plan entry while what it depends on holds.
+ */
+final class PadProfileViews {
+    /** The check of a plan entry and what it was computed from (§3.5: keyed by the entry instance). */
+    private static final class Memo {
+        final String tuple;
+        final ProfileCheck.Result result;
+
+        Memo(String tuple, ProfileCheck.Result result) {
+            this.tuple = tuple;
+            this.result = result;
+        }
+    }
+
+    private static final Map<PlanStore.Entry, Memo> MEMO = Collections.synchronizedMap(new WeakHashMap<>());
+
+    private PadProfileViews() {
+    }
+
+    /** The check's inputs of a plan now (the plan's pads, the current types, gate, tip, recipe and evidence). */
+    static CheckInputs inputs(DispenseService svc, DispensePlan plan) throws SQLException {
+        return PadInstances.inputs(svc, PadInstances.fromPlan(plan), true);
+    }
+
+    /** The check of a plan entry, computed again only when its plan, pad types, gate, tip, recipe or evidence changed. */
+    static ProfileCheck.Result check(DispenseService svc, PlanStore.Entry e) throws SQLException {
+        return check(e, inputs(svc, e.plan));
+    }
+
+    static ProfileCheck.Result check(PlanStore.Entry e, CheckInputs in) {
+        String tuple = e.plan.planId + "|" + Json.toJson(in.types) + "|" + in.gate + "|" + Json.toJson(in.tip) + "|"
+                + in.profileSteps + "|" + in.doseFingerprint + "|" + in.pastePartialPackages + "|"
+                + Json.toJson(in.evidence);
+        Memo m = MEMO.get(e);
+        if (m == null || !m.tuple.equals(tuple)) {
+            m = new Memo(tuple, ProfileCheck.of(in));
+            MEMO.put(e, m);
+        }
+        return m.result;
+    }
+
+    /** The plan view's additions (§12.5); a check that fails leaves the plan view as it was, with the reason. */
+    @SuppressWarnings("unchecked")
+    static void addTo(Map<String, Object> out, PlanStore.Entry e, DispenseService svc) {
+        DispensePlan p = e.plan;
+        ProfileCheck.Result r = null;
+        CheckInputs in = null;
+        if (svc != null) {
+            try {
+                in = inputs(svc, p);
+                r = check(e, in);
+            }
+            catch (SQLException | RuntimeException x) {
+                Logger.warn(x, "profile check of plan {} failed", p.planId);
+                out.put("profileCheckError", MachineEndpoints.rootMessage(x));
+            }
+        }
+        out.put("profileCheck", r == null ? null : check(r, in.pastePartialPackages));
+        List<Map<String, Object>> pads = (List<Map<String, Object>>) out.get("pads");
+        for (int i = 0; pads != null && i < pads.size() && i < p.pads.size(); i++) {
+            DispensePlan.PlannedPad x = p.pads.get(i);
+            Map<String, Object> d = pads.get(i);
+            ProfileCheck.PadInfo info = r == null ? null : r.pads.get(x.padId);
+            d.put("profileGroup", info == null ? null : info.group);
+            d.put("dotSteps", x.dotSteps);
+            d.put("dotsPerPad", x.dotsPerPad);
+            d.put("startPhase", x.startPhase);
+            boolean dose = x.dotSteps != null && in != null;
+            d.put("predictedMassMg", dose && x.dotCount > 0
+                    ? r3(x.dotCount * Suggester.mgPerDot(in.evidence, x.dotSteps)) : null);
+            d.put("padRipplePct", dose && x.dotsPerPad > 0 ? rounded(DoseModel.padRipplePct(x.dotSteps * x.dotsPerPad))
+                    : null);
+            d.put("anchorMassMg", info == null ? null : info.anchorMassMg);
+            d.put("dotDiameterMm", dose ? Suggester.dotDiameterMm(in.evidence, x.dotSteps) : null);
+            d.put("clearanceMm", info == null ? null : info.clearanceMm);
+        }
+        List<Map<String, Object>> dots = (List<Map<String, Object>>) out.get("dots");
+        // the dose the stream gives each dot: its own, else its pad's (a plan copied without the dot fields)
+        int[] doses = in == null ? null : DoseBlocks.dosesOf(p, in.profileSteps);
+        for (int i = 0; dots != null && i < dots.size() && i < p.dots.size(); i++) {
+            DispensePlan.PlannedDot x = p.dots.get(i);
+            Map<String, Object> d = dots.get(i);
+            int steps = x.netSteps > 0 || doses == null ? x.netSteps : doses[i];
+            d.put("netSteps", steps);
+            d.put("block", x.block);
+            d.put("padIndex", x.padIndex);
+            d.put("diameterMm", steps > 0 && in != null ? Suggester.dotDiameterMm(in.evidence, steps)[1] : null);
+        }
+        List<Map<String, Object>> blocks = new ArrayList<>();
+        for (DispensePlan.Block b : p.blocks) {
+            blocks.add(Views.map("index", b.index, "netSteps", b.netSteps, "turn", b.turn, "dots", b.dots, "pads",
+                    b.pads, "firstDot", b.firstDot, "lastDot", b.lastDot, "phaseDot", b.phaseDot, "flushDots",
+                    b.flushDots, "demandMgS", b.demandMgS == null ? null : r3(b.demandMgS)));
+        }
+        out.put("blocks", blocks);
+    }
+
+    /** §3.5: the check as JSON, with the packages whose dispensable pads are pasted although others are not. */
+    static Map<String, Object> check(ProfileCheck.Result r, java.util.Collection<String> pastePartial) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ok", r.ok);
+        m.put("fixable", r.fixable);
+        m.put("tipBlocking", r.tipBlocking);
+        m.put("notes", r.notes);
+        m.put("computedAtMs", r.computedAtMs);
+        m.put("tip", Views.map("key", r.tip.key, "name", r.tip.name, "odMm", r.tip.odMm, "minDotSteps",
+                r.tip.minDotSteps, "minDotMm", r.tip.minDotMm));
+        List<Map<String, Object>> anchors = new ArrayList<>();
+        for (Anchor a : r.anchors) {
+            anchors.add(Views.map("family", a.family, "typeKey", a.typeKey, "bench", a.bench, "massPerPadMg",
+                    a.massPerPadMg, "areaMm2", a.areaMm2, "mgPerMm2", a.mgPerMm2, "text", a.text));
+        }
+        m.put("anchors", anchors);
+        List<Map<String, Object>> groups = new ArrayList<>();
+        for (ProfileCheck.Group g : r.groups) {
+            groups.add(group(g));
+        }
+        m.put("groups", groups);
+        m.put("pastePartialPackages", pastePartial == null ? new ArrayList<>() : new ArrayList<>(pastePartial));
+        return m;
+    }
+
+    /** One group of §3.5 ("short" is the group's shortText). */
+    static Map<String, Object> group(ProfileCheck.Group g) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("group", g.group);
+        m.put("label", g.label);
+        m.put("packageIds", g.packageIds);
+        m.put("padNames", g.padNames);
+        m.put("allPadsOfPackage", g.allPadsOfPackage);
+        m.put("refs", g.refs);
+        m.put("parts", g.parts);
+        m.put("pads", g.pads);
+        m.put("padIds", g.padIds);
+        m.put("aperture", g.aperture);
+        m.put("family", g.family);
+        m.put("minPitchMm", g.minPitchMm);
+        m.put("minEdgeGapMm", g.minEdgeGapMm);
+        m.put("hopMm", g.hopMm);
+        m.put("typeKey", g.typeKey);
+        m.put("typeVersion", g.typeVersion);
+        m.put("typeStatus", g.typeStatus);
+        m.put("typeRule", g.typeRule);
+        m.put("reason", g.reason);
+        m.put("tipKind", g.tipKind);
+        m.put("outsideKind", g.outsideKind);
+        m.put("bridgeTo", g.bridgeTo);
+        m.put("nearOf", g.nearOf);
+        m.put("partial", g.partial);
+        m.put("blocking", g.blocking);
+        m.put("fixable", g.fixable);
+        m.put("short", g.shortText);
+        m.put("reasonText", g.reasonText);
+        m.put("suggestion", g.suggestion);
+        return m;
+    }
+
+    /** The profile calibration fields of a pad type version (§5.1), for {@link Views#padType}. */
+    static void padTypeFields(Map<String, Object> m, PadType t) {
+        m.put("dotSteps", t.dotSteps);
+        m.put("dotsPerPad", t.dotsPerPad);
+        m.put("turn", t.dotSteps == null ? null : DoseModel.turnNoun(t.dotSteps));
+        m.put("tipKey", t.tipKey);
+        m.put("doseFp", t.doseFp);
+        m.put("calAreaMm2", t.calAreaMm2);
+        m.put("massPerPadMg", t.massPerPadMg);
+        m.put("origin", t.origin);
+    }
+
+    private static double r3(double x) {
+        return Math.round(x * 1000) / 1000.0;
+    }
+
+    private static double[] rounded(double[] pct) {
+        return new double[] {Math.round(pct[0]), Math.round(pct[1])};
+    }
+}

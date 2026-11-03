@@ -129,20 +129,18 @@ final class PressureHold implements DispenseListener {
         }
         attach(m);
         DispenseConfig c = svc.getConfig();
-        Future<Object> f;
+        Future<String> f;
         try {
-            f = m.submit(() -> {
-                doStart(m, svc, c);
-                return null;
-            });
+            f = m.submit(() -> doStart(m, svc, c));
         }
         catch (RuntimeException e) {
             markOff("could not queue the pressure start: " + e.getMessage());
             throw e;
         }
         long timeout = c.pumpToValveSettleMs + c.valveSettleMs + 4L * c.commandTimeoutMs + 5000;
+        String refused;
         try {
-            f.get(timeout, TimeUnit.MILLISECONDS);
+            refused = f.get(timeout, TimeUnit.MILLISECONDS);
         }
         catch (TimeoutException e) {
             Map<String, Object> s = snapshot();
@@ -154,19 +152,31 @@ final class PressureHold implements DispenseListener {
             throw ApiException.refused("could not switch the pressure on: " + cause.getMessage())
                     .with("pressure", snapshot());
         }
+        if (refused != null) {
+            throw ApiException.refused("could not switch the pressure on: " + refused).with("pressure", snapshot());
+        }
         return snapshot();
     }
 
     /**
      * Machine thread. One line at a time, and every line only while the state is still STARTING:
      * a Stop or Pressure off during the switch-on is seen before the next line (in particular
-     * before valve ON), and the waits are host-side, so no lock is held across them.
+     * before valve ON), and the waits are host-side, so no lock is held across them. Returns why it
+     * did not start before any G-code was sent, else null: those refusals return rather than throw,
+     * because OpenPnP drops every task queued behind one that throws, and an engine task dropped so
+     * would never end (its busy flag would stay set).
      */
-    private void doStart(Machine m, DispenseService svc, DispenseConfig c) throws Exception {
+    private String doStart(Machine m, DispenseService svc, DispenseConfig c) throws Exception {
         if (state != State.STARTING) {
             String why = lastEvent;
             markOff("pressure start cancelled before any G-code was sent (" + why + ")");
-            throw new Exception("cancelled before it started (" + why + ")");
+            return "cancelled before it started (" + why + ")";
+        }
+        // On the machine thread, serialised with the engine's tasks: a task queued at the same time
+        // (its busy flag is set before it is queued) refuses or runs, never both with the hold.
+        if (svc.isBusy()) {
+            markOff("pressure start refused: a dispense task is starting or running");
+            return "a dispense task is starting or running: wait for it or press STOP";
         }
         boolean completed;
         try {
@@ -210,6 +220,7 @@ final class PressureHold implements DispenseListener {
         event("pressure on: " + ControllerCommands.PUMP_ON + ", wait " + c.pumpToValveSettleMs + " ms, "
                 + ControllerCommands.VALVE_ON + ", settle " + c.valveSettleMs + " ms"
                 + (keepaliveArmed ? "; host watchdog armed" : ""));
+        return null;
     }
 
     /** The switch-on lines and waits; false as soon as a stop was requested. */
@@ -509,7 +520,9 @@ final class PressureHold implements DispenseListener {
 
     @Override
     public void onFinished(RunResult run) {
-        if (state == State.ON) {
+        // A task refused before it sent a line (on the machine thread, because this hold is on) left the
+        // pneumatics as they were: the barrel is still held under pressure.
+        if (state == State.ON && run.linesSent > 0) {
             markOff("the " + run.kind + " run switched the pneumatics off at its end");
         }
     }

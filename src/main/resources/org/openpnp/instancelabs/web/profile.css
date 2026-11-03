@@ -96,7 +96,8 @@
 .pt-table col.pt-c-val { width: 74px; }
 .pt-table col.pt-c-act { width: 150px; }
 .pt-name { min-width: 0; }
-.pt-name__t { font: 650 14.5px/1.2 var(--font-ui); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a long generated name (SW_SPST_3.9x2.9mm · 1.83 × 0.86 mm) wraps: cut, it lost the size that tells two types apart */
+.pt-name__t { font: 650 14.5px/1.2 var(--font-ui); overflow-wrap: anywhere; }
 .pt-name__k { font-size: 12px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pt-act__b { display: flex; gap: 8px; justify-content: flex-end; }
 .pt-act .btn { height: 40px; }
@@ -158,11 +159,14 @@
 .pt-ladder li.on { color: var(--ink); background: var(--ok-bg); border-color: var(--ok-line); font-weight: 600; }
 .pt-ladder .tag { margin-left: auto; height: 18px; padding: 0 5px; font-size: 10px; }
 .pt-plan { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.pt-plan__i { width: 100%; display: flex; align-items: center; gap: 10px; min-height: 46px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-align: left; color: var(--ink); }
+/* status | the name with its pad count under it | chevron: a long name (SW_SPST_3.9x2.9mm · 1.83 × 0.86 mm) wraps in
+   the panel's width instead of running under the count */
+.pt-plan__i { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "b n c" "b v c"; align-items: center; column-gap: 10px; row-gap: 1px; min-height: 46px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-align: left; color: var(--ink); }
 .pt-plan__i:hover { background: var(--tile); }
-.pt-plan__n { flex: 1; font-weight: 650; min-width: 0; }
-.pt-plan__v { font-size: 13px; color: var(--ink-2); white-space: nowrap; }
-.pt-plan__i .ic { width: 16px; height: 16px; color: var(--ink-3); }
+.pt-plan__i > :first-child { grid-area: b; }
+.pt-plan__n { grid-area: n; align-self: end; font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
+.pt-plan__v { grid-area: v; align-self: start; font-size: 13px; color: var(--ink-2); }
+.pt-plan__i .ic { grid-area: c; width: 16px; height: 16px; color: var(--ink-3); }
 .pt-ph { display: flex; align-items: center; gap: 8px; padding: 10px 14px 10px 8px; border-bottom: 1px solid var(--line); min-height: 64px; }
 .pt-ph__t { flex: 1; min-width: 0; }
 .pt-ph__t h2 { font-size: 18px; overflow-wrap: anywhere; }

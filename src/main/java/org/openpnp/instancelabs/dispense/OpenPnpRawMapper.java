@@ -32,6 +32,21 @@ public class OpenPnpRawMapper implements RawMapper {
     private final GcodeDriver driver;
 
     public OpenPnpRawMapper(ReferenceMachine machine, Nozzle nozzle, String bAxisName) throws Exception {
+        this(machine, nozzle, bAxisName, true);
+    }
+
+    /**
+     * The mapper of the N1 vacuum probe: the same X/Y/Z and driver checks, but N1's rotation may map
+     * to its own axis (A); B stays the configured auger axis (for M18 B and {@link #resync}). N1's Z
+     * must be untransformed ({@link #probeNozzleProblem}).
+     */
+    public static OpenPnpRawMapper forProbeNozzle(ReferenceMachine machine, Nozzle n, String bAxisName)
+            throws Exception {
+        return new OpenPnpRawMapper(machine, n, bAxisName, false);
+    }
+
+    private OpenPnpRawMapper(ReferenceMachine machine, Nozzle nozzle, String bAxisName, boolean requireRotationOnB)
+            throws Exception {
         this.machine = machine;
         this.nozzle = nozzle;
         Location here = nozzle.getLocation();
@@ -71,7 +86,7 @@ public class OpenPnpRawMapper implements RawMapper {
         if (!(named instanceof ReferenceControllerAxis)) {
             throw new Exception("Auger axis '" + bAxisName + "' is not a controller axis");
         }
-        if (b != null && b != named) {
+        if (requireRotationOnB && b != null && b != named) {
             throw new Exception("Nozzle " + nozzle.getName() + " rotation maps to axis " + b.getName()
                     + ", not the configured auger axis " + bAxisName);
         }
@@ -100,6 +115,27 @@ public class OpenPnpRawMapper implements RawMapper {
 
     public GcodeDriver getDriver() {
         return driver;
+    }
+
+    /**
+     * Why this mapper's nozzle cannot be the N1 vacuum probe, or null: it must not be the dispenser
+     * nozzle, and its OpenPnP Z must be its raw Z (the probe sends N1 Z as raw Z, as the bench does).
+     */
+    public String probeNozzleProblem(Nozzle dispenser) {
+        if (nozzle == dispenser) {
+            return "PROBE: '" + nozzle.getName() + "' is the dispenser nozzle; the vacuum probe needs N1";
+        }
+        try {
+            double[] n = currentNozzleLocation();
+            if (Math.abs(toRaw(n[0], n[1], 5).z - 5) > 1e-6 || Math.abs(toRaw(n[0], n[1], 10).z - 10) > 1e-6) {
+                return "PROBE: " + nozzle.getName() + "'s Z is transformed in OpenPnP; the probe needs "
+                        + nozzle.getName() + " Z = raw Z";
+            }
+        }
+        catch (Exception e) {
+            return "PROBE: " + nozzle.getName() + "'s Z cannot be mapped to the controller: " + e.getMessage();
+        }
+        return null;
     }
 
     public Nozzle getNozzle() {

@@ -249,3 +249,19 @@
 /* Places: the table stays inside the card (an unsaved row adds its remove button) */
 .su-ptable-wrap { max-width: 100%; overflow-x: auto; }
 .ptable td.acts { white-space: normal; }
+
+/* ================================================================ Probe the blank, automatic (AUTO_REGISTER_DESIGN.md §8.4) */
+.su-blank-note { font-size: 13.5px; line-height: 1.42; color: var(--ink-2); }
+.su-blank-tbl caption, .su-tbl-cap { caption-side: top; text-align: left; font: 700 11.5px/1 var(--font-ui); letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); padding: 2px 0 6px; }
+.su-blank-tbl td { height: 38px; font-variant-numeric: tabular-nums; }
+.su-blank-tbl th:last-child, .su-blank-tbl td:last-child { width: 86px; }
+.su-blank-tbl td.su-blank-st { font-weight: 600; color: var(--ink-2); }
+.su-blank-tbl td.su-blank-st.bad { color: var(--block); }
+.su-blank-tbl tr.bad td { background: var(--block-bg); }
+.su-blank-result .su-blank-result__t { font: 500 15px/1.42 var(--font-ui); display: block; }
+.su-blank-result .su-blank-result__t b { font-weight: 700; }
+.su-blank-result .su-blank-tiles { margin-top: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.su-blank-result .su-blank-fix { color: var(--ink-2); font-size: 13.5px; }
+.su-blank-hand > summary { padding: 10px 0 6px; }
+.su-blank-hand > .stack { margin-top: 8px; }
+#blank-why .link { font: inherit; font-weight: 650; }

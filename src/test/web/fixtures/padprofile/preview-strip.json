@@ -1,0 +1,244 @@
+{
+ "steps": [
+  {
+   "key": "blank",
+   "state": "todo",
+   "text": null,
+   "estimatedSeconds": 187
+  },
+  {
+   "key": "coupons",
+   "state": "todo",
+   "text": null,
+   "estimatedSeconds": 104
+  },
+  {
+   "key": "ladder",
+   "state": "todo",
+   "text": null,
+   "estimatedSeconds": 32
+  },
+  {
+   "key": "weigh",
+   "state": "todo",
+   "text": null,
+   "estimatedSeconds": 84
+  },
+  {
+   "key": "readings",
+   "state": "todo",
+   "text": null,
+   "estimatedSeconds": 0
+  },
+  {
+   "key": "decide",
+   "state": "todo",
+   "text": null,
+   "estimatedSeconds": 0
+  },
+  {
+   "key": "plan",
+   "state": "todo",
+   "text": null,
+   "estimatedSeconds": 0
+  }
+ ],
+ "estimatedSeconds": 407,
+ "pasteMg": 80,
+ "blank": {
+  "surfaceName": "blank",
+  "x0": 334.0,
+  "x1": 362.0,
+  "y0": 230.2,
+  "y1": 239.7,
+  "usesMm": 9.6,
+  "leftMm": 15.8,
+  "leftAfterMm": 6.3,
+  "heightMm": 18.0,
+  "probe": true,
+  "probeWhy": "the 'blank' surface does not reach the calibration area's corners"
+ },
+ "ladder": [
+  {
+   "steps": 800,
+   "turn": "half turn",
+   "dots": 12,
+   "label": "control (half turn)",
+   "pitchMm": 2.5
+  },
+  {
+   "steps": 400,
+   "turn": "quarter turn",
+   "dots": 12,
+   "label": "quarter turn",
+   "pitchMm": 2.0
+  }
+ ],
+ "coupons": [
+  {
+   "place": "coupon1",
+   "label": "Coupon 1",
+   "steps": 400,
+   "turn": "quarter turn",
+   "dots": 32,
+   "pitchMm": 2.0,
+   "expectedMg": 17
+  },
+  {
+   "place": "coupon2",
+   "label": "Coupon 2",
+   "steps": 400,
+   "turn": "quarter turn",
+   "dots": 32,
+   "pitchMm": 2.0,
+   "expectedMg": 17
+  }
+ ],
+ "notWeighed": [],
+ "purgeSpots": {
+  "need": 26,
+  "left": 7
+ },
+ "home": {
+  "needed": false,
+  "whyCode": "homed",
+  "why": "homed",
+  "sinceMs": 1793295138866,
+  "policy": "whenNeeded",
+  "homedAtMs": 1793295138866,
+  "estimateS": 11.057
+ },
+ "zCheck": {
+  "needed": false,
+  "estimateS": 0.0
+ },
+ "probes": [
+  {
+   "surface": "blank",
+   "x": 284.0,
+   "y": 226.0
+  },
+  {
+   "surface": "blank",
+   "x": 309.0,
+   "y": 226.0
+  },
+  {
+   "surface": "blank",
+   "x": 334.0,
+   "y": 226.0
+  },
+  {
+   "surface": "blank",
+   "x": 284.0,
+   "y": 239.5
+  },
+  {
+   "surface": "blank",
+   "x": 309.0,
+   "y": 239.5
+  },
+  {
+   "surface": "blank",
+   "x": 334.0,
+   "y": 239.5
+  },
+  {
+   "surface": "blank",
+   "x": 335.0,
+   "y": 229.0
+  },
+  {
+   "surface": "blank",
+   "x": 361.0,
+   "y": 229.0
+  },
+  {
+   "surface": "blank",
+   "x": 361.0,
+   "y": 245.0
+  },
+  {
+   "surface": "blank",
+   "x": 335.0,
+   "y": 245.0
+  },
+  {
+   "surface": "blank",
+   "x": 348.0,
+   "y": 237.0
+  },
+  {
+   "surface": "coupon1",
+   "x": 336.0,
+   "y": 46.0
+  },
+  {
+   "surface": "coupon1",
+   "x": 364.0,
+   "y": 46.0
+  },
+  {
+   "surface": "coupon1",
+   "x": 336.0,
+   "y": 64.0
+  },
+  {
+   "surface": "coupon2",
+   "x": 336.0,
+   "y": 81.0
+  },
+  {
+   "surface": "coupon2",
+   "x": 364.0,
+   "y": 81.0
+  },
+  {
+   "surface": "coupon2",
+   "x": 336.0,
+   "y": 99.0
+  }
+ ],
+ "groups": [
+  {
+   "group": "g40510718d672",
+   "label": "Test_Strip_0.62x1.50 · 1.50 × 0.62 mm",
+   "kind": "new",
+   "typeKey": "test-strip-0-62x1-50-150x62",
+   "steps": 400,
+   "perPad": 2,
+   "turn": "quarter turn",
+   "doses": [
+    400
+   ],
+   "hopMm": 2.0,
+   "validated": false
+  }
+ ],
+ "saves": [
+  {
+   "group": "g40510718d672",
+   "kind": "new",
+   "typeKey": "test-strip-0-62x1-50-150x62",
+   "steps": 400,
+   "perPad": 2
+  }
+ ],
+ "demotes": [],
+ "skipped": [],
+ "needs": [
+  "two clean weigh coupons on coupon1 and coupon2 (blank PCB, 40 × 30 mm, at least 3 g)",
+  "the balance",
+  "a lint-free wipe and isopropyl alcohol"
+ ],
+ "notes": [],
+ "sentence": "Probes the blank with N1 (11 points, ≈ 3:07). Checks and touches your two weigh coupons (≈ 1:44). Lays 24 test dots on the blank (12 half-turn, 12 quarter-turn) in X 334.0–362.0, Y 230.2–239.7 (6.3 of 18.0 mm left after this) and looks at them with the top camera (≈ 32 s). Then lays 32 quarter-turn dots on coupon 1 and 32 quarter-turn dots on coupon 2 (≈ 1:24) and parks the head over the purge row. Then it needs you once: weigh each coupon, wipe it and weigh it again (4 readings). About 0.08 g of paste, ≈ 6:47 before your readings.",
+ "needsText": "You need: two clean weigh coupons on coupon1 and coupon2 (blank PCB, 40 × 30 mm, at least 3 g), the balance, a lint-free wipe and isopropyl alcohol.",
+ "source": {
+  "planId": "04ccb09c-19e8-4cd8-acbd-63d738543419",
+  "boardName": "padcal"
+ },
+ "manual": null,
+ "refusal": "Read the regulator first: it must show 18.0 psi (Run › Checks › Regulator).",
+ "refusalCode": "refused"
+}

@@ -23,6 +23,13 @@
       case 'shots': return r.board === 'waste' ? 'Prime' : r.board === 'waste-test-dot' ? 'Test dot' : 'Scale shots' + (r.board ? ' · ' + r.board : '');
       case 'dot-ladder': return 'Dot ladder';
       case 'touch-off': return 'Touch-off';
+      // Register board, the automatic probe of a surface, Check Z (AUTO_REGISTER_DESIGN.md §8.2)
+      case 'board-registration': return 'Registration' + (r.board ? ' · ' + r.board : '');
+      case 'surface-probe': return 'Surface probe' + (r.board ? ' · ' + r.board : '');
+      case 'z-check': return 'Z check';
+      // the pad calibration's engine steps (PROFILE_CALIBRATION_DESIGN.md §13.5)
+      case 'pad-ladder': return 'Pad calibration · blank';
+      case 'pad-weigh': return 'Pad calibration · coupons';
       default: return IL.cap(r.kind || 'Task');
     }
   }
@@ -277,6 +284,9 @@
     const src = plan.source || {};
     const bv = IL.boardview.create(host, { aria: 'Done-dot map' + (only ? ' of this run' : '') + ': ' + done + ' pads done, ' + part + ' partly, ' + left + ' not dispensed' });
     bv.setPlan(plan, { origin: src.source === 'file' ? { x: Number(src.x), y: Number(src.y) } : null });
+    // H4 (BOARD_IMPORT_DESIGN.md §5.1.1): the board drawing under the map once boardflow.js loads
+    if (IL.boardFlow) IL.boardFlow.recordsMap(bv, plan);
+    R.mapBv = bv;
     if (timings) bv.update({ done: doneIdx, check });
     return { host, done, part, left, leftPads };
   }
@@ -292,6 +302,8 @@
     const key = JSON.stringify([r.id, r.status, r.dots_done, !!lr, plan ? plan.planId : null, IL.basePlanId(r.plan_id) in R.plans,
       part ? (runPlan ? 1 : runPlan === null ? 0 : -1) : '']);
     IL.keyed(p.body, key, () => {
+      // H5 (BOARD_IMPORT_DESIGN.md §5.1.1): the replaced map view lets go of its ResizeObserver and SVGs
+      if (R.mapBv) { R.mapBv.destroy(); R.mapBv = null; }
       const start = serverToClient(r.started_at), end = serverToClient(r.ended_at);
       const prof = profileOf(r);
       const out = [
@@ -370,7 +382,8 @@
       IL.go('#run');
     }, { ok: 'Plan restored on Run: finish the ' + padIds.length + ' pads from the board decision there.' });
   }
-  const mini = (k, v, s) => el('div', { class: 'mini' }, el('div', { class: 'mini__k', text: k }), el('div', { class: 'mini__v', text: v }), s ? el('div', { class: 'mini__s', text: s }) : null);
+  // the subline keeps a label with its number on one line ("bench 5,490")
+  const mini = (k, v, s) => el('div', { class: 'mini' }, el('div', { class: 'mini__k', text: k }), el('div', { class: 'mini__v', text: v }), s ? el('div', { class: 'mini__s', text: IL.nb(s) }) : null);
   function calDetail(p, s, id) {
     const d = pcr.calibrations && pcr.calibrations();
     const k = d && d.calibrations.find((x) => String(x.id) === String(id));
@@ -414,8 +427,11 @@
         el('div', { class: 'rec-ph__s', text: IL.fmtDateTime(serverToClient(t.created_at)) })),
       el('div', { class: 'minis' }, mini('Offset', IL.fmtSigned(t.z_offset_mm, 3), 'mm'), mini('Change', isNum(v.delta) ? IL.fmtSigned(v.delta, 3) : '—', 'from ' + (isNum(t.previous_offset_mm) ? IL.fmtSigned(t.previous_offset_mm, 3) : '—') + ' mm')),
       a ? [IL.sectionK('Gaps and dots'), el('table', { class: 'tbl rec-mini-t' }, el('thead', {}, el('tr', {}, ['Gap mm', 'Dot Ø mm'].map((h) => el('th', { class: 'r' }, IL.unitText(h))))),
-        el('tbody', {}, (a.gapsMm || []).map((g, i) => el('tr', { class: isNum(a.contactGapMm) && Math.abs(g - a.contactGapMm) < 1e-9 ? 'is-contact' : null },
-          el('td', { class: 'r', text: IL.fmtSigned(g, 3) }), el('td', { class: 'r', text: isNum((a.diametersMm || [])[i]) ? IL.fmt(a.diametersMm[i], 3) : 'no dot' }))))),
+        el('tbody', {}, (a.gapsMm || []).map((g, i) => {
+          const dot = pcr.touchOffDot(a, i);   // "not measured" (its note as the tooltip), "no dot" only for no paste
+          return el('tr', { class: isNum(a.contactGapMm) && Math.abs(g - a.contactGapMm) < 1e-9 ? 'is-contact' : null },
+            el('td', { class: 'r', text: IL.fmtSigned(g, 3) }), el('td', { class: 'r', text: dot.text, title: dot.note }));
+        }))),
       el('p', { class: 'panel__lead', text: isNum(a.contactGapMm) ? 'Contact at a gap of ' + IL.fmtSigned(a.contactGapMm, 3) + ' mm.' + (a.reason ? ' ' + a.reason : '') : (a.reason || 'No contact found.') })] : null,
       v.note ? el('p', { class: 'panel__lead rec-note', text: v.note }) : null,
       v.det && v.det.blank ? el('p', { class: 'panel__lead', text: 'On “' + v.det.blank + '”' + (isNum(v.det.blankPlaneMaxResidualMm) ? ', surface worst residual ' + IL.fmt(v.det.blankPlaneMaxResidualMm, 3) + ' mm' : '') + '.' }) : null];

@@ -41,6 +41,15 @@ public final class CameraCapture {
         return of(cam, image, cam.getUnitsPerPixel(z));
     }
 
+    /**
+     * Same as {@link #capture(Camera, Length)}, with the camera's light actuator on
+     * (camera.lightSettleAndCapture()).
+     */
+    public static Capture captureLit(Camera cam, Length z) throws Exception {
+        BufferedImage image = cam.lightSettleAndCapture();
+        return of(cam, image, cam.getUnitsPerPixel(z));
+    }
+
     private static Capture of(Camera cam, BufferedImage image, Location upp) throws Exception {
         if (image == null) {
             throw new Exception("Camera " + cam.getName() + " returned no image");

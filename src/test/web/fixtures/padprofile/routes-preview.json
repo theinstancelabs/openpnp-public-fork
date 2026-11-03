@@ -1,0 +1,5 @@
+{
+  "_": "Calibrate automatically… before it starts: the summary of Test_Strip_0.62x1.50 (see routes.json); no job in the status.",
+  "GET /api/pad-calibrations/preview": "preview-strip.json",
+  "GET /api/status": {"merge": {"padCalibration": null}}
+}

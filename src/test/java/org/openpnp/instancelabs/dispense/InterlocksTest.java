@@ -158,10 +158,11 @@ public class InterlocksTest {
         in.controllerConnectedAtMs = null; // connect time unknown: set at all is enough
         in.cfg.profile.startAngleSetAtMs = 1L;
         assertFalse(Interlocks.check(in).has("I11"));
-        // a whole revolution per dot repeats the angle whatever it is
+        // a whole revolution per dot repeats the angle whatever it is (the plan's dots carry their turn)
         in = ok();
         in.cfg.profile.netStepsPerDot = 1600;
         in.cfg.profile.startAngleSetAtMs = null;
+        in.plan = GcodeStreamTest.toyPlan(in.cfg);
         assertFalse(Interlocks.check(in).has("I11"), Interlocks.check(in).toString());
     }
 
@@ -251,6 +252,9 @@ public class InterlocksTest {
         // an invalid profile is a configuration problem
         in = ok();
         in.cfg.profile.netStepsPerDot = 600;
+        assertTrue(Interlocks.check(in).has("CONFIG"));
+        // two turns per dot: refused before anything moves, not by the stream check after the home
+        in.cfg.profile.netStepsPerDot = 3200;
         assertTrue(Interlocks.check(in).has("CONFIG"));
     }
 }

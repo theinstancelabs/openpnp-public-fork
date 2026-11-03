@@ -1,0 +1,5 @@
+{
+  "_": "The result card of a finished pad calibration (see routes.json).",
+  "GET /api/status": {"merge": {"padCalibration": "job-result.json"}},
+  "GET /api/pad-calibrations/current": "job-result.json"
+}

@@ -261,13 +261,14 @@
   };
   /**
    * Keeps a number with its unit and a short label with its number on one line ("2,343 ms", "pitch 1.65 mm",
-   * "bench 5,490", "1 to 64"): the spaces between them become no-break spaces. Display text only.
+   * "bench 5,490", "1 to 64", "0.072 g"): the spaces between them become no-break spaces. Display text only.
    */
   IL.nb = function (text) {
     return String(text)
-      .replace(/(\d) (?=(?:mm²|mm|ms|min|s|°|psi|rpm|DPH|mg|mm\/100|%|per|spots?|dots?|pads?|of|to)(?![\w²]))/g, '$1\u00a0')
+      .replace(/(\d) (?=(?:mm²|mm|ms|min|s|°|psi|rpm|DPH|mg|g|mm\/100|%|per|spots?|dots?|pads?|of|to)(?![\w²]))/g, '$1\u00a0')
       .replace(/\b(bench|estimate|gap|dwell|purge|pitch|slowest|fastest|median|ended|started|limit|worst|tilt|offset|frame) (?=[\d−+-])/g, '$1\u00a0')
-      .replace(/([a-z])-([a-z])/g, '$1\u2011$2');
+      .replace(/([a-z])-([a-z])/g, '$1\u2011$2')
+      .replace(/≈ (?=[\d−-])/g, '≈\u00a0');
   };
   /** <dl class="kv"> from [[key, value, title?], ...]; rebuilt only when the pairs change. */
   IL.kv = function (dl, pairs) {
@@ -340,6 +341,12 @@
     if (m >= 60) return Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
     return m + ' min ' + (t % 60) + ' s';
   };
+  /** An estimate in whole seconds: 25 → "25 s", 85 → "1 min 25 s" (the ≈ is the caller's). */
+  IL.fmtSecs = function (s) {
+    if (!isNum(s)) return '—';
+    const t = Math.max(0, Math.round(Number(s)));
+    return t < 90 ? t + ' s' : Math.floor(t / 60) + ' min' + (t % 60 ? ' ' + (t % 60) + ' s' : '');
+  };
   IL.fmtTime = (ms) => { if (!ms) return '—'; const d = new Date(ms); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
   IL.fmtTimeS = (ms) => { if (!ms) return '—'; const d = new Date(ms); return IL.fmtTime(ms) + ':' + pad2(d.getSeconds()); };
   IL.fmtDateTime = function (ms) {
@@ -358,6 +365,8 @@
     return Math.round(s / 86400) + ' days ago';
   };
   IL.plural = (n, one, many) => n + ' ' + (n === 1 ? one : (many || one + 's'));
+  /** The Z check's touches (status.machine.zCheck.touches…): one per home period the N1 heights were measured in. */
+  IL.zTouches = (n) => (n > 1 ? n + ' N1 touches (heights from ' + n + ' different homes)' : 'one N1 touch');
   /**
    * ASCII number string for an <input> value (fmt uses a real minus that Number() cannot read). d: decimals to show
    * (0.1 → "0.10") unless that would lose digits: a stored 0.125 stays "0.125", so a save never rounds it away.
@@ -504,7 +513,8 @@
     planForgotten: false,  // GET /api/plan/{id} answered 404 (OpenPnP restarted)
     planAt: 0,
     cleanCheck: null,      // newest clean-pad report of the plan shown (plan, its subsets, or lastRun)
-    newSeatAtMs: lsJson('il.newSeatAtMs', null), // operator said "re-seated / new board": probe this seat
+    newSeatAtMs: null,     // the engine's new-seat flag (status.dispense.newSeatAtMs) as client ms: probe this seat
+    newSeatPending: 0,     // client ms of an IL.setNewSeat post in flight (the status may still show the old flag)
     route: { ws: 'run', section: null, id: null, panel: null },
     recovery: null,        // after STOP / ABORTED / ERROR: see IL.recoverySteps
     lastStop: null,        // the last recovery, kept after it cleared (board decision on Run)
@@ -603,18 +613,46 @@
     }
     return a;
   }
-  /** The operator answered "re-seated / new board" (or null after probing or "same seat"). */
+  /**
+   * The operator answered "re-seated / new board" (atMs) or "same seat" / probed (null). The answer is the engine's
+   * new-seat flag (POST /api/board/new-seat, AUTO_REGISTER_DESIGN.md §3.6): Register board probes again after it, and
+   * every page and browser sees it at its next status (S.newSeatAtMs mirrors status.dispense.newSeatAtMs, client ms).
+   * Returns the promise of the post; a refusal (a task runs) is a toast and the status keeps the engine's answer.
+   */
   IL.setNewSeat = function (atMs) {
-    S.newSeatAtMs = atMs || null;
-    lsSet('il.newSeatAtMs', atMs ? JSON.stringify(atMs) : null);
+    S.newSeatAtMs = atMs ? Date.now() : null;
+    S.newSeatPending = Date.now();
     attestVersion++;
     IL.render();
+    return IL.api('POST', '/api/board/new-seat', { newSeat: !!atMs }).then((r) => {
+      S.newSeatAtMs = r && isNum(r.newSeatAtMs) ? r.newSeatAtMs - S.skewMs : null;
+      return S.newSeatAtMs;
+    }).catch((e) => {
+      IL.toast((atMs ? 'New seat not noted: ' : 'Same seat not noted: ') + IL.errorText(e), 'need');
+      return null;
+    }).finally(() => { S.newSeatPending = 0; attestVersion++; IL.render(); });
   };
-  // both live in this browser's localStorage: an answer or a tick in another tab counts here at once (without this a
-  // second tab stayed "Ready to run" on the old seat's surface)
+  /** status.dispense.newSeatAtMs (server ms) → S.newSeatAtMs (client ms); a post in flight wins for 3 s. */
+  function mirrorNewSeat(s) {
+    const d = (s && s.dispense) || {};
+    if (!('newSeatAtMs' in d) || (S.newSeatPending && Date.now() - S.newSeatPending < 3000)) return;
+    const v = isNum(d.newSeatAtMs) ? d.newSeatAtMs - S.skewMs : null;
+    if ((v === null) !== (S.newSeatAtMs === null) || (v !== null && Math.abs(v - S.newSeatAtMs) > 2000)) {
+      S.newSeatAtMs = v;
+      attestVersion++;
+    }
+  }
+  /** One-time migration: a new-seat answer this browser kept before the engine flag existed is posted once. */
+  function migrateNewSeat(s) {
+    const old = lsJson('il.newSeatAtMs', null);
+    if (old === null || old === undefined) return;
+    lsSet('il.newSeatAtMs', null);
+    const d = (s && s.dispense) || {};
+    if (isNum(old) && 'newSeatAtMs' in d && !isNum(d.newSeatAtMs)) IL.setNewSeat(old);
+  }
+  // the attestations live in this browser's localStorage: a tick in another tab counts here at once
   window.addEventListener('storage', (e) => {
-    if (e.key !== null && e.key !== ATTEST_KEY && e.key !== 'il.newSeatAtMs') return;
-    S.newSeatAtMs = lsJson('il.newSeatAtMs', null);
+    if (e.key !== null && e.key !== ATTEST_KEY) return;
     attestVersion++;
     IL.render();
   });
@@ -656,9 +694,40 @@
     || !!(s.pressure && ((s.pressure.state && s.pressure.state !== 'off') || s.pressure.engineRunActive))
     || !!(s.machine && s.machine.busy));
   IL.interlock = (s, id) => ((s && s.interlocks) || []).find((i) => i.id === id) || null;
+  /** A STOP left N1 low and nothing homed since (status.machine.home.n1Low, with a home policy): the operator looks first. */
+  IL.n1Low = function (status) {
+    const m = ((status || S.status) || {}).machine || {};
+    return !!(m.enabled && !m.homed && m.home && m.home.policy && m.home.n1Low);
+  };
+  /**
+   * Which tool a STOP left low (status.machine.home.lowTool): N1 under its safe zone, or N1 above it, which on the shared
+   * Z axis puts the needle low (a STOP during board dots). {needle, name, z (the low tool's Z), pad (the pad of the plan
+   * shown under the needle, within 1 mm, or null), lift ('lifts it' | 'raises N1')}.
+   */
+  IL.lowTool = function (status) {
+    const s = status || S.status || {};
+    const hm = ((s.machine || {}).home) || {};
+    const needle = hm.lowTool === 'needle';
+    const n2 = needle ? IL.positions(s).n2 : null;
+    let pad = null, best = 1.0;
+    for (const d of (n2 && S.plan && S.plan.dots) || []) {
+      const dd = Math.hypot(d.x - n2.x, d.y - n2.y);
+      if (dd <= best) { best = dd; pad = d.padId; }
+    }
+    return { needle, name: needle ? 'The needle (N2)' : 'N1', z: needle ? (n2 ? n2.z : null) : hm.n1Z, pad, lift: needle ? 'lifts it' : 'raises N1' };
+  };
+  /** "The needle (N2) stopped low (Z 2.94 mm) at R3.1" or "N1 stopped low (Z 3.20 mm)": who, never a high Z called low. */
+  IL.lowToolShort = function (status) {
+    const t = IL.lowTool(status);
+    return t.name + ' stopped low (Z ' + IL.fmt(t.z, 2) + ' mm)' + (t.pad ? ' at ' + t.pad : '');
+  };
+  /** What the Machine item says then; also why a task that homes by itself waits. */
+  IL.n1LowText = function (status) {
+    return IL.lowToolShort(status) + ': look at the board under it. Home ' + IL.lowTool(status).lift + ' first, then homes.';
+  };
   /**
    * Why a control is locked now, or null. need: {connected, homed, idle (default true), pressureOff (default true),
-   * engine}. Texts are the spec's (§13 "Locked control").
+   * engine, homes (the task homes by itself: it waits while N1 is low)}. Texts are the spec's (§13 "Locked control").
    */
   IL.lockReason = function (status, need) {
     const s = status || S.status;
@@ -668,11 +737,19 @@
     const m = s.machine || {}, d = s.dispense || {}, pr = s.pressure || {};
     if (n.idle && IL.taskRunning(s)) {
       const lab = s.run && s.run.running ? s.run.label : 'task';
-      return lab === 'board' ? 'Locked while the board runs' : 'Locked while the ' + lab + ' runs';
+      return lab === 'board' ? 'Locked while the board runs' : 'Locked while the ' + (lab === 'z check' ? 'Z check' : lab) + ' runs';
     }
+    if (n.idle && IL.padProfile && IL.padProfile.jobLock(s)) return 'Locked while the pad calibration runs';
+    // the engine's own refusals (409): an upload holds the import pipeline; OpenPnP homes or jogs by itself, and what
+    // uses the machine waits (a task queued behind one of OpenPnP's own that fails would be dropped)
+    if (n.idle && s.boardImport && s.boardImport.reading) return 'A board file is being read (an upload takes up to about 20 s): wait for it to finish';
+    if (n.idle && (n.connected || n.homed) && m.enabled && m.busy) return 'OpenPnP is busy (homing or moving): wait for it to finish';
     if (n.pressureOff && pr.state && pr.state !== 'off') return 'Pressure is held: switch it off first';
     if (n.connected && !m.enabled) return 'Not connected: connect first';
     if (n.homed && !m.homed) return 'Not homed: home first';
+    // a task that homes by itself (Register board, Probe the blank, the pad calibration) waits, as Run does, while a STOP
+    // left N1 low: an automatic home must not drag N1 across the board (AUTO_REGISTER_DESIGN.md §8.2)
+    if (n.homes && IL.n1Low(s)) return IL.n1LowText(s);
     if (n.engine && (!d.running || !d.available)) return 'Dispenser unavailable' + (d.unavailableReason ? ': ' + d.unavailableReason : '');
     return null;
   };
@@ -776,7 +853,8 @@
   };
   /** Adopts a clean-pad report of the plan shown (or a subset) if newer than the one shown. */
   IL.adoptCleanCheck = function (cc, planId) {
-    if (!cc || !IL.planMatches(planId || cc.planId)) return false;
+    // a check refused at its start (the pressure hold, a STOP) looked at nothing: its reason is the run's (cleanCard)
+    if (!cc || (!cc.checkedAtMs && !(cc.pads || []).length) || !IL.planMatches(planId || cc.planId)) return false;
     if (S.cleanCheck && S.cleanCheck.checkedAtMs >= cc.checkedAtMs) return false;
     S.cleanCheck = cc;
     planVersion++;
@@ -833,12 +911,51 @@
   /** The failure of the last background load of key ('runs' | 'config' | 'events') or null. */
   IL.loadError = (key) => S.loadErrors[key] || null;
 
+  /**
+   * Why a task homes first, for "Homes first (…)" (status.machine.home, AUTO_REGISTER_DESIGN.md §2.2): 'setting: always',
+   * 'a stop came during the last home', 'not homed since 07:27' (the engine's sinceMs is the later of the last stop and
+   * the last connect: after a STOP it is when Start was pressed) or 'not homed'; '' when no home is needed.
+   */
+  IL.homeWhy = function (h) {
+    if (!h || !h.needed) return '';
+    if (h.whyCode === 'always') return 'setting: always';
+    if (h.whyCode === 'home-unconfirmed') return 'a stop came during the last home';
+    return isNum(h.sinceMs) ? 'not homed since ' + IL.fmtTime(h.sinceMs - S.skewMs) : 'not homed';
+  };
+
+  /**
+   * Dots of a plan its board already has paste on: the server's plan.pasted (each pad's dots laid since the board was
+   * seated), taken in path order on each pad. The same count in every tab and browser.
+   */
+  IL.pastedDots = function (plan) {
+    const laid = Object.assign({}, ((plan && plan.pasted) || {}).pads || {});
+    let n = 0;
+    for (const d of (plan && plan.dots) || []) if (laid[d.padId] > 0) { n++; laid[d.padId]--; }
+    return n;
+  };
+  /**
+   * The purge-row spots a board run of the plan lays (I9, as the engine counts them: plan.purgeSpotsNeeded, the profile's
+   * purge dots and the phase and flush dots of each further dot size), else the profile's purge dots (row.perBoard).
+   * plan defaults to the plan shown.
+   */
+  IL.purgeNeed = function (row, plan) {
+    const p = plan === undefined ? S.plan : plan;
+    return p && isNum(p.purgeSpotsNeeded) && p.purgeSpotsNeeded > 0 ? p.purgeSpotsNeeded : (row && isNum(row.perBoard) ? row.perBoard : 0);
+  };
+  /** "13 (8 to start, 5 for its other dot sizes)", or "8": the need with its parts when the plan has several dot sizes. */
+  IL.purgeNeedText = function (row, need) {
+    const base = row && isNum(row.perBoard) ? row.perBoard : need;
+    return need > base ? need + ' (' + base + ' to start, ' + (need - base) + ' for its other dot sizes)' : String(need);
+  };
+
   // ================================================================================== readiness (§9)
   IL.READY_ORDER = ['machine', 'angle', 'needle', 'regulator', 'padtypes', 'surface', 'plan', 'purge', 'clean'];
-  const READY_OK = new Set(['ok', 'you', 'off']);
+  const READY_OK = new Set(['ok', 'you', 'off', 'info']);   // info: a note that counts ready ("homes first")
   /** Which readiness item an I4 message belongs to. */
   function i4Kind(msg, boardSurface) {
     const t = String(msg || '').toLowerCase();
+    // Z after a home (AUTO_REGISTER_DESIGN.md §2.4): not checked yet, no point left to check it on, or it moved
+    if (/were measured before the home|must be checked after the home|^(i4:\s*)?z moved\b/.test(t)) return 'zcheck';
     if (/needle z frame|needle was changed|needle z offset/.test(t)) return 'needle';
     if (/^place '/.test(t)) return 'place';
     if (/the plan was made/.test(t)) return 'plan';
@@ -848,6 +965,46 @@
     return 'surface-bad';
   }
   IL.i4Kind = i4Kind;
+  /**
+   * A touch-off, or the needle frame's own offset (I4 asks for one after the frame was recorded again). After a failed Z
+   * check of this home (moved) only the touch-off: it measures the needle where the frame only carries it over.
+   */
+  const touchOffFixes = (nd, moved) => [{ href: '#calibrate/touch-off', label: 'Run a touch-off' }].concat(isNum(nd.anchorOffsetMm) && !moved
+    ? [{ fix: 'needle-confirm', label: 'Confirm frame offset ' + IL.fmt(nd.anchorOffsetMm, 3) + ' mm' }] : []);
+  /**
+   * After a failed Z check ("Z moved", AUTO_REGISTER_DESIGN.md §2.4) the remedy works under the same home, in this
+   * order: record the needle frame again with both tips (the engine refuses K then), probe the blank (the touch-off's
+   * dots take their Z from it), take the places' Z again with N1 (status.machine.zCheck.places: the touch-off primes at
+   * the waste), touch off (a frame recorded after the home replaces the touch-off, which I4 then asks for again; not
+   * the frame's own offset), register the board (a board without fiducials: probe it only). What was measured again
+   * since the home drops out of status.machine.zCheck.stale. Returns {step: frame | blank | places | touch-off |
+   * register | done, fixes} while the last Z check of this home failed, else null.
+   */
+  IL.zMoved = function (status) {
+    const s = status || S.status || {};
+    const zc = (s.machine || {}).zCheck || {};
+    const d = s.dispense || {};
+    const nd = d.needle || {};
+    const last = zc.last;
+    if (!last || last.pass !== false || !zc.homeAtMs || last.homeAtMs !== zc.homeAtMs) return null;
+    const stale = new Set((zc.stale || []).map((x) => x.what));
+    const surf = (n) => stale.has("the '" + n + "' surface");
+    if (stale.has('the needle frame')) return { step: 'frame', fixes: [{ href: '#setup/needle', label: 'Open Needle Z frame' }] };
+    if (surf(d.blankLocationName || 'blank')) return { step: 'blank', fixes: [{ view: 'probe-blank', label: 'Probe the blank…' }] };
+    const places = (zc.places || []).map((x) => x.name);
+    if (places.length) return { step: 'places', fixes: places.slice(0, 3).map((n) => ({ href: '#setup/places/' + encodeURIComponent(n), label: 'Retake Z with N1 (' + n + ')' })) };
+    if (stale.has('the touch-off') || !nd.touchedOff) return { step: 'touch-off', fixes: touchOffFixes(nd, true) };
+    if (surf(d.boardSurfaceName || 'board')) return { step: 'register', fixes: [registerFix(S.plan), { fix: 'probe-by-hand', label: 'Do it by hand' }] };
+    return { step: 'done', fixes: [] };
+  };
+  /**
+   * Register board's fix-it for a plan: "Probe only (X/Y as planned)" for a board without fiducials (F10: N1 probes it
+   * where it is planned; registrationTargets.probeOnly), else "Register board".
+   */
+  function registerFix(plan, extra) {
+    const t = plan && plan.registrationTargets;
+    return Object.assign(t && t.probeOnly ? { fix: 'register-probe-only', label: 'Probe only (X/Y as planned)' } : { fix: 'register', label: 'Register board' }, extra);
+  }
   const sentence = (t) => { const x = cap(String(t || '').trim()); return x && !/[.:!?]$/.test(x) ? x + '.' : x; };
 
   /**
@@ -883,17 +1040,44 @@
     };
     const sim = IL.isSim(s);
 
-    // 1 Machine
+    // 1 Machine. With a home policy (status.machine.home) Register board and Run home by themselves: "homes first" is
+    // a note that counts ready (AUTO_REGISTER_DESIGN.md §8.2); a STOP that left N1 low needs the operator to look first
+    const hm = m.home || null;
+    const zc = m.zCheck || null;
+    const homeS = hm && isNum(hm.estimateS) ? hm.estimateS : 25;
+    const zS = zc && isNum(zc.estimateS) ? zc.estimateS : 20;
+    // after the run's own home every N1 height predates it: one touch per home period checks Z (when there is one)
+    const zN = zc && zc.touchesAfterHome > 1 ? zc.touchesAfterHome : 1;
+    const zAfterHome = !!nd.anchor || Object.values(d.surfaces || {}).length > 0;
+    const zNow = !!zc && zc.needed && !!zc.reference;
     if (!m.enabled) {
       add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'block', value: 'not connected', short: 'connect',
         detail: 'Not connected to the controller.', fixes: [{ fix: 'connect', label: 'Connect', primary: true }] });
+    } else if (!m.homed && m.busy) {
+      add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'live', value: 'homing', short: 'homing', detail: 'Homing…' });
+    } else if (IL.n1Low(s)) {
+      const low = IL.lowTool(s).needle ? 'needle low' : 'N1 low';
+      add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'need', value: low, short: low, detail: IL.n1LowText(s),
+        fixes: [{ fix: 'home', label: 'Home now' }] });
+    } else if (!m.homed && hm && hm.policy) {
+      const why = IL.homeWhy(hm);
+      add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'info', value: zAfterHome ? 'homes first, checks Z' : 'homes first',
+        short: 'homes first', homeFirst: true,
+        detail: (/^not homed/.test(why) ? IL.cap(why) : 'Not homed' + (why ? ' (' + why + ')' : '')) + ': Register board and Run home first (≈ ' + IL.fmtSecs(homeS) + ')'
+          + (zAfterHome ? ', then ' + IL.zTouches(zN) + (zN > 1 ? ' check' : ' checks') + ' Z (≈ ' + IL.fmtSecs(zS * zN) + ').' : '.'),
+        fixes: [{ fix: 'home', label: 'Home now' }] });
     } else if (!m.homed) {
-      add(m.busy
-        ? { key: 'machine', code: 'MACHINE', title: 'Machine', state: 'live', value: 'homing', short: 'homing', detail: 'Homing…' }
-        : { key: 'machine', code: 'MACHINE', title: 'Machine', state: 'need', value: 'not homed', short: 'home',
-          detail: 'Not homed: positions are unknown (always after STOP).', fixes: [{ fix: 'home', label: 'Home' }] });
+      add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'need', value: 'not homed', short: 'home',
+        detail: 'Not homed: positions are unknown (always after STOP).', fixes: [{ fix: 'home', label: 'Home' }] });
     } else if (m.busy && !IL.taskRunning(s)) {
       add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'live', value: 'moving', short: 'machine moving', detail: 'The machine is moving.' });
+    } else if (zNow) {
+      const ref = zc.reference;
+      add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'info', value: 'checks Z', short: 'checks Z', zCheckFirst: true,
+        detail: 'Homed' + (c.homedAt ? ' ' + IL.fmtTime(c.homedAt) : '') + '. The N1 heights predate this home: Run checks Z first, '
+          + IL.zTouches(zc.touches) + (zc.touches > 1 ? ', the first' : '') + ' on the ' + (ref.name || 'surface') + ' at X ' + IL.fmt(ref.x, 1)
+          + ', Y ' + IL.fmt(ref.y, 1) + ' (≈ ' + IL.fmtSecs(zS * Math.max(1, zc.touches || 0)) + ').',
+        fixes: [{ fix: 'check-z', label: 'Check Z now' }] });
     } else {
       add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'ok', value: c.homedAt ? IL.fmtTime(c.homedAt) : 'homed',
         short: 'machine', detail: 'Connected and homed.' });
@@ -933,7 +1117,7 @@
     } else if (!nd.touchedOff) {
       add({ key: 'needle', code: 'I4', title: 'Needle', state: 'need', value: 'confirm', short: 'needle offset',
         detail: 'Needle offset not confirmed since the last needle change or frame.',
-        fixes: [{ fix: 'needle-confirm', label: 'Confirm frame offset ' + IL.fmt(nd.anchorOffsetMm, 3) + ' mm' },
+        fixes: IL.zMoved(s) ? touchOffFixes(nd, true) : [{ fix: 'needle-confirm', label: 'Confirm frame offset ' + IL.fmt(nd.anchorOffsetMm, 3) + ' mm' },
           { href: '#calibrate/touch-off', label: 'Run a touch-off' }] });
     } else if (Math.abs(drift) > L.needleDriftMm) {
       add({ key: 'needle', code: 'I4', title: 'Needle', state: 'block', value: 'drift', short: 'needle offset',
@@ -957,16 +1141,25 @@
         fixes: [{ view: 'pressure', label: 'Pressure on to read the gauge' }, { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
     }
 
-    // 5 Pad types (PLAN)
+    // 5 Pad types (PLAN); with the profile check, padprofile.js words it (PROFILE_CALIBRATION_DESIGN.md §13.2, H-P1)
     const gate = d.minPadTypeStatus || 'the gate';
-    if (!plan) {
+    const ppItem = IL.padProfile && plan && plan.profileCheck ? IL.padProfile.padTypesItem(plan, d, viol) : null;
+    if (ppItem) {
+      add(ppItem);
+    } else if (!plan) {
       add({ key: 'padtypes', code: 'PLAN', title: 'Pad types', state: 'wait', value: '—', short: 'pad types', detail: 'Known after planning.' });
     } else {
       const pads = plan.pads || [];
       const blocked = pads.filter((p) => p.blocked);
       // PLAN violations about a change after planning (gate, pad type versions) make the plan stale: item 7
       const planViol = viol.filter((v) => v.code === 'PLAN' && !/after planning/i.test(v.message));
-      if (blocked.length || (planViol.length && plan.dots && plan.dots.length)) {
+      if (blocked.length && !planViol.length && d.refuseFlaggedPads === false && plan.dots && plan.dots.length) {
+        // Refuse flagged pads off: the engine skips them and runs the rest (a note that counts ready)
+        add({ key: 'padtypes', code: 'PLAN', title: 'Pad types', state: 'info', value: (pads.length - blocked.length) + '/' + pads.length + ' · ' + blocked.length + ' skipped',
+          short: 'pad types', chip: IL.plural(blocked.length, 'pad') + ' skipped',
+          detail: IL.plural(blocked.length, 'pad') + ' skipped (Refuse flagged pads is off): ' + Array.from(new Set(blocked.map((p) => p.packageId || p.typeKey || 'no pad type'))).join(', ')
+            + '. The other ' + (pads.length - blocked.length) + ' are dispensed.', fixes: [{ href: '#setup/settings/refuse-flagged', label: 'Refuse flagged pads' }] });
+      } else if (blocked.length || (planViol.length && plan.dots && plan.dots.length)) {
         const groups = new Map();
         let belowGate = 0;
         for (const p of blocked) {
@@ -1012,20 +1205,39 @@
       const which = !(seat.length || newSeat || !sf) ? undefined : newSeat ? 'new'
         : !sf || /^no '/i.test(seat[0] ? seat[0].v.message : 'no ') ? 'none'
           : /another registration/.test(seat[0].v.message) ? 'other' : 'untied';
-      const why = which && { new: 'You said the board was re-seated: probe this seat.', none: 'No board surface yet: probe this seat.',
-        other: 'The board surface belongs to another seat of this board.', untied: 'The board surface is not tied to this plan.' }[which];
-      const seatFixes = [{ fix: 'probe', label: 'Probe this seat', primary: true }];
-      if (newSeat) seatFixes.push({ fix: 'same-seat', label: 'Same board, not moved' });
+      // a board without fiducials is probed only, where it is planned (F10)
+      const rt = plan.registrationTargets || null;
+      const only = !!rt && !!rt.probeOnly;
+      const why = which && (only ? { new: 'You said the board was re-seated: probe it (no fiducials: N1 touches it where it is planned).',
+        none: 'No board surface for this seat yet: probe the board (no fiducials: N1 touches it where it is planned).',
+        other: 'The board surface belongs to another seat of this board: probe it again.', untied: 'The board surface is not tied to this plan.' }
+        : { new: 'You said the board was re-seated: register it (fiducials, then N1 touches the board).',
+          none: 'No board surface for this seat yet: register the board (fiducials, then N1 touches the board).',
+          other: 'The board surface belongs to another seat of this board: register it again.', untied: 'The board surface is not tied to this plan.' })[which];
+      // Register board (fiducials + N1 probe) is the one primary fix; by hand stays. A new seat on a board that can be
+      // registered asks the fiducials instead of taking "same board" on trust (AUTO_REGISTER_DESIGN.md §8.2)
+      const camera = (m.positions || []).some((t) => t.kind === 'camera');
+      const registrable = !!rt && !rt.error && (rt.fiducialCount || (rt.fiducials || []).length) >= 2 && camera;
+      const reg = plan.registration || null;
+      const seatFixes = [registerFix(plan, { primary: true }), { fix: 'probe-by-hand', label: 'Do it by hand' }];
+      if (newSeat) seatFixes.push(registrable ? { fix: 'register-check', label: 'Same seat? Check the fiducials' } : { fix: 'same-seat', label: 'Same board, not moved' });
+      const registered = reg ? { atMs: reg.atMs, seat: reg.lastCheckedAtMs && reg.lastCheckedAtMs > reg.atMs ? 'same' : null } : null;
+      // the strip, the nav and the fix name the same action ("8 of 9 · register board", not "probe seat"; a board
+      // without fiducials "probe board", as its fix Probe only)
+      const act = only ? 'probe' : 'register';
       if (bad.length) {
-        add({ key: 'surface', code: 'I4', title: 'Surface', state: 'block', value: 'probe again', short: 'board surface',
+        add({ key: 'surface', code: 'I4', title: 'Surface', state: 'block', value: act + ' again', short: 'board surface',
           detail: bad.map((x) => sentence(x.v.message)).concat(why || []).join(' '),
-          fixes: which ? seatFixes : [{ fix: 'probe', label: 'Add probe points' }], seat: which });
+          fixes: which ? seatFixes : [registerFix(plan, { primary: true }), { fix: 'probe-by-hand', label: 'Add probe points by hand' }],
+          seat: which, registered });
       } else if (which) {
-        add({ key: 'surface', code: 'I4', title: 'Surface', state: 'need', value: 'probe', short: 'probe seat', detail: why, fixes: seatFixes, seat: which });
+        add({ key: 'surface', code: 'I4', title: 'Surface', state: 'need', value: act, short: act + ' board', detail: why, fixes: seatFixes, seat: which, registered });
       } else {
-        add({ key: 'surface', code: 'I4', title: 'Surface', state: 'ok', value: 'tied', short: 'board surface',
+        const regText = reg ? ' · registered ' + IL.fmtTime(reg.atMs - S.skewMs) + ' (' + IL.plural((reg.fiducials || []).length, 'fiducial') + ')'
+          : ' · not registered (no fiducial correction)';
+        add({ key: 'surface', code: 'I4', title: 'Surface', state: 'ok', value: 'tied', short: 'board surface', registered,
           detail: 'Board surface: ' + IL.plural((sf.points || []).length, 'point') + (sf.plane ? ', worst ' + IL.fmt(sf.plane.maxResidualMm, 3) + ' mm' : '')
-            + ', tied to this plan.' });
+            + ', tied to this plan' + regText + '.' });
       }
     }
 
@@ -1069,25 +1281,27 @@
       }
     }
 
-    // 8 Purge row (I9)
+    // 8 Purge row (I9): the plan's need, as the engine counts it (two dot sizes: 8 + 5)
     const pr = d.purgeRow || {};
+    const pNeed = IL.purgeNeed(pr, plan);
     if (!pr.defined) {
       add({ key: 'purge', code: 'I9', title: 'Purge row', state: 'block', value: 'not set', short: 'purge row',
         detail: 'The purge row is not set.', fixes: [{ href: '#setup/purge', label: 'Set the purge row' }] });
     } else if (pr.surfaceProbed === false) {
       add({ key: 'purge', code: 'I9', title: 'Purge row', state: 'block', value: 'no surface', short: 'purge surface',
         detail: "The purge row's surface '" + pr.surfaceName + "' is not probed.", fixes: [{ href: '#setup/surfaces', label: 'Probe the blank' }] });
-    } else if (pr.spots < pr.perBoard) {
-      add({ key: 'purge', code: 'I9', title: 'Purge row', state: 'block', value: 'too short', short: 'purge row too short',
-        detail: 'The row has ' + IL.plural(pr.spots, 'spot') + '; a board purges ' + pr.perBoard + '. A reset cannot fix this: give the row more spots, or purge fewer dots in the profile.',
+    } else if (pr.spots < pNeed) {
+      add({ key: 'purge', code: 'I9', title: 'Purge row', state: 'block', value: 'too short', short: 'purge row too short', nav: 'Purge row short',
+        detail: 'The row has ' + IL.plural(pr.spots, 'spot') + '; ' + (plan ? 'this plan purges ' : 'a board purges ') + IL.purgeNeedText(pr, pNeed)
+          + '. A reset cannot fix this: give the row more spots, or purge fewer dots in the profile.',
         fixes: [{ href: '#setup/purge', label: 'Purge row: more spots' }, { href: '#profile', label: 'Profile: purge dots' }] });
-    } else if (pr.spotsLeft < pr.perBoard) {
+    } else if (pr.spotsLeft < pNeed) {
       add({ key: 'purge', code: 'I9', title: 'Purge row', state: 'need', value: pr.spotsLeft + '/' + pr.spots, short: 'wipe row',
-        detail: 'Only ' + pr.spotsLeft + ' unused purge spots left, ' + pr.perBoard + ' needed. Wipe the row, then reset it.',
+        detail: 'Only ' + pr.spotsLeft + ' unused purge spots left, ' + IL.purgeNeedText(pr, pNeed) + ' needed. Wipe the row, then reset it.',
         fixes: [{ fix: 'purge-reset', label: 'Wiped: reset row', icon: 'i-wipe' }] });
     } else {
       add({ key: 'purge', code: 'I9', title: 'Purge row', state: 'ok', value: pr.spotsLeft + '/' + pr.spots, short: 'purge row',
-        detail: pr.spotsLeft + ' of ' + pr.spots + ' spots free; a board uses ' + pr.perBoard + '.' });
+        detail: pr.spotsLeft + ' of ' + pr.spots + ' spots free; ' + (plan ? 'this plan uses ' : 'a board uses ') + IL.purgeNeedText(pr, pNeed) + '.' });
     }
 
     // 9 Pads clean (I10)
@@ -1110,7 +1324,7 @@
         dirty: IL.dirtyPads(cc), fixes: [{ fix: 'clean-check', label: 'Wiped: check again' }] });
     } else if (!cpc.enabled) {
       add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'off', value: 'off', short: 'pads clean',
-        detail: sim ? 'Off (simulator): the simulated camera is a static picture.' : 'Off: not checked before a board.' });
+        detail: sim && !(s.server && s.server.simulatorConfirmed) ? 'Off (simulator): the simulated camera is a static picture.' : 'Off: not checked before a board.' });
     } else if (i10 && i10.state === 'blocked') {
       add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'block', value: 'no camera', short: 'pad check camera',
         detail: 'Clean-pad check is on but there is no top camera.', fixes: [{ href: '#setup/settings', label: 'Switch the check off in Settings' }] });
@@ -1163,12 +1377,25 @@
       if (i.state === 'blocked') addExtra(extraFor(code, i.text, 'block', i));
       else if (i.state === 'warning') addExtra(extraFor(code, i.text, 'need', i));
     }
-    if (ilk.I4 && ilk.I4.state === 'blocked' && items[2].ready) addExtra({ key: 'I4', code: 'I4', title: 'Place heights', state: 'block', short: 'place heights', detail: sentence(ilk.I4.text), fixes: [{ href: '#setup/places', label: 'Open Places' }] });
+    // I4 Z after a home: "measured before the home, not checked since" gates prime, the test dot and the calibrations,
+    // but a board run checks Z by itself (the machine item says so), so it is no blocker here. With no point left to
+    // check Z on, or a Z that moved, the run is refused too: a blocker of its own, fixed at the needle Z frame (not by
+    // Register board, which measures after the home)
+    const zBlocks = (t) => i4Kind(t, bsName) === 'zcheck' && !/were measured before the home/i.test(String(t || ''));
+    const zExtra = (t) => {
+      if (!extras.some((x) => x.key === 'I4-z')) {
+        addExtra({ key: 'I4-z', code: 'I4', title: 'Z check', state: 'block', short: 'Z check', detail: sentence(t), fixes: IL.fixesForCode('I4', s, t) });
+      }
+    };
+    const zRule = !!ilk.I4 && i4Kind(ilk.I4.text, bsName) === 'zcheck';
+    if (zRule && ilk.I4.state === 'blocked' && zBlocks(ilk.I4.text)) zExtra(ilk.I4.text);
+    if (ilk.I4 && ilk.I4.state === 'blocked' && items[2].ready && !zRule) addExtra({ key: 'I4', code: 'I4', title: 'Place heights', state: 'block', short: 'place heights', detail: sentence(ilk.I4.text), fixes: [{ href: '#setup/places', label: 'Open Places' }] });
     for (const v of viol) {
       if (['MACHINE', 'I9', 'I10', 'I11', 'PLAN'].includes(v.code)) continue;
       if (v.code === 'I4') {
         const k = i4Kind(v.message, bsName);
-        if (k === 'place') addExtra({ key: 'I4-place', code: 'I4', title: 'Place height', state: 'block', short: 'place Z', detail: sentence(v.message), fixes: [{ href: '#setup/places', label: 'Retake Z with N1' }] });
+        if (k === 'zcheck' && zBlocks(v.message)) zExtra(v.message);
+        else if (k === 'place') addExtra({ key: 'I4-place', code: 'I4', title: 'Place height', state: 'block', short: 'place Z', detail: sentence(v.message), fixes: [{ href: '#setup/places', label: 'Retake Z with N1' }] });
         else if (k === 'other-surface') addExtra({ key: 'I4-surface', code: 'I4', title: 'Surface', state: 'block', short: 'blank surface', detail: sentence(v.message), fixes: [{ href: '#setup/surfaces', label: 'Open Probed surfaces' }] });
         continue;
       }
@@ -1180,13 +1407,23 @@
     const notReady = all.filter((x) => !x.ready);
     const blocked = all.filter((x) => x.state === 'block');
     const count = items.filter((x) => x.ready).length;
-    // NEXT: the first not-ready item in the fixed order; items that only wait for a plan never come first
-    const next = notReady.find((x) => x.state !== 'wait') || notReady[0] || null;
+    // NEXT: the first blocked item, the one the verdict names (rc1 review: NEXT, the nav and the verdict agree), else
+    // the first not-ready item in the fixed order; items that only wait for a plan never come first
+    const next = blocked[0] || notReady.find((x) => x.state !== 'wait') || notReady[0] || null;
     let verdict;
-    if (blocked.length) verdict = { state: 'block', text: 'Blocked · ' + blocked[0].short, title: blocked.map((x) => x.title + ': ' + x.detail).join('\n') };
+    // the strip drops the part after " · " when it would run under STOP (cells--t2v); the title keeps it
+    // every dot of the plan is on its board already (the server's paste): the next action is the next board, not a run
+    const doneDots = plan && plan.dots && plan.dots.length && IL.pastedDots(plan) >= plan.dots.length ? plan.dots.length : 0;
+    if (blocked.length) verdict = { state: 'block', text: 'Blocked · ' + blocked[0].short, value: ['Blocked', ' · ' + blocked[0].short, 2], title: blocked.map((x) => x.title + ': ' + x.detail).join('\n') };
     else if (!plan && !c.planForgotten) verdict = { state: 'need', text: 'No plan yet', title: 'Choose a board and plan it (Run).' };
-    else if (notReady.length) verdict = { state: 'need', text: count + ' of 9 · ' + next.short, title: notReady.map((x) => x.title + ': ' + x.detail).join('\n') };
-    else verdict = { state: 'ok', text: 'Ready to run', title: 'All 9 checks are ready: a board can run now.' };
+    else if (doneDots) verdict = { state: 'ok', done: true, text: 'Board done · Next board', value: ['Board done', ' · Next board', 2],
+      title: 'All ' + doneDots + ' dots are on board ' + (plan.pasted && plan.pasted.board) + ': unload it and press Next board (Run), or wipe it before running it again.' };
+    else if (notReady.length) verdict = { state: 'need', text: count + ' of 9 · ' + next.short, value: [count + ' of 9', ' · ' + next.short, 2], title: notReady.map((x) => x.title + ': ' + x.detail).join('\n') };
+    else if (items[0].homeFirst) {
+      // the strip drops the long part when it would run under STOP (cells--t1)
+      verdict = { state: 'ok', text: 'Ready to run · homes first (≈ ' + IL.fmtSecs(homeS) + ')', value: ['Ready to run', ' · homes first (≈\u00a0' + IL.fmtSecs(homeS) + ')', 1],
+        title: 'All 9 checks are ready. ' + items[0].detail };
+    } else verdict = { state: 'ok', text: 'Ready to run', title: 'All 9 checks are ready: a board can run now.' };
     const soft = new Set(['regulator', 'clean']);
     // items 4 (regulator: asked in the confirm) and 9 (pads clean: the run re-checks) may be not ready, unless blocked
     const hard = extras.concat(items.filter((x) => !soft.has(x.key) || x.state === 'block')).filter((x) => !x.ready);
@@ -1256,7 +1493,9 @@
 
   // ================================================================================== verdict (strip "Board run")
   const TASK_WORD = { prime: 'Prime', 'test dot': 'Test dot', 'needle touch-off': 'Touch-off', 'dot ladder': 'Dot ladder',
-    'scale shots': 'Shots', 'clean-pad check': 'Pad check', board: 'Board' };
+    'scale shots': 'Shots', 'clean-pad check': 'Pad check', board: 'Board', 'board registration': 'Register', 'blank probe': 'Blank probe',
+    'z check': 'Z check', 'pad calibration': 'Pad calibration' };
+  IL.TASK_WORD = TASK_WORD;
   const VENT_S = 1;
   /**
    * Seconds left of a board run's dots (one number for the strip, the tiles and the timeline): the live rate blended
@@ -1292,10 +1531,49 @@
         const left = IL.boardLeftS(run);
         return [run.dotsDone + '/' + run.dotsPlanned, left !== null ? ' · ' + IL.fmtClock(left) + ' left' : ''];
       }
+      // a run homes first and checks Z after the home by itself (run.detail.stage, AUTO_REGISTER_DESIGN.md §5.5)
+      const st = run.detail && run.detail.stage;
+      if (st === 'home') return ['Homing first', ' · 0/' + run.dotsPlanned];
+      if (st === 'z check') return ['Checking Z', ' · 0/' + run.dotsPlanned];
       return ['0/' + run.dotsPlanned, ' · starting'];
+    }
+    if (run.label === 'pad calibration' && IL.padProfile) return IL.padProfile.taskParts(run);
+    if (run.label === 'board registration' || run.label === 'blank probe') {
+      const g = IL.regProgress(run);
+      return [word + ' · ' + g.part, g.left !== null ? ' · ≈ ' + IL.fmtClock(g.left) + ' left' : ''];
     }
     return [word, ''];
   }
+  const regLeft = { runId: null, value: null, at: 0 };
+  /**
+   * Where a Register board or blank probe task is, from status.run.detail (AUTO_REGISTER_DESIGN.md §7.5): {stage, k, n,
+   * part: 'home' | 'FID 2/3' | 'check 2/3' | 'probe 3/5' | 'save' | 'plan again', left: seconds left or null}. The
+   * engine sends its estimate at each step; between steps it counts down here (never below 3 s while steps remain).
+   */
+  IL.regProgress = function (run) {
+    const d = (run && run.detail) || {};
+    const stage = d.stage || 'home';
+    const fids = d.fiducials || [], pr = d.probes || [];
+    let k = 0, n = 0, part = stage;
+    if (stage === 'fiducials') {
+      n = fids.length;
+      k = Math.min(n, fids.filter((f) => f.state === 'found').length + 1);
+      part = 'FID ' + k + '/' + n;
+    } else if (stage === 'probe' || stage === 'same-seat') {
+      // the blank probe reports its points as it reaches them: its total is in stepsPlanned (the points + the save)
+      n = stage === 'same-seat' ? 3 : run.label === 'blank probe' ? Math.max(pr.length, (Number(d.stepsPlanned) || 0) - 1) : pr.length;
+      k = Math.min(n, pr.filter((q) => q.state === 'contact').length + 1);
+      part = (stage === 'same-seat' ? 'check ' : 'probe ') + k + '/' + n;
+    } else if (stage === 'plan') part = 'plan again';
+    let left = null;
+    if (isNum(d.estimatedSecondsLeft)) {
+      const v = Number(d.estimatedSecondsLeft);
+      if (regLeft.runId !== run.runId || regLeft.value !== v) Object.assign(regLeft, { runId: run.runId, value: v, at: Date.now() });
+      const since = run.running ? (Date.now() - regLeft.at) / 1000 : 0;
+      left = v > 0 ? Math.max(Math.min(v, 3), v - since) : 0;
+    }
+    return { stage, k, n, part, left };
+  };
   /** Short live label of a running task: "96/160 · 0:44 left", "Pad check ≈ 57/160 · 1:52 left", "Prime". */
   IL.taskLabel = (run) => taskParts(run).join('');
   /** The strip verdict now: {state, text, title} (task, recovery, offline and engine override the readiness). */
@@ -1310,8 +1588,12 @@
     }
     if (IL.recoveryActive()) {
       const r = S.recovery;
-      return { state: 'block', text: 'Stopped ' + IL.fmtTime(r.atMs), title: recoveryHeadline(r) + '. Back to ready: see the Recovery panel.' };
+      // the time goes when the strip is narrow, after the other cells' long parts (cells--t2v): the Recovery panel and
+      // the nav keep it
+      return { state: 'block', text: 'Stopped ' + IL.fmtTime(r.atMs), value: ['Stopped', ' ' + IL.fmtTime(r.atMs), 2], title: recoveryHeadline(r) + '. Back to ready: see the Recovery panel.' };
     }
+    const pcal = IL.padProfile ? IL.padProfile.verdict(s) : null;
+    if (pcal) return pcal;
     const d = s.dispense || {};
     if (!d.running || !d.available) return { state: 'block', text: 'Dispenser unavailable', title: d.unavailableReason || 'The dispense engine is not running.' };
     return IL.ready().verdict;
@@ -1408,13 +1690,26 @@
         : 'STOP keeps the screw step count; asked after Connect (I11)',
       fixes: m.enabled && !angleOk ? [{ fix: 'I11-confirm', label: 'No, it stayed on: ' + IL.fmtDeg(prof.startAngleDeg, 1) + ' still holds' },
         { href: '#calibrate/angle', label: 'Yes, it was off: measure again' }] : [] });
-    steps.push({ key: 'home', title: 'Home', detail: 'M410 can lose steps: home before any move', wait: !m.enabled, done: !!m.enabled && !!m.homed,
-      fixes: m.enabled && !m.homed ? [{ fix: 'home', label: 'Home', primary: true }] : [] });
-    const short = !!row.defined && row.spotsLeft < row.perBoard;
-    const tooShort = !!row.defined && row.spots < row.perBoard;
+    // Register board and Run home by themselves (status.machine.home.policy): the step is done without a home unless a
+    // STOP left N1 low (an automatic home must not drag it across the board, AUTO_REGISTER_DESIGN.md §8.2)
+    const hm = m.home || {};
+    const autoHome = !!m.enabled && !m.homed && !!hm.policy && !hm.n1Low;
+    const homeS = isNum(hm.estimateS) ? hm.estimateS : 25;
+    steps.push(m.enabled && !m.homed && hm.policy && hm.n1Low
+      ? { key: 'home', title: 'Home', wait: false, done: false,
+        detail: IL.lowToolShort(s) + ': look at the board under it; Home ' + IL.lowTool(s).lift + ' first, then homes.',
+        fixes: [{ fix: 'home', label: 'Home now', primary: true }] }
+      : autoHome
+        ? { key: 'home', title: 'Home first', state: 'info', done: true,
+          detail: 'Register board and Run home first (≈ ' + IL.fmtSecs(homeS) + '); or home now.', fixes: [{ fix: 'home', label: 'Home now' }] }
+        : { key: 'home', title: 'Home', detail: 'M410 can lose steps: home before any move', wait: !m.enabled, done: !!m.enabled && !!m.homed,
+          fixes: m.enabled && !m.homed ? [{ fix: 'home', label: 'Home', primary: true }] : [] });
+    const need = IL.purgeNeed(row);
+    const short = !!row.defined && row.spotsLeft < need;
+    const tooShort = !!row.defined && row.spots < need;
     if (short || (rec && rec.purgeShort)) {
-      steps.push({ key: 'purge', title: short ? 'Purge row: ' + row.spotsLeft + ' left, ' + row.perBoard + ' needed' : 'Purge row reset',
-        detail: tooShort ? 'the row has ' + IL.plural(row.spots, 'spot') + ', a board purges ' + row.perBoard + ': give it more spots (Setup) or purge fewer dots (Profile)'
+      steps.push({ key: 'purge', title: short ? 'Purge row: ' + row.spotsLeft + ' left, ' + need + ' needed' : 'Purge row reset',
+        detail: tooShort ? 'the row has ' + IL.plural(row.spots, 'spot') + ', a board purges ' + IL.purgeNeedText(row, need) + ': give it more spots (Setup) or purge fewer dots (Profile)'
           : short ? 'can be done now: wipe the row on the blank, then reset it (I9)' : row.spotsLeft + ' of ' + row.spots + ' spots free',
         done: !short, fixes: tooShort ? IL.fixesForCode('I9', s) : short ? [{ fix: 'purge-reset', label: 'Wiped: reset row', icon: 'i-wipe' }] : [] });
     }
@@ -1531,6 +1826,10 @@
     if (m.enabled && !pm.enabled) S.connectedAt = now;
     if (m.homed && !pm.homed) S.homedAt = prev ? now : null;
     if (!m.homed) S.homedAt = null;
+    // the engine knows when the machine was homed (also before this page loaded): status.machine.home.homedAtMs
+    if (m.homed && m.home && isNum(m.home.homedAtMs)) S.homedAt = m.home.homedAtMs - S.skewMs;
+    mirrorNewSeat(s);
+    if (!prev) migrateNewSeat(s);
     // when this page saw the profile change (the plan chip says "stale: profile changed 11:07")
     const fp = d.profile && d.profile.fingerprint, pfp = prev && prev.dispense && prev.dispense.profile && prev.dispense.profile.fingerprint;
     if (prev && fp && pfp && fp !== pfp) S.profileChangedAt = now;
@@ -1562,7 +1861,7 @@
     if (S.recovery) {
       if (!m.enabled) S.recovery.seenDown = true;
       const row = d.purgeRow || {};
-      if (row.defined && row.spotsLeft < row.perBoard) S.recovery.purgeShort = true;
+      if (row.defined && row.spotsLeft < IL.purgeNeed(row)) S.recovery.purgeShort = true;
     }
     // vent_failed: band + Pressure view, until the hold reads off
     if (pr.state === 'vent_failed') {
@@ -1701,7 +2000,8 @@
   // ================================================================================== strip (§4)
   /**
    * Patches a strip cell: kind (glyph + tint), value = text or [main, long, level] (the long part is dropped when the
-   * strip is too narrow: level 1 first (.cells--t1), then level 2 (.cells--t2)), title = the long form.
+   * strip is too narrow: the other cells' level 1 first (.cells--t1), then their level 2 (.cells--t2), the verdict's
+   * last (.cells--t2v)), title = the long form.
    */
   function setCell(cell, kind, value, title) {
     if (!cell) return;
@@ -1723,7 +2023,9 @@
   function fitStrip() {
     const cells = $('cells');
     if (!cells) return;
-    const sig = window.innerWidth + '|' + $('btn-start').hidden + $('btn-home').hidden + '|' + cells.textContent.replace(/\d/g, '0');
+    // the room the cells have, not only the window: the brand's heartbeat age or the STOP bay can change it (rc1 review:
+    // a verdict fitted before they did was cut, "Stopped 06:…", with no shorter form applied)
+    const sig = cells.clientWidth + '|' + $('btn-start').hidden + $('btn-home').hidden + '|' + cells.textContent.replace(/\d/g, '0');
     if (sig === fitSig) return;
     fitSig = sig;
     const over = () => {
@@ -1733,11 +2035,19 @@
       const limit = cells.getBoundingClientRect().right - parseFloat(getComputedStyle(cells).paddingRight || '0');
       return last.getBoundingClientRect().right > limit + 0.5;
     };
-    cells.classList.remove('cells--t1', 'cells--t2');
-    if (!over()) return;
-    cells.classList.add('cells--t1');
-    if (!over()) return;
-    cells.classList.replace('cells--t1', 'cells--t2');
+    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2v', 'cells--t3', 'cells--t4');
+    cells.classList.add('cells--fit');   // the verdict at its full width while measuring
+    if (over()) {
+      // the other cells' long parts first: the verdict keeps its own ("Stopped 14:19", a task's progress) while it fits
+      cells.classList.add('cells--t1');
+      if (over()) cells.classList.replace('cells--t1', 'cells--t2');
+      if (over()) cells.classList.add('cells--t2v');
+      // still too long (1024 px after a STOP, the widest state): the verdict is never cut (UI_DESIGN §4), so the
+      // pressure cell goes while it reads a plain "Off" (Recovery says "Pressure vented"), then the other cells' labels
+      if (over()) cells.classList.add('cells--t3');
+      if (over()) cells.classList.add('cells--t4');
+    }
+    cells.classList.remove('cells--fit');
   }
   window.addEventListener('resize', () => { fitSig = ''; IL.render(); });
   function pressureView(s) {
@@ -1801,7 +2111,10 @@
           setCell(mc, 'live', undefined, 'Homing: every axis goes to its home switch');
           IL.setText(homed, 'Homing…');
         } else {
-          setCell(mc, 'need', undefined, 'Connected, not homed: positions are unknown. Home before any move.');
+          const hm = m.home || {};
+          const auto = hm.policy && !hm.n1Low ? ' Register board and Run home first (≈ ' + IL.fmtSecs(isNum(hm.estimateS) ? hm.estimateS : 25) + ').'
+            : hm.n1Low ? ' ' + IL.lowToolShort(s) + ': Home ' + IL.lowTool(s).lift + ' first, then homes.' : ' Home before any move.';
+          setCell(mc, 'need', undefined, 'Connected, not homed: positions are unknown.' + auto);
           IL.setText(homed, 'Not homed');
           showHome = !IL.taskRunning(s) && (!s.pressure || s.pressure.state === 'off');
         }
@@ -1823,7 +2136,9 @@
     const pc = $('pill-pressure'), ac = $('chip-angle'), uc = $('chip-purge');
     const d = (s && s.dispense) || {};
     const prof = d.profile || {};
-    IL.setText(pc.querySelector('.cell__k'), isNum(prof.pressurePsi) ? 'Pressure · set ' + IL.fmtPsi(prof.pressurePsi) + ' psi' : 'Pressure');
+    // the set pressure goes with the other long parts when the strip is narrow (cells--t2): the value stays
+    const pk = pc.querySelector('.cell__k'), set = isNum(prof.pressurePsi) ? ' · set ' + IL.fmtPsi(prof.pressurePsi) + ' psi' : '';
+    if (pk.dataset.v !== set) { pk.dataset.v = set; pk.replaceChildren('Pressure', set ? el('span', { class: 'long', 'data-l': 2, text: set }) : ''); }
     if (!s || off) {
       const t = off ? cap(since) : null;
       setCell(pc, 'off', off ? 'Unknown' : '…', t);
@@ -1839,10 +2154,11 @@
       else if (S.recovery && !(s.machine && s.machine.enabled)) setCell(ac, 'need', 'Confirm', 'After STOP: asked after Connect: was the controller switched off? (I11)');
       else setCell(ac, 'ok', IL.fmtDeg(prof.startAngleDeg, 1), 'Screw start angle ' + IL.fmtDeg(prof.startAngleDeg, 1) + ', confirmed ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) + ' for this controller power-up (I11)');
       const row = d.purgeRow || {};
+      const need = IL.purgeNeed(row);
       if (!row.defined) setCell(uc, 'block', 'Not set', 'The purge row is not set (Setup, I9)');
-      else if (row.spots < row.perBoard) setCell(uc, 'block', [row.spotsLeft + ' of ' + row.spots, ' · too short'], 'The row has ' + row.spots + ' spots; a board purges ' + row.perBoard + ': give it more spots (Setup) or purge fewer dots (Profile) (I9)');
-      else if (row.spotsLeft < row.perBoard) setCell(uc, 'need', [row.spotsLeft + ' of ' + row.spots, ' · wipe'], row.spotsLeft + ' spots left, ' + row.perBoard + ' needed per board: wipe the row and reset it (I9)');
-      else setCell(uc, 'ok', row.spotsLeft + ' of ' + row.spots, row.spotsLeft + ' spots free, ' + row.perBoard + ' per board (I9)');
+      else if (row.spots < need) setCell(uc, 'block', [row.spotsLeft + ' of ' + row.spots, ' · too short'], 'The row has ' + row.spots + ' spots; a board purges ' + IL.purgeNeedText(row, need) + ': give it more spots (Setup) or purge fewer dots (Profile) (I9)');
+      else if (row.spotsLeft < need) setCell(uc, 'need', [row.spotsLeft + ' of ' + row.spots, ' · wipe'], row.spotsLeft + ' spots left, ' + IL.purgeNeedText(row, need) + ' needed per board: wipe the row and reset it (I9)');
+      else setCell(uc, 'ok', row.spotsLeft + ' of ' + row.spots, row.spotsLeft + ' spots free, ' + IL.purgeNeedText(row, need) + ' per board (I9)');
     }
     const v = IL.verdict();
     const ve = $('pill-engine');
@@ -1862,6 +2178,7 @@
       if (S.online === false) return { sub: 'No answer', kind: 'block' };
       if (run && run.running) {
         if (run.label === 'board') return { sub: run.dotsDone + ' of ' + run.dotsPlanned, kind: 'live', badge: String(run.dotsDone), badgeKind: 'live', badgeLabel: run.dotsDone + ' dots done' };
+        if (run.label === 'pad calibration') return { sub: 'Calibrating pads', kind: 'live' };
         return { sub: (TASK_WORD[run.label] || cap(run.label)) + ' running', kind: 'live' };
       }
       if (IL.recoveryActive()) {
@@ -1876,7 +2193,8 @@
       if (!S.plan) return { sub: S.planForgotten ? 'Plan again' : 'No plan yet', kind: S.planForgotten ? 'need' : '' };
       if (r.verdict.state === 'ok') return { sub: 'Ready to run', kind: 'ok', title: 'Ready: ' + (S.plan.boardName || 'board') };
       const kind = r.verdict.state === 'block' ? 'block' : 'need';
-      return { sub: cap(r.next ? r.next.short : ''), kind, badge: String(needs), badgeKind: kind, badgeLabel: needs + ' need you' };
+      // an item's nav form where its short name is too long for the subline (it never wraps, §15)
+      return { sub: r.next ? r.next.nav || cap(r.next.short) : '', kind, badge: String(needs), badgeKind: kind, badgeLabel: needs + ' need you' };
     }
     if (name === 'setup' || name === 'calibrate') return running ? { sub: 'Locked · running' } : {};
     if (name === 'profile') {
@@ -2294,7 +2612,8 @@
   // ================================================================================== actions, refusals, fixes
   /**
    * Runs an action from a button: disables it meanwhile, shows a refusal inline (in the nearest [data-refusals]
-   * ancestor or opts.refusalIn) + toast + activity, then polls. opts: {ok: text | fn(result), refusalIn, what}.
+   * ancestor or opts.refusalIn) + toast + activity, then polls. opts: {ok: text | fn(result) (empty: no toast),
+   * refusalIn, what}.
    */
   IL.act = async function (btn, fn, opts) {
     const o = opts || {};
@@ -2303,7 +2622,8 @@
     if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
     try {
       const r = await fn();
-      if (o.ok) IL.toast(typeof o.ok === 'function' ? o.ok(r) : o.ok, 'ok');
+      const ok = typeof o.ok === 'function' ? o.ok(r) : o.ok;
+      if (ok) IL.toast(ok, 'ok');
       return r;
     } catch (e) {
       IL.refuse(e, { host, what: o.what });
@@ -2337,9 +2657,13 @@
     return box;
   };
   function codeFromMessage(msg) {
-    const m = /^(I\d+|MACHINE|CONFIG|PLAN):\s*(.*)$/s.exec(String(msg || ''));
+    const m = IL.CODE_RE.exec(String(msg || ''));
     return m ? [{ code: m[1], message: m[2] }] : [];
   }
+  /** The code prefix of an engine refusal ("I4: …", "REG: …", "PROBE: …"): the prefix drives the fix-its. */
+  IL.CODE_RE = /^(I\d+|MACHINE|CONFIG|PLAN|REG|PROBE):\s*(.*)$/s;
+  /** The end of the REG refusal of a board without fiducials (F10): the way out it names. */
+  const PROBE_ONLY_WAY = /Or probe it only, where it is planned: Register with probe "always"\.?\s*$/;
   const FIXES = {};
   /**
    * Registers a fix-it: spec {run(btn, arg, status) → promise, press2: verb | fn(status) → verb|null, ok: toast text |
@@ -2413,7 +2737,8 @@
     if (verb && btn) press2Click(btn, typeof verb === 'function' ? () => verb(S.status, arg) : verb, action, { ok: spec.ok }, ev);
     else IL.act(btn, action, { ok: spec.ok });
   };
-  const FALLBACK_FIX = { 'plan-again': { href: '#run/board' }, 'clean-check': { href: '#run/checks' }, probe: { href: '#run/probe' } };
+  const FALLBACK_FIX = { 'plan-again': { href: '#run/board' }, 'clean-check': { href: '#run/checks' }, probe: { href: '#run/probe' },
+    register: { href: '#run/probe' }, 'probe-by-hand': { href: '#run/probe' }, 'board-step': { href: '#run/board' }, 'look-camera': { href: '#setup/camera' } };
   /** Fix-its for a refusal's I-code (message: the engine's text, e.g. an I4 refusal that names a place). */
   IL.fixesForCode = function (code, status, message) {
     const s = status || S.status || {};
@@ -2424,7 +2749,7 @@
     switch (code) {
       case 'MACHINE': return m.enabled ? [{ fix: 'home', label: 'Home' }] : [{ fix: 'connect', label: 'Connect' }];
       case 'I11': return [{ fix: 'I11-confirm', label: 'Controller stayed on: confirm' }, { href: '#calibrate/angle', label: 'Measure again' }];
-      case 'I9': return row.defined && row.spots < row.perBoard
+      case 'I9': return row.defined && row.spots < IL.purgeNeed(row)
         ? [{ href: '#setup/purge', label: 'Purge row: more spots' }, { href: '#profile', label: 'Profile: purge dots' }]
         : [{ fix: 'purge-reset', label: 'Wiped: reset row', icon: 'i-wipe' }];
       case 'I10': return [{ fix: 'clean-check', label: 'Wiped: check again' }];
@@ -2434,9 +2759,36 @@
           const pm = /^place '([^']+)'/i.exec(msg);
           return [{ href: '#setup/places' + (pm ? '/' + encodeURIComponent(pm[1]) : ''), label: 'Retake Z with N1' + (pm ? ' (' + pm[1] + ')' : '') }];
         }
+        // Z after a home: one N1 touch checks it; with no point left to touch the frame (and everything after it) is
+        // measured again; a Z that moved: the remedy's next step (IL.zMoved)
+        if (k === 'zcheck') {
+          if (/^(I4:\s*)?z moved\b/i.test(msg)) {
+            const zm = IL.zMoved(s);
+            return zm && zm.fixes.length ? zm.fixes : [{ href: '#setup/needle', label: 'Open Needle Z frame' }];
+          }
+          return /no point measured before/i.test(msg) ? [{ href: '#setup/needle', label: 'Open Needle Z frame' }] : [{ fix: 'check-z', label: 'Check Z' }];
+        }
+        // the needle frame recorded again replaced the touch-off: touch off, or take the frame's own offset
+        if (k === 'needle' && /run a touch-off/i.test(msg)) return touchOffFixes(d.needle || {}, !!IL.zMoved(s));
         if (k === 'other-surface') return [{ href: '#setup/surfaces', label: 'Open Probed surfaces' }];
-        if (k === 'seat' || k === 'surface-bad' || k === 'plan') return [{ href: '#run/probe', label: 'Probe this seat' }];
+        if (k === 'seat' || k === 'surface-bad' || k === 'plan') return [registerFix(S.plan), { fix: 'probe-by-hand', label: 'Do it by hand' }];
         return [{ href: '#setup/needle', label: 'Open Needle Z frame' }];
+      }
+      // Register board (AUTO_REGISTER_DESIGN.md §8.2): the fiducial check failed, or the probe did. A board without
+      // fiducials names its way out (F10): probe it only, where it is planned (registering or planning again cannot help)
+      case 'REG': return PROBE_ONLY_WAY.test(msg) ? [{ fix: 'register-probe-only', label: 'Probe only (X/Y as planned)', primary: true },
+        { fix: 'look-camera', label: 'Look with the camera' }, { fix: 'board-step', label: 'Change board' }, { fix: 'probe-by-hand', label: 'Do it by hand' }]
+        : [{ fix: 'look-camera', label: 'Look with the camera' }, { fix: 'board-step', label: 'Change board' },
+          { fix: 'plan-unregistered', label: 'Plan without fiducial correction' }, { fix: 'register', label: 'Register again' },
+          { fix: 'probe-by-hand', label: 'Do it by hand' }];
+      case 'PROBE': {
+        // the board top Z lies too far under the needle frame for the probe's floor: fix the Z or the frame, or by hand
+        if (/cannot reach that height/i.test(msg)) {
+          return [{ fix: 'board-step', label: 'Board step' }, { href: '#setup/needle', label: 'Open Needle Z frame' }, { fix: 'probe-by-hand', label: 'Do it by hand' }];
+        }
+        const out = [{ fix: 'register', label: 'Register again' }, { fix: 'probe-by-hand', label: 'Do it by hand' }];
+        if (/\b(blank|purge row)\b|'(?!board')[^']+' (surface|place)/i.test(msg) && !/board top/i.test(msg)) out.push({ view: 'probe-blank', label: 'Probe the blank…' });
+        return out;
       }
       case 'I7': return [{ href: '#setup/settings', label: 'Settings' }, { fix: 'run-fewer', label: 'Run fewer dots' }];
       case 'PLAN': return [{ href: '#profile', label: 'Pad types' }];
@@ -2448,8 +2800,11 @@
   // core fix-its
   IL.fix('connect', { run: () => IL.api('POST', '/api/machine/enable'), ok: 'Connecting to the controller…',
     gate: (s) => (S.online === false ? IL.lockReason(s) : null) });
-  IL.fix('home', { press2: 'home', run: () => IL.api('POST', '/api/machine/home'), ok: 'Homing…',
-    gate: (s) => IL.lockReason(s, { connected: true }) });
+  // the home's own answer (wait): a home that fails says why (`homing failed: …`, the pressure hold, a STOP before it
+  // started), as the strip alone cannot; the engine waits up to 5 min for it
+  IL.fix('home', { press2: 'home', gate: (s) => IL.lockReason(s, { connected: true }),
+    run: () => { IL.toast('Homing…'); return IL.api('POST', '/api/machine/home', { wait: true }, { timeoutMs: 320000 }); },
+    ok: (r) => (r && isNum(r.n1RaisedFromZ) ? 'Homed: N1 was raised from Z ' + IL.fmt(r.n1RaisedFromZ, 2) + ' mm first.' : 'Homed.') });
   IL.fix('I11-confirm', {
     gate: (s) => IL.lockReason(s, { connected: true, pressureOff: false }),
     run: async () => { const p = await IL.api('POST', '/api/screw/start-angle', {}); IL.planRefreshSoon(); return p; },
@@ -2841,15 +3196,16 @@
           IL.fixButton({ href: '#setup/purge', label: 'Setup › Purge row' })), el('div', { class: 'reason', id: 'pv-purge-reason', hidden: true }));
       }
       const row = (s.dispense && s.dispense.purgeRow) || {};
-      IL.keyed($('pv-purge-strip'), JSON.stringify([row.spots, row.usedSpots, row.perBoard, row.defined]), () => {
+      const need = IL.purgeNeed(row);
+      IL.keyed($('pv-purge-strip'), JSON.stringify([row.spots, row.usedSpots, need, row.defined]), () => {
         if (!row.defined) return el('div', { class: 'notebox notebox--block', text: 'The purge row is not set: set it in Setup (origin, pitch and spots on the blank).' });
         const cells = [];
-        for (let i = 0; i < row.spots; i++) cells.push(el('i', { class: i < row.usedSpots ? 'used' : i < row.usedSpots + row.perBoard ? 'next' : null }));
+        for (let i = 0; i < row.spots; i++) cells.push(el('i', { class: i < row.usedSpots ? 'used' : i < row.usedSpots + need ? 'next' : null }));
         return [el('div', { class: 'ready-head' }, el('div', { class: 'ready-head__t' }, el('div', { class: 'eyebrow', text: 'Spots free' }),
-          el('div', { class: 'ready-head__q', text: row.spots < row.perBoard ? 'Too short for one board (' + row.perBoard + ' per board)' : row.spotsLeft < row.perBoard ? 'Wipe the row and reset it' : 'Enough for ' + IL.plural(row.boardsLeft, 'board') })),
+          el('div', { class: 'ready-head__q', text: row.spots < need ? 'Too short for one board (' + need + ' per board)' : row.spotsLeft < need ? 'Wipe the row and reset it' : 'Enough for ' + IL.plural(Math.floor(row.spotsLeft / Math.max(1, need)), 'board') })),
         el('div', { class: 'ready-head__n' }, String(row.spotsLeft), el('small', { text: ' of ' + row.spots }))),
         el('div', { class: 'purge purge--lg', role: 'img', 'aria-label': 'Purge row: ' + row.spotsLeft + ' of ' + row.spots + ' spots free', style: 'margin-top:10px' }, cells),
-        el('div', { class: 'ready-sub' }, el('span', { text: row.usedSpots + ' used · ' + row.spotsLeft + ' free' }), el('span', { text: 'next board uses ' + row.perBoard }))];
+        el('div', { class: 'ready-sub' }, el('span', { text: row.usedSpots + ' used · ' + row.spotsLeft + ' free' }), el('span', { text: 'next board uses ' + need }))];
       });
       const next = row.defined ? { x: row.x0Mm + row.usedSpots * row.pitchXMm, y: row.y0Mm + row.usedSpots * row.pitchYMm } : null;
       IL.kv($('pv-purge-kv'), [
@@ -2859,7 +3215,7 @@
         ['Last wiped', row.resetAtMs ? IL.fmtDateTime(row.resetAtMs - S.skewMs) : 'never'],
       ]);
       const btn = p.foot.querySelector('[data-fix="purge-reset"]');
-      IL.gate(btn, !row.defined ? 'The purge row is not set' : IL.lockReason(s) || (row.spots < row.perBoard ? 'A reset cannot help: the row has fewer spots than one board purges' : null), $('pv-purge-reason'));
+      IL.gate(btn, !row.defined ? 'The purge row is not set' : IL.lockReason(s) || (row.spots < IL.purgeNeed(row) ? 'A reset cannot help: the row has fewer spots than one board purges' : null), $('pv-purge-reason'));
     },
   };
 
@@ -2968,6 +3324,7 @@
     for (const c of document.querySelectorAll('[data-open-view]')) c.addEventListener('click', () => IL.openView(c.dataset.openView));
     $('pill-engine').addEventListener('click', () => {
       const s = S.status;
+      if (IL.padProfile && IL.padProfile.jobActive(s) && !IL.recoveryActive()) { IL.openView('pad-cal', { keep: true }); return; }
       IL.go(IL.recoveryActive() ? '#run' : s && s.run && s.run.running ? '#run/run' : '#run/checks');
     });
     $('btn-start').addEventListener('click', (ev) => IL.runFix('connect', ev.currentTarget, null, ev));

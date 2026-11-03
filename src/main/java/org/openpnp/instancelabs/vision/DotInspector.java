@@ -47,7 +47,8 @@ import org.opencv.video.Video;
  * the nearby material contrast), which removes the size bias of a fixed threshold on blurred
  * edges; fill holes; then area (pixel count), centroid (moments) and circularity
  * (4*pi*A/P^2 of the outline).</li>
- * <li>{@link #inspect} filters by diameter and circularity; {@link #padCoverage} uses every blob.</li>
+ * <li>{@link #inspect} filters by diameter and circularity; {@link #padCoverage} uses every blob;
+ * {@link #inspectSpots} cuts strings off the new material and measures the dot at each known spot.</li>
  * </ol>
  *
  * Coordinates follow OpenPnP ({@code VisionUtils.getPixelCenterOffsets}): offset = pixel index -
@@ -103,6 +104,25 @@ public final class DotInspector {
             }
             dots.sort(Comparator.comparingDouble(d -> Math.hypot(d.xMm, d.yMm)));
             return dots;
+        }
+    }
+
+    /**
+     * The dot laid at each of {@code spotsMm} ({x, y} offsets from the image centre, mm, +x right, +y up), found
+     * even when paste strings join it to its neighbours ({@link SpotMeasure}): the new material is opened with a disc
+     * {@code cutMm} across, which cuts strings and necks thinner than that, and the piece at each spot is its dot. A
+     * spot whose paste is joined to another spot's, or that holds only strings or a smear, is
+     * {@link SpotDot.State#UNMEASURED}, never "no dot". {@code radiusMm}: how far from its spot a dot (or loose
+     * paste) still belongs to it; pieces within half of it reach the spot.
+     */
+    public List<SpotDot> inspectSpots(BufferedImage before, BufferedImage after, double mmPerPxX, double mmPerPxY,
+            List<double[]> spotsMm, double cutMm, double radiusMm) {
+        checkScale(mmPerPxX, mmPerPxY);
+        if (!(cutMm >= 0) || !(radiusMm > 0) || Double.isInfinite(cutMm) || Double.isInfinite(radiusMm)) {
+            throw new IllegalArgumentException("the cut must be 0 or more and the spot radius above 0 mm");
+        }
+        try (Analysis a = analyze(before, after)) {
+            return SpotMeasure.measure(a, settings, mmPerPxX, mmPerPxY, spotsMm, cutMm, radiusMm);
         }
     }
 

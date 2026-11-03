@@ -42,6 +42,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.prefs.Preferences;
+import java.util.stream.Collectors;
 
 import javax.swing.JOptionPane;
 
@@ -57,6 +58,7 @@ import org.openpnp.scripting.Scripting;
 import org.openpnp.spi.Machine;
 import org.openpnp.util.NanosecondTime;
 import org.pmw.tinylog.Logger;
+import org.simpleframework.xml.Attribute;
 import org.simpleframework.xml.Element;
 import org.simpleframework.xml.ElementList;
 import org.simpleframework.xml.ElementMap;
@@ -634,6 +636,127 @@ public class Configuration extends AbstractModelObject {
         catch (Exception e) {
             throw new Exception("Error while saving script-state.xml (" + e.getMessage() + ")", e);
         }
+    }
+
+    /**
+     * Instance Labs: writes packages.xml, parts.xml and boards.xml only, in that order (backups as
+     * save() makes them, temp file + atomic move), without dialogs; never machine.xml or board files.
+     * Each file is serialized to bytes and read back with createSerializer() first; if the ids read
+     * back differ from the ids in memory, it throws before anything is moved. Call on the event
+     * thread when the window exists.
+     */
+    public synchronized void saveLibraryFiles() throws Exception {
+        PackagesConfigurationHolder packagesHolder = new PackagesConfigurationHolder();
+        packagesHolder.packages = new ArrayList<>(packages.values());
+        PartsConfigurationHolder partsHolder = new PartsConfigurationHolder();
+        partsHolder.parts = new ArrayList<>(parts.values());
+        BoardsConfigurationHolder boardsHolder = new BoardsConfigurationHolder();
+        boardsHolder.boards = new ArrayList<>(boards.keySet());
+
+        String[] names = {"packages.xml", "parts.xml", "boards.xml"};
+        Object[] holders = {packagesHolder, partsHolder, boardsHolder};
+        List<List<String>> inMemory = List.of(
+                packagesHolder.packages.stream().map(Package::getId).collect(Collectors.toList()),
+                partsHolder.parts.stream().map(Part::getId).collect(Collectors.toList()),
+                boardsHolder.boards.stream().map(File::getPath).collect(Collectors.toList()));
+        byte[][] bytes = new byte[names.length][];
+        for (int i = 0; i < names.length; i++) {
+            try {
+                bytes[i] = toXmlBytes(holders[i]);
+            }
+            catch (Exception e) {
+                throw new Exception("Error while saving " + names[i] + " (" + e.getMessage() + "); nothing was saved",
+                        e);
+            }
+            List<String> readBack;
+            try {
+                readBack = readBackIds(holders[i], bytes[i]);
+            }
+            catch (Exception e) {
+                throw new Exception(names[i] + " would not read back (" + e.getMessage() + "); nothing was saved", e);
+            }
+            if (!inMemory.get(i).equals(readBack)) {
+                throw new Exception(names[i] + " would read back other ids than the ones in memory ("
+                        + firstDifference(inMemory.get(i), readBack) + "); nothing was saved");
+            }
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        List<String> saved = new ArrayList<>();
+        for (int i = 0; i < names.length; i++) {
+            File tmp = new File(configurationDirectory, names[i] + ".tmp");
+            try {
+                File file = createBackedUpFile(names[i], now);
+                Files.write(tmp.toPath(), bytes[i]);
+                Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            }
+            catch (Exception e) {
+                tmp.delete();
+                throw new Exception("Error while saving " + names[i] + " (" + e.getMessage() + ")"
+                        + (saved.isEmpty() ? "" : "; already saved: " + String.join(", ", saved)), e);
+            }
+            saved.add(names[i]);
+        }
+    }
+
+    /**
+     * The ids (for boards.xml the board paths) a library file would load with. Reads no Part objects
+     * (each one's constructor registers a configuration listener that is never removed), and packages
+     * the same way. The parser still reads the whole file, so text that would not load anywhere in it
+     * (a control character in a pad name, say) fails here too.
+     */
+    private static List<String> readBackIds(Object holder, byte[] xml) throws Exception {
+        List<String> l = new ArrayList<>();
+        if (holder instanceof PackagesConfigurationHolder) {
+            for (IdHolder h : readXml(PackageIdsHolder.class, xml).packages) {
+                l.add(h.id);
+            }
+        }
+        else if (holder instanceof PartsConfigurationHolder) {
+            for (IdHolder h : readXml(PartIdsHolder.class, xml).parts) {
+                l.add(h.id);
+            }
+        }
+        else {
+            for (File f : readXml(BoardsConfigurationHolder.class, xml).boards) {
+                l.add(f.getPath());
+            }
+        }
+        return l;
+    }
+
+    private static byte[] toXmlBytes(Object o) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        createSerializer().write(o, out);
+        out.write('\n');
+        return out.toByteArray();
+    }
+
+    private static <T> T readXml(Class<T> type, byte[] xml) throws Exception {
+        return createSerializer().read(type, new ByteArrayInputStream(xml), false);
+    }
+
+    private static String firstDifference(List<String> expected, List<String> actual) {
+        for (int i = 0; i < Math.max(expected.size(), actual.size()); i++) {
+            String a = i < expected.size() ? expected.get(i) : null;
+            String b = i < actual.size() ? actual.get(i) : null;
+            if (a == null || !a.equals(b)) {
+                return visible(a) + " reads back as " + visible(b);
+            }
+        }
+        return "none";
+    }
+
+    private static String visible(String s) {
+        if (s == null) {
+            return "nothing";
+        }
+        StringBuilder sb = new StringBuilder("\"");
+        for (char c : s.toCharArray()) {
+            sb.append(c < 0x20 || c == 0x7f || c >= 0xfffe ? String.format("\\u%04X", (int) c) : String.valueOf(c));
+        }
+        return sb.append('"').toString();
     }
 
     protected File createBackedUpFile(String fileName, LocalDateTime now) throws Exception {
@@ -1599,6 +1722,31 @@ public class Configuration extends AbstractModelObject {
     public static class BoardsConfigurationHolder {
         @ElementList(inline = true, entry = "board", required = false)
         private ArrayList<File> boards = new ArrayList<>();
+    }
+
+    /**
+     * Instance Labs: the package ids of packages.xml, read without making Package objects
+     * (saveLibraryFiles' read-back).
+     */
+    @Root(name = "openpnp-packages", strict = false)
+    static class PackageIdsHolder {
+        @ElementList(inline = true, entry = "package", required = false)
+        private ArrayList<IdHolder> packages = new ArrayList<>();
+    }
+
+    /**
+     * Instance Labs: the part ids of parts.xml, read without making Part objects.
+     */
+    @Root(name = "openpnp-parts", strict = false)
+    static class PartIdsHolder {
+        @ElementList(inline = true, entry = "part", required = false)
+        private ArrayList<IdHolder> parts = new ArrayList<>();
+    }
+
+    @Root(strict = false)
+    static class IdHolder {
+        @Attribute(required = false)
+        private String id;
     }
 
     /**
