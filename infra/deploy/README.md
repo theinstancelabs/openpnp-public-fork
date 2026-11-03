@@ -74,10 +74,12 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
        working at the machine by hand), and nothing recent in the last 15 min:
        - no run ended (`run.finishedAtMs`, `lastRun.endedAtMs`), no pad calibration ended
          (`padCalibration.endedAtMs`), no pressure event (`pressure.lastEventAtMs`). The pressure hold's first value,
-         stamped when the API starts (`PressureHold`), is not an event: with `server.startedAtMs` (BR-44, the JVM's
-         start) a stamp within 120 s of it is that one, whatever its text (`STARTUP_STAMP_S`: the API comes up within
-         `--status-timeout`'s 120 s, or il_deploy calls the start failed); a later stamp is an event. A build before
-         BR-44 has no `startedAtMs`: there the first value is told by its text, `lastEvent` "pressure off";
+         stamped when the API starts (`PressureHold`), is not an event: `lastEvent` exactly "pressure off" (every
+         event after it has more text) and, with `server.startedAtMs` (BR-44, the JVM's start), stamped within 120 s
+         of it (`STARTUP_STAMP_S`: the API comes up within `--status-timeout`'s 120 s, or il_deploy calls the start
+         failed). Both must hold: a person's event early after the start counts, and so does a first value whose text
+         changed (fails closed: the quiet period then runs from OpenPnP's start). A build before BR-44 has no
+         `startedAtMs`: there the text alone;
        - no home (`machine.zCheck.homeAtMs`);
        - no hand work in the dispense config: needle change, touch-off, landing, XY trim and anchor
          (`dispense.needle.changedAtMs`, `setAtMs`, `landing.setAtMs`, `xyTrim.setAtMs`, `anchor.setAtMs`), tip
@@ -153,7 +155,9 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
         M410, sent by every STOP, recomputes the position from the step counts, so a reset controller STOPped once
         reads 720.05; `RESET_ROTATION_TOLERANCE`). Either way it does **not** home.
      5. Home. Whatever the answer, it never STOPs while the machine is busy or homing: on anything but `homed` it
-        waits while `machine.busy` or `machine.homing` (BR-44) is true (up to `--home-busy-wait`). The API answers
+        waits while `machine.busy` or `machine.homing` (BR-44) is true (up to `--home-busy-wait`); a build before
+        BR-44 (a rollback can land there) has no `machine.homing`, so `machine.busy` alone (the home tests run on
+        both status shapes). The API answers
         409 "the home did not start or did not end within 5 min" after its own limit (`MachineEndpoints.home`)
         while the home may run on; il_deploy's
         `--home-timeout` (330 s) is longer. Such a home that then ends homed passes; one that ends unhomed is a

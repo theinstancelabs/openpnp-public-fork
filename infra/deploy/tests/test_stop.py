@@ -216,6 +216,17 @@ class Decisions(unittest.TestCase):
         api = StubApi(lambda n: status(busy=False, homing=True))
         self.assertFalse(self.deployer(api, "--poll-interval", "0.5")._wait_not_busy(2))
 
+    def test_a_home_ends_when_busy_says_so(self):
+        """The same wait holds while machine.busy is true: with machine.homing false (BR-44), and without it (a build
+        before BR-44, where a rollback can land), where machine.busy alone shows the home."""
+        for homing in (False, None):
+            with self.subTest(homing=homing):
+                api = StubApi(lambda n, homing=homing: status(busy=n < 4, homing=homing))
+                self.assertTrue(self.deployer(api)._wait_not_busy(5))
+                self.assertEqual(api.gets, 4)
+                api = StubApi(lambda n, homing=homing: status(busy=True, homing=homing))
+                self.assertFalse(self.deployer(api, "--poll-interval", "0.5")._wait_not_busy(2))
+
     def test_exec_stop_uses_the_same_rules(self):
         """Exit 0 when the machine is off (or OpenPnP is gone); 1 when it may not be: systemd then marks the unit
         failed, which il_deploy treats as an exit it did not cause (a hold)."""

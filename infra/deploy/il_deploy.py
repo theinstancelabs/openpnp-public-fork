@@ -108,8 +108,9 @@ HOME_GAVE_UP = "the home did not start or did not end within"
 # response to G28 ..."; G28 goes out with infinity-timeout-milliseconds, 60 s in the lab machine.xml): the controller
 # may still be in G28, where a STOP's M410 kills the board
 HOME_TIMED_OUT = re.compile(r"\btime[ds]?[ -]?out\b", re.I)
-# BR-44: server.startedAtMs is the JVM's start. The pressure hold's first value is stamped while OpenPnP starts, before
-# its API answers; il_deploy calls a start whose API and engine are not up within --status-timeout (120 s) failed
+# BR-44: server.startedAtMs is the JVM's start. The pressure hold's first value ('pressure off') is stamped while OpenPnP
+# starts, before its API answers; il_deploy calls a start whose API and engine are not up within --status-timeout (120 s)
+# failed. A person's pressure event can fall in this window too, so it only narrows the text (pressure_start_up_stamp)
 STARTUP_STAMP_S = 120
 
 
@@ -747,13 +748,17 @@ def unchecked_status_fields(st):
 
 def pressure_start_up_stamp(st):
     """True if the pressure hold's last event is its first value, which PressureHold stamps when the API starts
-    (PressureHold.java:77-78), not a person's event. With server.startedAtMs (BR-44) the time decides: stamped within
-    STARTUP_STAMP_S of the JVM's start. A build before it: the first value's text, 'pressure off'."""
+    (PressureHold.java:77-78), not a person's event: its text, exactly 'pressure off' (every event after it has more
+    text), and with server.startedAtMs (BR-44) also its time, within STARTUP_STAMP_S of the JVM's start. Both must hold,
+    so neither a changed text nor a person's event early after the start passes as the stamp (either fails closed: the
+    quiet period runs from that stamp)."""
     p = st.get("pressure") if isinstance(st.get("pressure"), dict) else {}
     server = st.get("server") if isinstance(st.get("server"), dict) else {}
+    if p.get("lastEvent") != "pressure off":
+        return False
     started, at = _ms(server.get("startedAtMs")), _ms(p.get("lastEventAtMs"))
     if started is None:
-        return p.get("lastEvent") == "pressure off"
+        return True
     return at is not None and started <= at <= started + STARTUP_STAMP_S * 1000
 
 

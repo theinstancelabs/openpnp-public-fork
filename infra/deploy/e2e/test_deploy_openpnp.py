@@ -592,7 +592,8 @@ class DeployRealOpenPnP(unittest.TestCase):
         since, until = il_deploy.read_json(os.path.join(self.root, "own-activity.json"))[-1]
         self.assertTrue(since * 1000 <= homes[0] <= until * 1000, (since, homes[0], until))
         # BR-44 on the real build: the engine runs, no home runs, and the pressure hold's first value was stamped while
-        # this OpenPnP started (pressure_start_up_stamp: by server.startedAtMs, not by its text)
+        # this OpenPnP started (pressure_start_up_stamp: its text, 'pressure off', within STARTUP_STAMP_S of
+        # server.startedAtMs)
         self.assertEqual((st["dispense"]["state"], st["dispense"]["startError"], st["machine"]["homing"]),
                          ("running", None, False))
         gap_ms = st["pressure"]["lastEventAtMs"] - st["server"]["startedAtMs"]

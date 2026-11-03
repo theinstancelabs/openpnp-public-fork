@@ -135,16 +135,45 @@ class Idle(unittest.TestCase):
         self.start_fake()
         self.assertEqual(self.reasons(), [])
 
-    def test_pressure_start_up_stamp_is_told_by_server_started_at(self):
-        """BR-44: server.startedAtMs is the JVM's start. The pressure hold's first stamp is made while OpenPnP starts
-        (its API is up within --status-timeout's 120 s, or il_deploy calls the start failed), so a stamp in that window
-        is OpenPnP's own, whatever its text; a later one is an event, whatever its text."""
-        self.start_fake(pressure_initial_event="off")  # the first value's text changed: still OpenPnP's own stamp
+    def test_pressure_start_up_stamp_is_its_text_at_the_start(self):
+        """The pressure hold's first value is exactly 'pressure off' (PressureHold.java:77; every event after it has
+        more text), stamped while OpenPnP starts. BR-44's server.startedAtMs (the JVM's start) narrows it: also within
+        STARTUP_STAMP_S of it (the API is up within --status-timeout's 120 s, or il_deploy calls the start failed). A
+        person's event early after the start is an event, and so is a first value whose text changed (that fails
+        closed: the quiet period then runs from OpenPnP's start)."""
+        self.start_fake()  # 'pressure off', 1 s after the JVM start
         self.assertEqual(self.reasons(), [])
-        self.fake.shutdown()
-        self.start_fake(jvm_start_s=il_deploy.STARTUP_STAMP_S + 60)  # stamped long after the JVM started
-        r = self.reasons()
-        self.assertTrue(any("a pressure event" in x and "ago" in x for x in r), r)
+        for name, machine in (("a person's event 70 s after the JVM start", dict(jvm_start_s=100,
+                                                                                    pressure_event_s_ago=30)),
+                              ("the first value's text changed", dict(pressure_initial_event="off")),
+                              ("'pressure off' long after the JVM start", dict(jvm_start_s=il_deploy.STARTUP_STAMP_S
+                                                                                + 60))):
+            with self.subTest(name):
+                self.fake.shutdown()
+                self.start_fake(**machine)
+                r = self.reasons()
+                self.assertTrue(any("a pressure event" in x and "ago" in x for x in r), r)
+
+    def test_pressure_start_up_stamp_rule(self):
+        """pressure_start_up_stamp on its own: the text and, with server.startedAtMs, the time; both must hold."""
+        t0 = 1_800_000_000_000
+        real = "pressure off (valve, then pump): API request"
+        window = il_deploy.STARTUP_STAMP_S * 1000
+        for text, at, started, stamp in (("pressure off", t0 + 2000, t0, True),
+                                         ("pressure off", t0 + window, t0, True),
+                                         ("pressure off", t0 + window + 1, t0, False),
+                                         ("pressure off", t0 - 1, t0, False),
+                                         ("pressure off", None, t0, False),
+                                         (real, t0 + 100_000, t0, False),
+                                         ("off", t0 + 2000, t0, False),
+                                         ("pressure off", t0 + 10 * window, None, True),
+                                         (real, t0 + 2000, None, False)):
+            with self.subTest(text=text, at=at, started=started):
+                st = {"server": {} if started is None else {"startedAtMs": started},
+                      "pressure": {"lastEvent": text, "lastEventAtMs": at}}
+                self.assertIs(il_deploy.pressure_start_up_stamp(st), stamp)
+                events = [ms for what, ms in il_deploy.api_activity_times(st) if what == "a pressure event"]
+                self.assertEqual(events, [] if stamp or at is None else [at])
 
     def test_pressure_start_up_stamp_of_a_build_before_br44(self):
         """No server.startedAtMs (a rollback to an older build): the first value is told by its text, as before."""

@@ -396,36 +396,58 @@ class Health(unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertIn("stop", rep["failure"])
 
+    # The home waits (Deployer._wait_not_busy) on each /api/status shape a deploy can meet: BR-44's (machine.homing true
+    # while a home runs) and a build before it, where a rollback can land: no machine.homing, so machine.busy alone
+    # shows the home
+    STATUS_SHAPES = (("BR-44", ()), ("before BR-44", ("old-status",)))
+
+    @contextlib.contextmanager
+    def status_shape(self, name, jar_fail, **machine):
+        """A subtest against a fresh fake of that shape, with a request log of its own."""
+        with self.subTest(status=name):
+            self.start(jar_fail=jar_fail, **machine)
+            try:
+                yield
+            finally:
+                self.fake.shutdown()
+                self.fake = None
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.lab.requests_path)
+
     def test_slow_home_finishes_late_without_a_stop(self):
-        self.start(home_s=1.0)
-        rep = self.check("--home-timeout", "0.3", "--home-busy-wait", "5")
-        self.assertTrue(rep["ok"], rep)
-        self.assertEqual(self.violations(), [])
+        for shape in self.STATUS_SHAPES:
+            with self.status_shape(*shape, home_s=1.0):
+                rep = self.check("--home-timeout", "0.3", "--home-busy-wait", "5")
+                self.assertTrue(rep["ok"], rep)
+                self.assertEqual(self.violations(), [])
 
     def test_home_that_never_ends_is_left_alone(self):
-        self.start(home_s=2.0)
-        rep = self.check("--home-timeout", "0.3", "--home-busy-wait", "0.5")
-        self.assertFalse(rep["ok"])
-        self.assertEqual(rep["kind"], "home-stuck")
-        self.assertNotIn(("POST", "/api/stop"), self.paths())
-        self.assertEqual(self.violations(), [])
+        for shape in self.STATUS_SHAPES:
+            with self.status_shape(*shape, home_s=2.0):
+                rep = self.check("--home-timeout", "0.3", "--home-busy-wait", "0.5")
+                self.assertFalse(rep["ok"])
+                self.assertEqual(rep["kind"], "home-stuck", rep)
+                self.assertNotIn(("POST", "/api/stop"), self.paths())
+                self.assertEqual(self.violations(), [])
 
     # --- the real server's own 5 min limit (MachineEndpoints.home: f.get(5, MINUTES), then 409 while the home runs on)
     def test_a_home_the_server_gave_up_on_is_waited_out_and_passes(self):
-        self.start(home_s=1.5, home_cap_s=0.3)
-        rep = self.check("--home-timeout", "5", "--home-busy-wait", "5")
-        self.assertTrue(rep["ok"], rep)
-        self.assertIn("ended after", [s for s in rep["steps"] if s["step"] == "home"][0]["detail"])
-        self.assertEqual(self.violations(), [])
-        self.assertEqual(len([p for p in self.paths() if p == ("POST", "/api/machine/home")]), 1)
+        for shape in self.STATUS_SHAPES:
+            with self.status_shape(*shape, home_s=1.5, home_cap_s=0.3):
+                rep = self.check("--home-timeout", "5", "--home-busy-wait", "5")
+                self.assertTrue(rep["ok"], rep)
+                self.assertIn("ended after", [s for s in rep["steps"] if s["step"] == "home"][0]["detail"])
+                self.assertEqual(self.violations(), [])
+                self.assertEqual(len([p for p in self.paths() if p == ("POST", "/api/machine/home")]), 1)
 
     def test_a_home_the_server_gave_up_on_that_never_ends_is_left_alone(self):
-        self.start(home_s=3.0, home_cap_s=0.3)
-        rep = self.check("--home-timeout", "5", "--home-busy-wait", "0.5")
-        self.assertFalse(rep["ok"])
-        self.assertEqual(rep["kind"], "home-stuck", rep)
-        self.assertNotIn(("POST", "/api/stop"), self.paths())
-        self.assertEqual(self.violations(), [])
+        for shape in self.STATUS_SHAPES:
+            with self.status_shape(*shape, home_s=3.0, home_cap_s=0.3):
+                rep = self.check("--home-timeout", "5", "--home-busy-wait", "0.5")
+                self.assertFalse(rep["ok"])
+                self.assertEqual(rep["kind"], "home-stuck", rep)
+                self.assertNotIn(("POST", "/api/stop"), self.paths())
+                self.assertEqual(self.violations(), [])
 
     def test_a_home_dropped_by_openpnp_is_the_machines(self):
         """The same 409 when OpenPnP dropped the home (a task of its own ahead of it failed): not busy, not homed."""
