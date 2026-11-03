@@ -22,6 +22,7 @@ import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeReport;
+import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
@@ -271,6 +272,8 @@ final class MachineEndpoints {
         // OpenPnP opens the controller link when the machine is started (enabled).
         s.put("connected", m.isEnabled());
         s.put("homed", m.isHomed());
+        // BR-44: from the start of any home until it ends (the deployer never sends STOP while it is true)
+        s.put("homing", m instanceof ReferenceMachine && ((ReferenceMachine) m).isHoming());
         s.put("busy", m.isBusy());
         DispenseService svc = ctx.svcOrNull();
         if (svc != null) {

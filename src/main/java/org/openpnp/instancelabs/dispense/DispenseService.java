@@ -64,6 +64,8 @@ import com.google.gson.Gson;
  */
 public final class DispenseService {
     private static volatile DispenseService instance;
+    /** BR-44: why the last start threw; null after a start that succeeded. */
+    private static volatile String startError;
     /** Longest the Stop path waits for an engine line that passed its abort check to be written. */
     static final long STOP_WRITE_GRACE_MS = 50;
     /** The vacuum probe nozzle (name or id). */
@@ -228,21 +230,46 @@ public final class DispenseService {
         });
     }
 
-    /** Starts (or restarts) the service for a loaded configuration. */
+    /**
+     * Starts (or restarts) the service for a loaded configuration. A start that throws leaves no service ({@link #get}
+     * null, not the one it stopped) and {@link #startState} "failed".
+     */
     public static synchronized DispenseService start(Configuration configuration) throws SQLException, IOException {
         if (instance != null) {
             instance.shutdown();
+            instance = null;
         }
-        instance = new DispenseService(configuration);
+        startError = null;
+        try {
+            instance = new DispenseService(configuration);
+        }
+        catch (Throwable t) {
+            startError = t.toString();
+            throw t;
+        }
         instance.askIdentityOnConnect();
         Logger.info("Instance Labs dispense service started: {}", instance.isAvailable() ? "available"
                 : "unavailable (" + instance.unavailableReason + ")");
         return instance;
     }
 
-    /** The running service, or null before the configuration has loaded. */
+    /** The running service, or null before the configuration has loaded (or when it failed to start). */
     public static DispenseService get() {
         return instance;
+    }
+
+    /**
+     * BR-44, for GET /api/status ({@code dispense.state}): "running", "failed" (the last start threw:
+     * {@link #startError}), or "starting" (not started yet: OpenPnP starts the web API and this service in no fixed
+     * order).
+     */
+    public static String startState() {
+        return instance != null ? "running" : startError != null ? "failed" : "starting";
+    }
+
+    /** Why the last start failed, or null. */
+    public static String startError() {
+        return instance != null ? null : startError;
     }
 
     private DispenseService(Configuration configuration) throws SQLException, IOException {
