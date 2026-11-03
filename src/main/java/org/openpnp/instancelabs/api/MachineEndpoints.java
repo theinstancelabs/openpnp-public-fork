@@ -49,8 +49,9 @@ final class MachineEndpoints {
      */
     static final long STOP_ANSWER_MS = 1500;
     /**
-     * Longest Start waits for a switch-off still running (BR-52): its DISABLE_COMMAND lines (each up to the driver's
-     * timeout) and the link's reader join (3 s).
+     * Longest Start waits for a switch-off still running (BR-52): one DISABLE_COMMAND line waiting the driver's timeout
+     * for a lost ok (10 s on the machines so far; the driver gives up on the rest) and a closing link's reader join
+     * (3 s), with room to spare.
      */
     static final long START_WAITS_FOR_SWITCH_OFF_MS = 20000;
 
@@ -163,7 +164,7 @@ final class MachineEndpoints {
 
     Object enable() throws Exception {
         Machine m = ctx.machine();
-        // BR-52: a machine switching off still reads started; connect anew once the switch-off has ended
+        // BR-52: a machine switching off still reads started; start it again once the switch-off has ended
         if (!ctx.switchOff.awaitEnd(START_WAITS_FOR_SWITCH_OFF_MS)) {
             throw ApiException.refused("OpenPnP is still switching the machine off after "
                     + START_WAITS_FOR_SWITCH_OFF_MS / 1000 + " s (it waits for the controller's answers): press Start "
