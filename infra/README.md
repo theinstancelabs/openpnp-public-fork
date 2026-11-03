@@ -20,12 +20,11 @@ Runs on every pull request, on pushes to `il/integration`, and by hand (workflow
 | build | `mvn -DskipTests package` (checkstyle runs at validate); the jar + lib become the artifact every later job tests | 3 min |
 | infra | `python3 -m unittest discover -s infra/<x>/tests -t infra/<x>` for every component here | 1 min |
 | maven | `mvn test`: unit tests and the simulated-machine integration tests (in-JVM GcodeServer, `*SimTest`) | 13 min |
-| deploy-e2e | `infra/deploy/e2e`: two releases in CI's format deployed and rolled back on the real jar against lumen-sim (no uinav) | 4 min |
 | controller-e2e | `infra/lumen-sim/e2e`: OpenPnP on lumen-sim's pty: home, STOP in G28, the 30-turn prime timeout | 6 min |
 | ui-e2e | `src/test/web/run-webui-sim-test.sh`: webui-sim, board-import, pad-profile, tip-setups in one SIM session | 55 min |
 | ui-boardview | `src/test/web/run-boardview-test.sh` | 5 min |
 | deploy-e2e | `infra/deploy/e2e/test_deploy_openpnp.py`: il_deploy with the build's jar on lumen-sim (deploy, deploy over a running OpenPnP, rollback, a power-cycled controller) | 3 min |
-| acceptance ×4 | `src/test/sim/il_sim_acceptance.py`, sharded; `ci/acceptance.py` fails the job unless every check passed (the script itself always exits 0) | 15 min each |
+| acceptance ×4 + 1 | `src/test/sim/il_sim_acceptance.py`, sharded on GcodeServer, plus `load` on lumen-sim's pty (`--controller-sim-cap`, BR-43/47); `ci/acceptance.py` fails the job unless every check passed (the script itself always exits 0) | 15 min each |
 | gate | green only if every job above succeeded; the one required status check | seconds |
 | release | push to `il/integration` only, after `gate`: a prerelease `il-build-<run>-<sha7>` with the build (`ci/make_release.py`), its tarball attested first (`actions/attest-build-provenance`; the deployer verifies it with `gh attestation verify`), then published by `ci/publish_release.py`: a release already at the tag passes only as this run's own (a re-run), checked with the deployer's policy; anything else there fails the run (tests in `deploy/tests/`) | 1 min |
 
@@ -44,17 +43,6 @@ exits 2 and fails the step). On any computer, the same env runs a gate on the fi
 shell, after another `&&` (`&& src/test/web/run-boardview-test.sh`). A new directory each run and the `&&`, because
 a refused directory (not empty: a second run, or another user of the computer made it) prints nothing on stdout, and
 `eval` of nothing succeeds, even under `set -e`: the gate would then read `~/.openpnp2` and the lab's files, unwarned.
-
-`ci/lab_layout.py`, the old way (the fixtures copied to the lab computer's paths, `/home/lumen` made with sudo), is
-superseded but still called in two places; it and `ci/tests/test_lab_layout.py` go once both are switched:
-1. `.github/actions/sim-env/action.yml`, step "Lab layout from infra/fixtures": its run becomes
-   `python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"` (shell: bash, no sudo), and the description
-   says "the gates' input files from infra/fixtures and their env (infra/ci/sim_env.py)" in place of "the lab
-   computer's file layout from infra/fixtures (infra/ci/lab_layout.py)", the eight names added to what it exports.
-2. `.github/workflows/ci.yml`, maven job, step "Lab layout from infra/fixtures": deleted. Its comment is out of date:
-   since BR-40 LiveBoardPlanTest asserts instead of skipping, and without the lab's files it reads the repo's
-   `src/test/resources/kicad/ftp.board.xml` and `infra/fixtures/lab-config` (what sim_env.py copies). No other maven
-   test reads env (the scan in `ci/tests/test_sim_env.py` covers every `src/test/java` file that calls `getenv`).
 
 `ci/tests/test_sim_env.py` scans the gates' sources (`src/test/sim`, `src/test/web`, `infra/*/e2e`, the Java tests
 that read env) for an env override with a lab computer path as its default, and fails the infra job when sim_env.py
