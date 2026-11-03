@@ -325,8 +325,11 @@ public class DispenseConfig {
         public double forbidRadiusMm = 15;
         /** Radius of the allowed circle around each place (mm). */
         public double placeRadiusMm = 6;
-        /** Margin around the purge row, the calibration area and each probed surface's points (mm). */
-        public double surfaceMarginMm = 2;
+        /**
+         * Margin around the purge row, the calibration area and each coupon (mm). A probed surface follows I4's
+         * {@link DispenseConfig#surfaceMarginMm} instead, so I4 and I12 never disagree about a dot.
+         */
+        public double marginMm = 2;
         /** More forbidden circles (e.g. a feeder, a nozzle tip holder). */
         public java.util.List<ForbidZone> forbid = new java.util.ArrayList<>();
     }
@@ -907,8 +910,8 @@ public class DispenseConfig {
             if (!(outputZones.placeRadiusMm >= 1 && outputZones.placeRadiusMm <= 15)) {
                 p.add("outputZones.placeRadiusMm must be 1..15 mm");
             }
-            if (!(outputZones.surfaceMarginMm >= 0 && outputZones.surfaceMarginMm <= 10)) {
-                p.add("outputZones.surfaceMarginMm must be 0..10 mm");
+            if (!(outputZones.marginMm >= 0 && outputZones.marginMm <= 10)) {
+                p.add("outputZones.marginMm must be 0..10 mm");
             }
             for (ForbidZone f : outputZones.forbid) {
                 if (f == null || !(f.radiusMm > 0 && f.radiusMm <= 100) || !Double.isFinite(f.x) || !Double.isFinite(f.y)) {

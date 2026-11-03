@@ -7,37 +7,51 @@ import java.util.Map;
 
 /**
  * BR-03: where the valve and the screw may switch on, in the needle's (N2) machine X/Y. Allowed: every place (waste,
- * towel, park, cup, ...: a circle of {@code placeRadiusMm}), each coupon's rectangle, the purge row, the calibration
- * area and every probed surface (its points' box; engine-probed patches, the blank, the boards of plans), each with
- * {@code surfaceMarginMm}. Forbidden, whatever else covers it: the bottom camera (a circle of {@code forbidRadiusMm})
- * and the configured circles. With the valve on the needle never crosses a forbidden zone.
+ * towel, park, cup, ...: a circle of {@code placeRadiusMm}), each coupon's rectangle, the purge row and the
+ * calibration area (each with {@code marginMm}), and every probed surface (engine-probed patches, the blank, the boards
+ * of plans) by I4's own rule ({@link Interlocks#onSurface}: within {@code surfaceMarginMm} of its points), so I4 and
+ * I12 never disagree about a dot. Forbidden, whatever else covers it: the bottom camera (a circle of
+ * {@code forbidRadiusMm}) and the configured circles. With the valve on the needle never crosses a forbidden zone.
  */
 public final class OutputZones {
-    /** A circle or a box, in machine X/Y (mm). */
+    /** A circle, a box or a probed surface, in machine X/Y (mm). */
     public static final class Zone {
         public final String name;
         public final boolean circle;
         public final double a, b, c, d; // circle: cx, cy, r; box: x0, y0, x1, y1
+        /** A probed surface's plane and the configuration whose I4 margin applies; null for a circle or a box. */
+        private final SurfacePlane plane;
+        private final DispenseConfig cfg;
 
-        private Zone(String name, boolean circle, double a, double b, double c, double d) {
+        private Zone(String name, boolean circle, double a, double b, double c, double d, SurfacePlane plane,
+                DispenseConfig cfg) {
             this.name = name;
             this.circle = circle;
             this.a = a;
             this.b = b;
             this.c = c;
             this.d = d;
+            this.plane = plane;
+            this.cfg = cfg;
         }
 
         static Zone circle(String name, double cx, double cy, double r) {
-            return new Zone(name, true, cx, cy, r, 0);
+            return new Zone(name, true, cx, cy, r, 0, null, null);
         }
 
         static Zone box(String name, double x0, double y0, double x1, double y1, double margin) {
             return new Zone(name, false, Math.min(x0, x1) - margin, Math.min(y0, y1) - margin,
-                    Math.max(x0, x1) + margin, Math.max(y0, y1) + margin);
+                    Math.max(x0, x1) + margin, Math.max(y0, y1) + margin, null, null);
+        }
+
+        static Zone surface(String name, SurfacePlane plane, DispenseConfig cfg) {
+            return new Zone(name, false, 0, 0, 0, 0, plane, cfg);
         }
 
         public boolean contains(double x, double y) {
+            if (plane != null) {
+                return Interlocks.onSurface(cfg, plane, x, y);
+            }
             if (circle) {
                 return Math.hypot(x - a, y - b) <= c;
             }
@@ -86,34 +100,31 @@ public final class OutputZones {
             for (String place : c.padCalibration.couponPlaces) {
                 double[] r = place == null ? null : c.padCalibration.couponRect(c, place);
                 if (r != null) {
-                    z.allow.add(Zone.box("coupon " + place, r[0], r[1], r[2], r[3], s.surfaceMarginMm));
+                    z.allow.add(Zone.box("coupon " + place, r[0], r[1], r[2], r[3], s.marginMm));
                 }
             }
         }
         DispenseConfig.PurgeRow row = c.purgeRow;
         if (row != null && row.isDefined()) {
             double[] first = row.spot(0), last = row.spot(row.spots - 1);
-            z.allow.add(Zone.box("purge row", first[0], first[1], last[0], last[1], s.surfaceMarginMm));
+            z.allow.add(Zone.box("purge row", first[0], first[1], last[0], last[1], s.marginMm));
         }
         CalibrationArea area = c.calibrationArea;
         if (area != null && area.isDefined()) {
             z.allow.add(Zone.box("calibration area", area.x0Mm, area.y0Mm, area.x0Mm + area.widthMm,
-                    area.y0Mm + area.heightMm, s.surfaceMarginMm));
+                    area.y0Mm + area.heightMm, s.marginMm));
         }
         for (Map.Entry<String, DispenseConfig.SurfaceMap> e : c.surfaces.entrySet()) {
             DispenseConfig.SurfaceMap m = e.getValue();
-            if (m == null || m.points == null || m.points.isEmpty()) {
+            if (m == null) {
                 continue;
             }
-            double x0 = Double.POSITIVE_INFINITY, y0 = Double.POSITIVE_INFINITY;
-            double x1 = Double.NEGATIVE_INFINITY, y1 = Double.NEGATIVE_INFINITY;
-            for (DispenseConfig.SurfacePoint p : m.points) {
-                x0 = Math.min(x0, p.x);
-                y0 = Math.min(y0, p.y);
-                x1 = Math.max(x1, p.x);
-                y1 = Math.max(y1, p.y);
+            try {
+                z.allow.add(Zone.surface("surface " + e.getKey(), SurfacePlane.fit(m.points), c));
             }
-            z.allow.add(Zone.box("surface " + e.getKey(), x0, y0, x1, y1, s.surfaceMarginMm));
+            catch (IllegalArgumentException notAPlane) {
+                // fewer than 3 points or all on one line: I4 refuses every dot on it too
+            }
         }
         return z;
     }

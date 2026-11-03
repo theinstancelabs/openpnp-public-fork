@@ -374,6 +374,14 @@ public final class Interlocks {
         return planSurface && in.plan != null ? in.plan.boardZMm : null;
     }
 
+    /**
+     * I4's rule for a dot on a probed surface, which I12 shares ({@link OutputZones}): within {@code surfaceMarginMm} of
+     * the probed points (their hull).
+     */
+    public static boolean onSurface(DispenseConfig cfg, SurfacePlane pl, double x, double y) {
+        return pl.distanceOutside(x, y) <= cfg.surfaceMarginMm;
+    }
+
     /** I4 for one probed surface and the dots that take their Z from it. */
     private static void checkSurface(Inputs in, InterlockReport r, String name, List<double[]> targets,
             boolean checkPlan) {
@@ -417,10 +425,9 @@ public final class Interlocks {
         int outside = 0;
         double worst = 0;
         for (double[] xy : targets) {
-            double d = pl.distanceOutside(xy[0], xy[1]);
-            if (d > cfg.surfaceMarginMm) {
+            if (!onSurface(cfg, pl, xy[0], xy[1])) {
                 outside++;
-                worst = Math.max(worst, d);
+                worst = Math.max(worst, pl.distanceOutside(xy[0], xy[1]));
             }
         }
         if (outside > 0) {
