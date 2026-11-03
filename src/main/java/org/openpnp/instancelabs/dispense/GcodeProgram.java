@@ -138,6 +138,11 @@ public class GcodeProgram {
      * ({@link DispenseConfig#needleFloorZMm(Double)}).
      */
     public Double floorReferenceZMm;
+    /**
+     * Where the paste lands from N2 (the tip's landing + trim, mm): the builder aimed every target by minus this, so
+     * the paste of a line lands at N2 plus this (I12).
+     */
+    public double landingDxMm, landingDyMm;
 
     /** All lines (including comments), one per entry. */
     public List<String> text() {

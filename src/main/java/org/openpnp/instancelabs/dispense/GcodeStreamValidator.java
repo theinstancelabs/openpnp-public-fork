@@ -60,9 +60,10 @@ public final class GcodeStreamValidator {
 
     /** The raw Z window for this configuration, or null without a needle frame (I4 refuses then). */
     /**
-     * BR-03: the output zones and how to find the needle in the program's raw lines. The needle's X/Y is the raw head
-     * X/Y plus the N2 offset ({@code dx}, {@code dy}: a translation, as OpenPnP's head offsets are); the program
-     * starts where the head is ({@code startRawX}, {@code startRawY}).
+     * BR-03: the output zones and how to find the needle in the program's raw lines. N2's X/Y is the raw head X/Y plus
+     * the N2 offset ({@code dx}, {@code dy}: a translation, as OpenPnP's head offsets are), and the paste lands at that
+     * plus the program's landing ({@link GcodeProgram#landingDxMm}: the landing + trim the builder aimed with); the
+     * program starts where the head is ({@code startRawX}, {@code startRawY}).
      */
     public static final class ZoneCheck {
         public final OutputZones zones;
@@ -287,6 +288,8 @@ public final class GcodeStreamValidator {
         Pattern yWord = zc == null ? null : Pattern.compile("(?:^|\\s)" + Pattern.quote(zc.letterY)
                 + "([-+]?[0-9]*\\.?[0-9]+)");
         double rawX = zc == null ? 0 : zc.startRawX, rawY = zc == null ? 0 : zc.startRawY;
+        // where the paste lands, from the raw head X/Y
+        double ox = zc == null ? 0 : zc.dx + prog.landingDxMm, oy = zc == null ? 0 : zc.dy + prog.landingDyMm;
         Pattern zWord = zw == null ? null
                 : Pattern.compile("(?:^|\\s)" + Pattern.quote(zw.letterZ) + "([-+]?[0-9]*\\.?[0-9]+)");
         boolean pump = false, valve = false, zeroed = prog.bZeroedAtStart, inDot = false, armed = false;
@@ -321,7 +324,7 @@ public final class GcodeStreamValidator {
                     p.add(where + "valve ON before pump ON");
                 }
                 valve = true;
-                String out = zc == null ? null : zc.zones.refusal(rawX + zc.dx, rawY + zc.dy);
+                String out = zc == null ? null : zc.zones.refusal(rawX + ox, rawY + oy);
                 if (out != null) {
                     p.add(where + "I12: " + out);
                 }
@@ -352,7 +355,7 @@ public final class GcodeStreamValidator {
                 double nx = xm.find() ? Double.parseDouble(xm.group(1)) : rawX;
                 double ny = ym.find() ? Double.parseDouble(ym.group(1)) : rawY;
                 if (valve && (nx != rawX || ny != rawY)) {
-                    String cross = zc.zones.crossing(rawX + zc.dx, rawY + zc.dy, nx + zc.dx, ny + zc.dy);
+                    String cross = zc.zones.crossing(rawX + ox, rawY + oy, nx + ox, ny + oy);
                     if (cross != null) {
                         p.add(where + "I12: " + cross);
                     }
@@ -380,7 +383,7 @@ public final class GcodeStreamValidator {
                 if (!(pump && valve)) {
                     p.add(where + "B move outside a pressure session");
                 }
-                String out = zc == null ? null : zc.zones.refusal(rawX + zc.dx, rawY + zc.dy);
+                String out = zc == null ? null : zc.zones.refusal(rawX + ox, rawY + oy);
                 if (out != null) {
                     p.add(where + "I12: " + out);
                 }

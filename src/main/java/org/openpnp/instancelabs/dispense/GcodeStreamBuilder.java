@@ -691,6 +691,8 @@ public class GcodeStreamBuilder {
         prog.bCountAtStart = bCountAtStart;
         prog.finalNozzle = nozzle.clone();
         prog.estimatedSeconds = t;
+        prog.landingDxMm = xy.dxMm;
+        prog.landingDyMm = xy.dyMm;
         return prog;
     }
 

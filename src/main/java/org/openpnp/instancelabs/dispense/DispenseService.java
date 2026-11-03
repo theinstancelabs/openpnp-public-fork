@@ -755,8 +755,9 @@ public final class DispenseService {
     }
 
     /**
-     * BR-03: moves the needle over (x, y) at OpenPnP's safe Z (both tools up first), on the calling machine thread,
-     * and waits until the head is still: the pressure hold's park. Refused with the position unknown (BR-02).
+     * BR-03: moves the needle so that its paste lands on (x, y) (N2 there minus the landing + trim, as programs aim)
+     * at OpenPnP's safe Z (both tools up first), on the calling machine thread, and waits until the head is still: the
+     * pressure hold's park. Refused with the position unknown (BR-02).
      */
     public void parkNeedle(double x, double y) throws Exception {
         requireAvailable();
@@ -764,20 +765,25 @@ public final class DispenseService {
         if (unknown != null) {
             throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
         }
+        double[] l = landingAndTrim(cfg);
         Location at = nozzle.getLocation().convertToUnits(LengthUnit.Millimeters);
-        org.openpnp.util.MovableUtils.moveToLocationAtSafeZ(nozzle, new Location(LengthUnit.Millimeters, x, y,
-                at.getZ(), at.getRotation()));
+        org.openpnp.util.MovableUtils.moveToLocationAtSafeZ(nozzle, new Location(LengthUnit.Millimeters, x - l[0],
+                y - l[1], at.getZ(), at.getRotation()));
         configuration.getMachine().getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
     }
 
-    /** The needle's machine X/Y now (OpenPnP's model), or null when there is no dispenser nozzle. */
+    /**
+     * BR-03: where the needle's paste lands now, in machine X/Y: N2 (OpenPnP's model) plus the mounted tip's landing +
+     * trim, as programs aim; null when there is no dispenser nozzle.
+     */
     public double[] needleXY() {
         Nozzle n = nozzle;
         if (n == null) {
             return null;
         }
-        org.openpnp.model.Location l = n.getLocation().convertToUnits(LengthUnit.Millimeters);
-        return new double[] {l.getX(), l.getY()};
+        org.openpnp.model.Location at = n.getLocation().convertToUnits(LengthUnit.Millimeters);
+        double[] l = landingAndTrim(cfg);
+        return new double[] {at.getX() + l[0], at.getY() + l[1]};
     }
 
     /** BR-02: the controller reset state (position known, the last detected reset and what it reported). */
@@ -2471,12 +2477,18 @@ public final class DispenseService {
         return new double[] {l.dxMm, l.dyMm};
     }
 
+    /** Where the mounted tip's paste lands from N2 (mm): its landing in effect plus the trim. Programs aim with it. */
+    private double[] landingAndTrim(DispenseConfig c) {
+        double[] l = landingInEffect(c);
+        return new double[] {l[0] + c.needleXyTrim.dxMm, l[1] + c.needleXyTrim.dyMm};
+    }
+
     /** The mounted tip's landing + trim and R7's paste per step for a program built from {@code c}. */
     GcodeStreamBuilder.TipXy tipXy(DispenseConfig c) {
         GcodeStreamBuilder.TipXy x = new GcodeStreamBuilder.TipXy();
-        double[] l = landingInEffect(c);
-        x.dxMm = l[0] + c.needleXyTrim.dxMm;
-        x.dyMm = l[1] + c.needleXyTrim.dyMm;
+        double[] l = landingAndTrim(c);
+        x.dxMm = l[0];
+        x.dyMm = l[1];
         try {
             x.feedMgPerStep = DoseBlocks.feedMgPerStep(c, mountedTip());
         }
