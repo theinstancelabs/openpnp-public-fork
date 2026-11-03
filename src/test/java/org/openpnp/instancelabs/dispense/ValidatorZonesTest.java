@@ -77,6 +77,33 @@ public class ValidatorZonesTest {
         assertTrue(v.stream().anyMatch(s -> s.contains("crosses the bottom camera")), v.toString());
     }
 
+    /** One dot whose paste lands at (x, 30), built (ToyMapper) with the tip's landing + trim (landingX, 0), checked. */
+    static List<String> landingAt(DispenseConfig c, double landingX, double x) throws Exception {
+        GcodeStreamBuilder.TipXy xy = new GcodeStreamBuilder.TipXy();
+        xy.dxMm = landingX;
+        ToyMapper m = new ToyMapper(230, 60, 31.5, 0);
+        GcodeProgram p = GcodeStreamBuilder.forDots(c, m, java.util.Collections.singletonList(
+                new GcodeStreamBuilder.DotSpec(x, 30, 3, 4, 180, 0, "dot")), true, false, false, 0, "landing", xy);
+        return GcodeStreamValidator.validate(p, c, "B", null,
+                GcodeStreamValidator.ZoneCheck.of(OutputZones.of(c, OutputZonesTest.CAMERA), m));
+    }
+
+    /**
+     * Review (MAJOR): the zones are where the paste lands, not where N2 is. The builder aims N2 at every target minus
+     * the tip's landing + trim, so the paste lands at N2 plus that. A towel 20 mm from the camera and a 4 mm landing:
+     * paste landing 13 mm from the camera (inside its 15 mm circle) is refused though N2 is 17 mm away, over the towel;
+     * the reverse (N2 inside the circle, the paste on the towel) is allowed.
+     */
+    @Test
+    public void theZonesAreWhereThePasteLandsNotWhereN2Is() throws Exception {
+        DispenseConfig c = new DispenseConfig();
+        c.locations.put("towel", new DispenseConfig.NamedLocation(220, 30, 5.5));
+        List<String> v = landingAt(c, -4, 213);
+        assertTrue(v.stream().anyMatch(s -> s.contains("I12") && s.contains("bottom camera")), v.toString());
+        v = landingAt(c, 4, 217);
+        assertTrue(v.stream().noneMatch(s -> s.contains("I12")), v.toString());
+    }
+
     @Test
     public void withoutAZoneCheckNothingChanges() {
         DispenseConfig c = config();

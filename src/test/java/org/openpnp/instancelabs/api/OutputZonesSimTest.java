@@ -14,6 +14,7 @@ import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.machine.reference.camera.SimulatedUpCamera;
@@ -134,6 +135,50 @@ public class OutputZonesSimTest {
         Location at = sim.n2.getLocation();
         assertEquals(80, at.getX(), 0.01);
         assertEquals(40, at.getY(), 0.01);
+        assertEquals("waste", i12().get("zone").getAsString());
+        stopPressure();
+    }
+
+    /** A landing of the mounted tip set under N2's head offset now, so the programs and the hold aim with it. */
+    void landing(double dx, double dy) throws Exception {
+        DispenseConfig c = svc.getConfig();
+        DispenseConfig.NeedleLanding l = new DispenseConfig.NeedleLanding();
+        l.dxMm = dx;
+        l.dyMm = dy;
+        double[] ho = svc.headOffsetNow();
+        l.headOffsetXMm = ho[0];
+        l.headOffsetYMm = ho[1];
+        l.setAtMs = System.currentTimeMillis();
+        c.needleLanding = l;
+        svc.updateConfig(c);
+    }
+
+    /**
+     * Review (MAJOR): the hold's needle is where the paste lands, N2 plus the mounted tip's landing + trim. With a 4 mm
+     * landing, N2 over the towel 17 mm from the camera puts the paste 13 mm from it, inside the camera's circle: the
+     * status says so and the hold is refused.
+     */
+    @Test
+    public void theHoldLooksWhereThePasteLands() throws Exception {
+        landing(-4, 0);
+        ok("PUT", "/api/locations/towel", "{\"x\":" + (CAM_X + 18) + ",\"y\":" + CAM_Y + ",\"z\":5.5}");
+        needleTo(CAM_X + 17, CAM_Y);
+        assertEquals("forbidden: bottom camera", i12().get("zone").getAsString());
+        sim.server.mark();
+        call("POST", "/api/pressure/start", "{}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("I12") && lastBody.contains("bottom camera"), lastBody);
+        assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
+    }
+
+    /** Review (MAJOR): a park puts where the paste lands (not N2) on the place: N2 beside it by the landing. */
+    @Test
+    public void theParkPutsThePasteOnThePlace() throws Exception {
+        landing(-4, 1.5);
+        ok("POST", "/api/pressure/start", "{\"park\":\"waste\"}");
+        Location at = sim.n2.getLocation();
+        assertEquals(80 + 4, at.getX(), 0.01, "N2 4 mm beside the waste");
+        assertEquals(40 - 1.5, at.getY(), 0.01);
         assertEquals("waste", i12().get("zone").getAsString());
         stopPressure();
     }

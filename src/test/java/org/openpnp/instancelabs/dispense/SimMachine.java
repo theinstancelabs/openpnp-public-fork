@@ -48,12 +48,12 @@ public final class SimMachine implements AutoCloseable {
     }
 
     /**
-     * BR-03: the towel under the needle where it is now, so a pressure hold may open the valve there (the tests that
-     * hold the pressure with the head at home).
+     * BR-03: the towel under the needle where it is now (where its paste lands), so a pressure hold may open the valve
+     * there (the tests that hold the pressure with the head at home).
      */
     public void towelUnderNeedle(DispenseService svc) throws Exception {
-        org.openpnp.model.Location l = n2.getLocation().convertToUnits(org.openpnp.model.LengthUnit.Millimeters);
-        svc.setLocation("towel", l.getX(), l.getY(), 5.5);
+        double[] at = svc.needleXY();
+        svc.setLocation("towel", at[0], at[1], 5.5);
     }
 
     /** Connects to the recording server (a controller connect) and homes. */
