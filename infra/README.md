@@ -38,10 +38,30 @@ the fixtures into DIR (new or empty; nothing outside it is written): the live co
 board, `machine.xml.patched` from `tools/instancelabs/make_machine_patch.py`, the engine's `dispense-config.json` and
 the bench run files, and prints the overrides in `GITHUB_ENV` format (`OPENPNP_CONFIG`, `IL_LIVE_CONFIG`,
 `IL_TEST_BOARD`, `IL_PATCHED_MACHINE_XML`, `IL_DISPENSE_CONFIG`, `IL_RUNS_DIR`, `LUMEN_SIM_E2E_CONFIG`,
-`LUMEN_SIM_E2E_DISPENSE_CONFIG`). CI: `python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"`. On any
-computer, the same env runs a gate on the fixtures instead of the lab's files:
-`eval "$(python3 infra/ci/sim_env.py /tmp/lab --export)"`. (`ci/lab_layout.py`, the old way: the fixtures copied to
-those host paths with sudo, is superseded and goes when the workflow switches.)
+`LUMEN_SIM_E2E_DISPENSE_CONFIG`). CI: `python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"` (a refusal
+exits 2 and fails the step). On any computer, the same env runs a gate on the fixtures instead of the lab's files:
+`lab_env="$(python3 infra/ci/sim_env.py "$(mktemp -d)/lab" --export)" && eval "$lab_env"`, then the gate in that
+shell, after another `&&` (`&& src/test/web/run-boardview-test.sh`). A new directory each run and the `&&`, because
+a refused directory (not empty: a second run, or another user of the computer made it) prints nothing on stdout, and
+`eval` of nothing succeeds, even under `set -e`: the gate would then read `~/.openpnp2` and the lab's files, unwarned.
+
+`ci/lab_layout.py`, the old way (the fixtures copied to the lab computer's paths, `/home/lumen` made with sudo), is
+superseded but still called in two places; it and `ci/tests/test_lab_layout.py` go once both are switched:
+1. `.github/actions/sim-env/action.yml`, step "Lab layout from infra/fixtures": its run becomes
+   `python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"` (shell: bash, no sudo), and the description
+   says "the gates' input files from infra/fixtures and their env (infra/ci/sim_env.py)" in place of "the lab
+   computer's file layout from infra/fixtures (infra/ci/lab_layout.py)", the eight names added to what it exports.
+2. `.github/workflows/ci.yml`, maven job, step "Lab layout from infra/fixtures": deleted. Its comment is out of date:
+   since BR-40 LiveBoardPlanTest asserts instead of skipping, and without the lab's files it reads the repo's
+   `src/test/resources/kicad/ftp.board.xml` and `infra/fixtures/lab-config` (what sim_env.py copies). No other maven
+   test reads env (the scan in `ci/tests/test_sim_env.py` covers every `src/test/java` file that calls `getenv`).
+
+`ci/tests/test_sim_env.py` scans the gates' sources (`src/test/sim`, `src/test/web`, `infra/*/e2e`, the Java tests
+that read env) for an env override with a lab computer path as its default, and fails the infra job when sim_env.py
+does not set it. It knows the usual spellings (`os.environ.get`/`os.getenv`/`os.environ[...]` in either quotes,
+`${X:-...}`, `System.getenv`, `getOrDefault`, `pick`, `process.env`; `/home/`, `~/`, `expanduser`, `Path.home`,
+`user.home`, `$HOME`, `homedir`, and names bound to those two levels deep, `acc.HOME` across files); its docstring
+lists what it does not see.
 
 ## Tests
 ```
