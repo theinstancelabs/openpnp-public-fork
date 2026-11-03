@@ -321,6 +321,9 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     protected LinkedBlockingQueue<Line> responseQueue = new LinkedBlockingQueue<>();
     protected LinkedBlockingQueue<AxesLocation> reportedLocationsQueue = new LinkedBlockingQueue<>();
     protected LinkedBlockingQueue<Line> receivedConfirmationsQueue = new LinkedBlockingQueue<>();
+    /** Instance Labs (BR-42): senders between their write and their confirmation. Guarded by confirmationLock. */
+    private int confirmationWaiters;
+    private final Object confirmationLock = new Object();
 
     protected Line errorResponse;
     private boolean motionPending;
@@ -1260,17 +1263,32 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
         // After sending this, we want one more confirmation. 
         // TODO: true queued reporting. For now it is sufficient to poll one for one.
-        receivedConfirmationsQueue.clear();
+        // Instance Labs (BR-42): only a sender alone drops stale confirmations. With another sender waiting (OpenPnP's
+        // Stop beside the dispense engine's line in flight) its ok may be in the queue already, and clearing it made
+        // that sender wait its whole timeout. Each line still gets one ok, and each waiting sender takes one.
+        synchronized (confirmationLock) {
+            if (confirmationWaiters == 0) {
+                receivedConfirmationsQueue.clear();
+            }
+            confirmationWaiters++;
+        }
         try {
-            // Send the command.
-            getCommunications().writeLine(command);
+            try {
+                // Send the command.
+                getCommunications().writeLine(command);
+            }
+            catch (IOException ex) {
+                Logger.error(ex, "{} failed to write command {}", getCommunications().getConnectionName(), command);
+                disconnect();
+                Configuration.get().getMachine().setEnabled(false);
+            }
+            waitForConfirmation(command, timeout);
         }
-        catch (IOException ex) {
-            Logger.error(ex, "{} failed to write command {}", getCommunications().getConnectionName(), command);
-            disconnect();
-            Configuration.get().getMachine().setEnabled(false);
+        finally {
+            synchronized (confirmationLock) {
+                confirmationWaiters--;
+            }
         }
-        waitForConfirmation(command, timeout);
         if (command.startsWith("$")) {
             Thread.sleep(dollarWaitTimeMilliseconds);
         }
