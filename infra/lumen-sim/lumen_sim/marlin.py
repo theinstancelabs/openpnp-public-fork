@@ -134,7 +134,8 @@ class Command:
 
 
 class Firmware:
-    def __init__(self, personality, machine, now, emit, on_line=None, kill_messages=False, on_error=None):
+    def __init__(self, personality, machine, now, emit, on_line=None, kill_messages=False, on_error=None,
+                 sim_cap=False):
         p = self.p = personality
         self.machine = machine
         self.now = now
@@ -142,6 +143,7 @@ class Firmware:
         self._on_line = on_line             # on_line(text, t) -> seq
         self._on_error = on_error           # on_error({"t", "line", "error"}): a gap in this model, not a board reply
         self.kill_messages = kill_messages
+        self.sim_cap = sim_cap              # M115 says it is lumen-sim (BR-47); never the board's own
         self._load_defaults()
         self.feedrate = 25.0                # mm/s (1500 mm/min)
         self.feedrate_percentage = 100
@@ -868,7 +870,7 @@ class Firmware:
         self._emit(self._report_line(self.position))  # projected: planned end, no wait
 
     def m115(self, cmd):
-        for line in self.p.m115():
+        for line in self.p.m115(self.sim_cap):
             self._emit(line)
 
     def m119(self, cmd):

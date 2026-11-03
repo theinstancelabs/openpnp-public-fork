@@ -24,6 +24,7 @@ Skipped unless LUMEN_SIM_E2E=1 and LUMEN_SIM_E2E_JAR names the OpenPnP jar. Take
 Env: UINAV_DIR (openpnp-uinav with --controller pty), LUMEN_SIM_E2E_CONFIG (config dir to copy, default
 ~/.openpnp2), LUMEN_SIM_E2E_DISPENSE_CONFIG (engine config to stage, default the SIM acceptance's if present),
 LUMEN_SIM_E2E_PORTS (web API ports to try, default 18930-18939), LUMEN_SIM_E2E_OUT (keeps logs and results.json).
+UINAV_SIM_CONTROLLER_CAP is ignored: lumen-sim runs without its simulator line, so SimGuard sees the board (BR-47).
 """
 import json
 import os
@@ -108,6 +109,8 @@ class PtySession:
         self.port = free_api_port()
         env = dict(os.environ, OPENPNP_IL_API_PORT=str(self.port), LUMEN_SIM_DIR=LUMEN_SIM_DIR)
         env.setdefault("JAVA_TOOL_OPTIONS", "-Xmx1536m")
+        # The reproductions need the board's exact M115: never lumen-sim's simulator line (uinav's sim default)
+        env.pop("UINAV_SIM_CONTROLLER_CAP", None)
         cmd = [UINAV, "--session", name, "launch", "--controller", "pty", "--controller-park", PARK,
                "--config", stage(os.path.join(tmp, "stage-" + name)), "--openpnp-jar", os.path.abspath(JAR)]
         for x in XML_SETS:
@@ -281,6 +284,8 @@ class HomeAndPrimeTest(SessionTest):
         st = self.s.status()
         self.assertFalse(st["server"]["simulatorConfirmed"])  # SimGuard: a serial board, i.e. a real machine
         self.enable()
+        # SimGuard asked at the connect (M115): the board's own answer, without lumen-sim's simulator line (BR-47)
+        self.assertFalse(self.s.status()["server"]["simulatorConfirmed"])
         n0 = self.s.io()[1]
         t0 = time.time()
         code, r = self.s.api("POST", "/api/machine/home", HOME, timeout=180)

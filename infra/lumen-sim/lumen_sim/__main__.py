@@ -3,7 +3,7 @@
 usage:
   python3 -m lumen_sim --link PATH [--personality stock|il-safety] [--control SOCK] [--io-log FILE]
                        [--time-scale 1.0] [--park X,Y,Z] [--kill-messages] [--vacuum N] [--surface-z Z]
-                       [--seed N]
+                       [--seed N] [--sim-cap]
   python3 -m lumen_sim ctl --control SOCK state
   python3 -m lumen_sim ctl --control SOCK fault '{"fault": "no_ok", "match": "^G4"}'
   python3 -m lumen_sim ctl --control SOCK set '{"vacuum": -1600000}'
@@ -56,6 +56,9 @@ def run(argv):
     ap.add_argument("--surface-z", type=_finite,
                     help="physical Z (mm) at which N1 touches a surface and seals (default: nothing under N1)")
     ap.add_argument("--seed", type=int, default=0, help="seed for random fault delays")
+    ap.add_argument("--sim-cap", action="store_true",
+                    help="M115 also sends 'Cap:SIMULATOR:lumen-sim', which OpenPnP's SimGuard takes as a simulator "
+                         "(SIM-feature scenarios only; never for the bug reproductions: the board never sends it)")
     args = ap.parse_args(argv)
     if args.time_scale <= 0:  # NaN and inf are refused by _finite: the loop would never sleep
         ap.error("--time-scale must be > 0")
@@ -64,7 +67,7 @@ def run(argv):
     except ValueError as e:
         ap.error("--link: %s" % e)
     sim = Simulator(args.personality, park=args.park, vacuum=args.vacuum, kill_messages=args.kill_messages,
-                    seed=args.seed)
+                    seed=args.seed, sim_cap=args.sim_cap)
     if args.surface_z is not None:
         sim.machine.surface_z = args.surface_z
     guard = LinkGuard()  # before anything is opened: it must hold none of it
