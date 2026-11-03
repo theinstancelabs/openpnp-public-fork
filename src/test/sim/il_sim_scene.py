@@ -56,6 +56,8 @@ import xml.etree.ElementTree as ET
 
 SCENE_REL = os.path.join("instancelabs", "sim-scene.json")
 LIVE_CONFIG = os.path.join(os.path.expanduser("~"), ".openpnp2")
+# Never written either: the live config the harness reads when IL_LIVE_CONFIG points elsewhere (BR-40).
+LIVE_CONFIGS = [LIVE_CONFIG] + ([os.environ["IL_LIVE_CONFIG"]] if os.environ.get("IL_LIVE_CONFIG") else [])
 # Installs the SIM top camera in a uinav SIM session (uinav first turns Top into an ImageCamera).
 CAMERA_XML_SETS = [".//camera[@name='Top']@class=org.openpnp.instancelabs.sim.SimBoardCamera",
                    ".//camera[@name='Top']@width=1920",
@@ -432,9 +434,10 @@ def scene_path(config_dir):
 def write(config_dir, sc):
     """Atomic (tmp + rename): a running session reloads it on change. Never into the live config."""
     real = os.path.realpath(config_dir)
-    live = os.path.realpath(LIVE_CONFIG)
-    if real == live or real.startswith(live + os.sep):
-        raise SystemExit("il_sim_scene: refusing to write a sim scene into the live config %s" % LIVE_CONFIG)
+    for cfg in LIVE_CONFIGS:
+        live = os.path.realpath(cfg)
+        if real == live or real.startswith(live + os.sep):
+            raise SystemExit("il_sim_scene: refusing to write a sim scene into the live config %s" % cfg)
     path = scene_path(config_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".sim-scene.", suffix=".tmp", dir=os.path.dirname(path))

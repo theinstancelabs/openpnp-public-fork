@@ -96,13 +96,15 @@ sys.path.insert(0, os.path.join(UINAV_DIR, "python"))
 import uinav  # noqa: E402
 
 HOME = os.path.expanduser("~")
-RUNS = "/home/lumen/instancelabs/runs"
+# The lab computer's paths by default; CI points these into infra/fixtures (BR-40): IL_RUNS_DIR (bench runs),
+# IL_LIVE_CONFIG (the lab's OpenPnP config, only read), IL_PATCHED_MACHINE_XML, IL_DISPENSE_CONFIG, IL_TEST_BOARD.
+RUNS = os.environ.get("IL_RUNS_DIR") or "/home/lumen/instancelabs/runs"
 DEF = {
     "jar": os.path.join(REPO, "target", "openpnp-gui-0.0.1-alpha-SNAPSHOT.jar"),
-    "live": os.path.join(HOME, ".openpnp2"),
-    "patched": "/home/lumen/instancelabs/config/machine.xml.patched",
-    "dispense_config": "/home/lumen/instancelabs/config/dispense-config.json",
-    "board": os.path.join(HOME, "Desktop", "ftp.board.xml"),
+    "live": os.environ.get("IL_LIVE_CONFIG") or os.path.join(HOME, ".openpnp2"),
+    "patched": os.environ.get("IL_PATCHED_MACHINE_XML") or "/home/lumen/instancelabs/config/machine.xml.patched",
+    "dispense_config": os.environ.get("IL_DISPENSE_CONFIG") or "/home/lumen/instancelabs/config/dispense-config.json",
+    "board": os.environ.get("IL_TEST_BOARD") or os.path.join(HOME, "Desktop", "ftp.board.xml"),
     "out": "/home/lumen/instancelabs/sim-acceptance/" + time.strftime("%Y%m%d-%H%M%S"),
 }
 # Board where the top camera found it on the real machine: runs/board_registration.json r7 (re-seated
