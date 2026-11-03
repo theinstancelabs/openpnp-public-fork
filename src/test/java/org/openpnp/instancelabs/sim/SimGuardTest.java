@@ -4,10 +4,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.DriverGcodeChannel;
 import org.openpnp.instancelabs.dispense.SimMachine;
@@ -22,6 +30,9 @@ public class SimGuardTest {
     static final List<String> GCODE_SERVER = Arrays.asList(
             "FIRMWARE_NAME:GcodeServer, FIRMWARE_URL:http%3A//openpnp.org, FIRMWARE_VERSION:x, X-AXES:5", "ok");
     static final List<String> MARLIN = Arrays.asList("FIRMWARE_NAME:Marlin bugfix-2.1.x", "Cap:HOST_WATCHDOG:1", "ok");
+    /** lumen-sim (infra/lumen-sim, INF-03) behind its flag: the board's M115 plus a line the real board never sends. */
+    static final List<String> LUMEN_SIM = Arrays.asList("FIRMWARE_NAME:Marlin bugfix-2.1.x (Sep 19 2024 13:39:21)",
+            "Cap:HOST_WATCHDOG:1", "Cap:SIMULATOR:lumen-sim", "ok");
     SimMachine sim;
 
     @AfterEach
@@ -166,5 +177,97 @@ public class SimGuardTest {
         sim = new SimMachine(false);
         assertEquals(new java.io.File(sim.configDir, "instancelabs/sim-scene.json").getAbsolutePath(),
                 SimGuard.sceneFile(org.openpnp.model.Configuration.get()).getAbsolutePath());
+    }
+
+    /** A pseudo-terminal held open by python3, as lumen-sim's, and a link to it, as uinav's session link. */
+    static final class Pty implements AutoCloseable {
+        final Process process;
+        final String device;
+        final Path link;
+
+        Pty() throws Exception {
+            Process p;
+            try {
+                p = new ProcessBuilder("python3", "-I", "-c", "import os, pty, sys; m, s = pty.openpty(); "
+                        + "print(os.ttyname(s), flush=True); sys.stdin.read()").start();
+            }
+            catch (java.io.IOException e) {
+                p = null;
+            }
+            Assumptions.assumeTrue(p != null, "python3 opens the test's pseudo-terminal");
+            process = p;
+            device = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8)).readLine();
+            Assumptions.assumeTrue(device != null && device.startsWith("/dev/pts/"), "a pty: " + device);
+            link = Files.createSymbolicLink(Files.createTempDirectory("simguard-pty").resolve("ttyLUMEN0"),
+                    Paths.get(device));
+        }
+
+        @Override
+        public void close() throws Exception {
+            process.getOutputStream().close(); // python reads to EOF, then lets the pty go
+            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+            }
+            Files.deleteIfExists(link);
+        }
+    }
+
+    /** BR-47: lumen-sim on a pty, as uinav --controller pty connects OpenPnP to it. */
+    @Test
+    public void aPtyAndTheLumenSimLineIsSimulated() throws Exception {
+        try (Pty pty = new Pty()) {
+            sim = new SimMachine(false);
+            sim.driver.setCommunicationsType(CommunicationsType.serial);
+            try {
+                sim.driver.setPortName(pty.link.toString());
+                assertTrue(SimGuard.isPtySerial(sim.driver), pty.link + " -> " + pty.device);
+                assertFalse(SimGuard.isLoopbackOnly(sim.machine));
+                assertFalse(SimGuard.isSimulated(sim.machine), "no M115 yet on this connection");
+                SimGuard.noteIdentity(sim.machine, LUMEN_SIM);
+                assertTrue(SimGuard.isSimulated(sim.machine));
+                sim.driver.setPortName(pty.device);
+                assertTrue(SimGuard.isSimulated(sim.machine), "the device itself");
+                // the bug reproductions: lumen-sim without its flag answers with the board's exact M115
+                SimGuard.noteIdentity(sim.machine, MARLIN);
+                assertFalse(SimGuard.isSimulated(sim.machine), "a pty with the stock M115");
+            }
+            finally {
+                sim.driver.setCommunicationsType(CommunicationsType.tcp);
+            }
+        }
+    }
+
+    /** BR-47: the lumen-sim line confirms nothing on a port that is not a pseudo-terminal. */
+    @Test
+    public void theLumenSimLineOnARealPortIsNotSimulated() throws Exception {
+        sim = new SimMachine(false);
+        sim.driver.setCommunicationsType(CommunicationsType.serial);
+        try {
+            Path toBoard = Files.createSymbolicLink(Files.createTempDirectory("simguard").resolve("ttyLUMEN0"),
+                    Paths.get("/dev/ttyACM0"));
+            Path file = Files.createTempFile("pts", "3");
+            for (String port : new String[] {"/dev/ttyACM0", "ttyACM0", "/dev/ttyUSB0",
+                "/dev/serial/by-id/usb-Opulo_LumenPnP_Motherboard_0001-if00", toBoard.toString(), file.toString(),
+                "/dev/pts/ptmx", "/dev/pts", "pts/3", "", " "}) {
+                sim.driver.setPortName(port);
+                assertFalse(SimGuard.isPtySerial(sim.driver), port);
+                SimGuard.noteIdentity(sim.machine, LUMEN_SIM);
+                assertFalse(SimGuard.isSimulated(sim.machine), port);
+            }
+            Files.deleteIfExists(toBoard);
+            Files.deleteIfExists(file);
+        }
+        finally {
+            sim.driver.setCommunicationsType(CommunicationsType.tcp);
+        }
+    }
+
+    @Test
+    public void theLumenSimLineIsASimulatorIdentity() {
+        assertTrue(SimGuard.isSimulatorIdentity(LUMEN_SIM), "records made on lumen-sim are simulated");
+        assertTrue(SimGuard.isSimulatorIdentity(GCODE_SERVER));
+        assertFalse(SimGuard.isSimulatorIdentity(MARLIN));
+        assertFalse(SimGuard.isSimulatorIdentity(Arrays.asList("Cap:SIMULATOR:lumen-simX", "ok")));
+        assertFalse(SimGuard.isSimulatorIdentity(Arrays.asList("Cap:SIMULATOR:0", "ok")));
     }
 }

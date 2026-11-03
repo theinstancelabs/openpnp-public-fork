@@ -168,6 +168,28 @@ public class SimBoardCameraTest {
         assertTrue(e.getMessage().endsWith("uses tcp to 192.168.1.20"), e.getMessage());
     }
 
+    /** BR-47: on lumen-sim's pseudo-terminal, once it said so, the SIM camera opens as on the GcodeServer. */
+    @Test
+    public void aPtyMachineOpensOnceLumenSimSaidSo() throws Exception {
+        try (SimGuardTest.Pty pty = new SimGuardTest.Pty()) {
+            sim = new SimMachine(false);
+            writeScene(sim.configDir);
+            sim.driver.setCommunicationsType(CommunicationsType.serial);
+            try {
+                sim.driver.setPortName(pty.link.toString());
+                SimGuard.noteIdentity(sim.machine, SimGuardTest.LUMEN_SIM);
+                camera(false).open();
+                sim.driver.setPortName("/dev/ttyACM0");
+                IllegalStateException e = assertThrows(IllegalStateException.class, camera(false)::open);
+                assertTrue(e.getMessage().startsWith("simulation-only camera on a non-simulated machine"),
+                        e.getMessage());
+            }
+            finally {
+                sim.driver.setCommunicationsType(CommunicationsType.tcp);
+            }
+        }
+    }
+
     @Test
     public void noSceneRefusesToOpen() throws Exception {
         sim = new SimMachine();
