@@ -252,8 +252,8 @@ Hero card:
   it (nothing moves).
   **As built (board import):** the board's drawing lies under the dots in a second SVG (`g.pv-l-art`: substrate,
   copper, mask, exposed copper, silkscreen, holes, drawn once per art id) with the picture control `#pv-picture`
-  (`Full` · `Quiet` (default, remembered in `localStorage['il.pv.picture']`: pads, holes and the outline, so the dots
-  stand out) · `Off` (the drawing without art)). A click on a pad or a part opens the **pad inspector** (panel view
+  (`Full` (default since 10-31: the whole PCB; the choice is remembered in `localStorage['il.pv.picture']`) · `Quiet`
+  (pads, holes and the outline, so the dots stand out) · `Off` (the drawing without art)). A click on a pad or a part opens the **pad inspector** (panel view
   `pad`) instead of the camera; `#btn-pad-inspect` opens the first pad in path order. The **path preview**
   (`#pv-play`) expands the row `#run-preview` (`#pv-scrub`, `#pv-speed` 1× · 4× · 16×, `#pv-readout`, `#pv-reset`):
   a ghost needle moves dot to dot on the plan's clock (`dots[i].ta / te`) and the dots appear as they would be

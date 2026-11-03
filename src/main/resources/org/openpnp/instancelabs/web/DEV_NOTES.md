@@ -310,7 +310,7 @@ with §11 (the AR + BI integration slice, on `il/rc1`). Nothing here moves the m
   row})` → `{shown}` (H3: the drawing, `#pv-picture`, the preview, `#btn-pad-inspect`; before planning the chosen
   board at the form's seat with the live camera, `#board-preplan`), `onPad` / `onPart` (H2), `recordsMap(bv, plan)`
   (H4), `onImported(saved)`, `preview()` (the hero's path preview). Keeps the newest 8 drawings;
-  `localStorage['il.pv.picture']` (default Quiet). Board pictures say `75 × 75 mm` and `80 parts`; the attach keeps the
+  `localStorage['il.pv.picture']` (default Full; Records' map is Full too). Board pictures say `75 × 75 mm` and `80 parts`; the attach keeps the
   drawing under the board file's earlier name, else a free one (never another board's).
 - **`IL.boardImport.open({file, onSaved})`**, `isOpen()` (web-flow): `#dlg-board-import`, states choose → reading
   (Cancel aborts, 60 s) → preview → saving (Esc and Cancel do nothing) → saved; 12 MB checked before sending; a refused

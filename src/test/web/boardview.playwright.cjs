@@ -96,12 +96,12 @@ async function showHero(page, picture) {
   return page.evaluate(() => ({ art: !!IL.run.bv.art, parts: (IL.run.bv.art.parts || []).length }));
 }
 
-/** boardflow's Records map (H4): the plan's drawing under the done-dot map, Quiet, in view. */
+/** boardflow's Records map (H4): the plan's drawing under the done-dot map, Full, in view. */
 async function recordsArt(page) {
   const ok = await page.waitForFunction(() => {
     const host = document.querySelector('.rec-mapbox');
     const bv = host && IL.boardview.of(host);
-    return !!(bv && bv.plan && bv.plan.board && bv.art && bv.pic === 'quiet' && !bv.artSvg.hidden);
+    return !!(bv && bv.plan && bv.plan.board && bv.art && bv.pic === 'full' && !bv.artSvg.hidden);
   }, null, { timeout: 30000 }).then(() => true, () => false);
   await page.evaluate(() => { const h = document.querySelector('.rec-mapbox'); if (h) h.scrollIntoView({ block: 'center' }); });
   return { ok };
@@ -120,6 +120,20 @@ async function recordsArt(page) {
     const resp = await page.goto(BASE + '#run');
     check('UI served through devproxy', resp.ok(), resp.status());
     await waitPlan(page);
+    // ---- the default picture: a browser that never chose one shows the whole PCB (Full), not the grey Quiet mask ----
+    await page.waitForFunction(() => {
+      const bv = IL.run.bv, p = IL.S.plan;
+      return !!(bv.art && bv.art.id === p.board.art.id && !bv.artSvg.hidden);
+    }, null, { timeout: 30000 });
+    const d0 = await page.evaluate(() => {
+      const bv = IL.run.bv;
+      const cs = (sel) => getComputedStyle(bv.artSvg.querySelector(sel));
+      const on = document.querySelector('#pv-picture .bf-pic__seg button[aria-pressed="true"]');
+      return { stored: localStorage.getItem('il.pv.picture'), pic: bv.pic, quiet: bv.artSvg.classList.contains('pv-art--quiet'),
+        cu: cs('.pv-a-cu').display, silk: cs('.pv-a-silklines').display, pressed: on && on.dataset.pic };
+    });
+    check('a browser that never chose a picture shows the whole PCB: Full pressed, copper and silkscreen drawn, no grey Quiet mask',
+      d0.stored === null && d0.pic === 'full' && !d0.quiet && d0.cu !== 'none' && d0.silk !== 'none' && d0.pressed === 'full', d0);
     const g0 = await showHero(page, 'full');
     check('the plan names a board drawing and the drawing loads under the hero (boardflow.js)', g0.art && g0.parts > 0, g0);
 
@@ -726,7 +740,7 @@ async function recordsArt(page) {
         shown: !document.querySelector('.rec-mapbox svg.pv-art').hasAttribute('hidden'),
         quiet: document.querySelector('.rec-mapbox svg.pv-art').classList.contains('pv-art--quiet'),
         done: document.querySelectorAll('.rec-mapbox circle.dot.done').length }));
-      check('Records: the map draws the plan\'s board (.rec-mapbox .pv-art .pv-a-edge, Quiet) with its done dots', gr.ok && rec.edge && rec.shown && rec.quiet && rec.done === 20, rec);
+      check('Records: the map draws the plan\'s whole board (.rec-mapbox .pv-art .pv-a-edge, Full) with its done dots', gr.ok && rec.edge && rec.shown && !rec.quiet && rec.done === 20, rec);
       for (const [w, h] of [[1440, 900], [1280, 800]]) {
         await page.setViewportSize({ width: w, height: h });
         for (const theme of ['light', 'dark']) {

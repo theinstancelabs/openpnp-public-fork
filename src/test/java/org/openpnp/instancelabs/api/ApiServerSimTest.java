@@ -756,10 +756,14 @@ public class ApiServerSimTest {
         assertEquals(409, run.status, run.toString());
         assertTrue(run.body.contains("I11"), run.toString());
 
-        // "still valid": the controller was not power-cycled
+        // a detected reset restarted the count for sure: a confirm cannot keep the old angle (#11 re-review)
+        Res confirm = post("/api/screw/start-angle", "{}");
+        assertEquals(409, confirm.status, confirm.toString());
+        assertTrue(confirm.body.contains("measure it again"), confirm.toString());
+        // measured again, the same angle: the plan stays valid
         long t0 = System.currentTimeMillis();
-        JsonObject conf = ok(post("/api/screw/start-angle", "{}"));
-        assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9, "a confirm keeps the angle");
+        JsonObject conf = ok(post("/api/screw/start-angle", "{\"startAngleDeg\":298,\"note\":\"measured again\"}"));
+        assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9);
         assertTrue(conf.get("startAngleSetAtMs").getAsLong() >= t0);
         assertFalse(conf.get("startAngleNeedsConfirm").getAsBoolean());
         assertTrue(ok(get("/api/plan/" + plan.get("planId").getAsString())).getAsJsonObject("interlocks").get("ok")
@@ -984,6 +988,69 @@ public class ApiServerSimTest {
             assertTrue(Collections.indexOfSubList(l, ControllerCommands.STOP_SEQUENCE) >= 0, "engine I1 after STOP: " + l);
             // this config has no DISABLE_COMMAND: STOP waited for the engine before OpenPnP's Stop
             assertTrue(stop.toString().contains("engine"), stop.toString());
+        }
+    }
+
+    /**
+     * BR-42 (Infra on lumen-sim, 10-31): the real board acks M410 after 1-2 s. With the machine's F9 DISABLE_COMMAND,
+     * STOP does not wait for the engine, so OpenPnP's Stop and the engine's stop lines and recovery send on one driver at
+     * once; an ok lost between them kept the engine busy up to 60 s. Now the engine is idle and the machine off within
+     * 15 s, and no line timed out.
+     */
+    @Test
+    public void aStopMidRunWithASlowM410EndsIdleWithoutATimeout() throws Exception {
+        setUpBoardRuns();
+        double[][] pos = new double[30][];
+        for (int i = 0; i < pos.length; i++) {
+            pos[i] = new double[] {2 + 4.0 * (i % 6), 2 + 3 * (i / 6), 0};
+        }
+        File board = writeBoard(pos);
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, String.join("\n",
+                ControllerCommands.STOP_SEQUENCE));
+        // a lost ok must break the 15 s below: the Stop now sends its other lines anyway (BR-66), after the timeout
+        sim.driver.setTimeoutMilliseconds(20000);
+        try (SlowProxy proxy = new SlowProxy(sim.server.getPort(), 10)) {
+            sim.machine.setEnabled(false);
+            sim.driver.disconnect();
+            ((org.openpnp.machine.reference.driver.TcpCommunications) sim.driver.getCommunications())
+                    .setPort(proxy.port());
+            sim.machine.setEnabled(true);
+            sim.machine.home();
+            ok(post("/api/screw/start-angle", "{}"));
+            JsonObject plan = planTied(board);
+            assertEquals(202, post("/api/run", "{\"planId\":\"" + plan.get("planId").getAsString() + "\"}").status);
+            long t0 = System.currentTimeMillis();
+            JsonObject s;
+            do {
+                Thread.sleep(20);
+                s = ok(get("/api/status"));
+            } while ((s.get("run").isJsonNull() || s.getAsJsonObject("run").get("dotsDone").getAsInt() < 2)
+                    && System.currentTimeMillis() - t0 < 30000);
+            sim.server.delayBeforeOkMs.put("M410", 1000L);
+            sim.server.mark();
+            JsonObject stop = ok(post("/api/stop", null));
+            long t1 = System.currentTimeMillis();
+            do {
+                Thread.sleep(50);
+                s = ok(get("/api/status"));
+            } while ((s.getAsJsonObject("run").get("running").getAsBoolean()
+                    || s.getAsJsonObject("dispense").get("busy").getAsBoolean()
+                    || s.getAsJsonObject("machine").get("enabled").getAsBoolean())
+                    && System.currentTimeMillis() - t1 < 30000);
+            long took = System.currentTimeMillis() - t1;
+            JsonObject run = s.getAsJsonObject("run");
+            assertEquals("ABORTED", run.get("status").getAsString(), run.toString());
+            assertTrue(took < 15000, "idle and off " + took + " ms after the STOP: " + stop);
+            JsonObject last = ok(get("/api/runs/last")).getAsJsonObject("run");
+            assertFalse(last.toString().contains("timeout"), "no line timed out: " + last);
+            // CI's symptom: OpenPnP's Stop lost an ok, waited the driver's timeout and skipped its last lines
+            List<String> after = commands(sim.server.sinceMark());
+            assertTrue(Collections.frequency(after, "M107 P0") >= 2 && Collections.frequency(after, "M18 B") >= 2,
+                    "the engine's F9 lines and OpenPnP's whole DISABLE_COMMAND: " + after);
+        }
+        finally {
+            sim.server.delayBeforeOkMs.clear();
         }
     }
 

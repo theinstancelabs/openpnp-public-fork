@@ -61,6 +61,9 @@ public class RecordingGcodeServer implements AutoCloseable {
     public volatile String firmwareName = "Marlin (RecordingGcodeServer)";
     /** Wait before the "ok" of lines starting with a prefix, e.g. "G28" -> 3000 (a slow home). */
     public final Map<String, Long> delayBeforeOkMs = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The "ok" of lines starting with a prefix waits until the latch opens (30 s at most): a controller the test answers. */
+    public final Map<String, java.util.concurrent.CountDownLatch> holdOkUntil =
+            new java.util.concurrent.ConcurrentHashMap<>();
     /** Machine B minus logical B (deg): the G92 workspace shift. */
     private double bShift = 0;
     /** If >= 0, reply "Error: simulated" to the n-th received line (0-based) after mark(). */
@@ -147,6 +150,11 @@ public class RecordingGcodeServer implements AutoCloseable {
                             Thread.sleep(d.getValue());
                         }
                     }
+                    for (Map.Entry<String, java.util.concurrent.CountDownLatch> h : holdOkUntil.entrySet()) {
+                        if (line.startsWith(h.getKey())) {
+                            h.getValue().await(30, java.util.concurrent.TimeUnit.SECONDS);
+                        }
+                    }
                     reply.append("ok\n");
                     out.write(reply.toString().getBytes(StandardCharsets.UTF_8));
                     out.flush();
@@ -228,6 +236,14 @@ public class RecordingGcodeServer implements AutoCloseable {
      * workspace shift, and the step counts restart (the count is the machine position's, Marlin syncs it at boot;
      * the paste model's restarts with {@link SimPaste#powerCycle}). Call it while OpenPnP is disconnected.
      */
+    /**
+     * A line another tool sent while OpenPnP was not connected (a bench script's G92 B0): it acts on the controller's
+     * state as if received, but is not recorded among the lines OpenPnP sent.
+     */
+    public synchronized void lineFromAnotherTool(String line) {
+        track(line);
+    }
+
     public synchronized void powerCycle() {
         pos.put('X', 0.0);
         pos.put('Y', 0.0);

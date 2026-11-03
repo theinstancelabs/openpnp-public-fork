@@ -18,6 +18,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.openpnp.ConfigurationListener;
 import org.openpnp.instancelabs.board.EdtRunner;
@@ -144,6 +146,8 @@ public final class DispenseService {
     private final HomeTracker homeTracker;
     /** BR-02: a controller reset seen at a connect; the position is unknown until a home. */
     private final ControllerReset controllerReset;
+    /** BR-02: the CONNECT_COMMAND's G92 was warned about (once per engine). */
+    private volatile boolean connectG92Warned;
     /** The last good open-air N1 baseline (the probe's part-on-N1 check across tasks). */
     private final VacuumProber.BaselineMemory baselineMemory = new VacuumProber.BaselineMemory();
     /** The API's manual pressure hold: engine tasks refuse to start while it is on (machine thread). */
@@ -251,6 +255,7 @@ public final class DispenseService {
         this.configuration = configuration;
         this.configDir = configuration.getConfigurationDirectory();
         this.cfg = DispenseConfig.load(configDir);
+        boolean dbExisted = DispenseDb.fileFor(configDir).exists();
         this.db = DispenseDb.open(configDir);
         resolveNozzle();
         try {
@@ -275,7 +280,7 @@ public final class DispenseService {
         Machine machine = configuration.getMachine();
         homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
         controllerReset = new ControllerReset(null, machine != null && machine.isEnabled(),
-                machine != null && machine.isHomed());
+                machine != null && machine.isHomed(), resetHistory(dbExisted), this::journalReset);
         if (machine != null) {
             machine.addListener(homeTracker);
             machineListener = new MachineListener.Adapter() {
@@ -390,18 +395,85 @@ public final class DispenseService {
             else {
                 OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
                 letterB = mapper.letterB().charAt(0);
+                warnIfConnectSetsPosition(mapper.getDriver());
                 m114 = new DriverGcodeChannel(mapper.getDriver()).sendAndCollect("M114", cfg.commandTimeoutMs);
             }
         }
         catch (Exception e) {
             error = String.valueOf(e.getMessage());
         }
-        controllerReset.connected(m114, letterB, error);
+        controllerReset.connected(m114, letterB, error); // journals a reset or an unread position to the events
         String why = controllerReset.unknownWhy();
         if (why != null) {
             Logger.warn("dispense: {}", why);
+        }
+    }
+
+    /**
+     * BR-02: a G92 in the driver's CONNECT_COMMAND sets the controller's position before the M114 above reads it, so a
+     * reset's boot position would be hidden. Warned once per engine (the log and the events).
+     */
+    private void warnIfConnectSetsPosition(GcodeDriver driver) {
+        if (connectG92Warned) {
+            return;
+        }
+        String connect = driver.getCommand(null, GcodeDriver.CommandType.CONNECT_COMMAND);
+        Matcher g92 = Pattern.compile("(?im)^\\s*G92\\b.*$").matcher(connect == null ? "" : connect);
+        if (g92.find()) {
+            connectG92Warned = true;
+            String why = "the driver's CONNECT_COMMAND sends '" + g92.group().trim() + "': it sets the controller's "
+                    + "position at every connect, so the engine cannot tell a controller reset (X 0, Y 0, Z 0, B 720) "
+                    + "from a reconnect (BR-02): remove it from CONNECT_COMMAND";
+            Logger.warn("dispense: {}", why);
             db.event(null, "WARN", "MACHINE", why);
         }
+    }
+
+    /** BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. */
+    private void journalReset(ControllerReset.Event e) {
+        try {
+            String level = ControllerReset.EVENT_KNOWN.equals(e.code) ? "INFO" : "WARN";
+            db.insertEvent(null, level, e.code, e.message, e.atMs);
+        }
+        catch (SQLException ex) {
+            Logger.error(ex, "dispense: the controller reset journal could not be written ({}): after a restart the "
+                    + "engine will not know about it", e.code);
+        }
+    }
+
+    /**
+     * BR-02: what earlier engines journaled about controller resets (the newest of each kind), so a restart keeps the
+     * screw count's epoch and an unknown position. Unreadable, it counts as an unread connect: unknown until a home.
+     */
+    private List<ControllerReset.Event> resetHistory(boolean dbExisted) {
+        List<ControllerReset.Event> h = new ArrayList<>();
+        try {
+            if (db.newestEvents(ControllerReset.EVENT_JOURNAL).isEmpty()) {
+                // the first journaling start: on a database an earlier build used, a power cycle it saw may be
+                // unanswered, so the screw count is dated once (I11); a fresh database has nothing to answer
+                long now = System.currentTimeMillis();
+                if (dbExisted) {
+                    journalReset(new ControllerReset.Event(ControllerReset.EVENT_COUNT_EPOCH, now, "the first start "
+                            + "that journals controller resets, on a database an earlier build used: the controller "
+                            + "may have been switched off before it, so the screw count may have restarted (I11 asks "
+                            + "for the start angle)"));
+                }
+                db.insertEvent(null, "INFO", ControllerReset.EVENT_JOURNAL, "this engine journals controller resets "
+                        + "(BR-02)", now);
+            }
+            for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
+                    ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH)) {
+                h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
+                        (String) row.get("message")));
+            }
+        }
+        catch (SQLException | RuntimeException e) {
+            Logger.warn(e, "dispense: the record of controller resets could not be read");
+            h.add(new ControllerReset.Event(ControllerReset.EVENT_UNREAD, System.currentTimeMillis(), "the engine's "
+                    + "record of controller resets could not be read (" + e.getMessage() + "), so it may have been "
+                    + "reset"));
+        }
+        return h;
     }
 
     /** The controller's M115 answer on the current connection. */
@@ -700,6 +772,13 @@ public final class DispenseService {
      * power-up (the B step count restarts at power-up).
      */
     public synchronized DispenseProfile setStartAngle(Double angleDeg, String note) throws IOException {
+        Long reset = controllerReset.detectedAtMs();
+        Long setAt = cfg.profile.startAngleSetAtMs;
+        if (angleDeg == null && reset != null && (setAt == null || setAt < reset)) {
+            // BR-02: the B step count restarted at that reset for sure, so the old angle cannot be confirmed
+            throw new EngineRefusal(409, "refused", "the controller was reset after the screw start angle was set, so "
+                    + "the angle is lost: measure it again and set it (a confirm cannot keep it)");
+        }
         DispenseConfig c = cfg.copy();
         if (angleDeg != null) {
             c.profile.startAngleDeg = angleDeg;
@@ -2410,6 +2489,7 @@ public final class DispenseService {
         in.opticalCheckAvailable = imager() != null && imager().isAvailable();
         in.scope = scope == null ? new Interlocks.Scope() : scope;
         in.controllerResetAtMs = controllerReset.countEpochMs();
+        in.controllerResetDetectedAtMs = controllerReset.detectedAtMs();
         in.positionUnknownWhy = controllerReset.unknownWhy();
         in.boardRun = plan != null;
         in.purgeDots = plan == null ? 0 : DoseBlocks.purgeSpotsNeeded(plan, c);
@@ -6016,7 +6096,10 @@ public final class DispenseService {
         void recover() {
             bZeroed.set(false);
             try {
-                channel.send("M400", -1);
+                // the I1 shutdown's M410 flushed the planner: this returns at once. A silent controller ends the
+                // recovery here after the command timeout (it waited OpenPnP's 60 s, BR-42); the read-back below is
+                // then not sent (its M114 ok still waits OpenPnP's infinity, as OpenPnP's own position reads)
+                channel.send("M400", c.commandTimeoutMs);
                 // A stop between the screw's M204 S and the restore leaves the screw acceleration in force.
                 channel.send("M204 S" + GcodeStreamBuilder.f0(c.travelAccelMmS2), c.commandTimeoutMs);
                 AxesLocation rep = mapper.getDriver().getReportedLocation(c.commandTimeoutMs);

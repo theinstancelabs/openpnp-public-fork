@@ -200,6 +200,36 @@ public class ReviewSafetySimTest {
     }
 
     /**
+     * BR-66: OpenPnP's Stop sends its whole DISABLE_COMMAND even with a controller error pending. Every line called
+     * bailOnError first, so the pending error threw at M410 and nothing of the Stop went out.
+     */
+    @Test
+    public void openPnpStopSendsItsWholeSequenceDespiteAPendingControllerError() throws Exception {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND,
+                String.join("\n", ControllerCommands.STOP_SEQUENCE));
+        leaveControllerErrorPending();
+        sim.server.mark();
+        sim.machine.setEnabled(false);
+        List<String> l = sim.server.sinceMark();
+        assertTrue(java.util.Collections.indexOfSubList(l, ControllerCommands.STOP_SEQUENCE) >= 0,
+                "M410, both valves and pumps off, M18 B: " + l);
+    }
+
+    /** BR-66: a Stop line whose ok never comes (CI: lost to a second sender) no longer keeps the lines after it. */
+    @Test
+    public void openPnpStopSendsTheLinesAfterOneThatTimesOut() throws Exception {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND,
+                String.join("\n", ControllerCommands.STOP_SEQUENCE));
+        sim.driver.setTimeoutMilliseconds(500);
+        sim.server.mute.add(ControllerCommands.PUMP_OFF);
+        sim.server.mark();
+        sim.machine.setEnabled(false);
+        List<String> l = sim.server.sinceMark();
+        assertTrue(java.util.Collections.indexOfSubList(l, ControllerCommands.STOP_SEQUENCE) >= 0,
+                "the pick valve and pump off and M18 B after the pump off that got no answer: " + l);
+    }
+
+    /**
      * Bench F9: with the machine.xml patch, OpenPnP's Stop (DISABLE_COMMAND) sends the whole Stop
      * sequence, so the web STOP of a held pressure ends in M410, both valves and pumps off, M18 B.
      */

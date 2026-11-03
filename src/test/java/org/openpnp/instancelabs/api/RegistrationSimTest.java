@@ -23,6 +23,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 import org.junit.jupiter.api.AfterEach;
@@ -785,6 +789,116 @@ public class RegistrationSimTest {
         Res run = post("/api/run", "{\"planId\":\"" + onMarlin.get("planId").getAsString() + "\"}");
         assertEquals(409, run.status, run.toString());
         assertTrue(run.body.contains("the 'board' surface was probed on the simulator"), run.toString());
+    }
+
+    /**
+     * BR-52 (CI run 41543474439): the STOP answers within 1.5 s, but OpenPnP may still be switching the machine off
+     * then (here its DISABLE_COMMAND's ok is held). The machine still reads started, though the controller's
+     * identity is already forgotten: a run then is refused for the switch-off, not as "made on the simulator"; Start
+     * waits for the switch-off and starts the machine again, never "already started"; the run right after it keeps
+     * the simulator's registration.
+     */
+    @Test
+    public void aStartRightAfterAStopWaitsForTheSwitchOffAndTheRunKeepsTheRegistration() throws Exception {
+        String p0 = plan().get("planId").getAsString();
+        JsonObject first = register(p0, "{\"wait\":true}");
+        assertEquals("OK", first.get("status").getAsString(), first.toString());
+        String p1 = first.get("newPlanId").getAsString();
+        CountDownLatch answer = slowSwitchOff();
+        // the machine thread busy at the STOP (CI: the registration's probe), so OpenPnP's Stop runs beside it
+        Future<Object> busy = sim.machine.submit(() -> {
+            Thread.sleep(800);
+            return null;
+        });
+        waitUntil(sim.machine::isBusy, "the machine thread busy");
+        JsonObject stop = ok(post("/api/stop", null));
+        assertTrue(stop.get("machineEnabled").getAsBoolean(), "answered before the switch-off ended: " + stop);
+        busy.get(5, TimeUnit.SECONDS);
+        assertTrue(sim.machine.isEnabled(), "still switching off");
+
+        Res during = post("/api/run", "{\"planId\":\"" + p1 + "\"}");
+        assertEquals(409, during.status, during.toString());
+        assertTrue(during.body.contains("switching the machine off"), during.toString());
+
+        Future<Res> start = startAsync();
+        Thread.sleep(300);
+        assertFalse(start.isDone(), "Start waits while the switch-off runs");
+        answer.countDown();
+        JsonObject en = ok(start.get(30, TimeUnit.SECONDS));
+        assertTrue(en.get("enabled").getAsBoolean(), en.toString());
+        assertFalse(en.has("note"), "started again, not \"already started\": " + en);
+        assertTrue(ok(get("/api/status")).getAsJsonObject("server").get("simulatorConfirmed").getAsBoolean());
+        // the run right after it (CI: 20 ms) keeps the simulator's registration
+        ok(post("/api/screw/start-angle", "{}"));
+        JsonObject run = ok(post("/api/run", "{\"planId\":\"" + p1 + "\",\"wait\":true}"));
+        assertEquals("OK", run.getAsJsonObject("result").get("status").getAsString(), run.toString());
+    }
+
+    /** BR-52: a switch-off OpenPnP started itself (its own Stop button) holds Start and the tasks the same way. */
+    @Test
+    public void aSwitchOffOpenPnpStartedItselfHoldsStartUntilItEnded() throws Exception {
+        ok(get("/api/status"));
+        CountDownLatch answer = slowSwitchOff();
+        sim.server.mark();
+        Thread stop = new Thread(() -> {
+            try {
+                sim.machine.setEnabled(false);
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }, "OpenPnP Stop");
+        stop.start();
+        waitUntil(() -> sim.server.sinceMark().contains(SLOW_SWITCH_OFF), "OpenPnP in its DISABLE_COMMAND");
+        assertTrue(sim.machine.isEnabled(), "still switching off");
+        Res home = post("/api/machine/home", "{}");
+        assertEquals(409, home.status, home.toString());
+        assertTrue(home.body.contains("switching the machine off"), home.toString());
+
+        Future<Res> start = startAsync();
+        Thread.sleep(300);
+        assertFalse(start.isDone(), "Start waits while the switch-off runs");
+        answer.countDown();
+        JsonObject en = ok(start.get(30, TimeUnit.SECONDS));
+        assertFalse(en.has("note"), "started again after the switch-off, not \"already started\": " + en);
+        assertTrue(en.get("enabled").getAsBoolean(), en.toString());
+        stop.join(5000);
+        assertTrue(sim.machine.isEnabled());
+        assertTrue(ok(get("/api/status")).getAsJsonObject("server").get("simulatorConfirmed").getAsBoolean(),
+                "the old switch-off's last listeners kept the new connection's identity");
+    }
+
+    /** The DISABLE_COMMAND line whose ok the controller holds back ({@link #slowSwitchOff}). */
+    static final String SLOW_SWITCH_OFF = "M118 switching off";
+
+    /**
+     * OpenPnP's switch-off lasts until the returned latch opens (its DISABLE_COMMAND's ok is held; the driver gives up
+     * after its 5 s timeout), longer than the STOP's 1.5 s answer.
+     */
+    CountDownLatch slowSwitchOff() {
+        CountDownLatch answer = new CountDownLatch(1);
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, SLOW_SWITCH_OFF);
+        sim.server.holdOkUntil.put(SLOW_SWITCH_OFF, answer);
+        return answer;
+    }
+
+    /** POST /api/machine/enable on its own thread. */
+    Future<Res> startAsync() {
+        FutureTask<Res> f = new FutureTask<>(() -> post("/api/machine/enable", null));
+        Thread t = new Thread(f, "test Start");
+        t.setDaemon(true);
+        t.start();
+        return f;
+    }
+
+    static void waitUntil(java.util.function.BooleanSupplier until, String what) throws InterruptedException {
+        long t0 = System.currentTimeMillis();
+        while (!until.getAsBoolean()) {
+            if (System.currentTimeMillis() - t0 > 10000) {
+                throw new AssertionError("never: " + what);
+            }
+            Thread.sleep(5);
+        }
     }
 
     /** §10.2 cases 7, 13 and 16: refusals before N1 or anything else moves. */

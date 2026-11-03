@@ -313,6 +313,7 @@ final class DispenseEndpoints {
         JsonObject b = r.json();
         DispenseService svc = ctx.availableSvc();
         ctx.requireEngineIdle(svc);
+        ctx.requireNotSwitchingOff(); // the pump and valve never go on after the STOP's valve-off (BR-52)
         if (ctx.pressure.isActive()) {
             throw ApiException.refused("the pressure is already " + ctx.pressure.getState().name().toLowerCase());
         }

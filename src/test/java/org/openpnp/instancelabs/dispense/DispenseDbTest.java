@@ -620,6 +620,28 @@ public class DispenseDbTest {
     }
 
     @Test
+    public void theNewestEventOfEachCodeIsReadBackInTheOrderWritten() throws Exception {
+        // BR-02's journal: the engine replays these at its start, so the order decides the state
+        File dir = java.nio.file.Files.createTempDirectory("dispense-db").toFile();
+        try (DispenseDb db = DispenseDb.open(dir)) {
+            db.event(null, "WARN", "A", "first a", 1000);
+            db.event(null, "INFO", "B", "only b", 2000);
+            db.event(null, "WARN", "C", "not asked", 2500);
+            db.event(null, "WARN", "A", "second a", 3000);
+        }
+        try (DispenseDb db = DispenseDb.open(dir)) {
+            List<java.util.Map<String, Object>> rows = db.newestEvents("A", "B", "D");
+            assertEquals(2, rows.size(), rows.toString());
+            assertEquals("B", rows.get(0).get("code"));
+            assertEquals(2000L, ((Number) rows.get(0).get("ts")).longValue());
+            assertEquals("A", rows.get(1).get("code"));
+            assertEquals("second a", rows.get(1).get("message"));
+            assertEquals(3000L, ((Number) rows.get(1).get("ts")).longValue());
+            assertTrue(db.newestEvents().isEmpty());
+        }
+    }
+
+    @Test
     public void runsAndEventsPersistToFile() throws Exception {
         File dir = java.nio.file.Files.createTempDirectory("dispense-db").toFile();
         RunResult r = new RunResult();

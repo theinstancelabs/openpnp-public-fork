@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
 
 import com.google.gson.JsonObject;
@@ -89,6 +90,16 @@ public class PowerCycleSimTest {
         sim.machine.setEnabled(true);
     }
 
+    /**
+     * OpenPnP quits and starts again (a deploy, or a restart to recover the serial link) with the controller powered
+     * all along: the engine starts afresh on the same database and sees the next connect.
+     */
+    void restartOpenPnp() throws Exception {
+        sim.machine.setEnabled(false);
+        svc = DispenseService.start(Configuration.get());
+        sim.machine.setEnabled(true);
+    }
+
     /** The lines since the mark that move an axis or switch an output. */
     List<String> motionAndOutputs() {
         List<String> out = new ArrayList<>();
@@ -136,7 +147,126 @@ public class PowerCycleSimTest {
 
         JsonObject after = ok("GET", "/api/machine", null);
         assertTrue(after.get("positionKnown").getAsBoolean(), after.toString());
-        assertTrue(after.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), "the reset stays on record");
+        assertTrue(after.getAsJsonObject("powerCycle").get("detected").getAsBoolean(),
+                "this connection began with a reset: " + after);
+
+        // a Stop and Start afterwards, the controller powered all along: this connection is not a reset
+        reconnect();
+        JsonObject again = ok("GET", "/api/machine", null);
+        JsonObject pc2 = again.getAsJsonObject("powerCycle");
+        assertFalse(pc2.get("detected").getAsBoolean(), again.toString());
+        assertEquals(pc.get("atMs").getAsLong(), pc2.get("atMs").getAsLong(), "the last reset stays on record");
+    }
+
+    /**
+     * #11 re-review MAJOR (CI's deploy dry run): after a power cycle a bench tool zeroed the screw (G92 B0) and nobody
+     * homed. X, Y, Z and A still read their boot values: the home needs the operator's word, and no Z move goes out on
+     * the boot belief before G28.
+     */
+    @Test
+    public void aBootWithTheScrewZeroedNeedsTheOperatorsWord() throws Exception {
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.server.lineFromAnotherTool("G92 B0");
+        sim.machine.setEnabled(true);
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.get("positionKnown").getAsBoolean(), m.toString());
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "no Z raise on the boot belief");
+        sim.server.mark();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        List<String> l = motionAndOutputs();
+        assertTrue(!l.isEmpty() && l.get(0).startsWith("G28"), "G28 first: " + l);
+    }
+
+    /**
+     * #11 re-review MINOR: after a detected reset the screw count restarted for sure, so a bare confirm cannot keep an
+     * angle set before it, also once a later Stop and Start reads detected false; a new angle can be set.
+     */
+    @Test
+    public void aConfirmCannotKeepAnAngleSetBeforeADetectedReset() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":298}");
+        Thread.sleep(5);
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        reconnect();
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("measure"), lastBody);
+        JsonObject p = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), "a new angle after the reset: " + p);
+        ok("POST", "/api/screw/start-angle", "{}"); // and a confirm of that one is fine
+    }
+
+    @Test
+    public void aG92InTheConnectCommandIsWarnedAbout() throws Exception {
+        // it would set the position before the engine's M114 reads it, hiding a reset's boot position
+        String connect = sim.driver.getCommand(null, GcodeDriver.CommandType.CONNECT_COMMAND);
+        sim.driver.setCommand(null, GcodeDriver.CommandType.CONNECT_COMMAND,
+                (connect == null ? "" : connect + "\n") + "G92 X0 Y0 ; a config edit");
+        reconnect();
+        reconnect();
+        int warned = 0;
+        for (java.util.Map<String, Object> e : svc.getDb().recentEvents(20)) {
+            if (String.valueOf(e.get("message")).contains("CONNECT_COMMAND sends 'G92 X0 Y0")) {
+                warned++;
+            }
+        }
+        assertEquals(1, warned, "warned once per engine: " + svc.getDb().recentEvents(20));
+    }
+
+    @Test
+    public void aResetStaysOnRecordAcrossAnOpenPnpRestart() throws Exception {
+        long setAt = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":298}").get("startAngleSetAtMs")
+                .getAsLong();
+        Thread.sleep(5); // the reset comes later than the angle, in ms
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        // the home's G92 A0 B0 removed the boot position: the next connect reads a homed controller
+        restartOpenPnp();
+
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertTrue(m.get("positionKnown").getAsBoolean(), "the attested home followed the reset: " + m);
+        JsonObject pc = m.getAsJsonObject("powerCycle");
+        assertFalse(pc.get("detected").getAsBoolean(), "this connection is not a reset: " + m);
+        assertFalse(pc.get("atMs").isJsonNull(), "the last reset stays on record: " + m);
+        JsonObject p = ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertFalse(p.get("controllerResetAtMs").isJsonNull(), p.toString());
+        assertTrue(p.get("controllerResetAtMs").getAsLong() > setAt, p.toString());
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(),
+                "I11: the angle was set before the reset, whatever restarted since: " + p);
+    }
+
+    @Test
+    public void aResetNotHomedBeforeAnOpenPnpRestartStillNeedsTheOperatorsWord() throws Exception {
+        powerCycle();
+        // OpenPnP's own jog moves the head while unhomed: the controller no longer reads the boot position
+        sim.machine.execute(() -> {
+            sim.driver.sendCommand("G1 X5 F3000");
+            return null;
+        });
+        restartOpenPnp();
+
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.get("positionKnown").getAsBoolean(), "the reset was never followed by a home: " + m);
+        assertTrue(m.get("positionUnknownWhy").getAsString().contains("reset"), m.toString());
+        assertFalse(m.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), "this connect read X 5: " + m);
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("nothing is under either tool"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
+
+        sim.server.mark();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        List<String> l = motionAndOutputs();
+        assertFalse(l.isEmpty(), sim.server.sinceMark().toString());
+        assertTrue(l.get(0).startsWith("G28"), "G28 first: " + l);
+
+        restartOpenPnp();
+        assertTrue(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean(), "the home is on record too");
     }
 
     @Test
