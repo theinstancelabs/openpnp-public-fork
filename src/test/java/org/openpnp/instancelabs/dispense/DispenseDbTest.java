@@ -1,5 +1,6 @@
 package org.openpnp.instancelabs.dispense;
 
+import org.openpnp.instancelabs.padprofile.Tip;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -22,7 +23,7 @@ public class DispenseDbTest {
     @Test
     public void seedsFamiliesTypesAndProvisionalCalibration() throws Exception {
         try (DispenseDb db = DispenseDb.inMemory()) {
-            List<PadType> t = db.currentPadTypes();
+            List<PadType> t = db.currentPadTypes(Tip.SEED_KEY);
             assertEquals(12, t.size());
             assertEquals("chip-0402", t.get(0).typeKey);
             assertEquals("chip-0603", t.get(1).typeKey);
@@ -32,7 +33,7 @@ public class DispenseDbTest {
             for (PadType p : t) {
                 assertEquals(PadTypeStatus.NOT_STARTED, p.status);
             }
-            PadType centre = db.currentPadType("qfn-centre");
+            PadType centre = db.currentPadType("qfn-centre", Tip.SEED_KEY);
             assertTrue(centre.k < 1);
             Calibration c = db.currentCalibration(System.currentTimeMillis());
             assertEquals(0.47, c.qMm3PerRev, 0);
@@ -72,6 +73,27 @@ public class DispenseDbTest {
         pc.outcome = PadCalibrationRecord.PROVISIONAL;
         db.insertPadCalibration(pc);
         db.setPastePartial("P", true);
+        // schema 3 (tip setups design §22.1): the seeded setup is there; a mount, a photo, its link and event, a
+        // label and a flag
+        TipSetups.Mount m = new TipSetups.Mount();
+        m.kind = TipSetups.Mount.SEED;
+        m.setupKey = "ad22tta-b";
+        m.setupVersion = 1;
+        m.why = "in use before the update";
+        db.insertTipMount(m);
+        Photo ph = new Photo();
+        ph.kind = Photo.KIND_SETUP;
+        ph.source = Photo.SOURCE_UPLOAD;
+        ph.setupKey = "ad22tta-b";
+        ph.file = "2026-10/0123456789abcdef0123.jpg";
+        ph.sha256 = "0123456789abcdef0123";
+        ph.widthPx = 64;
+        ph.heightPx = 64;
+        db.insertPhoto(ph);
+        db.insertPhotoLink(ph.id, pc.id, Photo.ROLE_REFERENCE, null);
+        db.insertPhotoEvent(ph.id, Photo.ACTION_MAIN, null, null);
+        db.insertCalLabel(pc.id, "Chip 0603 · 22G bent taper", true, null);
+        db.insertCalFlag("pc-1", "ad22tta-b", "wrong-tip", null, null);
     }
 
     @Test
@@ -93,20 +115,20 @@ public class DispenseDbTest {
     @Test
     public void editsAppendVersions() throws Exception {
         try (DispenseDb db = DispenseDb.inMemory()) {
-            PadType p = db.currentPadType("chip-0603");
+            PadType p = db.currentPadType("chip-0603", Tip.SEED_KEY);
             p.status = PadTypeStatus.PROVISIONAL;
             p.k = 0.9;
             PadType v2 = db.insertPadTypeVersion(p);
             assertEquals(2, v2.version);
             assertEquals(2, db.padTypeHistory("chip-0603").size());
-            assertEquals(0.9, db.currentPadType("chip-0603").k, 0);
+            assertEquals(0.9, db.currentPadType("chip-0603", Tip.SEED_KEY).k, 0);
             assertEquals(1.0, db.padTypeHistory("chip-0603").get(0).k, 0);
-            assertEquals(12, db.currentPadTypes().size());
+            assertEquals(12, db.currentPadTypes(Tip.SEED_KEY).size());
             // user-added type
             PadType mine = new PadType("my-led", "Custom", "Big LED", 1.2, 1.2, PadType.Layout.SINGLE, null, 1.0,
                     "MYLED", null);
             db.insertPadTypeVersion(mine);
-            assertEquals(13, db.currentPadTypes().size());
+            assertEquals(13, db.currentPadTypes(Tip.SEED_KEY).size());
             assertThrows(IllegalArgumentException.class, () -> db.insertPadTypeVersion(
                     new PadType("bad", "x", "x", 1, 1, PadType.Layout.TWO_TERMINAL, null, 1, null, null)));
             // package mapping override
@@ -168,12 +190,12 @@ public class DispenseDbTest {
             db.mapPackage("P", Arrays.asList("2", "3"), "chip-0805");
             Map<String, String> m = db.packageMappings();
             assertEquals("{P#1=chip-0603, P#2,3=chip-0805}", new java.util.TreeMap<>(m).toString());
-            String before = new PadTypeResolver(db.currentPadTypes(), m).fingerprint();
+            String before = new PadTypeResolver(db.currentPadTypes(Tip.SEED_KEY), m).fingerprint();
             // pad 2 goes back: chip-0805 keeps pad 3 only, and the fingerprint changes
             db.mapPackage("P", Arrays.asList("1", "2"), "chip-0603");
             m = db.packageMappings();
             assertEquals("{P#1,2=chip-0603, P#3=chip-0805}", new java.util.TreeMap<>(m).toString());
-            assertFalse(before.equals(new PadTypeResolver(db.currentPadTypes(), m).fingerprint()));
+            assertFalse(before.equals(new PadTypeResolver(db.currentPadTypes(Tip.SEED_KEY), m).fingerprint()));
             // clearing some pads takes them out of their mapping; the same key again changes nothing else
             db.mapPackage("P", Arrays.asList("2"), null);
             assertEquals("{P#1=chip-0603, P#3=chip-0805}", new java.util.TreeMap<>(db.packageMappings()).toString());
@@ -223,7 +245,7 @@ public class DispenseDbTest {
     @Test
     public void padTypeDoseFieldsAreValidatedAndKept() throws Exception {
         try (DispenseDb db = DispenseDb.inMemory()) {
-            PadType t = db.currentPadType("chip-0805");
+            PadType t = db.currentPadType("chip-0805", Tip.SEED_KEY);
             assertEquals("seed", t.origin);
             for (int[] ok : new int[][] {{400, 2}, {800, 1}, {1600, 1}, {400, 6}, {800, 6}}) {
                 PadType v = t.copy();
@@ -263,7 +285,7 @@ public class DispenseDbTest {
             v2.calAreaMm2 = 1.381;
             v2.origin = PadType.ORIGIN_SUGGESTED;
             db.insertPadTypeVersion(v2);
-            PadType back = db.currentPadType("chip-0805");
+            PadType back = db.currentPadType("chip-0805", Tip.SEED_KEY);
             assertEquals(2, back.version);
             assertEquals(1600, (int) back.dotSteps);
             assertEquals(1, (int) back.dotsPerPad);
@@ -485,7 +507,7 @@ public class DispenseDbTest {
             other.outcome = PadCalibrationRecord.STOPPED;
             db.insertPadCalibration(other);
 
-            List<PadCalibrationRecord> l = db.padCalibrations("sot-23", 10);
+            List<PadCalibrationRecord> l = db.padCalibrations("sot-23", null, 10);
             assertEquals(2, l.size());
             assertEquals(ch.id, l.get(0).id, "newest first");
             PadCalibrationRecord back = l.get(1);
@@ -509,8 +531,8 @@ public class DispenseDbTest {
             assertFalse(back.allChecksPass());
             assertTrue(l.get(0).allChecksPass());
             assertEquals(1.06, l.get(0).massPerPadMg, 0);
-            assertEquals(3, db.padCalibrations(null, 10).size());
-            assertEquals(1, db.padCalibrations(null, 1).size());
+            assertEquals(3, db.padCalibrations(null, null, 10).size());
+            assertEquals(1, db.padCalibrations(null, null, 1).size());
 
             // never characterized with a failed check or without checks; never validated (the user's decision)
             PadCalibrationRecord failed = new PadCalibrationRecord();
@@ -527,7 +549,7 @@ public class DispenseDbTest {
             failed.outcome = PadCalibrationRecord.FAILED;
             failed.jobId = null;
             assertThrows(IllegalArgumentException.class, () -> db.insertPadCalibration(failed));
-            assertEquals(3, db.padCalibrations(null, 10).size());
+            assertEquals(3, db.padCalibrations(null, null, 10).size());
         }
     }
 
@@ -623,7 +645,7 @@ public class DispenseDbTest {
             assertEquals(120.0, ((Number) runs.get(0).get("dph_overall")).doubleValue(), 1e-9);
             assertEquals(2, db.query("SELECT * FROM dot_log WHERE run_uuid = ?", "run-1").size());
             assertEquals(1, db.recentEvents(5).size());
-            assertEquals(12, db.currentPadTypes().size(), "seeded once");
+            assertEquals(12, db.currentPadTypes(Tip.SEED_KEY).size(), "seeded once");
         }
     }
 
@@ -686,7 +708,7 @@ public class DispenseDbTest {
                 + "\"locations\":{\"waste\":{\"x\":1,\"y\":2,\"z\":3}}}";
         DispenseConfig c = DispenseConfig.fromJson(v2);
         assertEquals(DispenseConfig.SCHEMA_VERSION, c.schemaVersion);
-        assertEquals(3, c.schemaVersion);
+        assertEquals(4, c.schemaVersion, "every step from 2 on: the tip setups' schema (§22.1)");
         assertEquals(0.10, c.gapMm(), 0, "needleGapMm is gone: the gap is the profile's");
         assertEquals(new DispenseProfile().fingerprint(), c.profile.fingerprint());
         assertEquals(2000, c.travelAccelMmS2, 0);

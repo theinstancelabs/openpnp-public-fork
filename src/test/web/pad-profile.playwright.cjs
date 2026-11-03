@@ -254,13 +254,15 @@ async function weighCoupon(page, place) {
     s = await status(page);
     const nd = s.dispense.needle;
     const bzMid = Number(bz((bx0 + bx1) / 2, (by0 + by1) / 2).toFixed(3));
+    // needle values carry the needle change they were taken after, pad-type writes the tip setup (§22.3)
+    const token = nd.changedAtMs === undefined ? null : nd.changedAtMs;
     if (!nd.anchored || !nd.anchor || Math.abs(nd.anchor.surfaceZMm - bzMid) > 0.5 || !nd.touchedOff) {
-      await api(page, 'POST', '/api/needle/anchor', { surfaceZ: bzMid, needleContactZ: Number((bzMid - 2.59).toFixed(3)), note: 'pad-profile test (SIM)' });
-      await api(page, 'POST', '/api/needle/offset', { offsetMm: -2.59, note: 'pad-profile test (SIM)' });
+      await api(page, 'POST', '/api/needle/anchor', { surfaceZ: bzMid, needleContactZ: Number((bzMid - 2.59).toFixed(3)), note: 'pad-profile test (SIM)', needleChangedAtMs: token });
+      await api(page, 'POST', '/api/needle/offset', { offsetMm: -2.59, note: 'pad-profile test (SIM)', needleChangedAtMs: token });
     }
     await api(page, 'POST', '/api/screw/start-angle', { note: 'pad-profile test (SIM)' });
     const chip = await api(page, 'GET', '/api/pad-types/chip-0603');
-    if (!['characterized', 'validated'].includes(chip.current.status)) await api(page, 'PUT', '/api/pad-types/chip-0603', { status: 'characterized' });
+    if (!['characterized', 'validated'].includes(chip.current.status)) await api(page, 'PUT', '/api/pad-types/chip-0603', { status: 'characterized', forSetup: s.dispense.tip.key });
     await page.evaluate(() => { IL.attest.set('regulator', IL.S.status.dispense.profile.pressurePsi); IL.attest.set('paste-life', true); });
     check('(0) set-up: SIM-only shortened calibration accepted, places, blank and area set', true);
 
@@ -273,7 +275,7 @@ async function weighCoupon(page, place) {
     check('nano preview: a profile badge on every package row and one NEEDS_PROFILE warning', nano.badges === nano.rows && nano.rows > 0 && nano.needs.length === 1, nano);
     const nanoLines = await page.evaluate(() => Array.from(document.querySelectorAll('li[data-code="NEEDS_PROFILE"] .pp-needs-w > li')).map((l) => l.textContent));
     check('nano preview: the warning names the packages one line per reason, the tip\'s last', nanoLines.length === 3 && /^(Not calibrated yet|No pad type): /.test(nanoLines[0])
-      && /^Cannot be dispensed with the 22G tip: /.test(nanoLines[2]), nanoLines);
+      && /^Cannot be dispensed with the 22G bent taper: /.test(nanoLines[2]), nanoLines);
     // the line above says what the key and the warning say (the LED pads have a pad type, not calibrated yet)
     const nanoFound = await page.evaluate(() => document.querySelector('#board-import-found .bi-found__a').textContent);
     check('nano preview: "No part gets paste yet · 5 parts need a profile (10 pads)", not "need a pad type"',
@@ -333,7 +335,7 @@ async function weighCoupon(page, place) {
       tipOpen: document.getElementById('pt-needs-tip').open, tipText: document.getElementById('pt-needs-tip-s').textContent,
       nav: document.querySelector('#tab-btn-profile .nav__s').textContent, src: document.getElementById('pt-needs-src').textContent }));
     check('(3) three fixable rows with data-reason (J, T, Q)', list.rows.length === 3 && list.rows.every((r) => r[0] === 'no-type'), list.rows);
-    check('(3) the tip details (collapsed) hold the 2 WSON groups', list.tip.length === 2 && !list.tipOpen && /22G tip/.test(list.tipText), list);
+    check('(3) the tip details (collapsed) hold the 2 WSON groups', list.tip.length === 2 && !list.tipOpen && /22G bent taper/.test(list.tipText), list);
     check('(3) nav sub "Needs 3 profiles"', list.nav === 'Needs 3 profiles', list.nav);
     // the profile panel's pad-type gate counts in words: "1 of 12 pad types is allowed", "2 of 13 … are allowed"
     await page.waitForFunction(() => / pad types (is|are) allowed/.test((document.querySelector('#pt-ov-gate .pt-gate__s') || {}).textContent || ''), null, { timeout: 15000 }).catch(() => null);
@@ -550,7 +552,7 @@ async function weighCoupon(page, place) {
     await shoot(page, 'fix-purge-two-sizes-checks', () => toTop(page, '#chk-needs', null));
 
     // ---- (9b) Refuse flagged pads (rc1 review): "Dispense the rest" opens the switch in Setup › Settings; off, the engine
-    // skips the pads it cannot dispense (WSON-8 with the 22G tip, Test_Strip with no profile yet) and runs the rest: Pad
+    // skips the pads it cannot dispense (WSON-8 with the 22G bent taper, Test_Strip with no profile yet) and runs the rest: Pad
     // types is a note that counts ready, and the run confirm names the pads skipped
     const tipOnly = await page.evaluate(() => {
       const p = JSON.parse(JSON.stringify(IL.S.plan));
@@ -558,7 +560,7 @@ async function weighCoupon(page, place) {
       const it = IL.readiness(IL.S.status, p, IL.readyCtx()).items.find((x) => x.key === 'padtypes');
       return { state: it.state, short: it.short, fixes: it.fixes.map((f) => [f.href || f.fix, f.label]) };
     });
-    check('(9b) tip groups only: Blocked · the 22G tip, "Dispense the rest" links #setup/settings/refuse-flagged', tipOnly.state === 'block' && tipOnly.short === 'the 22G tip'
+    check('(9b) tip groups only: Blocked · the 22G bent taper, "Dispense the rest" links #setup/settings/refuse-flagged', tipOnly.state === 'block' && tipOnly.short === 'the 22G bent taper'
       && tipOnly.fixes[0][0] === '#setup/settings/refuse-flagged', tipOnly);
     await page.evaluate(() => IL.go('#setup/settings/refuse-flagged'));
     // focused, then scrolled into view (smoothly: the card's flash scrolls to its top first)
@@ -581,9 +583,9 @@ async function weighCoupon(page, place) {
     const off = await page.evaluate(() => { const r = IL.ready(); const it = r.items.find((x) => x.key === 'padtypes');
       return { state: it.state, value: it.value, detail: it.detail, verdict: r.verdict.text, canRun: r.canRun, runReason: r.runReason,
         blocked: (IL.S.plan.pads || []).filter((x) => x.blocked).length }; });
-    check('(9b) off: Pad types is a note that counts ready, naming the pads skipped (WSON-8 not with the 22G tip, Test_Strip)', off.state === 'info'
-      && new RegExp('^\\d+/\\d+ · ' + off.blocked + ' skipped$').test(off.value) && /^\d+ pads skipped \(Refuse flagged pads is off\): .*Test_Strip.*WSON.* not with the 22G tip\. The other \d+ are dispensed\.$/.test(off.detail)
-      && !/needs a profile|22G tip/.test(off.verdict), off);
+    check('(9b) off: Pad types is a note that counts ready, naming the pads skipped (WSON-8 not with the 22G bent taper, Test_Strip)', off.state === 'info'
+      && new RegExp('^\\d+/\\d+ · ' + off.blocked + ' skipped$').test(off.value) && /^\d+ pads skipped \(Refuse flagged pads is off\): .*Test_Strip.*WSON.* not with the 22G bent taper\. The other \d+ are dispensed\.$/.test(off.detail)
+      && !/needs a profile|22G bent taper/.test(off.verdict), off);
     await shoot(page, 'fix-refuse-flagged-off-checks', () => toTop(page, '#chk-needs', null));
     // the run confirm (as Records › Finish opens it: the pads left of this board) names the pads the run skips; it
     // opens also while another check waits (here the board surface), saying so

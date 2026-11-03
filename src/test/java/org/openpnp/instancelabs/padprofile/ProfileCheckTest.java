@@ -119,21 +119,21 @@ public class ProfileCheckTest {
         List<PadInstance> p0402 = part("R1", "R_0402", 0, 0, 0.54, 0.64, 0, -0.51, 0.51);
         ProfileCheck.Group g = ProfileCheck.of(PadFixtures.inputs(p0402)).groups.get(0);
         assertEquals(ProfileCheck.TIP_PITCH, g.tipKind);
-        assertEquals("Not dispensable with the 22G tip: these pads are 1.02 mm apart, and the smallest dot this tip makes "
-                + "reliably (1.00 mm, a quarter turn) would leave only 0.02 mm to the next pad's dot (at least 0.20 mm "
+        assertEquals("Not dispensable with the 22G bent taper: these pads are 1.02 mm apart, and the smallest dot this "
+                + "tip makes reliably (1.00 mm, a quarter turn) would leave only 0.02 mm to the next pad's dot (at least 0.20 mm "
                 + "needed)." + NEEDS_OTHER, g.reasonText);
-        assertEquals("cannot be dispensed with the 22G tip", g.shortText);
+        assertEquals("cannot be dispensed with the 22G bent taper", g.shortText);
         // ... gap <= 0
         g = ProfileCheck.of(PadFixtures.inputs(part("U1", "FINE", 0, 0, 0.25, 0.8, 0, -0.25, 0.25))).groups.get(0);
-        assertEquals("Not dispensable with the 22G tip: a 1.00 mm dot, the smallest this tip makes reliably, is wider than "
-                + "the 0.50 mm pad pitch, so neighbouring dots would overlap by 0.50 mm." + NEEDS_OTHER, g.reasonText);
+        assertEquals("Not dispensable with the 22G bent taper: a 1.00 mm dot, the smallest this tip makes reliably, is "
+                + "wider than the 0.50 mm pad pitch, so neighbouring dots would overlap by 0.50 mm." + NEEDS_OTHER, g.reasonText);
         // copper: a small pad's dot reaches 0.10 mm onto a big pad of another part
         List<PadInstance> pads = part("S1", "SMALL", 0, 0, 0.3, 0.3, 0, 0);
         pads.add(new PadInstance("B1", "BIG", "1", 1.9, 0, 0, 3.0, 3.0, 0));
         g = only(ProfileCheck.of(PadFixtures.inputs(pads)), "SMALL");
         assertEquals(ProfileCheck.TIP_COPPER, g.tipKind);
-        assertEquals("Not dispensable with the 22G tip: the smallest dot this tip makes reliably (1.00 mm) would reach "
-                + "0.10 mm onto the next pad." + NEEDS_OTHER, g.reasonText);
+        assertEquals("Not dispensable with the 22G bent taper: the smallest dot this tip makes reliably (1.00 mm) "
+                + "would reach 0.10 mm onto the next pad." + NEEDS_OTHER, g.reasonText);
         // no plan: the DO-220AA pin; its tab, opted in, names the pin by its width
         Map<String, List<PadInstance>> nano = PadFixtures.packageLevel(PadFixtures.load("nano"));
         CheckInputs in = PadFixtures.inputs(nano.get("DO-220AA"));
@@ -143,8 +143,8 @@ public class ProfileCheckTest {
                 + "with this tip: paste these only if you solder those pins by hand."), r.groups.get(0).reasonText);
         ProfileCheck.Group pin = r.groups.get(1);
         assertEquals(ProfileCheck.TIP_NO_PLAN, pin.tipKind);
-        assertEquals("Not dispensable with the 22G tip: on these 0.61 × 1.12 mm pads the closest plan (1 half-turn dot "
-                + "per pad) reaches 0.28 mm past the pad edge (at most 0.25 mm).", pin.reasonText);
+        assertEquals("Not dispensable with the 22G bent taper: on these 0.61 × 1.12 mm pads the closest plan (1 "
+                + "half-turn dot per pad) reaches 0.28 mm past the pad edge (at most 0.25 mm).", pin.reasonText);
         assertEquals("Not dispensable with the 22G tip: on these 0.95 × 0.75 mm pads the closest plan (1 half-turn dot per "
                 + "pad) comes within 0.11 mm of the next pad's dot (at least 0.20 mm).",
                 Texts.tipNoPlan("22G tip", 0.948, 0.746, 1, 800, null, 0.112, null, 1.06, 0.93));
@@ -165,8 +165,8 @@ public class ProfileCheckTest {
         assertTrue(tabs.blocking);
         assertFalse(tabs.fixable);
         assertEquals(Suggestion.NONE, tabs.suggestion.kind);
-        assertEquals("The other pads of " + usb + " (0.80 mm apart) cannot be dispensed with the 22G tip, so none of this "
-                + "part's pads are pasted: a part whose pins are soldered by hand gets no paste on its other pads either. "
+        assertEquals("The other pads of " + usb + " (0.80 mm apart) cannot be dispensed with the 22G bent taper, so "
+                + "none of this part's pads are pasted: a part whose pins are soldered by hand gets no paste on its other pads either. "
                 + "To paste these pads anyway, choose “Paste the dispensable pads of this part” for " + usb + ".",
                 tabs.reasonText);
         assertEquals(2, r.tipBlocking);
@@ -246,8 +246,9 @@ public class ProfileCheckTest {
         SuggesterTest.type(in, type("chip-0603", "Chip 0603", TypeInfo.CHARACTERIZED, 0.8, 0.95), "RES");
         in.gate = TypeInfo.VALIDATED;
         g = ProfileCheck.of(in).groups.get(0);
-        assertEquals("Chip 0603 is not calibrated yet (status: characterized). Boards need pad types that are at least "
-                + "validated on a board: calibrate it automatically or by hand.", g.reasonText);
+        assertEquals("Chip 0603 is not calibrated for the " + Tip.SEED_NAME + " yet (status: characterized). Boards need "
+                + "pad types that are at least validated on a board: calibrate it for this tip automatically or by hand.",
+                g.reasonText);
         assertTrue(g.fixable);
     }
 
@@ -306,12 +307,29 @@ public class ProfileCheckTest {
         assertTrue(g.blocking);
         assertTrue(g.fixable);
         assertEquals("calibrated for another tip", g.shortText);
-        assertEquals("Chip 0603 was calibrated with another tip (25g); the mounted tip is the 22G tip. Mass per turn and "
-                + "dot size change with the tip: calibrate it again for this tip.", g.reasonText);
+        assertEquals("Chip 0603 was calibrated with another tip (25g); the mounted tip is the 22G bent taper. Mass per "
+                + "turn and dot size change with the tip: calibrate it again for this tip.", g.reasonText);
         assertEquals(Suggestion.CALIBRATE_EXISTING, g.suggestion.kind);
         // and is never offered for reuse
         t.tipKey = Tip.g22().key;
         assertTrue(ProfileCheck.of(in).groups.isEmpty());
+    }
+
+    @Test
+    public void aTypeWithoutATipKeyIsTheSeededSetupsAndBelowTheGateUnderAnotherTip() {
+        // §22.1: a version written before tip setups names no tip: it is the seeded 22G's (Tip.setupOf)
+        CheckInputs in = PadFixtures.inputs(part("R1", "RES", 0, 0, 0.8, 0.95, 50, -0.825, 0.825));
+        TypeInfo t = type("chip-0603", "Chip 0603", TypeInfo.CHARACTERIZED, 0.8, 0.95);
+        t.tipKey = null;
+        SuggesterTest.type(in, t, "RES");
+        assertTrue(ProfileCheck.of(in).groups.isEmpty(), "the 22G's own");
+        Tip t25 = SuggesterSetupTest.tip25(true);
+        in.tip = t25;
+        ProfileCheck.Group g = ProfileCheck.of(in).groups.get(0);
+        assertEquals(ProfileCheck.BELOW_GATE, g.reason);
+        assertEquals("calibrated for another tip", g.shortText);
+        assertTrue(g.reasonText.startsWith("Chip 0603 was calibrated with another tip (" + Tip.SEED_KEY + "); the "
+                + "mounted tip is the 25G straight."), g.reasonText);
     }
 
     @Test
@@ -336,8 +354,8 @@ public class ProfileCheckTest {
         t.dotSteps = 200;
         t.dotsPerPad = 4;
         g = ProfileCheck.of(in).groups.get(0);
-        assertEquals("pad type chip-0603 v2 has eighth-turn dots; the 22G tip takes quarter, half or one-turn dots (a "
-                + "quarter turn at least): edit it and plan again", g.reasonText);
+        assertEquals("pad type chip-0603 v2 has eighth-turn dots; the 22G bent taper takes quarter, half or one-turn "
+                + "dots (a quarter turn at least): edit it and plan again", g.reasonText);
     }
 
     @Test
@@ -453,7 +471,7 @@ public class ProfileCheckTest {
         assertFalse(r.ok);
         assertEquals(1793000000000L, r.computedAtMs);
         assertEquals("ad22tta-b", r.tip.key);
-        assertEquals("22G tip", r.tip.name);
+        assertEquals("22G bent taper", r.tip.name);
         assertEquals(400, r.tip.minDotSteps);
         assertEquals(0.825, r.tip.minDotMm[0], 0.001);
         assertEquals(1.0, r.tip.minDotMm[1], 0.001);
@@ -470,5 +488,67 @@ public class ProfileCheckTest {
         assertEquals("3 pads", Texts.plural(3, "pad", "pads"));
         assertEquals("validated on a board", Texts.statusWord("validated"));
         assertEquals("not started", Texts.statusWord("not-started"));
+    }
+
+    // ---- tip setups (§22.2, §22.8) ------------------------------------------------------------------
+
+    @Test
+    public void theBelowGateTextNamesTheMountedSetupAndWhatTheOthersHave() {
+        TypeInfo.Other o = new TypeInfo.Other();
+        o.setupKey = Tip.SEED_KEY;
+        o.setupName = Tip.SEED_NAME;
+        o.version = 3;
+        o.status = TypeInfo.CHARACTERIZED;
+        assertEquals("Chip 0603 is not calibrated for the 25G straight yet (status: not started; characterized for the "
+                + Tip.SEED_NAME + "). Boards need pad types that are at least characterized: calibrate it for this "
+                + "tip automatically or by hand.", Texts.belowGate("Chip 0603", TypeInfo.NOT_STARTED,
+                        TypeInfo.CHARACTERIZED, "25G straight", Collections.singletonList(o)));
+        assertEquals("Chip 0603 is not calibrated for the " + Tip.SEED_NAME + " yet (status: provisional). Boards need "
+                + "pad types that are at least validated on a board: calibrate it for this tip automatically or by "
+                + "hand.", Texts.belowGate("Chip 0603", TypeInfo.PROVISIONAL, TypeInfo.VALIDATED, Tip.SEED_NAME,
+                        null));
+    }
+
+    @Test
+    public void theMeasureTipSentence() {
+        assertEquals("Measure the 25G straight's dots first (Setup › Dispenser & tip › Measure its dots, ≈ 8 min and two "
+                + "coupons to weigh): suggestions need its dot sizes and paste per turn.", Texts.measureTip(
+                        "25G straight"));
+        Tip t = new Tip("25g-straight", "25G straight", 0.25, 0.51, DoseModel.QUARTER);
+        assertFalse(t.isMeasured());
+        assertEquals("none", t.dotsSource());
+        assertEquals("bench", Tip.g22().dotsSource());
+        assertFalse(t.knows(DoseModel.HALF));
+        assertTrue(Tip.g22().knows(DoseModel.HALF));
+        IllegalStateException e = org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+                () -> t.dHiMm(DoseModel.HALF));
+        assertEquals("the 25G straight has no measured half-turn dots at this recipe and paste: its dot size is not "
+                + "known", e.getMessage());
+        e = org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, () -> t.massMg(DoseModel.HALF));
+        assertEquals("the 25G straight was never weighed at this recipe and paste: the mass of a half-turn dot is not "
+                + "known", e.getMessage());
+    }
+
+    @Test
+    public void theControlNamesTheTipAndComparesASetupWithItsOwnRecords() {
+        Tip t25 = new Tip("25g-straight", "25G straight", 0.25, 0.51, DoseModel.QUARTER);
+        // the bench setup: against the bench, and the failure text says another tip may be on
+        LadderStats.Check c = LadderStats.control(800, 0.82, null, 18, null, Tip.g22());
+        assertFalse(c.ok);
+        assertEquals("the control half-turn dots are 0.82 mm², 22 % below the bench's 1.06 mm²: check the regulator "
+                + "(18 psi) and the paste before calibrating, or another tip than the " + Tip.SEED_NAME + " is on",
+                c.text);
+        // another setup: never against the bench; its first measurement passes and says so
+        c = LadderStats.control(800, 0.40, null, 18, null, t25);
+        assertTrue(c.ok);
+        assertEquals("first measurement of this tip", c.text);
+        assertNull(c.limit);
+        c = LadderStats.control(800, 0.40, 0.50, 18, null, t25);
+        assertFalse(c.ok);
+        assertEquals("the control half-turn dots are 0.40 mm², 20 % below the 0.50 mm² of the last calibration: check "
+                + "the regulator (18 psi) and the paste before calibrating, or another tip than the 25G straight is "
+                + "on", c.text);
+        assertTrue(LadderStats.control(800, 0.48, 0.50, 18, null, t25).ok);
+        assertNull(LadderStats.control(800, 0.48, 0.50, 18, null, t25).text);
     }
 }

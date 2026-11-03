@@ -140,7 +140,7 @@ public class PlanBoardFrameTest {
     static DispensePlan plan(BoardLocation bl) {
         DispenseConfig cfg = new DispenseConfig();
         cfg.minPadTypeStatus = "provisional";
-        return new DispensePlanner(cfg, new PadTypeResolver(types, null)).planBoard(bl, 0, 0);
+        return TestTips.planner(cfg, new PadTypeResolver(types, null)).planBoard(bl, 0, 0);
     }
 
     static BoardLocation location(Board b, double rotation) {

@@ -178,7 +178,7 @@ public class BoardPlanningTest {
         cfg.minPadTypeStatus = "provisional";
         cfg.needleZOffsetMm = -2.59;
         // the toy QFN's 0.25 mm perimeter pad is too narrow for the 22G tip: its part is pasted only by choice
-        DispensePlanner planner = new DispensePlanner(cfg, pastePartialQfn());
+        DispensePlanner planner = TestTips.planner(cfg, pastePartialQfn());
         BoardLocation bl = new BoardLocation(board());
         bl.setLocation(new Location(LengthUnit.Millimeters, 100, 50, 5.5, 0));
         DispensePlan plan = planner.planBoard(bl, 100, 50);
@@ -247,7 +247,7 @@ public class BoardPlanningTest {
             }
             gated.add(x);
         }
-        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(gated, null)
+        DispensePlanner planner = TestTips.planner(cfg, new PadTypeResolver(gated, null)
                 .withPastePartial(java.util.Collections.singleton("QFN-16_3x3mm"))).withRules(rules);
         BoardLocation bl = new BoardLocation(board());
         bl.setLocation(new Location(LengthUnit.Millimeters, 100, 50, 5.5, 0));
@@ -281,7 +281,7 @@ public class BoardPlanningTest {
     @Test
     public void statusBelowMinimumBlocks() {
         DispenseConfig cfg = new DispenseConfig(); // default minimum: characterized
-        DispensePlanner planner = new DispensePlanner(cfg, new PadTypeResolver(types, null));
+        DispensePlanner planner = TestTips.planner(cfg, new PadTypeResolver(types, null));
         List<PadGeometry> pads = new ArrayList<>();
         pads.add(new PadGeometry("P1", 0, 0, 0, 0.8, 0.95, 0, types.get(1)));
         DispensePlan plan = planner.plan("t", pads, 0, 0);
@@ -313,7 +313,7 @@ public class BoardPlanningTest {
         cfg.minPadTypeStatus = "provisional";
         BoardLocation bl = new BoardLocation(b);
         bl.setLocation(new Location(LengthUnit.Millimeters, 150, 100, 1.6, 0));
-        DispensePlan plan = new DispensePlanner(cfg, new PadTypeResolver(types, null)).planBoard(bl, 150, 100);
+        DispensePlan plan = TestTips.planner(cfg, new PadTypeResolver(types, null)).planBoard(bl, 150, 100);
         assertEquals(160, plan.pads.size());
         assertEquals(160, plan.dots.size());
         assertEquals(0, plan.blockedPads().size());

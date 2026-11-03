@@ -3,7 +3,9 @@ package org.openpnp.instancelabs.dispense;
 import java.util.List;
 import java.util.Locale;
 
+import org.openpnp.instancelabs.padprofile.DoseModel;
 import org.openpnp.instancelabs.padprofile.Texts;
+import org.openpnp.instancelabs.padprofile.Tip;
 
 /**
  * Pre-flight interlocks (plan §5.5). Runtime interlocks are enforced elsewhere: I1 (outputs off on
@@ -68,6 +70,27 @@ public final class Interlocks {
         public ZCheck.Result zCheck;
         /** The controller is confirmed to be OpenPnP's simulator: surfaces probed there are usable. */
         public boolean simulatorConfirmed;
+        /**
+         * The mounted tip with its dot table ({@link DispenseService#mountedTip}, tip setups design §22.2): a planned
+         * dose it does not know is refused; null = unknown.
+         */
+        public Tip tip;
+        /**
+         * Where the needle lands has been checked for this needle under N2's head offset now (§22.3,
+         * {@link DispenseService#isNeedleXyChecked}); while false only the landing waivers of {@link Scope} dispense.
+         */
+        public boolean xyChecked;
+        /** Why the landing is not checked (the readiness text), or null: the rule's own text. */
+        public String xyUncheckedWhy;
+        /** When the mounted setup was put on (its mount or needle change), for the PLAN and I4 texts; null = unknown. */
+        public Long tipOnAtMs;
+        /**
+         * The mounted setup's corrections since the plan's setup version ("OD 0.72 → 0.90 mm", §22.3), or null: the
+         * PLAN text of a corrected setup.
+         */
+        public String setupDiff;
+        /** The pad types could not be read for the version checks: the run is refused (§22.2), with this error. */
+        public String padTypesReadError;
     }
 
     /** What a run uses, for the I4 Z-frame checks. */
@@ -76,6 +99,14 @@ public final class Interlocks {
         public boolean needleMotion = true;
         /** The named I4 waiver: the needle touch-off run itself (it sets the touched-off state). */
         public boolean touchOffWaiver;
+        /** {@link #landingWaiver}: prime and the test dot at the waste, or the landing check itself (§22.3). */
+        public static final String LANDING_WASTE = "waste";
+        public static final String LANDING_CHECK = "landing-check";
+        /**
+         * The named waiver of the landing rule (tip setups design §22.3): {@link #LANDING_WASTE} or
+         * {@link #LANDING_CHECK}; null = none (refused while the landing is not checked).
+         */
+        public String landingWaiver;
         /** Places whose Z must agree with the needle frame (waste, blank). */
         public final List<String> referencePlaces = new java.util.ArrayList<>();
         /**
@@ -126,6 +157,10 @@ public final class Interlocks {
                 PadType now = in.padTypesNow.get(p.typeKey);
                 if (now == null || now.version != p.typeVersion) {
                     changed.add(p.typeKey + " v" + p.typeVersion + (now == null ? " is gone" : " is now v" + now.version));
+                }
+                else if (p.typePadVersion != null && now.padVersion != null && !p.typePadVersion.equals(now.padVersion)) {
+                    // §22.2: the pad definition, shared by every setup, was edited
+                    changed.add(p.typeKey + " pad v" + p.typePadVersion + " is now pad v" + now.padVersion);
                 }
             }
             if (p.typeStatus == null) {
@@ -181,14 +216,18 @@ public final class Interlocks {
         }
         DispenseConfig.NeedleAnchor a = cfg.needleAnchor;
         if (a == null) {
-            r.add("I4", "the needle Z frame is not set: touch the same surface with N1 and with the needle tip and "
-                    + "record both heights (Needle card)");
+            r.add("I4", cfg.needleChangedAtMs != null ? putOn(in) + ": record its needle Z frame (Setup › Needle Z frame)"
+                    : "the needle Z frame is not set: touch the same surface with N1 and with the needle tip and "
+                            + "record both heights (Needle card)");
             return;
         }
         if (!cfg.isNeedleAnchored()) {
-            r.add("I4", "the needle was changed after the needle Z frame was recorded: record the N1 and needle "
-                    + "contact heights again (Needle card)");
+            r.add("I4", putOn(in) + ": record its needle Z frame (Setup › Needle Z frame)");
             return;
+        }
+        String close = frameTooClose(cfg);
+        if (close != null) {
+            r.add("I4", close);
         }
         if (sc.touchOffWaiver) {
             r.notes.add("I4: touch-off run (the touched-off state is what it sets)");
@@ -196,6 +235,7 @@ public final class Interlocks {
         else if (!cfg.isNeedleTouchedOff()) {
             r.add("I4", "needle Z offset has not been set since the last needle change / needle frame (run a touch-off)");
         }
+        checkLanding(in, r, sc);
         double tol = cfg.zFrameToleranceMm;
         double drift = cfg.needleZOffsetMm - a.offsetMm();
         if (Math.abs(drift) > cfg.needleOffsetMaxDriftMm) {
@@ -242,6 +282,54 @@ public final class Interlocks {
                 r.add("I4", ZCheck.placeMovedMessage(name, loc, in.zCheck));
             }
         }
+    }
+
+    /** "the 25G straight was put on at 14:07": the mounted setup and the time of its needle change (§22.3). */
+    static String putOn(Inputs in) {
+        DispenseConfig cfg = in.cfg;
+        Long at = in.tipOnAtMs != null ? in.tipOnAtMs : cfg.needleChangedAtMs;
+        return "the " + tipName(in) + " was put on" + (at == null ? "" : " at " + ZCheck.clock(at));
+    }
+
+    static String tipName(Inputs in) {
+        return in.tip != null && in.tip.name != null ? in.tip.name : in.cfg.tip.name;
+    }
+
+    /**
+     * The I4 offset rule (§22.3): a needle frame whose offset o from N1's is below 2 x zFrameToleranceMm + 0.1 mm
+     * lets a height taken with the needle pass the frame checks; refused until the tolerance is lowered. Null when
+     * the frame is far enough from N1's (the 22G's offset is -2.60 mm).
+     */
+    public static String frameTooClose(DispenseConfig cfg) {
+        DispenseConfig.NeedleAnchor a = cfg.needleAnchor;
+        if (a == null) {
+            return null;
+        }
+        double o = Math.abs(a.offsetMm());
+        if (o >= 2 * cfg.zFrameToleranceMm + 0.1 - 1e-9) {
+            return null;
+        }
+        return String.format(Locale.ROOT, "The %s's tip is %.2f mm from N1's: I4 cannot tell a height taken with the "
+                + "needle; lower zFrameToleranceMm below %.2f mm (Settings).", cfg.tip.name, o, Math.max(0, o / 2 - 0.05));
+    }
+
+    /**
+     * The landing rule (tip setups design §22.3): while where the needle lands is not checked for this needle under
+     * N2's head offset now, only prime and the test dot at the waste and the landing check itself dispense
+     * ({@link Scope#landingWaiver}).
+     */
+    static void checkLanding(Inputs in, InterlockReport r, Scope sc) {
+        if (in.xyChecked) {
+            return;
+        }
+        if (sc.landingWaiver != null || DispenseService.onlyAtTheWaste(in.cfg, sc)) {
+            // the waste is the place for stray paste: prime and the test dot dispense before the landing check
+            r.notes.add("I4: " + (Scope.LANDING_CHECK.equals(sc.landingWaiver) ? "the landing check" : "at the waste")
+                    + " before the landing is checked");
+            return;
+        }
+        r.add("I4", in.xyUncheckedWhy != null ? in.xyUncheckedWhy : putOn(in) + " and where it lands has not been "
+                + "checked: check where it lands (Setup › Dispenser & tip).");
     }
 
     /**
@@ -312,8 +400,8 @@ public final class Interlocks {
             if (pl.minZ < boardZ - tol || pl.maxZ > boardZ + tol) {
                 r.add("I4", String.format(Locale.ROOT, "'%s' surface Z %.3f..%.3f is outside the board top Z %.3f "
                         + "+/- %.2f (the board location's Z of the plan): surface points are N1 contact heights "
-                        + "(OpenPnP frame); a height taken with the needle is about 2.59 mm off", name, pl.minZ,
-                        pl.maxZ, boardZ, tol));
+                        + "(OpenPnP frame); a height taken with the needle is about %.2f mm off", name, pl.minZ,
+                        pl.maxZ, boardZ, tol, Math.abs(a.offsetMm())));
             }
         }
         else if (pl.minZ < a.surfaceZMm - tol || pl.maxZ > a.surfaceZMm + tol) {
@@ -399,6 +487,27 @@ public final class Interlocks {
     }
 
     /**
+     * PLAN (tip setups design §22.2-22.3): the plan was made for the mounted setup and its version (a plan of
+     * another setup, or of none, is stale), and the pad types could be read for the version checks.
+     */
+    static void checkPlanSetup(Inputs in, InterlockReport r) {
+        String now = in.tip != null ? in.tip.key : in.cfg.tip.key;
+        int version = in.tip != null ? in.tip.setupVersion : in.cfg.tip.setupVersion;
+        if (in.plan.setupKey == null || !in.plan.setupKey.equals(now)) {
+            Long at = in.tipOnAtMs;
+            r.add("PLAN", "the tip changed after planning (the " + tipName(in) + " was mounted"
+                    + (at == null ? "" : " at " + ZCheck.clock(at)) + "): plan again");
+        }
+        else if (in.plan.setupVersion != null && in.plan.setupVersion != version) {
+            r.add("PLAN", "the " + tipName(in) + " changed after planning" + (in.setupDiff == null || in.setupDiff
+                    .isEmpty() ? "" : " (" + in.setupDiff + ")") + ": plan again");
+        }
+        if (in.padTypesReadError != null) {
+            r.add("PLAN", "the pad types could not be read (" + in.padTypesReadError + "): plan again");
+        }
+    }
+
+    /**
      * §6.5 PLAN refusals: a pad type whose dots the mounted tip cannot make (R1), or that gives a pad
      * less than half a screw turn in a row (R6). One line per pad type.
      */
@@ -415,6 +524,13 @@ public final class Interlocks {
                 if (seen.add(who + " dose")) {
                     r.add("PLAN", Texts.interlockDose(who, p.typeVersion, p.dotSteps, cfg.tip.name,
                             cfg.tip.minDotSteps));
+                }
+            }
+            else if (in.tip != null && !in.tip.knows(p.dotSteps)) {
+                if (seen.add(who + " known")) {
+                    r.add("PLAN", "pad type " + who + " v" + p.typeVersion + " has " + DoseModel.turnName(p.dotSteps)
+                            + " dots, which the " + in.tip.name + " never measured at this recipe and paste: measure "
+                            + "its dots (Setup › Dispenser & tip)");
                 }
             }
             else if (padSteps * 2 < cfg.bStepsPerRev && seen.add(who + " R6")) {
@@ -545,6 +661,7 @@ public final class Interlocks {
             if (in.plan.dots.isEmpty()) {
                 r.add("PLAN", "plan has no dots");
             }
+            checkPlanSetup(in, r);
             checkDoses(in, r);
             List<DispensePlan.PlannedPad> blocked = in.plan.blockedPads();
             if (!blocked.isEmpty() && cfg.refuseFlaggedPads) {

@@ -25,7 +25,11 @@ public final class Suggester {
     private Suggester() {
     }
 
-    /** One dose's numbers: mass per dot (weighed, else another dose's weighed mass per step, else the model) and dot size. */
+    /**
+     * One dose's numbers: mass per dot (weighed, else another dose's weighed mass per step, else the setup's dot table,
+     * else the bench model) and dot size (the fresh records, else the dot table, else the bench model). A dose the
+     * tip does not know ({@link #known} false) is never laid out or suggested: its numbers are NaN.
+     */
     static final class DoseView {
         int steps;
         double mgPerDot;
@@ -39,9 +43,22 @@ public final class Suggester {
         boolean measured;
         boolean opticalPass;
         boolean massConfirmed;
+        /** Size and mass are known (tip setups §22.2): the fresh records, the setup's dot table or the bench model. */
+        boolean known = true;
     }
 
+    /** The view of a dose with the bench model's numbers where no fresh record has them (the 22G bent taper). */
     static DoseView view(Map<Integer, DoseEvidence> evidence, int steps) {
+        return view(evidence, steps, null);
+    }
+
+    /**
+     * The view of a dose for a tip setup (§22.2): the fresh records first (as before), then, for a setup the bench
+     * model does not describe, its dot table (any age, at this recipe and paste); the bench model only for the bench
+     * setup ({@code tip} null: the bench). Without any of them the dose is unknown.
+     */
+    static DoseView view(Map<Integer, DoseEvidence> evidence, int steps, Tip tip) {
+        boolean bench = tip == null || tip.benchModel;
         DoseView v = new DoseView();
         v.steps = steps;
         v.ev = evidence == null ? null : evidence.get(steps);
@@ -74,9 +91,18 @@ public final class Suggester {
             v.mgPerDot = other.mgPerStep * steps;
             v.mgSource = "weighed-per-step";
         }
-        else {
+        else if (!bench && tip.mgPerStep != null) {
+            v.mgPerDot = tip.mgPerStep * steps;
+            v.mgSource = "table";
+        }
+        else if (bench) {
             v.mgPerDot = DoseModel.massMg(steps);
             v.mgSource = "model";
+        }
+        else {
+            v.mgPerDot = Double.NaN;
+            v.mgSource = "unknown";
+            v.known = false;
         }
         if (v.ev != null && v.ev.hasMeasuredDots()) {
             v.dGap = v.ev.d95Mm;
@@ -86,26 +112,46 @@ public final class Suggester {
             v.opticalPass = v.ev.opticalPass;
             v.dShown = new double[] {r3(v.ev.dMeanMm), r3(v.ev.d95Mm)};
         }
-        else {
+        else if (!bench && tip.measured != null && tip.measured.containsKey(steps)) {
+            Tip.Measured m = tip.measured.get(steps);
+            v.dGap = m.d95Mm;
+            v.dOverhang = m.dMeanMm;
+            v.dSource = "table";
+            v.dShown = new double[] {r3(m.dMeanMm), r3(m.d95Mm)};
+        }
+        else if (bench) {
             v.dGap = DoseModel.dHiMm(steps);
             v.dOverhang = v.dGap;
             v.dSource = "model";
             v.dShown = new double[] {r3(DoseModel.dLoMm(steps)), r3(DoseModel.dHiMm(steps))};
         }
+        else {
+            v.dGap = Double.NaN;
+            v.dOverhang = Double.NaN;
+            v.dSource = "unknown";
+            v.dShown = null;
+            v.known = false;
+        }
         return v;
     }
 
     /**
-     * Mass per dot of a dose as the suggestions count it: weighed, else another dose's weighed mass
-     * per step, else the model (for the plan view's predicted mass per pad, §12.5).
+     * Mass per dot of a dose as the suggestions count it (the plan view's predicted mass per pad, §12.5): weighed, else
+     * another dose's weighed mass per step, else the mounted tip setup's dot table (§22.2), the bench model only for
+     * the bench setup; null when the tip does not know the dose (views write null).
      */
-    public static double mgPerDot(Map<Integer, DoseEvidence> evidence, int steps) {
-        return view(evidence, steps).mgPerDot;
+    public static Double mgPerDot(Map<Integer, DoseEvidence> evidence, int steps, Tip tip) {
+        DoseView v = view(evidence, steps, tip);
+        return Double.isNaN(v.mgPerDot) ? null : v.mgPerDot;
     }
 
-    /** A dose's dot size as the suggestions show it: measured mean and d95, else the model's band (mm). */
-    public static double[] dotDiameterMm(Map<Integer, DoseEvidence> evidence, int steps) {
-        return view(evidence, steps).dShown.clone();
+    /**
+     * A dose's dot size as the suggestions show it (mm): measured mean and d95, else the mounted tip setup's dot table
+     * or, for the bench setup, the model's band; null when the tip does not know the dose size (§22.2).
+     */
+    public static double[] dotDiameterMm(Map<Integer, DoseEvidence> evidence, int steps, Tip tip) {
+        double[] d = view(evidence, steps, tip).dShown;
+        return d == null ? null : d.clone();
     }
 
     /** A dot plan on a group's openings, evaluated. */
@@ -171,8 +217,8 @@ public final class Suggester {
     static List<Candidate> candidates(ProfileCheck.Ctx c, ProfileCheck.Group g, Map<Integer, DoseView> views) {
         List<Candidate> l = new ArrayList<>();
         for (int s : classOrder(c.in.profileSteps)) {
-            if (!DoseModel.isAllowed(s, c.tip())) {
-                continue;
+            if (!DoseModel.isAllowed(s, c.tip()) || !views.get(s).known) {
+                continue; // §22.2: a dose the tip does not know is not suggested
             }
             for (int n = 1; n <= Limits.MAX_DOTS; n++) {
                 if (n * s * 2 < c.in.stepsPerRev) {
@@ -285,6 +331,17 @@ public final class Suggester {
         Suggestion s = new Suggestion();
         s.group = g.group;
         String reason = g.reason;
+        if (!c.tipMeasured && (ProfileCheck.NO_TYPE.equals(reason) || ProfileCheck.BELOW_GATE.equals(reason))) {
+            // §22.2: an unmeasured setup cannot say how much a dot lays: measure its dots first
+            s.kind = Suggestion.MEASURE_TIP;
+            s.family = g.family;
+            s.opening = opening(g);
+            s.sentence = Texts.measureTip(c.tip().name);
+            s.confidence = "low";
+            s.id = "s" + GroupKey.sha12(g.group + "|measure-tip|" + reason + "|" + c.tip().key + "|"
+                    + c.typesFingerprint);
+            return s;
+        }
         if (ProfileCheck.TIP.equals(reason) || ProfileCheck.PART.equals(reason)
                 || ProfileCheck.NO_PAD_SIZE.equals(reason) || g.plan == null) {
             s.kind = Suggestion.NONE;
@@ -301,7 +358,7 @@ public final class Suggester {
         String kind = Suggestion.NEW;
         if (ProfileCheck.BELOW_GATE.equals(reason) && covered) {
             kind = Suggestion.CALIBRATE_EXISTING;
-            if (g.type.hasOwnPlan()) {
+            if (g.type.hasOwnPlan() && c.knowsDose(g.type)) {
                 chosen = typePlan(c, g, g.type);
                 chosen.eval = c.nb.evaluate(g.idx, chosen.local, chosen.view.dGap / 2, chosen.view.dOverhang / 2);
                 chosen.fit = fitOf(chosen);
@@ -360,6 +417,9 @@ public final class Suggester {
             if (!ratioIn(ratio, Limits.SAME_SIZE_RATIO_LOW, Limits.SAME_SIZE_RATIO_HIGH)
                     || Math.abs(tl - g.key.longMm) > Limits.SAME_SIZE_MM + Limits.EPS
                     || Math.abs(ts - g.key.shortMm) > Limits.SAME_SIZE_MM + Limits.EPS) {
+                continue;
+            }
+            if (!c.knowsDose(t)) {
                 continue;
             }
             Candidate x = typePlan(c, g, t);
@@ -626,8 +686,31 @@ public final class Suggester {
         if ("weighed-per-step".equals(v.mgSource)) {
             why.add("the mass per step comes from another turn size");
         }
+        else if ("table".equals(v.mgSource)) {
+            why.add(!c.tip().mgPerStepConfirmed ? "weighed once" : "the mass per step comes from the "
+                    + c.tip().name + "'s earlier weighing");
+        }
         else if (!v.massConfirmed) {
             why.add("no weighing at this recipe yet");
+        }
+        if ("table".equals(v.dSource)) {
+            why.add("the dot size comes from the " + c.tip().name + "'s earlier measurement, not a fresh one");
+        }
+        if (g.anchor != null && g.anchor.setupName != null) {
+            why.add("the amount is anchored on pads validated with the " + g.anchor.setupName);
+        }
+        if (g.type != null && PadTypeOrigin.COPIED.equals(g.type.origin) && "your plan".equals(s.planFrom)) {
+            s.confidence = "low";
+            why.add("the plan was copied from " + (g.type.copiedFrom == null ? "another tip" : "the "
+                    + g.type.copiedFrom) + " and never measured with this tip");
+        }
+    }
+
+    /** Origins of a type version the suggester tells apart (D/PadType's, P/ imports nothing from D/). */
+    static final class PadTypeOrigin {
+        static final String COPIED = "copied";
+
+        private PadTypeOrigin() {
         }
     }
 

@@ -60,7 +60,7 @@ public class GcodeStreamTest {
         pads.add(new PadGeometry("R2.1", 110.0, 85.0, 90, 0.8, 0.95, 5.5, t));
         pads.add(new PadGeometry("R1.2", 101.65, 80.0, 0, 0.8, 0.95, 5.5, t));
         pads.add(new PadGeometry("R1.1", 100.0, 80.0, 0, 0.8, 0.95, 5.5, t));
-        DispensePlan plan = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(t), null))
+        DispensePlan plan = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(t), null))
                 .plan("toy", pads, 77.5, 40);
         plan.planId = "golden";
         return plan;

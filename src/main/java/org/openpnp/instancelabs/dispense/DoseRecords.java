@@ -6,11 +6,14 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 
 import org.openpnp.instancelabs.padprofile.DoseEvidence;
 import org.openpnp.instancelabs.padprofile.LadderStats;
 import org.openpnp.instancelabs.padprofile.Limits;
+import org.openpnp.instancelabs.padprofile.Tip;
 
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
@@ -43,6 +46,26 @@ public final class DoseRecords {
         public Integer k;
         /** A thread to the next dot; a string. */
         public boolean t, s;
+    }
+
+    /**
+     * A tip setup's dot table (tip setups design §22.2): per dose, the newest passing optical record of the setup at
+     * the recipe ({@code dose_fp}), the loaded paste and the simulator flag, outside jobs flagged wrong-tip, any age;
+     * and the mass per step of its newest confirmed weighing at that recipe and paste, else its newest single one.
+     * It describes the tip the way the bench model describes the 22G; freshness still decides characterized.
+     */
+    public static final class DotTable {
+        public String setupKey;
+        public String doseFp;
+        public String pasteKey;
+        public boolean simulated;
+        /** Per dose (steps): the dot size measured and the record it came from. */
+        public final Map<Integer, Tip.Measured> doses = new TreeMap<>();
+        /** Weighed mass per motor step (mg) and when; null = never weighed at this recipe and paste. */
+        public Double mgPerStep;
+        public Long mgPerStepAtMs;
+        /** Confirmed by two readings that agree (false: weighed once). */
+        public boolean mgPerStepConfirmed;
     }
 
     /** The calibration's thresholds from the site settings. */
@@ -155,6 +178,8 @@ public final class DoseRecords {
         r.drift = st.driftPct;
         r.landingMeanMm = st.landingMeanMm;
         r.landingSdMm = st.landingSdMm;
+        r.landingDxMm = st.landingDxMm;
+        r.landingDyMm = st.landingDyMm;
         r.dotsJson = GSON.toJson(dots);
         r.pass = st.pass;
         r.why = st.failures.isEmpty() ? null : st.failures.get(0);
@@ -183,12 +208,141 @@ public final class DoseRecords {
         return n % 2 == 1 ? a.get(n / 2) : (a.get(n / 2 - 1) + a.get(n / 2)) / 2;
     }
 
-    /** The records fresh for the current setup (§1.7), oldest first. */
+    /**
+     * The setup's dot table (§22.2, see {@link DotTable}) from its records: another setup's records never enter it,
+     * nor the records of a job in {@code flaggedJobs} (wrong tip). Each optical record counts alone.
+     */
+    public static DotTable dotTable(List<DoseRecord> records, String setupKey, String doseFp, String pasteKey,
+            boolean simulated, Set<String> flaggedJobs) {
+        return dotTable(records, setupKey, doseFp, pasteKey, simulated, flaggedJobs, null);
+    }
+
+    /**
+     * As above; with {@code set}, an optical record that fails alone counts when its job's camera records of the
+     * same dose pass together, as the job judged them (§7.4): a ladder block is sized for the hops of the weigh dots
+     * planned on the coupons ({@link PadLadder#dotsFor}), so at the machine's 60 hops the weighed dose's block fails
+     * its thread count alone, and Measure its dots would otherwise leave a tip whose smallest dot is weighed
+     * unmeasured. Its sizes are then the pooled ones (what the job reported).
+     */
+    public static DotTable dotTable(List<DoseRecord> records, String setupKey, String doseFp, String pasteKey,
+            boolean simulated, Set<String> flaggedJobs, LadderStats.Settings set) {
+        DotTable t = new DotTable();
+        t.setupKey = setupKey;
+        t.doseFp = doseFp;
+        t.pasteKey = pasteKey;
+        t.simulated = simulated;
+        Map<Long, DoseRecord> byId = new HashMap<>();
+        List<DoseRecord> mine = new ArrayList<>();
+        for (DoseRecord r : records) {
+            byId.put(r.id, r);
+            if (setupKey.equals(r.tipKey) && Objects.equals(doseFp, r.doseFp) && Objects.equals(pasteKey, r.pasteKey)
+                    && r.simulated == simulated && !(r.jobId != null && flaggedJobs != null
+                            && flaggedJobs.contains(r.jobId))) {
+                mine.add(r);
+            }
+        }
+        mine.sort((a, b) -> Long.compare(a.id, b.id));
+        for (DoseRecord r : mine) {
+            // the newest passing optical record per dose (records come oldest first: a later one replaces it)
+            if (!DoseRecord.OPTICAL.equals(r.kind)) {
+                continue;
+            }
+            Tip.Measured m = null;
+            if (Boolean.TRUE.equals(r.pass) && r.diameterMeanMm != null && r.diameterP95Mm != null) {
+                m = new Tip.Measured();
+                m.dMeanMm = r.diameterMeanMm;
+                m.d95Mm = r.diameterP95Mm;
+                m.recordId = r.id;
+                m.atMs = r.createdAtMs;
+            }
+            else if (set != null && r.jobId != null) {
+                m = pooledWithJob(r, mine, set);
+            }
+            if (m != null) {
+                t.doses.put(r.steps, m);
+            }
+        }
+        // the newest confirmed weighing (a reading another agrees with, §7.5), else the newest single one
+        java.util.Set<Long> confirmed = new java.util.HashSet<>();
+        for (DoseRecord r : mine) {
+            if (r.hasReading() && r.confirmedBy != null && byId.containsKey(r.confirmedBy)
+                    && mine.contains(byId.get(r.confirmedBy))) {
+                confirmed.add(r.id);
+                confirmed.add(r.confirmedBy);
+            }
+        }
+        DoseRecord single = null, best = null;
+        for (DoseRecord r : mine) {
+            if (!r.hasReading() || mgPerStepOf(r, byId) == null) {
+                continue;
+            }
+            single = r;
+            if (confirmed.contains(r.id)) {
+                best = r;
+            }
+        }
+        DoseRecord w = best != null ? best : single;
+        if (w != null) {
+            t.mgPerStep = mgPerStepOf(w, byId);
+            t.mgPerStepAtMs = w.createdAtMs;
+            t.mgPerStepConfirmed = best != null;
+        }
+        return t;
+    }
+
+    /**
+     * An optical record pooled with its job's other camera records of its dose (the coupons' imaged weigh dots, another
+     * block): their sizes when they pass together, else null (nothing to pool, or the pool fails too).
+     */
+    private static Tip.Measured pooledWithJob(DoseRecord r, List<DoseRecord> mine, LadderStats.Settings set) {
+        List<LadderStats.Record> pool = new ArrayList<>();
+        long at = r.createdAtMs;
+        for (DoseRecord x : mine) {
+            if (x.steps != r.steps || !r.jobId.equals(x.jobId)
+                    || !(DoseRecord.OPTICAL.equals(x.kind) || DoseRecord.COUPON.equals(x.kind))) {
+                continue;
+            }
+            List<Seen> dots = dotsOf(x);
+            if (dots != null && !dots.isEmpty()) {
+                pool.add(record(x.id, x.steps, x.kind, dots));
+                at = Math.max(at, x.createdAtMs);
+            }
+        }
+        if (pool.size() < 2) {
+            return null;
+        }
+        LadderStats.Stats st = LadderStats.of(r.steps, pool, set);
+        if (!st.pass || st.dMeanMm == null || st.d95Mm == null) {
+            return null;
+        }
+        Tip.Measured m = new Tip.Measured();
+        m.dMeanMm = st.dMeanMm;
+        m.d95Mm = st.d95Mm;
+        m.recordId = r.id;
+        m.atMs = at;
+        return m;
+    }
+
+    /** A reading's mass per motor step: as stored, else its total over the dots laid on its coupon (§7.5). */
+    static Double mgPerStepOf(DoseRecord r, Map<Long, DoseRecord> byId) {
+        if (r.mgPerStep != null) {
+            return r.mgPerStep;
+        }
+        DoseRecord coupon = r.couponRecordId == null ? null : byId.get(r.couponRecordId);
+        int dots = coupon != null ? coupon.n : r.n;
+        return r.totalMg == null || dots <= 0 || r.steps <= 0 ? null : r.totalMg / dots / r.steps;
+    }
+
+    /**
+     * The records fresh for the current setup (§1.7), oldest first, without the records of the jobs flagged wrong-tip
+     * (tip setups design §22.3): they leave the setup's evidence.
+     */
     public static List<DoseRecord> fresh(List<DoseRecord> records, DispenseConfig cfg, DoseRecord.Epochs epochs,
-            long nowMs) {
+            long nowMs, Set<String> flaggedJobs) {
         List<DoseRecord> l = new ArrayList<>();
         for (DoseRecord r : records) {
-            if (r.isFresh(nowMs, cfg, epochs)) {
+            if (r.isFresh(nowMs, cfg, epochs) && !(r.jobId != null && flaggedJobs != null
+                    && flaggedJobs.contains(r.jobId))) {
                 l.add(r);
             }
         }
@@ -221,11 +375,17 @@ public final class DoseRecords {
     /**
      * The pooled evidence of every dose from the fresh records (§1.7, §7.6): camera records (ladder and
      * coupon) pooled through {@link LadderStats#of}, a record without dots by its own verdict, and the
-     * weighed mass of every fresh reading ({@link LadderStats#mass}).
+     * weighed mass of every fresh reading ({@link LadderStats#mass}); the records of the jobs flagged wrong-tip
+     * left out (tip setups design §22.3).
      */
     public static Map<Integer, DoseEvidence> evidence(List<DoseRecord> records, DispenseConfig cfg,
-            DoseRecord.Epochs epochs, long nowMs) {
-        List<DoseRecord> fresh = fresh(records, cfg, epochs, nowMs);
+            DoseRecord.Epochs epochs, long nowMs, Set<String> flaggedJobs) {
+        return pooled(records, fresh(records, cfg, epochs, nowMs, flaggedJobs), cfg);
+    }
+
+    /** The evidence pooled from the fresh records ({@code all}: every record, for the coupons of the readings). */
+    private static Map<Integer, DoseEvidence> pooled(List<DoseRecord> all, List<DoseRecord> fresh, DispenseConfig cfg) {
+        List<DoseRecord> records = all;
         LadderStats.Settings set = settings(cfg.padCalibration);
         Map<Integer, List<LadderStats.Record>> pooled = new TreeMap<>();
         Map<Integer, List<DoseRecord>> verdicts = new TreeMap<>();

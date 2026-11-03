@@ -287,7 +287,7 @@ public class BoardImportSimTest {
     @Test
     public void ftpPreviewSavePlanAndTheDrawing() throws Exception {
         // the 0603s' pad type passes the gate: nothing needs a profile (PROFILE_CALIBRATION_DESIGN.md §12.6)
-        ok(send("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
+        ok(send("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
                 "Content-Type", "application/json"));
         byte[] ftp = fixture(FTP);
         JsonObject pv = preview(ftp, "ftp.kicad_pcb");
@@ -470,7 +470,7 @@ public class BoardImportSimTest {
     @Test
     public void replaceKeepsHistoryAndMakesOldPlansStale() throws Exception {
         setUpBoardRuns();
-        ok(send("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
+        ok(send("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
                 "Content-Type", "application/json"));
         byte[] ftp = fixture(FTP);
         JsonObject first = importBoard(ftp, "ftp.kicad_pcb", "ftp", false);
@@ -706,7 +706,7 @@ public class BoardImportSimTest {
             pos[i] = new double[] {2 + 4.0 * (i % 6), 2 + 3 * (i / 6), 0};
         }
         File board = writeBoard(pos);
-        ok(send("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
+        ok(send("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
                 "Content-Type", "application/json"));
         byte[] ftp = fixture(FTP);
         JsonObject pv = preview(ftp, "ftp.kicad_pcb");
@@ -748,7 +748,7 @@ public class BoardImportSimTest {
     @Test
     public void runsAndProbesWaitForTheUploadToFinish() throws Exception {
         setUpBoardRuns();
-        ok(send("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
+        ok(send("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
                 "Content-Type", "application/json"));
         JsonObject plan = planTied(writeBoard(new double[][] {{2, 2, 0}, {6, 2, 0}}));
         assertTrue(plan.getAsJsonObject("interlocks").get("ok").getAsBoolean(), plan.toString());
@@ -1006,7 +1006,7 @@ public class BoardImportSimTest {
             c.getBoard(xml);
             return null;
         }, 10_000);
-        ok(send("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
+        ok(send("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
                 "Content-Type", "application/json"));
         String path = xml.getCanonicalPath();
         JsonObject before = plan(path);
@@ -1188,8 +1188,8 @@ public class BoardImportSimTest {
                 "Content-Type", "application/json"));
         ok(send("PUT", "/api/locations/blank", "{\"x\":90,\"y\":40,\"z\":5.5}".getBytes(StandardCharsets.UTF_8),
                 "Content-Type", "application/json"));
-        ok(postJson("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
-        ok(postJson("/api/needle/offset", "{\"offsetMm\":-2.59}"));
+        ok(postJson("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
+        ok(postJson("/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}"));
         ok(send("PUT", "/api/surfaces/blank", "{\"points\":[[60,30,5.5],[200,30,5.5],[60,50,5.5],[200,50,5.5]]}"
                 .getBytes(StandardCharsets.UTF_8), "Content-Type", "application/json"));
         ok(send("PUT", "/api/surfaces/board", ("{" + BOARD_POINTS + "}").getBytes(StandardCharsets.UTF_8),

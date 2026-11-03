@@ -96,6 +96,10 @@ public final class Decider {
         if (g == null || g.idx.length == 0) {
             throw new IllegalArgumentException("no group " + in.group + " with pads on this board");
         }
+        if (!c.view(in.steps).known) {
+            throw new IllegalArgumentException("the " + c.tip().name + " has no " + DoseModel.turnName(in.steps)
+                    + " dots measured at this recipe and paste: nothing to decide with");
+        }
         Suggester.Candidate chosen = Suggester.evaluate(c, g, in.steps, in.perPad, c.view(in.steps));
         List<Check> chosenChecks = checks(in, c, g, chosen);
         Suggester.Candidate pick = chosen;
@@ -232,7 +236,8 @@ public final class Decider {
         String massText = e == null || e.massReadings == 0
                 ? "the " + DoseModel.turnNoun(x.steps) + " was not weighed in this job: Calibrate again weighs it"
                 : "the amount was weighed once; a second weighing (another coupon or another job) confirms it";
-        l.add(new Check("mass", confirmed, Texts.mg(DoseModel.massMg(x.steps)) + " mg per dot",
+        l.add(new Check("mass", confirmed, c.tip().knows(x.steps) ? Texts.mg(c.tip().massMg(x.steps)) + " mg per dot"
+                : null,
                 e != null && e.mgPerDot != null ? Texts.mg(e.mgPerDot) + " mg per dot" : null,
                 "two readings within " + Texts.pct(s.confirmTolerance) + " %", massText));
         boolean amount = x.err >= -s.massTolLow - Limits.EPS && x.err <= s.massTolHigh + Limits.EPS;

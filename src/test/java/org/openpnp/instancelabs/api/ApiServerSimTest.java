@@ -152,8 +152,8 @@ public class ApiServerSimTest {
         ok(call("PUT", "/api/locations/blank", "{\"x\":90,\"y\":40,\"z\":5.5}"));
         // I4 needle frame from the bench relation (needle contact raw Z = 65.59 - N1 contact Z, i.e.
         // N2 contact 2.91: offset -2.59), then the offset confirmed
-        ok(post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
-        ok(post("/api/needle/offset", "{\"offsetMm\":-2.59}"));
+        ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
+        ok(post("/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}"));
         // probed surfaces: the blank (places and purge row) and the test board's area (origin 100, 80; 20 x 10 mm)
         ok(call("PUT", "/api/surfaces/blank", "{\"points\":[[60,30,5.5],[200,30,5.5],[60,50,5.5],[200,50,5.5]]}"));
         ok(call("PUT", "/api/surfaces/board", "{\"points\":[[98,78,5.5],[130,78,5.5],[98,95,5.5],[130,95,5.5]]}"));
@@ -233,7 +233,8 @@ public class ApiServerSimTest {
         assertTrue(index.body.contains("id=\"btn-stop\""));
         // the web UI: core + one module per workspace (index.html loads every one of them)
         for (String f : new String[] {"app.js", "app.css", "favicon.svg", "core.js", "boardview.js", "run.js", "run.css",
-                "setup.js", "setup.css", "profile.js", "profile.css", "calibrate.js", "records.js"}) {
+                "setup.js", "setup.css", "profile.js", "profile.css", "calibrate.js", "records.js", "tipsetup.js",
+                "tipsetup.css"}) {
             Res r = get("/static/" + f);
             assertEquals(200, r.status, f);
             assertFalse(r.body.isEmpty(), f);
@@ -317,7 +318,7 @@ public class ApiServerSimTest {
         r = call("POST", "/api/needle/changed", "{}", "Sec-Fetch-Site", "cross-site");
         assertEquals(403, r.status, r.toString());
         // same-origin browser request is fine
-        r = call("POST", "/api/needle/offset", "{\"offsetMm\":0.01}", "Origin", "http://127.0.0.1:" + api.getPort(),
+        r = call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":0.01}", "Origin", "http://127.0.0.1:" + api.getPort(),
                 "Sec-Fetch-Site", "same-origin");
         assertEquals(200, r.status, r.toString());
         // DNS-rebinding guard: a foreign Host header is refused even for GET
@@ -355,25 +356,25 @@ public class ApiServerSimTest {
         assertTrue(has0603);
 
         Res created = post("/api/pad-types",
-                "{\"family\":\"Custom\",\"name\":\"Test pad 1\",\"padWMm\":1.2,\"padHMm\":0.8,\"k\":0.9}");
+                "{\"forSetup\":\"ad22tta-b\",\"family\":\"Custom\",\"name\":\"Test pad 1\",\"padWMm\":1.2,\"padHMm\":0.8,\"k\":0.9}");
         assertEquals(201, created.status, created.toString());
         JsonObject pt = created.json().getAsJsonObject("padType");
         assertEquals("custom-test-pad-1", pt.get("typeKey").getAsString());
         assertEquals(1, pt.get("version").getAsInt());
         assertEquals("single", pt.get("layout").getAsString());
 
-        JsonObject upd = ok(call("PUT", "/api/pad-types/custom-test-pad-1", "{\"status\":\"provisional\",\"tMm\":0.12}"))
+        JsonObject upd = ok(call("PUT", "/api/pad-types/custom-test-pad-1", "{\"forSetup\":\"ad22tta-b\",\"status\":\"provisional\",\"tMm\":0.12}"))
                 .getAsJsonObject("padType");
         assertEquals(2, upd.get("version").getAsInt());
         assertEquals("provisional", upd.get("status").getAsString());
         assertEquals(0.9, upd.get("k").getAsDouble(), 1e-9, "unchanged fields are kept");
 
-        assertEquals(400, call("PUT", "/api/pad-types/custom-test-pad-1", "{\"packagePattern\":\"([\"}").status);
-        assertEquals(400, call("PUT", "/api/pad-types/custom-test-pad-1", "{\"status\":\"great\"}").status);
-        assertEquals(409, post("/api/pad-types", "{\"typeKey\":\"chip-0603\",\"name\":\"x\",\"padWMm\":1,\"padHMm\":1}").status);
-        assertEquals(400, post("/api/pad-types", "{\"name\":\"no size\"}").status);
+        assertEquals(400, call("PUT", "/api/pad-types/custom-test-pad-1", "{\"forSetup\":\"ad22tta-b\",\"packagePattern\":\"([\"}").status);
+        assertEquals(400, call("PUT", "/api/pad-types/custom-test-pad-1", "{\"forSetup\":\"ad22tta-b\",\"status\":\"great\"}").status);
+        assertEquals(409, post("/api/pad-types", "{\"forSetup\":\"ad22tta-b\",\"typeKey\":\"chip-0603\",\"name\":\"x\",\"padWMm\":1,\"padHMm\":1}").status);
+        assertEquals(400, post("/api/pad-types", "{\"forSetup\":\"ad22tta-b\",\"name\":\"no size\"}").status);
 
-        JsonObject ret = ok(call("DELETE", "/api/pad-types/custom-test-pad-1", null)).getAsJsonObject("padType");
+        JsonObject ret = ok(call("DELETE", "/api/pad-types/custom-test-pad-1", "{\"forSetup\":\"ad22tta-b\"}")).getAsJsonObject("padType");
         assertEquals("Retired", ret.get("family").getAsString());
         assertEquals("not-started", ret.get("status").getAsString());
         assertTrue(ret.get("packagePattern").isJsonNull());
@@ -582,7 +583,7 @@ public class ApiServerSimTest {
         assertEquals(409, runRefused.status);
         assertTrue(runRefused.body.contains("PLAN"), runRefused.toString());
 
-        ok(call("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}"));
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         JsonObject plan = planTied(board);
         JsonObject sum = plan.getAsJsonObject("summary");
         assertEquals(6, sum.get("pads").getAsInt());
@@ -704,7 +705,7 @@ public class ApiServerSimTest {
         assertEquals(400, call("PUT", "/api/config", "{\"purgeRow\":{\"resetAtMs\":1}}").status, "stamped by the reset only");
 
         // a stale plan (needle offset changed) is refused
-        ok(post("/api/needle/offset", "{\"offsetMm\":-2.57}"));
+        ok(post("/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.57}"));
         Res stale = post("/api/run", "{\"planId\":\"" + planId + "\"}");
         assertEquals(409, stale.status);
         assertTrue(stale.body.contains("plan the board again"), stale.toString());
@@ -713,7 +714,7 @@ public class ApiServerSimTest {
         // a profile changed after planning: the plan's dots would be the old recipe's
         String fresh = ok(post("/api/plan", planBody(board))).get("planId").getAsString();
         assertEquals(fresh, get("/api/plans").array().get(0).getAsJsonObject().get("planId").getAsString());
-        ok(call("PUT", "/api/config", "{\"profile\":{\"dwellMs\":300}}"));
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"dwellMs\":300}}"));
         Res staleProfile = post("/api/run", "{\"planId\":\"" + fresh + "\"}");
         assertEquals(409, staleProfile.status, staleProfile.toString());
         assertTrue(staleProfile.body.contains("dispense profile"), staleProfile.toString());
@@ -724,7 +725,7 @@ public class ApiServerSimTest {
     public void boardRunNeedsTheStartAngleOfThisControllerConnection() throws Exception {
         setUpBoardRuns();
         File board = writeBoard();
-        ok(call("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}"));
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         reconnect();
         JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
         assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
@@ -762,7 +763,7 @@ public class ApiServerSimTest {
     public void planNeedsBoardZAndRunRefusesAChangedBoard() throws Exception {
         setUpBoardRuns();
         File board = writeBoard();
-        ok(call("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}"));
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         Res noZ = post("/api/plan", "{\"source\":\"file\",\"file\":\"" + board.getAbsolutePath() + "\",\"x\":100,\"y\":80}");
         assertEquals(400, noZ.status, noZ.toString());
         assertTrue(noZ.body.contains("'z'"), noZ.toString());
@@ -806,18 +807,18 @@ public class ApiServerSimTest {
     @Test
     public void needleFrameAndSurfacesHaveTheirOwnEndpoints() throws Exception {
         // the needle touches 2.59 mm below N1 in OpenPnP's N2 frame (bench, side camera)
-        JsonObject a = ok(post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactZ\":2.91}"));
+        JsonObject a = ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactZ\":2.91}"));
         assertEquals(-2.59, a.get("offsetMm").getAsDouble(), 1e-9);
         assertFalse(a.get("touchedOff").getAsBoolean(), "the frame alone is not a touch-off");
         assertTrue(a.getAsJsonObject("anchor").get("rawSumMm").isJsonNull());
-        assertEquals(400, post("/api/needle/anchor", "{\"surfaceZ\":5.5}").status);
+        assertEquals(400, post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5}").status);
         // the bench relation: needle contact raw Z = K - N1 contact Z. The sim machine maps N2's Z
         // like the LumenPnP see-saw (z2 = 63 - raw), so K 65.59 at N1 5.5 = raw 60.09 = N2 Z 2.91
-        JsonObject k = ok(post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
+        JsonObject k = ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
         assertEquals(2.91, k.getAsJsonObject("anchor").get("needleContactZMm").getAsDouble(), 1e-9);
         assertEquals(-2.59, k.get("offsetMm").getAsDouble(), 1e-9);
         assertEquals(65.59, k.getAsJsonObject("anchor").get("rawSumMm").getAsDouble(), 1e-9);
-        assertEquals(400, post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactZ\":2.91,"
+        assertEquals(400, post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactZ\":2.91,"
                 + "\"needleContactRawSum\":65.59}").status, "one or the other");
         assertEquals(400, call("PUT", "/api/config", "{\"needleAnchor\":null}").status);
         assertEquals(400, call("PUT", "/api/config", "{\"surfaces\":{\"board\":{\"points\":[]}}}").status);
@@ -843,10 +844,12 @@ public class ApiServerSimTest {
         // K belongs to the needle it was measured with: the new needle's frame is measured with both tips
         assertTrue(changed.get("kRefusal").getAsString().startsWith("K was measured with the needle before the change at"),
                 changed.toString());
-        Res fromK = post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        long token = changed.get("changedAtMs").getAsLong(); // the needle change these heights are taken after (§22.3)
+        Res fromK = post("/api/needle/anchor", "{\"needleChangedAtMs\":" + token + ",\"surfaceZ\":5.5,"
+                + "\"needleContactRawSum\":65.59}");
         assertEquals(409, fromK.status, fromK.toString());
         assertTrue(fromK.body.contains("record the needle frame with both tips touching the same spot"), fromK.toString());
-        ok(post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactZ\":2.71}"));
+        ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":" + token + ",\"surfaceZ\":5.5,\"needleContactZ\":2.71}"));
         JsonObject again = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle");
         assertTrue(again.get("anchored").getAsBoolean() && again.get("kRefusal").isJsonNull(), again.toString());
         assertEquals(-2.79, again.get("anchorOffsetMm").getAsDouble(), 1e-9);
@@ -922,7 +925,7 @@ public class ApiServerSimTest {
             pos[i] = new double[] {2 + 4.0 * (i % 6), 2 + 3 * (i / 6), 0};
         }
         File board = writeBoard(pos);
-        ok(call("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}"));
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         // reconnect OpenPnP through the slow proxy (still only localhost sockets)
         try (SlowProxy proxy = new SlowProxy(sim.server.getPort(), 10)) {
             sim.machine.setEnabled(false);
@@ -1005,6 +1008,9 @@ public class ApiServerSimTest {
         forge = call("PUT", "/api/config", "{\"needleZOffsetHomeAtMs\":" + System.currentTimeMillis() + "}");
         assertEquals(400, forge.status, forge.toString());
         JsonObject all = ok(get("/api/config"));
+        Res noTip = call("PUT", "/api/config", all.toString());
+        assertEquals(400, noTip.status, "a profile edit names the tip setup it was made for (§22.1): " + noTip);
+        all.addProperty("forTip", "ad22tta-b");
         assertEquals(200, call("PUT", "/api/config", all.toString()).status);
         assertEquals(404, get("/static/..").status);
         // removed with the bench recipe (schema 3): the gap is the profile's, the purge row replaced
@@ -1016,19 +1022,19 @@ public class ApiServerSimTest {
             assertTrue(gone.body.contains("unknown setting"), gone.toString());
         }
         // gap: 0.05-0.15 behave the same, >= 0.20 misses dots
-        Res wide = call("PUT", "/api/config", "{\"profile\":{\"gapMm\":0.2}}");
+        Res wide = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"gapMm\":0.2}}");
         assertEquals(400, wide.status, wide.toString());
         assertTrue(wide.body.contains("gapMm must be 0.05 to 0.15"), wide.toString());
-        JsonObject c = ok(call("PUT", "/api/config", "{\"profile\":{\"gapMm\":0.15}}"));
+        JsonObject c = ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"gapMm\":0.15}}"));
         assertEquals(0.15, c.getAsJsonObject("profile").get("gapMm").getAsDouble(), 1e-9);
-        assertEquals(3, c.get("schemaVersion").getAsInt());
+        assertEquals(4, c.get("schemaVersion").getAsInt(), "the tip setups' schema (§22.1)");
         assertFalse(c.toString().contains("Gcode"), c.toString());
     }
 
     /** PUT /api/config merges the nested settings one level deep; stamped fields are the engine's. */
     @Test
     public void nestedSettingsMergeOneLevelDeep() throws Exception {
-        JsonObject c = ok(call("PUT", "/api/config", "{\"profile\":{\"dwellMs\":300}}"));
+        JsonObject c = ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"dwellMs\":300}}"));
         JsonObject p = c.getAsJsonObject("profile");
         assertEquals(300, p.get("dwellMs").getAsInt());
         // the other profile fields are kept
@@ -1040,36 +1046,42 @@ public class ApiServerSimTest {
         assertEquals(8, p.get("purgeDots").getAsInt());
         assertTrue(p.get("startAngleSetAtMs").isJsonNull(), "a dwell change does not stamp the start angle");
 
-        Res unknown = call("PUT", "/api/config", "{\"profile\":{\"noSuchKnob\":1}}");
+        Res unknown = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"noSuchKnob\":1}}");
         assertEquals(400, unknown.status, unknown.toString());
         assertTrue(unknown.body.contains("profile.noSuchKnob"), unknown.toString());
-        assertEquals(400, call("PUT", "/api/config", "{\"profile\":5}").status, "a nested setting is an object");
+        assertEquals(400, call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":5}").status, "a nested setting is an object");
         // the profile is validated as a whole
-        assertEquals(400, call("PUT", "/api/config", "{\"profile\":{\"netStepsPerDot\":700}}").status,
+        assertEquals(400, call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"netStepsPerDot\":700}}").status,
                 "700 steps does not divide a revolution");
-        assertEquals(400, call("PUT", "/api/config", "{\"profile\":{\"screwRpm\":450}}").status);
+        assertEquals(400, call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"screwRpm\":450}}").status);
         assertEquals(400, call("PUT", "/api/config", "{\"cleanPadCheck\":{\"minBrightFraction\":1.5}}").status);
 
         // the start angle's set time is stamped by the engine only ...
-        Res forged = call("PUT", "/api/config", "{\"profile\":{\"startAngleSetAtMs\":" + System.currentTimeMillis() + "}}");
+        Res forged = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"startAngleSetAtMs\":" + System.currentTimeMillis() + "}}");
         assertEquals(400, forged.status, forged.toString());
         assertTrue(forged.body.contains("profile.startAngleSetAtMs"), forged.toString());
         // ... and a changed start angle is stamped (it is a calibration of this controller power-up)
         long t0 = System.currentTimeMillis();
-        p = ok(call("PUT", "/api/config", "{\"profile\":{\"startAngleDeg\":118}}")).getAsJsonObject("profile");
+        p = ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"startAngleDeg\":118}}")).getAsJsonObject("profile");
         assertEquals(118, p.get("startAngleDeg").getAsDouble(), 1e-9);
         assertTrue(p.get("startAngleSetAtMs").getAsLong() >= t0, p.toString());
         // an unchanged stamp in a round-trip is fine
-        assertEquals(200, call("PUT", "/api/config", "{\"profile\":{\"startAngleSetAtMs\":"
+        assertEquals(200, call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"startAngleSetAtMs\":"
                 + p.get("startAngleSetAtMs").getAsLong() + ",\"dwellMs\":250}}").status);
 
-        // needle XY trim: the set time is stamped when dx/dy change
-        JsonObject t = ok(call("PUT", "/api/config", "{\"needleXyTrim\":{\"dxMm\":0.04,\"dyMm\":-0.02,"
-                + "\"note\":\"landing data\"}}")).getAsJsonObject("needleXyTrim");
+        // needle XY trim (tip setups §22.3): its own route with the needle token, stamped with the set time and N2's
+        // head offset; PUT /api/config cannot change it
+        JsonObject t = ok(post("/api/needle/xy-trim", "{\"dxMm\":0.04,\"dyMm\":-0.02,\"note\":\"landing data\","
+                + "\"needleChangedAtMs\":null}")).getAsJsonObject("needleXyTrim");
         assertEquals(0.04, t.get("dxMm").getAsDouble(), 1e-9);
         assertTrue(t.get("setAtMs").getAsLong() >= t0);
-        assertEquals(400, call("PUT", "/api/config", "{\"needleXyTrim\":{\"setAtMs\":1}}").status);
-        assertEquals(400, call("PUT", "/api/config", "{\"needleXyTrim\":{\"dxMm\":2}}").status, "fix the head offset");
+        Res byConfig = call("PUT", "/api/config", "{\"needleXyTrim\":{\"dxMm\":0.05}}");
+        assertEquals(400, byConfig.status, byConfig.toString());
+        assertEquals("Where the needle lands is set by Check where it lands and the trim panel (POST "
+                + "/api/needle/landing, /api/needle/xy-trim).", byConfig.json().get("reason").getAsString());
+        assertEquals(400, post("/api/needle/xy-trim", "{\"dxMm\":2,\"dyMm\":0,\"needleChangedAtMs\":null}").status,
+                "at most 1 mm: a needle that lands farther off needs its landing checked");
+        assertEquals(400, post("/api/needle/xy-trim", "{\"dxMm\":0.1,\"dyMm\":0}").status, "the token is required");
         JsonObject st = ok(get("/api/status")).getAsJsonObject("dispense");
         assertEquals(-0.02, st.getAsJsonObject("needle").getAsJsonObject("xyTrim").get("dyMm").getAsDouble(), 1e-9);
 
@@ -1123,7 +1135,7 @@ public class ApiServerSimTest {
     @Test
     public void cleanPadCheckFindsPasteLeftOnAPad() throws Exception {
         setUpBoardRuns();
-        ok(call("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}"));
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         File board = writeBoard();
         FakeImager cam = new FakeImager();
         svc.setDotImager(cam);

@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="/static/board.css">
 <link rel="stylesheet" href="/static/boardimport.css">
 <link rel="stylesheet" href="/static/padprofile.css">
+<link rel="stylesheet" href="/static/tipsetup.css">
 <link rel="stylesheet" href="/static/setup.css">
 <link rel="stylesheet" href="/static/profile.css">
 <!-- core.js runs at once (sets the theme before the first paint, defines IL); the workspace modules
@@ -23,6 +24,7 @@
 <script src="/static/boardflow.js" defer></script>
 <script src="/static/boardimport.js" defer></script>
 <script src="/static/padprofile.js" defer></script>
+<script src="/static/tipsetup.js" defer></script>
 <script src="/static/run.js" defer></script>
 <script src="/static/setup.js" defer></script>
 <script src="/static/profile.js" defer></script>
@@ -88,8 +90,9 @@
       <button type="button" class="cell-act" id="btn-start" hidden title="Connect to the controller (OpenPnP's Start button). Nothing moves.">Connect</button>
       <button type="button" class="cell-act" id="btn-home" hidden title="Move every axis to its home switch so positions are known (press twice)">Home</button>
       <button type="button" class="cell cell--off" id="pill-pressure" data-open-view="pressure"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Pressure</span><span class="cell__v">…</span></span></button>
-      <button type="button" class="cell cell--off" id="chip-angle" data-open-view="angle"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Start angle</span><span class="cell__v">…</span></span></button>
+      <button type="button" class="cell cell--off" id="chip-angle" data-open-view="angle"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k"><span class="long" data-l="2">Start </span>angle</span><span class="cell__v">…</span></span></button>
       <button type="button" class="cell cell--off" id="chip-purge" data-open-view="purge"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Purge row</span><span class="cell__v">…</span></span></button>
+      <button type="button" class="cell cell--off" id="chip-tip"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Tip</span><span class="cell__v">…</span></span></button>
       <button type="button" class="cell cell--off cell--verdict" id="pill-engine"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Board run</span><span class="cell__v">…</span></span><svg class="chev ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chev"/></svg></button>
     </div>
   </header>

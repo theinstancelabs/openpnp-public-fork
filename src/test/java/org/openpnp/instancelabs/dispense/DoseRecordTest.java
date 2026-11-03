@@ -127,7 +127,7 @@ public class DoseRecordTest {
         DispenseConfig c = setup();
         DoseRecord r = record(DoseRecord.MASS, 800, c, NOW - H);
         r.tipKey = "ad25g";
-        assertEquals("made with another tip (ad25g); the tip now is the 22G tip (ad22tta-b)",
+        assertEquals("made with another tip (ad25g); the tip now is the 22G bent taper (ad22tta-b)",
                 r.whyStale(NOW, c, MACHINE));
         r.tipKey = c.tip.key;
         c.needleChangedAtMs = NOW - H / 2;

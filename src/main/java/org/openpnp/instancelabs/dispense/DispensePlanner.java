@@ -21,6 +21,7 @@ import org.openpnp.instancelabs.padprofile.Limits;
 import org.openpnp.instancelabs.padprofile.PadInstance;
 import org.openpnp.instancelabs.padprofile.ProfileCheck;
 import org.openpnp.instancelabs.padprofile.Texts;
+import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.model.Abstract2DLocatable.Side;
 import org.openpnp.model.Board;
 import org.openpnp.model.BoardLocation;
@@ -49,12 +50,24 @@ public class DispensePlanner {
     private SurfacePlane surface;
     /** Purge-row spots from the next unused one (ordinal 0) where block switches lay their dots, or null. */
     private IntFunction<double[]> purgeSpot = k -> null;
-    /** Dot diameters (mm) by net steps for the dot-gap flag; the model's upper edge where none is given. */
+    /** Dot diameters (mm) by net steps for the dot-gap flag; the tip's upper edge where none is given. */
     private Map<Integer, Double> dotDiameters = Collections.emptyMap();
+    /** The mounted tip setup with its dot table (§22.2); a plan needs it. */
+    private Tip tip;
 
     public DispensePlanner(DispenseConfig cfg, PadTypeResolver resolver) {
         this.cfg = cfg;
         this.resolver = resolver;
+    }
+
+    /**
+     * The mounted tip with its dot table (tip setups design §22.2, {@code svc.mountedTip()}): the same-pad pitch and
+     * the dot-gap flag from its dot sizes, and {@link PadFlag#DOSE_UNKNOWN} for a dose it does not know. The planner
+     * refuses to plan without one.
+     */
+    public DispensePlanner withTip(Tip tip) {
+        this.tip = tip;
+        return this;
     }
 
     /** Per pad-type layout rules (pad_rules): pads larger than largestSingleDotPadMm2 get a grid. */
@@ -153,7 +166,13 @@ public class DispensePlanner {
     }
 
     public DispensePlan plan(String boardName, List<PadGeometry> pads, double startX, double startY) {
+        if (tip == null) {
+            throw new IllegalStateException("the planner needs the mounted tip");
+        }
         DispensePlan plan = new DispensePlan();
+        plan.setupKey = tip.key;
+        plan.setupName = tip.name;
+        plan.setupVersion = tip.setupVersion;
         plan.planId = UUID.randomUUID().toString();
         plan.boardName = boardName;
         plan.createdAtMs = System.currentTimeMillis();
@@ -169,6 +188,7 @@ public class DispensePlanner {
         PadTypeStatus minStatus = cfg.minPadTypeStatus();
         Set<String> wholePart = wholePartPads(pads, plan);
         Map<String, Integer> otherTip = new TreeMap<>();
+        Map<Integer, Integer> unknownDose = new TreeMap<>();
 
         // per pad of plan.pads: its dots (machine mm), null when it gets none
         List<List<DispensePlan.PlannedDot>> padDots = new ArrayList<>();
@@ -197,12 +217,13 @@ public class DispensePlanner {
             }
             p.typeKey = t.typeKey;
             p.typeVersion = t.version;
+            p.typePadVersion = t.padVersion;
             p.typeStatus = t.status;
             p.typeTipKey = t.tipKey;
             if (!t.status.atLeast(minStatus)) {
                 p.flags.add(PadFlag.STATUS_BELOW_MIN);
             }
-            if (cfg.tip.isOther(t.tipKey)) {
+            if (!Tip.setupOf(t.tipKey).equals(tip.key)) {
                 // decision 5: mass per turn and dot size change with the tip, so the type is below the gate
                 p.flags.add(PadFlag.STATUS_BELOW_MIN);
                 otherTip.merge(t.typeKey, 1, Integer::sum);
@@ -220,10 +241,18 @@ public class DispensePlanner {
             p.targetVolumeMm3 = DotMath.targetVolumeMm3(p.areaMm2, t.tMm, t.k);
             p.targetMassMg = p.targetVolumeMm3 * cfg.pasteDensityMgMm3;
             int steps = t.dotSteps != null ? t.dotSteps : profileSteps;
-            List<double[]> offsets = offsets(g, t, p.areaMm2, steps);
             p.dotSteps = steps;
-            p.dotsPerPad = offsets.size();
             p.rotationPerDotDeg = steps / cfg.bStepsPerDeg;
+            if (!tip.knows(steps)) {
+                // §22.2: a dose the mounted setup never measured at this recipe and paste: no dots
+                p.flags.add(PadFlag.DOSE_UNKNOWN);
+                unknownDose.merge(steps, 1, Integer::sum);
+                p.dotsPerPad = t.dotsPerPad != null ? t.dotsPerPad : 0;
+                p.dotCount = 0;
+                continue;
+            }
+            List<double[]> offsets = offsets(g, t, p.areaMm2, steps);
+            p.dotsPerPad = offsets.size();
             if (p.isBlocked()) {
                 p.dotCount = 0;
                 continue;
@@ -251,8 +280,13 @@ public class DispensePlanner {
         for (Map.Entry<String, Integer> e : otherTip.entrySet()) {
             PadType t = resolver.byKey(e.getKey());
             plan.warnings.add(Texts.belowGateTip(t == null || t.name == null ? e.getKey() : t.name,
-                    t == null ? "?" : t.tipKey, cfg.tip.name) + " " + Texts.plural(e.getValue(), "pad", "pads")
+                    t == null ? "?" : Tip.setupOf(t.tipKey), tip.name) + " " + Texts.plural(e.getValue(), "pad", "pads")
                     + " of " + e.getKey() + (e.getValue() == 1 ? " gets" : " get") + " no paste (STATUS_BELOW_MIN).");
+        }
+        for (Map.Entry<Integer, Integer> e : unknownDose.entrySet()) {
+            plan.warnings.add(Texts.plural(e.getValue(), "pad", "pads") + (e.getValue() == 1 ? " gets" : " get")
+                    + " no paste (DOSE_UNKNOWN): the " + tip.name + " never measured " + DoseModel.turnName(e.getKey())
+                    + " dots at this recipe and paste: measure its dots (Setup › Dispenser & tip).");
         }
         if (surface == null) {
             plan.warnings.add("no probed board surface: dot Z is the board's single Z; a run is refused (I4) until "
@@ -280,8 +314,8 @@ public class DispensePlanner {
         int n = t.dotsPerPad != null ? t.dotsPerPad
                 : DotGeometry.profileDotCount(areaMm2, rule == null ? null : rule.largestSingleDotPadMm2,
                         rule == null ? null : rule.maxDots);
-        double r = DoseModel.dHiMm(steps) / 2;
-        return DotGeometry.layoutN(g.wMm, g.hMm, n, r + cfg.tip.odMm / 2, r);
+        double r = tip.dHiMm(steps) / 2;
+        return DotGeometry.layoutN(g.wMm, g.hMm, n, r + tip.odMm / 2, r);
     }
 
     /**
@@ -300,7 +334,7 @@ public class DispensePlanner {
         ProfileCheck.Result r;
         try {
             r = ProfileCheck.of(PadInstances.inputs(PadInstances.fromGeometry(pads), resolver.types(), rules, cfg,
-                    resolver.pastePartial(), false));
+                    resolver.pastePartial(), false, tip));
         }
         catch (RuntimeException e) {
             plan.warnings.add("the profile check failed (" + e + "): parts with pads the tip cannot dispense are not "
@@ -308,7 +342,7 @@ public class DispensePlanner {
             return ids;
         }
         Set<String> refs = new TreeSet<>(GroupKey.NATURAL);
-        Set<String> tip = new HashSet<>();
+        Set<String> tipPads = new HashSet<>();
         Set<String> near = new HashSet<>();
         for (ProfileCheck.Group g : r.groups) {
             if (ProfileCheck.PART.equals(g.reason)) {
@@ -316,7 +350,7 @@ public class DispensePlanner {
                 refs.addAll(g.refs);
             }
             else if (ProfileCheck.TIP.equals(g.reason)) {
-                tip.addAll(g.padIds);
+                tipPads.addAll(g.padIds);
                 if (ProfileCheck.TIP_NEAR.equals(g.tipKind)) {
                     near.addAll(g.padIds);
                 }
@@ -325,21 +359,21 @@ public class DispensePlanner {
         if (!ids.isEmpty()) {
             plan.warnings.add(Texts.plural(ids.size(), "pad", "pads") + " of " + Texts.plural(refs.size(), "part",
                     "parts") + (ids.size() == 1 ? " gets" : " get") + " no paste (" + shortList(refs) + "): another "
-                    + "pad of the part cannot be dispensed with the " + cfg.tip.name + ", and a part soldered by hand "
+                    + "pad of the part cannot be dispensed with the " + tip.name + ", and a part soldered by hand "
                     + "gets no paste on its other pads either (PART_NOT_DISPENSABLE). Profile can paste the "
                     + "dispensable pads of a package anyway.");
         }
         // the tip's own pads of a part that also has dispensable pads, where a pad type would paste them
         Set<String> mixed = new HashSet<>();
         for (PadGeometry g : pads) {
-            if (g.placementId != null && !tip.contains(g.padId)) {
+            if (g.placementId != null && !tipPads.contains(g.padId)) {
                 mixed.add(g.placementId);
             }
         }
         Set<String> tipIds = new HashSet<>();
         Set<String> tipRefs = new TreeSet<>(GroupKey.NATURAL);
         for (PadGeometry g : pads) {
-            if (g.padType != null && tip.contains(g.padId)
+            if (g.padType != null && tipPads.contains(g.padId)
                     && (mixed.contains(g.placementId) || near.contains(g.padId))) {
                 tipIds.add(g.padId);
                 tipRefs.add(g.placementId);
@@ -349,7 +383,7 @@ public class DispensePlanner {
             ids.addAll(tipIds);
             plan.warnings.add(Texts.plural(tipIds.size(), "pad", "pads") + " of " + Texts.plural(tipRefs.size(),
                     "part", "parts") + (tipIds.size() == 1 ? " gets" : " get") + " no paste (" + shortList(tipRefs)
-                    + "): the " + cfg.tip.name + " cannot dispense " + (tipIds.size() == 1 ? "it" : "them") + ", also "
+                    + "): the " + tip.name + " cannot dispense " + (tipIds.size() == 1 ? "it" : "them") + ", also "
                     + "where the other pads of the part are pasted (PART_NOT_DISPENSABLE).");
         }
         return ids;
@@ -383,7 +417,7 @@ public class DispensePlanner {
             }
             laid.add(pi);
             at.add(i);
-            radius.add(dotDiameters.getOrDefault(p.dotSteps, DoseModel.dHiMm(p.dotSteps)) / 2);
+            radius.add(dotDiameters.getOrDefault(p.dotSteps, tip.dHiMm(p.dotSteps)) / 2);
         }
         double[] r = new double[radius.size()];
         for (int i = 0; i < r.length; i++) {

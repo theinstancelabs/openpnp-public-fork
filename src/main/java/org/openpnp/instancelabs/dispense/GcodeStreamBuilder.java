@@ -120,8 +120,31 @@ public class GcodeStreamBuilder {
     private int pendingNetSteps;
     private int pendingPadIndex;
 
+    /**
+     * Where the mounted tip lands and what its screw feeds (tip setups design §22.2-22.3): every dispensed target is
+     * moved by minus (landing + trim), and R7's feed check counts with the setup's paste per step.
+     */
+    public static final class TipXy {
+        /** Every dispensed target is moved by minus this (landing + trim, mm). */
+        public double dxMm, dyMm;
+        /** R7: the paste per motor step the feed check counts with (mg); null = the bench model's. */
+        public Double feedMgPerStep;
+
+        /** The configuration's: its landing (when it has one) plus its trim, the bench model's feed. */
+        public static TipXy of(DispenseConfig c) {
+            TipXy x = new TipXy();
+            x.dxMm = c.needleXyTrim.dxMm + (c.needleLanding == null ? 0 : c.needleLanding.dxMm);
+            x.dyMm = c.needleXyTrim.dyMm + (c.needleLanding == null ? 0 : c.needleLanding.dyMm);
+            return x;
+        }
+    }
+
+    /** Where targets are moved and the feed check's paste per step (the configuration's unless a factory got one). */
+    private TipXy xy;
+
     public GcodeStreamBuilder(DispenseConfig cfg, RawMapper mapper, boolean bZeroedAtStart, boolean keepalive) {
         this.cfg = cfg;
+        this.xy = TipXy.of(cfg);
         this.mapper = mapper;
         this.keepalive = keepalive;
         double[] planned = mapper.currentPlanned();
@@ -212,6 +235,12 @@ public class GcodeStreamBuilder {
      */
     public static GcodeProgram forPlan(DispenseConfig cfg, RawMapper mapper, DispensePlan plan,
             List<DotSpec> purge, boolean bZeroed, boolean keepalive, Long bCount) throws Exception {
+        return forPlan(cfg, mapper, plan, purge, bZeroed, keepalive, bCount, null);
+    }
+
+    /** As above with the mounted tip's landing and feed ({@code xy} null: the configuration's). */
+    public static GcodeProgram forPlan(DispenseConfig cfg, RawMapper mapper, DispensePlan plan,
+            List<DotSpec> purge, boolean bZeroed, boolean keepalive, Long bCount, TipXy xy) throws Exception {
         Map<String, Integer> padIndex = new HashMap<>();
         for (int i = 0; i < plan.pads.size(); i++) {
             padIndex.putIfAbsent(plan.pads.get(i).padId, i);
@@ -228,6 +257,7 @@ public class GcodeStreamBuilder {
             blocks.add(new BlockSpec(r.netSteps, dots, DoseBlocks.turnName(r.netSteps)));
         }
         GcodeStreamBuilder b = new GcodeStreamBuilder(cfg, mapper, bZeroed, keepalive);
+        b.xy = xy != null ? xy : b.xy;
         b.bCountAtStart = bCount;
         b.prog.floorReferenceZMm = plan.boardZMm;
         b.comment("; instancelabs dispense plan " + plan.planId + " board " + plan.boardName + " profile '"
@@ -261,7 +291,15 @@ public class GcodeStreamBuilder {
     public static GcodeProgram forBlocks(DispenseConfig cfg, RawMapper mapper, List<BlockSpec> blocks,
             List<DotSpec> purgeSpots, int flush, boolean bZeroed, boolean keepalive, Long bCount, Double floorRefZ)
             throws Exception {
+        return forBlocks(cfg, mapper, blocks, purgeSpots, flush, bZeroed, keepalive, bCount, floorRefZ, null);
+    }
+
+    /** As above with the mounted tip's landing and feed ({@code xy} null: the configuration's). */
+    public static GcodeProgram forBlocks(DispenseConfig cfg, RawMapper mapper, List<BlockSpec> blocks,
+            List<DotSpec> purgeSpots, int flush, boolean bZeroed, boolean keepalive, Long bCount, Double floorRefZ,
+            TipXy xy) throws Exception {
         GcodeStreamBuilder b = new GcodeStreamBuilder(cfg, mapper, bZeroed, keepalive);
+        b.xy = xy != null ? xy : b.xy;
         b.bCountAtStart = bCount;
         Double lowest = floorRefZ;
         List<String> labels = new ArrayList<>();
@@ -328,7 +366,7 @@ public class GcodeStreamBuilder {
         double[] arrive = new double[total];
         double[] end = new double[total];
         long[] counts = bCountAtStart == null ? null : new long[total];
-        double mgPerStep = DoseBlocks.modelMgPerStep(cfg);
+        double mgPerStep = xy.feedMgPerStep != null ? xy.feedMgPerStep : DoseBlocks.modelMgPerStep(cfg);
         prog.blocks = new ArrayList<>();
         int w = 0;
         for (int k = 0; k < blocks.size(); k++) {
@@ -399,7 +437,15 @@ public class GcodeStreamBuilder {
     public static GcodeProgram forDots(DispenseConfig cfg, RawMapper mapper, List<DotSpec> dots,
             boolean bZeroed, boolean keepalive, boolean primeAtWaste, double primeExtraMm, String title)
             throws Exception {
+        return forDots(cfg, mapper, dots, bZeroed, keepalive, primeAtWaste, primeExtraMm, title, null);
+    }
+
+    /** As above with the mounted tip's landing ({@code xy} null: the configuration's). */
+    public static GcodeProgram forDots(DispenseConfig cfg, RawMapper mapper, List<DotSpec> dots,
+            boolean bZeroed, boolean keepalive, boolean primeAtWaste, double primeExtraMm, String title, TipXy xy)
+            throws Exception {
         GcodeStreamBuilder b = new GcodeStreamBuilder(cfg, mapper, bZeroed, keepalive);
+        b.xy = xy != null ? xy : b.xy;
         b.primeExtraClearanceMm = primeExtraMm;
         b.comment("; instancelabs dispense " + title);
         b.sessionStart();
@@ -488,7 +534,7 @@ public class GcodeStreamBuilder {
     }
 
     /**
-     * Lift to travel safe Z (if not there), then XY (a dispense target: the needle XY trim applies).
+     * Lift to travel safe Z (if not there), then XY (a dispense target: where the needle lands applies, landing + trim).
      */
     public void travelTo(double x, double y) throws Exception {
         if (Math.abs(nozzle[2] - cfg.travelSafeZMm) > 1e-6) {
@@ -584,12 +630,13 @@ public class GcodeStreamBuilder {
         prog.dotCount += d.index >= 0 ? 1 : 0;
     }
 
+    /** A dispense target moved by minus where the needle lands (landing + trim, §22.3). */
     private double trimX(double x) {
-        return x - cfg.needleXyTrim.dxMm;
+        return x - xy.dxMm;
     }
 
     private double trimY(double y) {
-        return y - cfg.needleXyTrim.dyMm;
+        return y - xy.dyMm;
     }
 
     public void endSession() throws Exception {

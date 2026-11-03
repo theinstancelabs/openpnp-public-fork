@@ -205,7 +205,7 @@ public final class SimBoardRenderer {
         DispenseService svc = DispenseService.get();
         if (svc != null && svc.getDb() != null) {
             try {
-                return new PadTypeResolver(svc.getDb().currentPadTypes(), svc.getDb().packageMappings());
+                return svc.padTypeResolver(); // the mounted tip setup's view (§22.2)
             }
             catch (Exception e) {
                 Logger.warn("sim camera: pad types not read, footprint pads only: {}", e.getMessage());

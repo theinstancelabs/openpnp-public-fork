@@ -78,7 +78,7 @@ public class PlannerDoseTest {
     static DispensePlanner planner(DispenseConfig c) {
         PadTypeResolver r = new PadTypeResolver(Arrays.asList(chip0603(), TAB, SOT), null);
         DispenseConfig.PurgeRow row = c.purgeRow;
-        return new DispensePlanner(c, r).withPurgeSpots(k -> k < row.spotsLeft() ? row.spot(row.usedSpots + k) : null);
+        return TestTips.planner(c, r).withPurgeSpots(k -> k < row.spotsLeft() ? row.spot(row.usedSpots + k) : null);
     }
 
     static DispensePlan threeDosePlan(DispenseConfig c) {
@@ -218,7 +218,7 @@ public class PlannerDoseTest {
             double rot = rnd.nextInt(4) * 90;
             pads.addAll(rotated("R" + i, 100 + rnd.nextDouble() * 40, 80 + rnd.nextDouble() * 30, rot, chip));
         }
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(chip), null))
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(chip), null))
                 .plan("random", pads, 77.5, 40);
         // the old planner: nearest neighbour + 2-opt over every dot from the start (the dots are the pad centres)
         List<PadGeometry> laid = new ArrayList<>();
@@ -265,16 +265,17 @@ public class PlannerDoseTest {
         // a tip whose smallest dose is a half turn
         c.tip.minDotSteps = 800;
         r = Interlocks.check(in);
-        assertTrue(r.toString().contains("PLAN: " + Texts.interlockDose("sot-q", 1, 400, "22G tip", 800)), r.toString());
-        assertTrue(r.toString().contains("pad type sot-q v1 has quarter-turn dots; the 22G tip takes quarter, half or "
-                + "one-turn dots (a half turn at least): edit it and plan again"), r.toString());
+        assertTrue(r.toString().contains("PLAN: " + Texts.interlockDose("sot-q", 1, 400, "22G bent taper", 800)),
+                r.toString());
+        assertTrue(r.toString().contains("pad type sot-q v1 has quarter-turn dots; the 22G bent taper takes quarter, "
+                + "half or one-turn dots (a half turn at least): edit it and plan again"), r.toString());
         // one quarter turn per pad
         c.tip.minDotSteps = 400;
         PadType one = type("sot-q1", "SOT one quarter", 1.475, 0.6, 400, 1);
         List<PadGeometry> pads = new ArrayList<>();
         pads.add(pad("Q9", "SOT_Q1", "1", 110, 90, 0, 1.475, 0.6, one));
         pads.add(pad("Q9", "SOT_Q1", "2", 110, 92, 0, 1.475, 0.6, one));
-        in.plan = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(one), null)).plan("r6", pads,
+        in.plan = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(one), null)).plan("r6", pads,
                 77.5, 40);
         in.purgeDots = DoseBlocks.purgeSpotsNeeded(in.plan, c);
         r = Interlocks.check(in);
@@ -291,17 +292,17 @@ public class PlannerDoseTest {
         PadType chip = chip0603();
         chip.tipKey = "ad25g";
         List<PadGeometry> pads = part("R1", "R_0603_1608Metric", 100, 80, 1.65, 0.8, 0.95, chip);
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(chip), null))
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(chip), null))
                 .plan("tip", pads, 77.5, 40);
         for (DispensePlan.PlannedPad x : p.pads) {
             assertEquals(Collections.singletonList("STATUS_BELOW_MIN"), x.flagNames());
             assertEquals("ad25g", x.typeTipKey);
             assertEquals(0, x.dotCount);
         }
-        assertTrue(p.warnings.contains(Texts.belowGateTip("0603", "ad25g", "22G tip") + " 2 pads of chip-0603 get no "
-                + "paste (STATUS_BELOW_MIN)."), p.warnings.toString());
-        assertTrue(p.warnings.get(0).startsWith("0603 was calibrated with another tip (ad25g); the mounted tip is the 22G "
-                + "tip."), p.warnings.toString());
+        assertTrue(p.warnings.contains(Texts.belowGateTip("0603", "ad25g", "22G bent taper") + " 2 pads of chip-0603 "
+                + "get no paste (STATUS_BELOW_MIN)."), p.warnings.toString());
+        assertTrue(p.warnings.get(0).startsWith("0603 was calibrated with another tip (ad25g); the mounted tip is the "
+                + "22G bent taper."), p.warnings.toString());
         // the plan is not stale for it: the pads would not pass now either (no plan-again loop)
         in.plan = p;
         c.refuseFlaggedPads = false;
@@ -310,13 +311,13 @@ public class PlannerDoseTest {
         c.tip.key = "ad25g";
         assertTrue(Interlocks.check(in).toString().contains("would pass now"), Interlocks.check(in).toString());
         // the other way round: planned with a matching tip, then the tip changed
-        DispensePlan q = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(chip), null))
+        DispensePlan q = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(chip), null))
                 .plan("tip", pads, 77.5, 40);
         assertTrue(q.blockedPads().isEmpty());
         in.plan = q;
         c.tip.key = "ad22tta-b";
         assertTrue(Interlocks.check(in).toString().contains("PLAN: the tip changed after planning: 2 pad(s) of this "
-                + "plan have pad types calibrated with another tip than the 22G tip; plan again"),
+                + "plan have pad types calibrated with another tip than the 22G bent taper; plan again"),
                 Interlocks.check(in).toString());
     }
 
@@ -333,7 +334,7 @@ public class PlannerDoseTest {
         // R3.1 at 102.275: 1.45 mm from R1.2, the 1.345 mm one-turn dots leave 0.105 mm
         pads.addAll(part("R3", "R_0603_1608Metric", 103.1, 80, 1.65, 0.8, 0.95, chip));
         pads.addAll(part("R4", "R_0603_1608Metric", 110, 80, 1.65, 0.8, 0.95, chip));
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(chip), null))
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(chip), null))
                 .plan("bridge", pads, 77.5, 40);
         Set<String> flagged = new HashSet<>();
         for (DispensePlan.PlannedPad x : p.pads) {
@@ -350,7 +351,7 @@ public class PlannerDoseTest {
                 + "(R1.2 to R3.1, R3.1 to R1.2); they get no paste (MAY_BRIDGE). A pad type for this size avoids it."),
                 p.warnings.toString());
         // measured dots smaller than the model's: no bridge (1.45 - 1.20 = 0.25 mm)
-        DispensePlan q = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(chip), null))
+        DispensePlan q = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(chip), null))
                 .withDotDiameters(Collections.singletonMap(1600, 1.20)).plan("bridge", pads, 77.5, 40);
         assertTrue(q.blockedPads().isEmpty(), q.warnings.toString());
     }
@@ -373,7 +374,7 @@ public class PlannerDoseTest {
         pads.addAll(part("R1", "R_0603_1608Metric", 110, 80, 1.65, 0.8, 0.95, chip0603()));
         List<PadType> types = Arrays.asList(mixed, chip0603());
         PadTypeResolver plain = new PadTypeResolver(types, null);
-        DispensePlan p = new DispensePlanner(c, plain).plan("mixed", pads, 77.5, 40);
+        DispensePlan p = TestTips.planner(c, plain).plan("mixed", pads, 77.5, 40);
         DispensePlan.PlannedPad tab = padOf(p, "J1.3");
         assertTrue(tab.flags.contains(PadFlag.PART_NOT_DISPENSABLE), tab.flagNames().toString());
         assertEquals(0, tab.dotCount);
@@ -384,15 +385,15 @@ public class PlannerDoseTest {
         }
         assertTrue(padOf(p, "R1.1").flags.isEmpty());
         assertTrue(p.warnings.contains("1 pad of 1 part gets no paste (J1): another pad of the part cannot be dispensed "
-                + "with the 22G tip, and a part soldered by hand gets no paste on its other pads either "
+                + "with the 22G bent taper, and a part soldered by hand gets no paste on its other pads either "
                 + "(PART_NOT_DISPENSABLE). Profile can paste the dispensable pads of a package anyway."),
                 p.warnings.toString());
-        assertTrue(p.warnings.contains("2 pads of 1 part get no paste (J1): the 22G tip cannot dispense them, also "
-                + "where the other pads of the part are pasted (PART_NOT_DISPENSABLE)."), p.warnings.toString());
+        assertTrue(p.warnings.contains("2 pads of 1 part get no paste (J1): the 22G bent taper cannot dispense them, "
+                + "also where the other pads of the part are pasted (PART_NOT_DISPENSABLE)."), p.warnings.toString());
         assertEquals(2, p.dots.size());
         // paste the dispensable pads of MIXED anyway: the tab gets its dot, the pins still none
         PadTypeResolver partial = new PadTypeResolver(types, null).withPastePartial(Collections.singleton("MIXED"));
-        DispensePlan q = new DispensePlanner(c, partial).plan("mixed", pads, 77.5, 40);
+        DispensePlan q = TestTips.planner(c, partial).plan("mixed", pads, 77.5, 40);
         assertTrue(padOf(q, "J1.3").flags.isEmpty(), padOf(q, "J1.3").flagNames().toString());
         assertEquals(1, padOf(q, "J1.3").dotCount);
         assertEquals(Collections.singletonList("PART_NOT_DISPENSABLE"), padOf(q, "J1.1").flagNames());
@@ -421,7 +422,7 @@ public class PlannerDoseTest {
         pads.add(pad("R9", "R_0603_1608Metric", "1", 96.6, 76.85, 0, 0.8, 0.95, chip0603()));
         pads.add(pad("R9", "R_0603_1608Metric", "2", 94.95, 76.85, 0, 0.8, 0.95, chip0603()));
         List<PadType> types = Arrays.asList(chip0603(), pin, tab);
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(types, null)).plan("near", pads, 77.5, 40);
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(types, null)).plan("near", pads, 77.5, 40);
         for (String id : new String[] {"U2.1", "U2.2", "U2.3", "U2.4"}) {
             assertTrue(padOf(p, id).flags.isEmpty(), id + " " + padOf(p, id).flagNames());
             assertEquals(id.equals("U2.4") ? 4 : 2, padOf(p, id).dotCount, id);
@@ -434,7 +435,7 @@ public class PlannerDoseTest {
             assertFalse(w.contains("U2"), w);
         }
         // SOT-223 pasted partly: U1's other pads get their dots, pin 1 still none
-        DispensePlan q = new DispensePlanner(c, new PadTypeResolver(types, null)
+        DispensePlan q = TestTips.planner(c, new PadTypeResolver(types, null)
                 .withPastePartial(Collections.singleton("SOT-223"))).plan("near", pads, 77.5, 40);
         assertEquals(Collections.singletonList("PART_NOT_DISPENSABLE"), padOf(q, "U1.1").flagNames());
         for (String id : new String[] {"U1.2", "U1.3", "U1.4"}) {
@@ -457,7 +458,7 @@ public class PlannerDoseTest {
             pads.addAll(part("R" + (i + 1), "R_0603_1608Metric", 100 + 2.5 * i, 80, 1.65, 0.8, 0.95, chip));
         }
         pads.addAll(part("R4", "R_0603_1608Metric", 115, 80, 1.65, 0.8, 0.95, chip));
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(chip), null))
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(chip), null))
                 .plan("row", pads, 77.5, 40);
         for (String id : new String[] {"R1.1", "R1.2", "R2.1", "R2.2", "R3.1", "R3.2"}) {
             assertEquals(Collections.singletonList("PART_NOT_DISPENSABLE"), padOf(p, id).flagNames(), id);
@@ -479,11 +480,11 @@ public class PlannerDoseTest {
         pads.add(pad("D1", "DO-220AA", "1", 100, 80, 0, 0.61, 1.118, tab));
         pads.add(pad("D1", "DO-220AA", "2", 103, 80, 0, 2.515, 2.388, tab));
         List<PadType> types = Collections.singletonList(tab);
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(types, null)).plan("do220", pads, 77.5, 40);
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(types, null)).plan("do220", pads, 77.5, 40);
         assertEquals(Collections.singletonList("PART_NOT_DISPENSABLE"), padOf(p, "D1.1").flagNames());
         assertEquals(Collections.singletonList("PART_NOT_DISPENSABLE"), padOf(p, "D1.2").flagNames());
         assertTrue(p.dots.isEmpty());
-        DispensePlan q = new DispensePlanner(c, new PadTypeResolver(types, null)
+        DispensePlan q = TestTips.planner(c, new PadTypeResolver(types, null)
                 .withPastePartial(Collections.singleton("DO-220AA"))).plan("do220", pads, 77.5, 40);
         assertEquals(Collections.singletonList("PART_NOT_DISPENSABLE"), padOf(q, "D1.1").flagNames());
         assertTrue(padOf(q, "D1.2").flags.isEmpty(), padOf(q, "D1.2").flagNames().toString());

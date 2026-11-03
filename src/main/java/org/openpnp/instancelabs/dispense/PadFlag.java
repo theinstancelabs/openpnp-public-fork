@@ -21,7 +21,13 @@ public enum PadFlag {
      * and none of its pads get paste (main-thread decision 4), unless its package is set to paste the
      * dispensable pads anyway; the pads the tip cannot dispense of such a part never get paste. Blocking.
      */
-    PART_NOT_DISPENSABLE(true);
+    PART_NOT_DISPENSABLE(true),
+    /**
+     * The pad's dose (its type's, else the profile's) is not in the mounted tip's dot table at the
+     * current recipe and paste (tip setups design §22.2): no dots, and a plan warning naming the dose,
+     * until the tip's dots are measured. Blocking.
+     */
+    DOSE_UNKNOWN(true);
 
     public final boolean blocking;
 

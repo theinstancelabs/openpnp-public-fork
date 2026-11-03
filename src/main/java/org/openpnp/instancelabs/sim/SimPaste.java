@@ -355,6 +355,18 @@ public final class SimPaste {
         return s == null ? Collections.emptyList() : s.deposits(null);
     }
 
+    /**
+     * The tip on the SIM head (§22.8): the scene's {@code physicalTip}, else the mounted setup of the running dispense
+     * service, else none (the scene's paste as it is).
+     */
+    static String physicalTip(SimScene sc) {
+        if (sc.physicalTip != null) {
+            return sc.physicalTip;
+        }
+        DispenseService svc = DispenseService.get();
+        return svc == null ? null : svc.mountedKey();
+    }
+
     /** The running dispense service's needle Z offset (0 without the service, DispenseConfig's default). */
     static double configNeedleZOffsetMm() {
         DispenseService svc = DispenseService.get();
@@ -467,7 +479,7 @@ public final class SimPaste {
         if (sc == null || line == null) {
             return null;
         }
-        SimScene.Paste p = sc.paste;
+        SimScene.Paste p = sc.pasteFor(physicalTip(sc));
         store.catchUp(clockNs.getAsLong() / 1e9);
         moved(sc, p, x, y, needleZ);
         String code = line.contains(";") ? line.substring(0, line.indexOf(';')) : line;

@@ -24,6 +24,7 @@ something new from core, ask for it (or add it to your module and propose it for
 | `boardflow.js` | board import (web-flow) | `IL.boardFlow`: fills the hooks H1–H5 of `run.js` / `records.js` (§11; §5 › Board drawing). |
 | `boardimport.js` + `boardimport.css` | board import (web-flow) | `IL.boardImport`: the upload dialog `#dlg-board-import` and the page-wide drop guard (§5 › Board drawing). |
 | `padprofile.js` + `padprofile.css` | profile calibration (pc-web) | `IL.padProfile`, the `pad-cal` view, Profile › Needs a profile and the suggestion card, the profile column of the upload, the pad inspector's profile notebox (§5 › Missing paste profiles; `PROFILE_CALIBRATION_DESIGN.md` §13). |
+| `tipsetup.js` + `tipsetup.css` | tip setups (ts-web) | `IL.tips` and `IL.photos`: the strip's Tip cell view, the content of Setup › Dispenser & tip, the `tip-change` view, `#dlg-tip-add`, `#photo-view`, the gated file choosers and drop zones (§5 › Tip setups; `PROFILE_CALIBRATION_DESIGN.md` §22.7). |
 | `run.js` + `run.css` | Run stage | `#ws-run`, Run panel steps (board, probe, checks, run, result, recovery override), run confirm `#dlg-run`. |
 | `setup.js` + `setup.css` | Setup stage | `#ws-setup` (cards §8.2), default panel `head`. `calibrate.js` may reuse `setup.css`. |
 | `profile.js` + `profile.css` | Profile stage | `#ws-profile` (§8.3), `#dlg-padtype`, `#dlg-history`, panel `pt`. |
@@ -41,7 +42,7 @@ STOP): use `IL.press2`, `IL.dialog.open` / `IL.dialog.showNative`.
 ```
 <head>  core.js (sync)  → IL defined, theme applied, F9 / Space / Esc key handlers and the STOP clicks installed
         boardart.js, boardview.js, pathpreview.js, padinspect.js, boardflow.js, boardimport.js, padprofile.js,
-        run.js, setup.js, profile.js, calibrate.js, records.js (defer, in this order)
+        tipsetup.js, run.js, setup.js, profile.js, calibrate.js, records.js (defer, in this order)
         app.js (defer)  → IL.boot()   (core boots by itself at DOMContentLoaded if app.js never ran)
 boot:   mount(root) of every registered workspace → route applied → show() of the active one
         → poll /api/status (0.7 s chain) → render loop
@@ -309,7 +310,7 @@ with §11 (the AR + BI integration slice, on `il/rc1`). Nothing here moves the m
   row})` → `{shown}` (H3: the drawing, `#pv-picture`, the preview, `#btn-pad-inspect`; before planning the chosen
   board at the form's seat with the live camera, `#board-preplan`), `onPad` / `onPart` (H2), `recordsMap(bv, plan)`
   (H4), `onImported(saved)`, `preview()` (the hero's path preview). Keeps the newest 8 drawings;
-  `localStorage['il.pv.picture']` (default Quiet). Board pictures say `75 × 75 mm` and `80 parts`; the attach keeps the
+  `localStorage['il.pv.picture']` (default Full; Records' map is Full too). Board pictures say `75 × 75 mm` and `80 parts`; the attach keeps the
   drawing under the board file's earlier name, else a free one (never another board's).
 - **`IL.boardImport.open({file, onSaved})`**, `isOpen()` (web-flow): `#dlg-board-import`, states choose → reading
   (Cancel aborts, 60 s) → preview → saving (Esc and Cancel do nothing) → saved; 12 MB checked before sending; a refused
@@ -374,6 +375,62 @@ modules (H-P9 in `index.html`). Every hook in another module's file is a no-op w
 - Not in this PR: the test-board ladder (PC §20 decision 8, `pc-ladder`, a follow-up) and the per-run "Skip these N
   pads" (no API yet: the Pad types card points to Setup › Settings › Refuse flagged pads).
 
+### Tip setups and pictures (PROFILE_CALIBRATION_DESIGN.md §22.7, as built 2026-10-30)
+
+`tipsetup.js` + `tipsetup.css` load after `padprofile.js` and before the workspace modules (`index.html`: the strip's
+`#chip-tip`, one `<link>` and one `<script>`). API: `WEB_API.md` §3.6; the screens: `UI_DESIGN.md` §8.6. The file
+header lists its API; in short:
+
+- **`IL.tips`**: `data()` / `load()` (`GET /api/tip-setups?retired=true`, read again on a mount, an edit or a picture),
+  `setup(key)`, `mountedSetup()`, `name(s)`; **the needle token** `token()` / `tokenOf(s)` (`status.dispense.needle.
+  changedAtMs`, null when none is recorded): every needle value a page posts carries the token of the moment its
+  heights were taken (setup.js captures it with the heights; `needleChangedAtMs`), and every pad-type write and
+  profile patch names the mounted setup (`forSetup`, `forTip`), so a form opened before a mount is refused (409
+  `needle-changed` / `tip-changed`; core's refusal fixes offer Reload); `cellView(s)` (the strip cell core renders:
+  `{kind, v, t}`, `v` = `[head, long part, level]`), `buildCard(c)` / `renderCard(s, h)` (the content of the card
+  setup.js makes, `#card-tip`), `step(s)` (the bring-up step `Dispenser & tip`), `nextSteps(s)` / `changeOpen(s)` (the
+  order after a needle change, `#tip-next`, from the status: the regulator and prime ticks are the browser's),
+  `openChange({again?, select?, retire?})` (the panel view `tip-change`, `?panel=tip-change`), `openAdd({fromChange?})`
+  / `openEdit(key)` (`#dlg-tip-add`), `takePicture(calibrationIds)`, `pictureLock(s)`, `chooserLock(s)`,
+  `thumb(setup, size, button?)`, `noPicture()`, the words `tipWords`, `boreWords`, `dotsWords`, `typesWords`,
+  `neverOn()`.
+- **`IL.photos`**: `normalize(file)` (the browser draws the picture: `createImageBitmap(file, {imageOrientation:
+  'from-image'})`, at most 2048 px, JPEG 0.85, no metadata; a file it cannot decode rejects with `HEIC`), `upload(blob,
+  query)` / `send(file, query)` (`POST /api/photos`), `chooser({id, inputId, label, onFile})` (a button and a hidden
+  `input[type=file][accept="image/*"]`: an open OS chooser blocks F9 and STOP, so the button is gated with
+  `IL.tips.chooserLock`, which is `IL.lockReason` plus `: add the photo when it has finished`), `dropZone({id, onFile})`
+  (`div.photo-drop`, no chooser: it stays open during a run, and the engine refuses an upload then), `strip(photos,
+  {max, list, setup})` (`button.photo-thumb > img[alt]`, then `+n`), `view(photo, {list, setup, from})` (`#photo-view`:
+  `IL.dialog.open({id: 'photo-view', size: 'lg'})`, `.dialog--lg` in tipsetup.css; Esc closes, focus goes back to
+  `from`; remove (two presses) and its Undo, `Use as the tip's picture`; no remove on a result photo), `DROP_HINT`.
+- **Fix-its** (`data-fix`): `tip-change`, `tip-again` (Change tip with the a-new-needle row checked: what "I changed
+  the needle" opens), `tip-edit`, `tip-add`, `landing-check` (`IL.padProfile.openCal({measure: 'landing'})`),
+  `landing-keep` (two presses, `POST /api/needle/landing {keep: true}`), `measure-tip` (`openCal({measure: 'tip'})`).
+- **Two-press words** (`IL.press2`): `move to the camera` (Take a picture from below), `mount` (`#btn-tip-mount`, `Add
+  and mount`), `undo: the {old} never left the dispenser` (`#btn-tip-undo`), `retire`, `lay 17 dots` (the landing
+  check's start) and `measure` (Measure its dots).
+- **Hooks in other owners' files** (each falls back when `IL.tips` is missing): `core.js` the strip cell, the Needle
+  readiness texts (put on at HH:MM, the landing block with Check and Keep), `i4Kind` (the landing and frame refusals
+  are Needle items), `attestValid` (the regulator, `prime-seen`, `test-dot-seen` and `tip-on` ticks lapse when the
+  needle token moves), `needleChangedAtMs` on needle-confirm, Reload on a `tip-changed` / `needle-changed` refusal, and
+  `TASK_WORD` `tip picture`; `setup.js` the card shell and its bring-up step, `Where the needle lands`, the tokens on
+  anchor, offset and trim, the K prefill (own K, the seed's bench K, else empty with Both tips touch; From K locked when
+  `status.dispense.needle.kRefusal` says so), `STAMPED_TOP` (`tip`, `parkedTips`, `needleLanding`, `needleXyTrim`) and
+  `forTip` in the settings editor; `padprofile.js` the pad-cal view per mode (`measure`), its tip line, the landing and
+  dot-size results, the result card's label block, pictures and `Made with another tip…`, Needs a profile `for the
+  {S}`, `#pt-needs-measure`, `#pt-needs-other`; `profile.js` (`IL.pt`) the recipe per tip, By tip, `+n tips`, Other
+  tips, the editor's eyebrow, version note and `Calibrated for`, History's Tip column, `IL.pt.unsaved()` (Mount waits
+  for unsaved recipe or editor edits); `records.js` the Calibrations table and panel; `run.js` the confirm's
+  `#run-confirm-tip` (attestation `tip-on`) and `for the {S}` in the recipe; `calibrate.js` the tip read-only in the
+  touch-off and the scale shots, the ladder guide's photo.
+- **sessionStorage**: `il.tips.mount` (the last mount this tab made: the undo band's 2 min survive a reload).
+- Tests: `TipSetupUiSimTest` (the files are served, the presets' chart values, a needle value without its token is
+  refused), `ApiServerSimTest.servesTheUiAndStatus` lists `tipsetup.js` and `tipsetup.css`, `tip-setups.playwright.cjs`
+  (PC §22.8 steps 0–12, fourth in `run-webui-sim-test.sh`'s SIM session, which installs the SIM bottom camera
+  `SimTipCamera` and gives the 25G its own SIM paste), fixtures in `src/test/web/fixtures/tips/` (a PNG, a JPEG and a
+  HEIC), and the SIM acceptance `il_sim_acceptance.py tips` (API level, `WEB_API.md` §6). A seeded SIM session:
+  `il_ui_session.py start --padcal --tip-camera [--paste-by-tip KEY:… --physical-tip KEY]`.
+
 ### Since §10
 
 `server.simulated` and `server.simulatorConfirmed` now exist (`WEB_API.md` §3.1): §10's fallback (the driver
@@ -428,7 +485,8 @@ follows the theme); overlay marks on the board `--pv-o-ap --pv-o-dot --pv-o-next
 overlay; the overlay gets `.pv--art` whenever the drawing shows.
 
 Breakpoint ≤ 1360 px: nav rail 84 px, panel 388 px, STOP 216 px. The strip drops `.long` value parts by itself
-when it would run under STOP, the other cells' before the verdict's (`.cells--t1` / `--t2` / `--t2v`).
+when it would run under STOP, the other cells' before the verdict's (`.cells--t1` / `--t2` / `--t2v`), then the
+plain-Off pressure cell (`--t3`), the other cells' keys (`--t4`) and an ok Tip cell (`--t5`).
 
 Icon sprite ids: `i-run i-setup i-profile i-cal i-records i-gauge i-chev i-plus i-minus i-camera i-refresh i-swap
 i-play i-capture i-mark i-lock i-plug i-home i-wipe i-hand i-paste i-back i-needle i-close i-sun i-moon i-shield
@@ -437,11 +495,11 @@ i-list i-angle i-purge i-keyboard`; glyphs `g-check g-x g-bang g-dash g-info`.
 ## 8. Ids owned by core (do not create them again)
 
 `btn-stop` (`data-testid=stop`), `skip-main`, `brand`, `heartbeat`, `heartbeat-short`, `sim-tag`, `cells`,
-`cell-machine`, `pill-conn`, `pill-homed`, `btn-start`, `btn-home`, `pill-pressure`, `chip-angle`, `chip-purge`,
-`pill-engine`, `nav`, `tab-btn-<ws>`, `btn-theme`, `main`, `msg-area`, `ws-<ws>`, `panel`, `panel-bar`,
+`cell-machine`, `pill-conn`, `pill-homed`, `btn-start`, `btn-home`, `pill-pressure`, `chip-angle`, `chip-tip`,
+`chip-purge`, `pill-engine`, `nav`, `tab-btn-<ws>`, `btn-theme`, `main`, `msg-area`, `ws-<ws>`, `panel`, `panel-bar`,
 `panel-back`, `panel-bar-title`, `panel-top`, `panel-scroll`, `panel-stop`, `panel-body`, `panel-foot`,
-`stop-unconfirmed`, `toast`, `favicon`, `interlock-list`, `dlg-keys`, and the `pv-*` ids inside core's views.
-Fix-it copies elsewhere use `data-fix="<id>"`, never a duplicate id (§16).
+`stop-unconfirmed`, `toast`, `favicon`, `interlock-list`, `dlg-keys`, and the `pv-*` ids inside core's views. Fix-it
+copies elsewhere use `data-fix="<id>"`, never a duplicate id (§16).
 
 ## 9. Working on it (SIM only)
 

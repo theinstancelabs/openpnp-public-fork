@@ -338,7 +338,7 @@
             pcr.field('ss-count', 'Shots', 'count', pcr.numInput('ss-count', '30', '1', { min: '1' })),
             pcr.field('ss-total', 'Total mass', 'mg', pcr.numInput('ss-total', null, '0.1', { min: '0' })),
             pcr.field('ss-each', 'Mass of each shot', 'mg · optional, gives the spread', pcr.textInput('ss-each', null, { placeholder: 'e.g. 1.81, 1.79, 1.84' }), null, 'span3'),
-            pcr.field('ss-tip', 'Tip', null, pcr.textInput('ss-tip', '22G 0.41 mm')),
+            pcr.field('ss-tip', 'Tip', 'the mounted tip', pcr.textInput('ss-tip', '', { readonly: true, title: 'the mounted tip (Setup › Dispenser & tip)' })),
             pcr.field('ss-lot', 'Paste lot', null, pcr.textInput('ss-lot')),
             pcr.field('ss-psi', 'Set pressure', 'psi', pcr.numInput('ss-psi', null, '0.1', { min: '0' })),
             pcr.field('ss-temp', 'Barrel temperature', '°C', pcr.numInput('ss-temp', null, '0.1')),
@@ -532,8 +532,27 @@
     IL.planRefreshSoon();
     return p;
   }
+  /**
+   * Whether a touch-off row measured the needle and frame in force (§22.3), from the server's times: null when it did,
+   * else {why: 'change' | 'frame', atMs} for a row older than the last needle change or than the needle Z frame. Never
+   * from when this page first saw the row: an old needle's offset must not reach the new one.
+   */
+  function touchEra(row, n) {
+    const t = Number(row.created_at);
+    if (isNum(n.changedAtMs) && t < n.changedAtMs) return { why: 'change', atMs: n.changedAtMs };
+    const a = n.anchor;
+    if (a && isNum(a.setAtMs) && t < a.setAtMs) return { why: 'frame', atMs: a.setAtMs };
+    return null;
+  }
+  const eraText = (e) => 'Touched off before the ' + (e.why === 'change' ? 'needle change' : 'needle Z frame') + ' at ' + IL.fmtTime(e.atMs - S.skewMs)
+    + ': touch off again.';
   async function useTouchOff(v) {
-    const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(v.row.z_offset_mm.toFixed(4)), note: 'touch-off #' + v.row.id + ' (web UI)' });
+    // the era again at the press (a needle change may have landed since the render); the token of the same status
+    const n = (S.status && S.status.dispense && S.status.dispense.needle) || {};
+    const era = touchEra(v.row, n);
+    if (era) throw new Error(eraText(era));
+    const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(v.row.z_offset_mm.toFixed(4)), note: 'touch-off #' + v.row.id + ' (web UI)',
+      needleChangedAtMs: isNum(n.changedAtMs) ? Number(n.changedAtMs) : null });
     IL.planRefreshSoon();
     await loadCalibrations();
     return r;
@@ -577,10 +596,12 @@
     const latest = rows.find((r) => /dot-ladder-touch-off/.test(r.method || '')) || null;
     const v = pcr.touchOffView(latest);
     const needle = (s.dispense && s.dispense.needle) || {};
-    const inUse = v && isNum(needle.zOffsetMm) && Math.abs(needle.zOffsetMm - v.row.z_offset_mm) < 5e-4;
+    // a row of another needle or frame is never "In use" and is never offered for the needle offset
+    const era = v ? touchEra(v.row, needle) : null;
+    const inUse = v && !era && isNum(needle.zOffsetMm) && Math.abs(needle.zOffsetMm - v.row.z_offset_mm) < 5e-4;
     // after a run that recorded nothing (its reason is in the box above) the one below is an older run's
     const older = noContact(s.run);
-    IL.keyed(host, JSON.stringify([v ? v.row.id : null, inUse, C.ver, older]), () => {
+    IL.keyed(host, JSON.stringify([v ? v.row.id : null, inUse, C.ver, older, era ? eraText(era) : null]), () => {
       if (!v) return [sub('Last touch-off'), el('p', { class: 'muted cal-none', text: C.data ? 'No touch-off with dots yet.' : C.error ? 'Could not load the records: ' + C.error : 'Loading the records…' })];
       const a = v.analysis || {};
       const gaps = a.gapsMm || [];
@@ -593,8 +614,9 @@
             el('div', { class: 'cal-to__big' }, isNum(a.contactGapMm) ? 'Contact at a gap of ' + IL.fmtSigned(a.contactGapMm, 3) + ' mm' : 'No contact found'),
             el('div', { text: 'offset ' + IL.fmtSigned(v.row.previous_offset_mm, 3) + ' → ' + IL.fmtSigned(v.row.z_offset_mm, 3) + ' mm' + (isNum(v.delta) ? ', Δ ' + IL.fmtSigned(v.delta, 3) : '') }),
             a.reason ? el('div', { class: 'dim', text: a.reason }) : null,
-            v.applied || inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
-              : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
+            era ? el('div', { class: 'cal-to__old', id: 'to-era' }, IL.glyph('need', 'xs'), ' ' + eraText(era))
+              : inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
+                : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
           el('table', { class: 'tbl cal-to__t' }, el('thead', {}, el('tr', {}, el('th', { class: 'r' }, IL.unitText('Gap mm')), el('th', { class: 'r' }, IL.unitText('Dot Ø mm')), el('th', { text: '' }))),
             el('tbody', {}, gaps.map((g, i) => {
               const dot = pcr.touchOffDot(a, i);
@@ -666,6 +688,9 @@
     IL.gate($('btn-shots-run'), runReason(s, blockers, Object.values(p.errs).find(Boolean) || (!place ? 'Add a cup place in Setup › Places first.' : null)), $('shots-reason'));
     renderLive($('shots-live'), s, 'scale shots');
     prefill('ss-psi', isNum(prof.pressurePsi) ? IL.fmtPsi(prof.pressurePsi) : null);
+    // the record names the tip on the dispenser (§22.7); older records keep their own text
+    const tipName = d.tip && d.tip.name ? d.tip.name : '';
+    if ($('ss-tip').value !== tipName) $('ss-tip').value = tipName;
     const r = shotsRecordPlan();
     const typed = ['ss-total', 'ss-each'].some((id) => $(id).value.trim() !== '');
     showErrs(typed ? r.errs : { 'ss-rot': r.errs['ss-rot'], 'ss-count': r.errs['ss-count'] });
@@ -873,7 +898,8 @@
     const j = S.status && S.status.padCalibration;
     const mine = j && j.manual && (j.typeKeys || []).includes(t.typeKey) ? j : null;
     const lad = mine ? (mine.ladder || []).find((x) => x.steps === d.steps) : null;
-    IL.keyed(g, JSON.stringify([C.guide.key, sg.id, lad ? [lad.dots, lad.pass] : null, !!S.config]), () => {
+    const photoId = mine && mine.result ? ((mine.result.photos || []).find((p) => p.kind === 'result' && p.doseSteps === d.steps) || {}).id : null;
+    IL.keyed(g, JSON.stringify([C.guide.key, sg.id, lad ? [lad.dots, lad.pass] : null, !!S.config, photoId || null]), () => {
       const close = el('button', { type: 'button', class: 'btn btn--sm btn--quiet', 'aria-label': 'Close the guide' }, IL.icon('i-close'), 'Close');
       close.addEventListener('click', () => { C.guide = null; IL.render(); });
       const ladder = el('button', { type: 'button', class: 'btn btn--hold btn--sm', id: 'btn-guide-ladder' }, IL.icon('i-play'), 'Lay the ladder');
@@ -892,11 +918,20 @@
           el('li', { text: 'Needle Z frame recorded, blank place and blank surface set, needle touched off (the touch-off card below).' }),
           el('li', {}, 'Lay the ladder: ' + turn + ' dots on the blank with the profile’s dot first as the control, the same phase-locked dots as Calibrate automatically. ' + limits + ' ',
             lad ? el('b', { text: lad.pass === null || lad.pass === undefined ? 'Measuring…' : lad.pass ? 'Last ladder: every check passed.' : 'Last ladder: ' + ((lad.failures || [])[0] || 'a check failed') + '.' }) : null,
-            el('div', { class: 'btn-row', 'data-refusals': '' }, ladder)),
+            el('div', { class: 'btn-row', 'data-refusals': '' }, ladder), guidePhoto(mine, d.steps)),
           el('li', {}, 'Weigh dots: ' + turn + ' dots on a coupon, then weigh it, wipe it and weigh it again. ', el('div', { class: 'btn-row' }, weigh)),
           el('li', {}, 'In Profile, set the dots per pad (' + d.perPad + ') and the turn (' + turn + ') and then the status: characterized needs a passing ladder and a confirmed weighing at this turn. ',
             el('div', { class: 'btn-row' }, prof)))];
     });
+  }
+  /** The by-hand ladder's result photo of this dose (§22.7: img.guide-photo, a button opening the picture), or null. */
+  function guidePhoto(j, steps) {
+    const p = j && j.result ? (j.result.photos || []).find((x) => x.kind === 'result' && x.doseSteps === steps) : null;
+    if (!p) return null;
+    const b = el('button', { type: 'button', class: 'photo-thumb guide-photo__b', title: (p.caption || 'Result photo') + ': open' },
+      el('img', { class: 'guide-photo', src: p.thumbUrl, alt: p.caption || 'The ladder’s result photo', width: '160', height: '120' }));
+    b.addEventListener('click', () => { if (IL.photos) IL.photos.view(p, { from: b }); });
+    return el('figure', { class: 'guide-photo__f' }, b, el('figcaption', { text: p.caption || 'The ladder on the blank' }));
   }
   /** Set up / Validate from a pad type: fill the turns around one profile dot and show the steps. opts: true (validate) or {validate, suggestion}. */
   pcr.openGuide = function (t, opts) {

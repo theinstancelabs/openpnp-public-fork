@@ -27,18 +27,23 @@ import org.openpnp.instancelabs.dispense.DoseBlocksResult;
 import org.openpnp.instancelabs.dispense.DoseRecord;
 import org.openpnp.instancelabs.dispense.DoseRecords;
 import org.openpnp.instancelabs.dispense.HomeTracker;
+import org.openpnp.instancelabs.dispense.EngineRefusal;
 import org.openpnp.instancelabs.dispense.InterlockReport;
+import org.openpnp.instancelabs.dispense.LandingResult;
 import org.openpnp.instancelabs.dispense.ManualBalance;
+import org.openpnp.instancelabs.dispense.NeedleChange;
 import org.openpnp.instancelabs.dispense.PadCalibrationRecord;
 import org.openpnp.instancelabs.dispense.PadInstances;
 import org.openpnp.instancelabs.dispense.PadLadder;
 import org.openpnp.instancelabs.dispense.PadType;
 import org.openpnp.instancelabs.dispense.PadTypeStatus;
+import org.openpnp.instancelabs.dispense.Photo;
 import org.openpnp.instancelabs.dispense.ProbeTargets;
 import org.openpnp.instancelabs.dispense.RunResult;
 import org.openpnp.instancelabs.dispense.SurfacePlane;
 import org.openpnp.instancelabs.dispense.SurfaceProbeRequest;
 import org.openpnp.instancelabs.dispense.SurfaceProbeResult;
+import org.openpnp.instancelabs.dispense.TipSetup;
 import org.openpnp.instancelabs.dispense.VacuumProber;
 import org.openpnp.instancelabs.dispense.WeighPlan;
 import org.openpnp.instancelabs.dispense.ZCheck;
@@ -48,11 +53,13 @@ import org.openpnp.instancelabs.padprofile.Decider;
 import org.openpnp.instancelabs.padprofile.DoseEvidence;
 import org.openpnp.instancelabs.padprofile.DoseModel;
 import org.openpnp.instancelabs.padprofile.LadderStats;
+import org.openpnp.instancelabs.padprofile.LandingFit;
 import org.openpnp.instancelabs.padprofile.Limits;
 import org.openpnp.instancelabs.padprofile.ProfileCheck;
 import org.openpnp.instancelabs.padprofile.Suggester;
 import org.openpnp.instancelabs.padprofile.Suggestion;
 import org.openpnp.instancelabs.padprofile.Texts;
+import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.instancelabs.padprofile.TypeInfo;
 import org.openpnp.instancelabs.sim.SimBalance;
 import org.pmw.tinylog.Logger;
@@ -83,11 +90,21 @@ import com.google.gson.JsonElement;
  * <p>Each engine step is an ordinary engine task queued from this job's thread under its lock after the
  * stop flag (§7.8): a STOP stops the job first, then the engine. The by-hand path (§8) runs the ladder
  * or the weighing alone for one dose: the same steps and records, no decision.</p>
+ *
+ * <p>Tip setups (§22.3): the job belongs to the setup mounted and the needle token at its start; every engine step
+ * and every record carries them, and a mount or a needle change meanwhile stops it with nothing saved. Two jobs of
+ * records only: {@code measure: "tip"} (Measure its dots: every dose the tip takes on the blank, the profile's
+ * weighed on two coupons, for its dot table) and {@code measure: "landing"} (Check where it lands: a locator dot,
+ * then a purge and a row of 8 in a band of the calibration area, fitted and saved, or asked about).</p>
  */
 final class PadCalibrationJob {
     static final String RUNNING = "running", AWAITING = "awaiting-reading", DECIDING = "deciding",
             PLANNING = "planning", DONE = "done", STOPPED = "stopped", CANCELLED = "cancelled", FAILED = "failed";
     static final String LADDER = "ladder", WEIGH = "weigh";
+    /** The jobs of records only (tip setups design §22.3): Measure its dots, Check where it lands. */
+    static final String MEASURE_TIP = "tip", MEASURE_LANDING = "landing";
+    /** The landing check's steps: the locator dot, then the purge and the row. */
+    static final String LOCATOR = "locator", ROW = "row";
     /** The halt of a job whose engine saw a STOP it did not (§7.8). */
     static final String STOPPED_SINCE_START = "the machine was stopped after this pad calibration was started: nothing "
             + "more was sent";
@@ -104,6 +121,10 @@ final class PadCalibrationJob {
     static final double DEFAULT_HOP_MM = PadLadder.MAX_PITCH_MM;
     /** The blank step touches this far inside the area's free band, and no closer to its used band (mm). */
     static final double BLANK_INSET_MM = 1.0;
+    /** §22.2: a dose whose dot size the tip does not know is spaced for at least this, or its OD + 0.4 mm (mm). */
+    static final double UNKNOWN_DOT_MM = 1.6;
+    /** §22.2: a tip wider than the 22G's bore is counted with the bench mass x 1.5 until it is weighed. */
+    static final double WIDE_BORE_MM = 0.41, WIDE_BORE_MASS = 1.5;
 
     /** What the operator asked for (POST body, or the preview's query). */
     static final class Request {
@@ -123,6 +144,10 @@ final class PadCalibrationJob {
         Long pasteLifeAtMs;
         String operator;
         List<String> demotes = new ArrayList<>();
+        /** {@link #MEASURE_TIP} | {@link #MEASURE_LANDING} (records only), or null: calibrate. */
+        String measure;
+        /** The landing check searches ±9 mm (offered after its locator found nothing). */
+        boolean wide;
     }
 
     /** One group of the job and the plan saved for it. */
@@ -225,6 +250,20 @@ final class PadCalibrationJob {
     String refusalCode = "refused";
     final List<String> needs = new ArrayList<>();
     final List<String> notes = new ArrayList<>();
+    /** The setup mounted and the needle token at the start (§22.3): every engine step and record carries them. */
+    String setupKey;
+    String setupName;
+    Long needleSinceMs;
+    /** The mounted tip at the start with its dot table: the sizes and masses of the doses it knows. */
+    Tip tip;
+    /** {@link #MEASURE_TIP} | {@link #MEASURE_LANDING}, or null. */
+    String measure;
+    // the landing check (§22.3)
+    /** The calibration area as it was before the band was reserved, the band's layout, E and R. */
+    CalibrationArea landingArea;
+    PadLadder.LandingLayout landingLayout;
+    double[] expected;
+    double searchMm;
 
     // the run
     private final Object lock = new Object();
@@ -259,6 +298,15 @@ final class PadCalibrationJob {
     PadCalibrationJobs.Engine engine;
     /** The block steps' results (P7 reads the dots after each block switch). */
     final List<DoseBlocksResult> results = new CopyOnWriteArrayList<>();
+    /** The result photos stored after each block step (§22.4). */
+    final List<Photo> photos = new CopyOnWriteArrayList<>();
+    /** What the landing check found (saved, asked about, or not found), and the text of its result. */
+    volatile LandingResult landing;
+    volatile String landingText;
+    /** Why a mount or a needle change stopped the job (§22.3), the result's sentence; null otherwise. */
+    volatile String tipHalt;
+    /** The needle change that voided the coupons this job waited for (§22.3), or null. */
+    volatile NeedleChange voidedBy;
 
     private PadCalibrationJob(ApiContext ctx, PadProfileEndpoints profile, DispenseEndpoints dispense,
             DispenseService svc, Request req) {
@@ -284,19 +332,43 @@ final class PadCalibrationJob {
 
     private void plan() throws Exception {
         DispenseConfig c = svc.getConfig();
+        // the setup and the needle this job belongs to (§22.3)
+        setupKey = c.tip.key;
+        setupName = c.tip.name;
+        needleSinceMs = c.needleChangedAtMs;
+        tip = svc.mountedTip();
+        measure = req.measure;
+        if (measure != null && !MEASURE_TIP.equals(measure) && !MEASURE_LANDING.equals(measure)) {
+            throw ApiException.badRequest("'measure' must be \"tip\" (measure its dots) or \"landing\" (check where it "
+                    + "lands), or left out (calibrate)");
+        }
         if (req.steps != null && !req.steps.isEmpty()) {
+            if (measure != null) {
+                throw ApiException.badRequest("'measure' is a job of its own: leave 'steps' out");
+            }
             if (req.steps.size() != 1 || !(LADDER.equals(req.steps.get(0)) || WEIGH.equals(req.steps.get(0)))) {
                 throw ApiException.badRequest("'steps' must be [\"ladder\"] or [\"weigh\"] (the by-hand steps), or "
                         + "left out (the whole calibration)");
             }
             manual = req.steps.get(0);
         }
+        if (MEASURE_LANDING.equals(measure)) {
+            planLanding(c);
+            steps();
+            estimate(c);
+            refusal = refusal(c);
+            return;
+        }
         if (manual != null) {
             planManual(c);
+        }
+        else if (MEASURE_TIP.equals(measure)) {
+            planTip(c);
         }
         else {
             planGroups(c);
         }
+        boolean measuring = MEASURE_TIP.equals(measure);
         int profileSteps = c.profile.netStepsPerDot;
         // the weighing: the chosen doses without a confirmed mass, on the coupons there are places for
         List<String> places = c.padCalibration.definedCouponPlaces(c);
@@ -304,7 +376,7 @@ final class PadCalibrationJob {
         if (weigh) {
             Map<Integer, Integer> need = new TreeMap<>();
             for (GroupPlan g : groups) {
-                if (manual != null || !massConfirmed(g.steps)) {
+                if (manual != null || measuring || !massConfirmed(g.steps)) {
                     need.merge(g.steps, 1, Integer::sum);
                 }
             }
@@ -329,7 +401,7 @@ final class PadCalibrationJob {
             Set<Integer> doses = new java.util.TreeSet<>(java.util.Collections.reverseOrder());
             for (GroupPlan g : groups) {
                 for (int s : g.doses) {
-                    if (manual != null || needsOptical(s, c.padCalibration.minHops)) {
+                    if (manual != null || measuring || needsOptical(s, c.padCalibration.minHops)) {
                         doses.add(s);
                     }
                 }
@@ -426,7 +498,7 @@ final class PadCalibrationJob {
         }
         DispenseDb db = svc.getDb();
         for (String k : req.typeKeys) {
-            if (db.currentPadType(k) == null) {
+            if (!db.typeKeyExists(k)) {
                 throw ApiException.badRequest("no pad type '" + k + "'");
             }
             typeKeys.add(k);
@@ -449,16 +521,76 @@ final class PadCalibrationJob {
         }
     }
 
+    /**
+     * Measure its dots (§22.3): every dose the mounted tip takes laid on the blank, the profile's dose weighed on two
+     * coupons; records only (its dot table and its mass per turn), no pad type changes.
+     */
+    private void planTip(DispenseConfig c) throws Exception {
+        GroupPlan p = new GroupPlan();
+        p.label = "the " + c.tip.name + "'s dots";
+        p.steps = c.profile.netStepsPerDot;
+        p.weighSteps = p.steps;
+        p.perPad = 1;
+        for (int s : DoseModel.ALLOWED_STEPS) {
+            if (DoseBlocks.isAllowed(s, c)) {
+                p.doses.add(s);
+            }
+        }
+        // no board gives a hop: the dots are spaced as a dose of unknown size is, max(1.6 mm, OD + 0.4 mm) (§22.2)
+        p.hopMm = unknownSpacingMm();
+        groups.add(p);
+        evidence = PadInstances.inputs(svc, new ArrayList<>(), false).evidence;
+        if (req.planId != null) {
+            entry = dispense.requirePlan(req.planId);
+            boardName = entry.plan.boardName;
+        }
+    }
+
+    /**
+     * Check where it lands (§22.3): the band of the calibration area it reserves, E (the setup's own landing under N2's
+     * head offset now, else 0, 0) and the search R; the blank's surface probed first when it is stale.
+     */
+    private void planLanding(DispenseConfig c) throws Exception {
+        area = c.calibrationArea.effective(c);
+        landingArea = area == null ? null : area.copy();
+        DispenseConfig.NeedleLanding own = c.needleLanding;
+        boolean ownNow = own != null && !moved(svc.headOffsetNow(), own.headOffsetXMm, own.headOffsetYMm);
+        boolean straight = TipSetup.FORM_STRAIGHT.equals(c.tip.form);
+        boolean pointed = TipSetup.FORM_BENT.equals(c.tip.form) && c.tip.bendToward != null;
+        expected = svc.landingInEffect();
+        searchMm = LandingFit.searchMm(ownNow, straight, pointed, req.wide);
+        landingLayout = PadLadder.landingLayout(landingArea, searchMm, d95(c.profile.netStepsPerDot), fovMm(), null);
+        if (area != null && landingLayout.problem == null) {
+            planBlank(c);
+        }
+        if (req.planId != null) {
+            entry = dispense.requirePlan(req.planId);
+            boardName = entry.plan.boardName;
+        }
+    }
+
+    /** The top camera's frame (mm): the engine's, else the bench camera's for the estimate. */
+    private double[] fovMm() {
+        double[] f = svc.topCameraFovMm();
+        return f != null ? f : ESTIMATE_FOV_MM;
+    }
+
+    /** N2's head offset now differs from the one a value was set under (more than 0.001 mm); unknown now: no. */
+    static boolean moved(double[] now, Double x, Double y) {
+        return now != null && (x == null || y == null || Math.abs(now[0] - x) > 0.001 || Math.abs(now[1] - y) > 0.001);
+    }
+
     private CouponPlan coupon(DispenseConfig c, String place, int s) {
         CouponPlan k = new CouponPlan();
         k.place = place;
         int at = c.padCalibration.couponPlaces.indexOf(place);
         k.label = "Coupon " + (at + 1);
         k.steps = s;
-        double mg = Suggester.mgPerDot(evidence, s);
+        Double weighed = Suggester.mgPerDot(evidence, s, tip);
+        double mg = weighed != null ? weighed : countMgPerDot(s);
         k.dots = req.weighDots != null && manual != null ? WeighPlan.count(s, 1, req.weighDots)
                 : WeighPlan.count(s, mg, c.padCalibration.weighTargetMg);
-        k.expectedMg = k.dots * DoseModel.massMg(s);
+        k.expectedMg = k.dots * countMgPerDot(s);
         k.d95 = d95(s);
         k.pitch = PadLadder.pitch(hop(s), k.d95);
         k.rect = c.padCalibration.couponRect(c, place);
@@ -508,10 +640,38 @@ final class PadCalibrationJob {
         return Double.isNaN(h) ? DEFAULT_HOP_MM : h;
     }
 
-    /** The dot size the spacing uses: the measured d95, else the model's upper edge. */
+    /**
+     * The dot size the spacing uses: the measured d95, else the tip's upper edge (the bench model's for the 22G, its
+     * dot table's otherwise). A dose whose size the tip does not know is spaced for max(1.6 mm, OD + 0.4 mm) (§22.2):
+     * a dot that size less the ladder's edge gap, so the row's pitch is at least that.
+     */
     private double d95(int s) {
         DoseEvidence e = evidence.get(s);
-        return e != null && e.hasMeasuredDots() ? Math.max(e.d95Mm, DoseModel.dLoMm(s)) : DoseModel.dHiMm(s);
+        if (e != null && e.hasMeasuredDots()) {
+            return Math.max(e.d95Mm, tip.knowsSize(s) ? tip.dLoMm(s) : 0);
+        }
+        return tip.knowsSize(s) ? tip.dHiMm(s) : unknownSpacingMm() - PadLadder.ROW_EDGE_GAP_MM;
+    }
+
+    /** §22.2: the spacing of dots whose size the tip does not know, max(1.6 mm, OD + 0.4 mm). */
+    private double unknownSpacingMm() {
+        return Math.max(UNKNOWN_DOT_MM, tip.odMm + 0.4);
+    }
+
+    /** The mass of a dot as the job counts and expects it: the tip's, else the bench's (x 1.5 above a 0.41 mm bore). */
+    private double countMgPerDot(int s) {
+        return countMgPerDot(tip, s);
+    }
+
+    /**
+     * §22.2: the mass of a dot the tip knows, else the bench model's, x 1.5 when the bore is wider than the 22G's (a
+     * count and R7's demand, not a claim).
+     */
+    static double countMgPerDot(Tip tip, int s) {
+        if (tip.benchModel || tip.mgPerStep != null) {
+            return tip.massMg(s); // the bench's, or the weighed mass per step of this tip (any of its doses)
+        }
+        return DoseModel.massMg(s) * (tip.idMm > WIDE_BORE_MM + 1e-9 ? WIDE_BORE_MASS : 1);
     }
 
     private boolean massConfirmed(int s) {
@@ -650,7 +810,20 @@ final class PadCalibrationJob {
     }
 
     private void steps() {
-        boolean auto = manual == null;
+        if (MEASURE_LANDING.equals(measure)) {
+            step("blank");
+            step(LOCATOR);
+            step(ROW);
+            Step b = find("blank");
+            if (!blankNeeded) {
+                b.state = "skipped";
+                DispenseConfig.SurfaceMap m = area == null ? null : svc.getConfig().surface(area.surfaceName);
+                b.text = "blank surface probed" + (m != null && m.setAtMs != null ? " " + ZCheck.clock(m.setAtMs) : "")
+                        + " (still valid)";
+            }
+            return;
+        }
+        boolean auto = manual == null && measure == null;
         if (manual == null || LADDER.equals(manual)) {
             step("blank");
         }
@@ -716,11 +889,18 @@ final class PadCalibrationJob {
             k.estimateS = coupons.size() * COUPON_S;
         }
         Step l = find(LADDER);
-        double profileMg = DoseModel.massMg(c.profile.netStepsPerDot);
+        double profileMg = countMgPerDot(c.profile.netStepsPerDot);
+        if (MEASURE_LANDING.equals(measure)) {
+            // a locator dot, then 8 purge dots and the row of 8, each step imaged before and after
+            int frames = landingLayout == null ? 2 : Math.max(1, landingLayout.frames.size());
+            find(LOCATOR).estimateS = 4 + 2 * frames * CAPTURE_S;
+            find(ROW).estimateS = (PadLadder.LANDING_PURGE_DOTS + LandingFit.ROW_MM.length) * 1.2 + 2 * frames * CAPTURE_S;
+            pasteMg = (1 + PadLadder.LANDING_PURGE_DOTS + LandingFit.ROW_MM.length) * profileMg;
+        }
         if (l != null && layout != null) {
             l.estimateS = blockSeconds(c, layout.blocks);
             for (DoseBlocksRequest.Block x : layout.blocks) {
-                pasteMg += x.xy.size() * DoseModel.massMg(x.netSteps);
+                pasteMg += x.xy.size() * countMgPerDot(x.netSteps);
             }
             pasteMg += DoseBlocks.purgeSpotsNeeded(runsOf(layout.blocks), c, c.padCalibration.flushDots) * profileMg;
         }
@@ -742,6 +922,9 @@ final class PadCalibrationJob {
 
     /** The engine steps: the blank probe, each coupon's probe and look, the ladder, the weighing. */
     private int engineSteps() {
+        if (MEASURE_LANDING.equals(measure)) {
+            return 2 + (blankNeeded ? 1 : 0);
+        }
         int n = coupons.size() + (coupons.isEmpty() ? 0 : 1);
         if (find("blank") != null && blankNeeded) {
             n++;
@@ -789,10 +972,13 @@ final class PadCalibrationJob {
             return "a pad calibration is waiting for the readings of its coupons: type them, skip them or cancel it "
                     + "first (Calibrate › Pad calibration)";
         }
+        if (MEASURE_LANDING.equals(measure)) {
+            return landingRefusal(c);
+        }
         if (groups.isEmpty()) {
             return nothingToCalibrate(c);
         }
-        if (manual == null && req.save && req.checkIds) {
+        if (manual == null && measure == null && req.save && req.checkIds) {
             for (GroupPlan g : groups) {
                 String want = req.suggestionIds.get(g.group);
                 if (want == null || !want.equals(g.suggestionId)) {
@@ -868,6 +1054,44 @@ final class PadCalibrationJob {
                     : String.format(Locale.ROOT, "I9: only %d unused purge spot(s) left, %d needed: wipe the purge row "
                             + "and reset it", row.spotsLeft(), purgeNeed);
         }
+        // the landing rule (§22.3): before where the needle lands is checked, only prime, the test dot and the landing
+        // check dispense
+        String xy = svc.needleXyProblem();
+        if (xy != null) {
+            return "I4: " + xy;
+        }
+        InterlockReport basic = svc.checkBasicInterlocks(svc.homePlan().needed);
+        if (!basic.ok()) {
+            return basic.toString();
+        }
+        return null;
+    }
+
+    /** The landing check's refusals (§22.3): the regulator and the paste, its band of the area, the interlocks. */
+    private String landingRefusal(DispenseConfig c) {
+        if (!regulatorAttested(c)) {
+            return String.format(Locale.ROOT, "Read the regulator first: it must show %.1f psi (Run › Checks › "
+                    + "Regulator).", c.profile.pressurePsi);
+        }
+        long now = System.currentTimeMillis();
+        if (req.pasteLifeAtMs == null || now - req.pasteLifeAtMs > ATTEST_MS || req.pasteLifeAtMs > now + SKEW_MS) {
+            return "Confirm the paste is within its working life first (Run › Checks).";
+        }
+        if (area == null) {
+            return "Set the blank place first (Setup › Places › " + c.blankLocationName + "): the calibration area lies "
+                    + "on the blank.";
+        }
+        if (landingLayout.problem != null) {
+            return landingLayout.problem;
+        }
+        String overlap = overlap(c);
+        if (overlap != null) {
+            return "The calibration area overlaps " + overlap + ": move it (Calibrate › Pad calibration).";
+        }
+        if (blankNeeded && Double.isNaN(blankZ)) {
+            return "Set the blank place first (Setup › Places › " + c.blankLocationName + "): its Z is where N1 touches "
+                    + "the blank.";
+        }
         InterlockReport basic = svc.checkBasicInterlocks(svc.homePlan().needed);
         if (!basic.ok()) {
             return basic.toString();
@@ -876,6 +1100,9 @@ final class PadCalibrationJob {
     }
 
     private String nothingToCalibrate(DispenseConfig c) {
+        if (MEASURE_TIP.equals(measure)) {
+            return "Nothing to measure: the " + c.tip.name + " takes no dot at this recipe.";
+        }
         boolean use = false;
         for (Map<String, Object> s : skipped) {
             use |= String.valueOf(s.get("why")).startsWith("a pad type of this size");
@@ -909,7 +1136,69 @@ final class PadCalibrationJob {
                 return "the weigh coupon place " + p;
             }
         }
-        return overPads(x0, y0, x1, y1);
+        String pads = overPads(x0, y0, x1, y1);
+        return pads != null ? pads : overJobBoards(x0, y0, x1, y1);
+    }
+
+    /**
+     * §22.3: "the board {name} of OpenPnP's job (3 mm around it)" when the box meets the outline of a board of the job
+     * open in OpenPnP + 3 mm, with or without a plan; else null (also when no job is open).
+     */
+    private static String overJobBoards(double x0, double y0, double x1, double y1) {
+        List<Object[]> boards;
+        try {
+            boards = org.openpnp.instancelabs.board.EdtRunner.call(PadCalibrationJob::jobBoardBoxes,
+                    DispenseEndpoints.EDT_START_MS);
+        }
+        catch (Exception e) {
+            return null; // OpenPnP's thread did not answer: the plan's pads were checked above
+        }
+        for (Object[] b : boards) {
+            double[] r = (double[]) b[1];
+            if (distance(x0, y0, x1, y1, r[0] - 3, r[1] - 3, r[2] + 3, r[3] + 3) <= 0) {
+                return "the board " + b[0] + " of OpenPnP's job (3 mm around it)";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The outline boxes {name, {x0, y0, x1, y1}} of the enabled boards of the job open in OpenPnP (machine mm), as
+     * wide as the board's dimensions turned by its rotation on either side; boards without dimensions are left out.
+     */
+    static List<Object[]> jobBoardBoxes() {
+        List<Object[]> l = new ArrayList<>();
+        org.openpnp.model.Job j = DispenseEndpoints.currentJob();
+        if (j == null) {
+            return l;
+        }
+        for (org.openpnp.model.BoardLocation bl : j.getBoardLocations()) {
+            org.openpnp.model.Board b = bl.getBoard();
+            if (!bl.isEnabled() || b == null || b.getDimensions() == null) {
+                continue;
+            }
+            org.openpnp.model.Location at = bl.getGlobalLocation().convertToUnits(
+                    org.openpnp.model.LengthUnit.Millimeters);
+            org.openpnp.model.Location d = b.getDimensions().convertToUnits(org.openpnp.model.LengthUnit.Millimeters);
+            if (!(d.getX() > 0) || !(d.getY() > 0)) {
+                continue;
+            }
+            double a = Math.toRadians(at.getRotation());
+            double ca = Math.cos(a), sa = Math.sin(a);
+            double[] box = {Double.MAX_VALUE, Double.MAX_VALUE, -Double.MAX_VALUE, -Double.MAX_VALUE};
+            for (int side : new int[] {1, -1}) {
+                for (double[] p : new double[][] {{0, 0}, {d.getX(), 0}, {0, d.getY()}, {d.getX(), d.getY()}}) {
+                    double x = side * p[0], y = p[1];
+                    double gx = at.getX() + x * ca - y * sa, gy = at.getY() + x * sa + y * ca;
+                    box[0] = Math.min(box[0], gx);
+                    box[1] = Math.min(box[1], gy);
+                    box[2] = Math.max(box[2], gx);
+                    box[3] = Math.max(box[3], gy);
+                }
+            }
+            l.add(new Object[] {b.getName(), box});
+        }
+        return l;
     }
 
     /**
@@ -1003,6 +1292,11 @@ final class PadCalibrationJob {
                 done("blank", String.format(Locale.ROOT, "blank surface probed: %d points, Z %.3f..%.3f",
                         res.points.size(), res.plane.minZ, res.plane.maxZ));
             }
+            if (MEASURE_LANDING.equals(measure)) {
+                runLanding(c);
+                end(DONE, null);
+                return;
+            }
             if (!coupons.isEmpty()) {
                 begin("coupons");
                 for (CouponPlan k : coupons) {
@@ -1018,9 +1312,10 @@ final class PadCalibrationJob {
                 r.blocks.addAll(layout.blocks);
                 r.areaReserveMm = layout.reservedMm;
                 r.parkAfter = coupons.isEmpty();
-                r.stopEpoch = startEpoch;
+                stamp(r);
                 DoseBlocksResult res = engine(() -> engine.runDoseBlocks(r), x -> x.run, x -> x.ok, x -> x.message);
                 results.add(res);
+                storePhotos(res);
                 List<DoseRecord> written = records(res, DoseRecord.OPTICAL);
                 control(c, written);
                 done(LADDER, ladderWords(res));
@@ -1034,9 +1329,10 @@ final class PadCalibrationJob {
                 DoseBlocksRequest r = new DoseBlocksRequest();
                 r.kind = DoseBlocksRequest.WEIGH;
                 r.blocks.addAll(weighBlocks(c));
-                r.stopEpoch = startEpoch;
+                stamp(r);
                 DoseBlocksResult res = engine(() -> engine.runDoseBlocks(r), x -> x.run, x -> x.ok, x -> x.message);
                 results.add(res);
+                storePhotos(res);
                 List<DoseRecord> written = records(res, DoseRecord.COUPON);
                 synchronized (lock) {
                     for (int i = 0; i < written.size() && i < coupons.size(); i++) {
@@ -1089,6 +1385,10 @@ final class PadCalibrationJob {
                 stopRequested = true;
                 stopReason = STOPPED_SINCE_START;
             }
+            String changed = stopRequested ? null : tipOrNeedleChanged();
+            if (changed != null) {
+                haltForTip(changed);
+            }
             if (stopRequested) {
                 throw new Halt(stopReason);
             }
@@ -1118,9 +1418,271 @@ final class PadCalibrationJob {
             throw new Halt(stopReason != null ? stopReason : message.apply(res));
         }
         if (!ok.test(res)) {
+            // the machine thread refuses a step of another setup or needle (§22.3): the job stops, nothing is saved
+            String changed = tipOrNeedleChanged();
+            if (changed != null) {
+                synchronized (lock) {
+                    haltForTip(changed);
+                }
+            }
             throw new IllegalStateException(message.apply(res));
         }
         return res;
+    }
+
+    /** The job's setup and needle on a dose-blocks step (§22.3) and the stop epoch of its start. */
+    private void stamp(DoseBlocksRequest r) {
+        r.stopEpoch = startEpoch;
+        r.forTip = setupKey;
+        r.needleSinceMs = needleSinceMs;
+    }
+
+    /**
+     * §22.3: the text when another setup was mounted or the needle was changed since the job started ("The tip changed
+     * during the calibration (the 25G straight was mounted at 14:07): nothing was saved."), else null.
+     */
+    String tipOrNeedleChanged() {
+        DispenseConfig c = svc.getConfig();
+        if (setupKey != null && !setupKey.equals(c.tip.key)) {
+            Long at = null;
+            try {
+                at = TipSetupEndpoints.mountedAtMs(svc.getDb(), c.tip.key);
+            }
+            catch (Exception e) {
+                at = null; // the text without the time
+            }
+            return "The tip changed during the calibration (the " + c.tip.name + " was mounted"
+                    + (at == null ? "" : " at " + ZCheck.clock(at)) + "): nothing was saved.";
+        }
+        if (setupKey != null && !java.util.Objects.equals(needleSinceMs, c.needleChangedAtMs)) {
+            return needleChangedDuring(c.needleChangedAtMs == null ? System.currentTimeMillis() : c.needleChangedAtMs);
+        }
+        return null;
+    }
+
+    /** "The needle was changed at {HH:MM} during the calibration: nothing was saved." (§22.3) */
+    static String needleChangedDuring(long atMs) {
+        return "The needle was changed at " + ZCheck.clock(atMs) + " during the calibration: nothing was saved.";
+    }
+
+    /** Under the lock: the job halts at once with the tip's or the needle's words (its result's sentence). */
+    private void haltForTip(String why) throws Halt {
+        stopRequested = true;
+        stopReason = why;
+        tipHalt = why;
+        throw new Halt(why);
+    }
+
+    /** The step's result photos stored with the job (§22.4); a picture that cannot be stored is a warning. */
+    private void storePhotos(DoseBlocksResult res) {
+        if (res == null || res.photos.isEmpty()) {
+            return;
+        }
+        try {
+            photos.addAll(svc.storeResultPhotos(id, res));
+        }
+        catch (Exception e) {
+            warnings.add("the result photos of the " + stepWords() + " step were not stored: "
+                    + MachineEndpoints.rootMessage(e));
+        }
+    }
+
+    /**
+     * Check where it lands (§22.3): the locator dot at the band's centre (the engine moves it by minus E + trim, as every
+     * dot), its new blob within ±R gives the coarse shift C; then the purge and the row of 8 moved by minus C, fitted:
+     * T = E + trim + C + residual, saved when the fit holds (or asked about when the setup's own landing lies more than
+     * 1.0 mm from it). Nothing is saved without a locator dot or a fit.
+     */
+    private void runLanding(DispenseConfig c) throws Exception {
+        int steps = c.profile.netStepsPerDot;
+        String surface = landingArea.surfaceName;
+        LandingResult lr = new LandingResult();
+        lr.jobId = id;
+        lr.setupKey = setupKey;
+        lr.needleSinceMs = needleSinceMs;
+        lr.searchMm = searchMm;
+        lr.expected = expected.clone();
+        lr.headOffset = svc.headOffsetNow();
+        begin(LOCATOR);
+        DoseBlocksRequest r = landingRequest();
+        DoseBlocksRequest.Block b = new DoseBlocksRequest.Block(steps, "locator", surface);
+        b.xy.add(landingLayout.locator.clone());
+        b.hopMm = DEFAULT_HOP_MM;
+        b.matchRadiusMm = searchMm;
+        r.blocks.add(b);
+        r.lookXy = looks(b.xy);
+        r.purgeXy = new ArrayList<>(); // the needle was primed until paste came out: no purge before the locator
+        r.areaReserveMm = landingLayout.reservedMm; // the whole band, as a ladder reserves its rows
+        DoseBlocksResult res = engine(() -> engine.runDoseBlocks(r), x -> x.run, x -> x.ok, x -> x.message);
+        results.add(res);
+        storePhotos(res);
+        List<double[]> blobs = blobs(res);
+        double[] coarse = LandingFit.locate(blobs, landingLayout.locator, searchMm);
+        if (coarse == null) {
+            lr.found = blobs.size();
+            landing = lr;
+            landingText = noLocatorText(c);
+            done(LOCATOR, "no dot found within ±" + Texts.num(searchMm, 0) + " mm");
+            skip(ROW, "no locator dot: nothing more was laid");
+            landingEvent(lr, landingText);
+            return;
+        }
+        lr.coarse = coarse;
+        done(LOCATOR, String.format(Locale.ROOT, "the locator dot landed %s, %s mm from its spot", Views.signed(coarse[0]),
+                Views.signed(coarse[1])));
+        begin(ROW);
+        double[] fov = fovMm();
+        PadLadder.LandingLayout l = PadLadder.landingLayout(landingArea, searchMm, d95(steps), fov, coarse);
+        if (l.problem != null) {
+            landing = lr;
+            landingText = l.problem;
+            skip(ROW, l.problem);
+            landingEvent(lr, landingText);
+            return;
+        }
+        DoseBlocksRequest r2 = landingRequest();
+        DoseBlocksRequest.Block row = new DoseBlocksRequest.Block(steps, "landing row", surface);
+        row.xy.addAll(shifted(l.row, coarse));
+        row.hopMm = LandingFit.ROW_MM[1];
+        row.matchRadiusMm = LandingFit.MATCH_MM + LandingFit.RESIDUAL_MAX_MM;
+        r2.blocks.add(row);
+        r2.lookXy = looks(row.xy);
+        r2.purgeXy = shifted(l.purge, coarse);
+        DoseBlocksResult res2 = engine(() -> engine.runDoseBlocks(r2), x -> x.run, x -> x.ok, x -> x.message);
+        results.add(res2);
+        List<Photo> stored = new ArrayList<>(photos);
+        storePhotos(res2);
+        for (Photo p : photos) {
+            if (!stored.contains(p) && lr.photoId == null) {
+                lr.photoId = p.id;
+            }
+        }
+        List<double[]> rowBlobs = blobs(res2);
+        LandingFit.Fit fit = LandingFit.fit(l.row, rowBlobs);
+        double[] trim = {c.needleXyTrim.dxMm, c.needleXyTrim.dyMm};
+        lr.found = rowBlobs.size();
+        lr.residual = new double[] {fit.dxMm, fit.dyMm};
+        lr.n = fit.matched;
+        lr.sdMm = fit.scatterMm;
+        lr.pairs = fit.pairs;
+        lr.dxMm = expected[0] + trim[0] + coarse[0] + fit.dxMm;
+        lr.dyMm = expected[1] + trim[1] + coarse[1] + fit.dyMm;
+        if (!fit.ok) {
+            landing = lr;
+            landingText = fit.matched >= LandingFit.MIN_MATCHES && fit.nextBest <= LandingFit.MAX_NEXT_BEST
+                    ? String.format(Locale.ROOT, "The dots scatter %.2f mm around their spots (at most %.2f mm): check "
+                            + "that the needle is on straight and tight, then check again. Look at the result photo.",
+                            fit.scatterMm, LandingFit.SCATTER_MAX_MM)
+                    : "Not enough dots near their spots (" + fit.matched + " of " + LandingFit.ROW_MM.length + "): check "
+                            + "that the needle is on straight, then check again. Look at the result photo.";
+            done(ROW, landingText);
+            landingEvent(lr, landingText);
+            return;
+        }
+        // a measurement, applied as the touch-off applies its own; the engine asks instead when it moved more than 1 mm
+        try {
+            svc.setLanding(lr, false, needleSinceMs);
+        }
+        catch (EngineRefusal e) {
+            String changed = tipOrNeedleChanged();
+            if (changed == null) {
+                throw e;
+            }
+            synchronized (lock) {
+                haltForTip(changed);
+            }
+        }
+        landing = lr;
+        landingText = lr.text;
+        done(ROW, lr.saved ? "saved" : "not saved: asked whether the " + setupName + " is on");
+    }
+
+    /** A step of the landing check: every new blob kept, the job's setup and needle. */
+    private DoseBlocksRequest landingRequest() {
+        DoseBlocksRequest r = new DoseBlocksRequest();
+        r.kind = DoseBlocksRequest.LADDER;
+        r.landingCheck = true;
+        r.parkAfter = false;
+        stamp(r);
+        return r;
+    }
+
+    /**
+     * The frames a landing check's step looks through: the band's (the new blobs anywhere in it), and one more centred
+     * on each spot that no band frame holds {@link PadLadder#TILE_INSET_MM} inside: the band's frames meet at their
+     * edges, and the bare check before a dot needs its ring inside the frame.
+     */
+    private List<double[]> looks(List<double[]> spots) {
+        double[] fov = fovMm();
+        List<double[]> l = new ArrayList<>();
+        for (double[] f : landingLayout.frames) {
+            l.add(f.clone());
+        }
+        for (double[] p : spots) {
+            boolean held = false;
+            for (double[] f : l) {
+                held |= Math.abs(p[0] - f[0]) <= fov[0] / 2 - PadLadder.TILE_INSET_MM
+                        && Math.abs(p[1] - f[1]) <= fov[1] / 2 - PadLadder.TILE_INSET_MM;
+            }
+            if (!held) {
+                l.add(p.clone());
+            }
+        }
+        return l;
+    }
+
+    /** Spots moved by minus the coarse shift, so the dots land on them (§22.3). */
+    private static List<double[]> shifted(List<double[]> spots, double[] coarse) {
+        List<double[]> l = new ArrayList<>();
+        for (double[] p : spots) {
+            l.add(new double[] {p[0] - coarse[0], p[1] - coarse[1]});
+        }
+        return l;
+    }
+
+    /** The new blobs of a step as LandingFit takes them: {x, y, areaMm2}. */
+    private static List<double[]> blobs(DoseBlocksResult res) {
+        List<double[]> l = new ArrayList<>();
+        for (DoseBlocksResult.Blob b : res.newBlobs) {
+            l.add(new double[] {b.x, b.y, b.areaMm2});
+        }
+        return l;
+    }
+
+    /** §22.3's text when the locator found nothing within ±R. */
+    private String noLocatorText(DispenseConfig c) {
+        String fix;
+        if (TipSetup.FORM_BENT.equals(c.tip.form)) {
+            String dir = TipSetupEndpoints.direction(c.tip.bendToward);
+            fix = dir == null ? "point the bend the way it points in its picture" : "point the bend toward " + dir
+                    + ", as in its picture";
+        }
+        else {
+            fix = "check that the needle is on straight";
+        }
+        return "No dot found within ±" + Texts.num(searchMm, 0) + " mm of where the " + c.tip.name + " should land: is "
+                + "paste coming out (Prime until it does)? If it is, the needle lands farther off: " + fix
+                + (searchMm < LandingFit.SEARCH_WIDE_MM - 1e-9 ? "; or search ±" + Texts.num(LandingFit.SEARCH_WIDE_MM, 0)
+                        + " mm." : ".");
+    }
+
+    /** A TIP event of a landing check that saved nothing: what it found and why (§22.3). */
+    private void landingEvent(LandingResult lr, String why) {
+        try {
+            svc.getDb().event(null, "WARN", DispenseService.TIP_EVENT, "landing check " + id + " of the " + setupName
+                    + " saved nothing: " + why + " " + new Gson().toJson(lr));
+        }
+        catch (Exception e) {
+            Logger.warn(e, "pad calibration {}: the landing event was not written", id);
+        }
+    }
+
+    private void skip(String key, String text) {
+        Step s = find(key);
+        if (s != null) {
+            s.state = "skipped";
+            s.text = text;
+        }
     }
 
     /** At most this long a step waits for OpenPnP's machine thread to be idle (its own Home or jog). */
@@ -1178,6 +1740,7 @@ final class PadCalibrationJob {
             DoseRecord r = DoseRecords.fromBlock(b, kind, set);
             conditions(r, c);
             r.method = manual != null ? "manual" : "auto";
+            r.tipKey = res.setupKey != null ? res.setupKey : r.tipKey; // the setup the step ran with (§22.3)
             r.runUuid = res.run.runId;
             r.notes = b.label;
             r = svc.getDb().insertDoseRecord(r);
@@ -1209,7 +1772,7 @@ final class PadCalibrationJob {
     private void conditions(DoseRecord r, DispenseConfig c) {
         r.pressurePsi = c.profile.pressurePsi;
         r.doseFp = c.profile.doseFingerprint();
-        r.tipKey = c.tip.key;
+        r.tipKey = setupKey != null ? setupKey : c.tip.key;
         r.pasteKey = c.paste.key;
         r.regulatorPsi = req.regulatorPsi;
         r.regulatorAtMs = req.regulatorAtMs;
@@ -1248,16 +1811,29 @@ final class PadCalibrationJob {
         Double earlier = null;
         long now = System.currentTimeMillis();
         DoseRecord.Epochs ep = epochs();
-        for (DoseRecord r : svc.getDb().doseRecords(s, now - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3))) {
-            if (r.id != mine.id && !id.equals(r.jobId) && DoseRecord.OPTICAL.equals(r.kind)
-                    && Boolean.TRUE.equals(r.pass) && r.isFresh(now, c, ep)) {
-                earlier = DoseRecords.medianArea(r);
+        if (tip.benchModel) {
+            for (DoseRecord r : svc.getDb().doseRecords(s, now - (long) (c.padCalibration.doseRecordMaxAgeH
+                    * 3600e3))) {
+                if (r.id != mine.id && !id.equals(r.jobId) && DoseRecord.OPTICAL.equals(r.kind)
+                        && Boolean.TRUE.equals(r.pass) && r.isFresh(now, c, ep)) {
+                    earlier = DoseRecords.medianArea(r);
+                }
             }
         }
+        else {
+            earlier = tableArea(s); // §22.2: the setup's own dot table, any age, without the bench
+        }
         LadderStats.Check k = LadderStats.control(s, controlMedianMm2, earlier, c.profile.pressurePsi,
-                DoseRecords.settings(c.padCalibration));
+                DoseRecords.settings(c.padCalibration), tip);
         controlPass = k.ok;
         controlText = k.text;
+    }
+
+    /** The median dot area of the record the tip's dot table holds for a dose (as the job started), or null. */
+    private Double tableArea(int s) throws Exception {
+        Tip.Measured m = tip.benchModel || tip.measured == null ? null : tip.measured.get(s);
+        DoseRecord r = m == null ? null : svc.getDb().doseRecord(m.recordId);
+        return r == null ? null : DoseRecords.medianArea(r);
     }
 
     private DoseRecord.Epochs epochs() {
@@ -1271,7 +1847,7 @@ final class PadCalibrationJob {
      * (or not fit at all) weighs its planned dose, and the new one waits for another calibration.
      */
     private void reweigh(DispenseConfig c) throws Exception {
-        if (manual != null || coupons.isEmpty()) {
+        if (manual != null || measure != null || coupons.isEmpty()) {
             return;
         }
         evidence = currentEvidence();
@@ -1472,12 +2048,30 @@ final class PadCalibrationJob {
         }
         double mg = (fullG - emptyG) * 1000;
         int found = coupon.found != null && coupon.found > 0 ? coupon.found : coupon.n;
-        double expected = found * DoseModel.massMg(coupon.steps);
-        if (!LadderStats.plausible(mg, found, DoseModel.massMg(coupon.steps))) {
+        Tip tip = mountedTip(svc);
+        double perDot = countMgPerDot(tip, coupon.steps);
+        double expected = found * perDot;
+        // §22.2: a tip never weighed at this recipe is counted with the bench's mass: plausible at 0.1 to 10 times it
+        boolean plausible = tip.benchModel || tip.mgPerStep != null ? LadderStats.plausible(mg, found, perDot)
+                : mg >= 0.1 * expected && mg <= 10 * expected;
+        if (!plausible) {
             throw new ApiException(409, "implausible", String.format(Locale.ROOT, "You typed %.3f g − %.3f g = %.0f mg; "
                     + "about %.0f mg was expected for %d %s dots. Check the unit and that the wiped coupon was weighed "
                     + "second, then save again to keep it.", fullG, emptyG, mg, expected, found,
                     DoseModel.turnName(coupon.steps))).with("coupon", coupon.couponPlace);
+        }
+    }
+
+    /** The mounted tip with its dot table; the configuration's tip without one when the records cannot be read. */
+    static Tip mountedTip(DispenseService svc) {
+        try {
+            return svc.mountedTip();
+        }
+        catch (java.sql.SQLException e) {
+            DispenseConfig c = svc.getConfig();
+            Tip t = new Tip(c.tip.key, c.tip.name, c.tip.idMm, c.tip.odMm, c.tip.minDotSteps);
+            t.benchModel = TipSetup.MODEL_BENCH.equals(c.tip.model);
+            return t;
         }
     }
 
@@ -1566,7 +2160,7 @@ final class PadCalibrationJob {
 
     /** Steps 6 and 7 (§7.6, §7.7): decide every group on the pooled fresh records, write, plan again. */
     private void finish() throws Exception {
-        if (manual != null) {
+        if (manual != null || measure != null) {
             evidence = currentEvidence();
             Step r = find("readings");
             if (r != null && "now".equals(r.state)) {
@@ -1579,6 +2173,10 @@ final class PadCalibrationJob {
             if (stopRequested) {
                 throw new Halt(stopReason);
             }
+            String changed = tipOrNeedleChanged();
+            if (changed != null) {
+                haltForTip(changed); // nothing is written for another setup or needle (§22.3)
+            }
             state = DECIDING;
         }
         begin("decide");
@@ -1589,7 +2187,18 @@ final class PadCalibrationJob {
         }
         int characterized = 0;
         for (GroupPlan g : groups) {
-            write(c, g);
+            try {
+                write(c, g);
+            }
+            catch (EngineRefusal e) {
+                // a mount or a needle change since the start (the engine checks it under its lock, §22.3)
+                if (!"tip-changed".equals(e.code) && !"needle-changed".equals(e.code)) {
+                    throw e;
+                }
+                synchronized (lock) {
+                    haltForTip(e.getMessage());
+                }
+            }
             characterized += PadCalibrationRecord.CHARACTERIZED.equals(g.outcome) ? 1 : 0;
         }
         done("decide", characterized + " of " + groups.size() + " characterized");
@@ -1646,8 +2255,8 @@ final class PadCalibrationJob {
             return;
         }
         controlMedianMm2 = m;
-        LadderStats.Check k = LadderStats.control(s, m, null, c.profile.pressurePsi,
-                DoseRecords.settings(c.padCalibration));
+        LadderStats.Check k = LadderStats.control(s, m, tip.benchModel ? null : tableArea(s), c.profile.pressurePsi,
+                DoseRecords.settings(c.padCalibration), tip);
         controlPass = k.ok;
         controlText = k.text;
     }
@@ -1689,11 +2298,14 @@ final class PadCalibrationJob {
     private void write(DispenseConfig c, GroupPlan g) throws Exception {
         Decider.Decision d = decide(g, false);
         g.decision = d;
-        PadType cur = g.typeKey == null ? null : svc.getDb().currentPadType(g.typeKey);
+        PadType cur = g.typeKey == null ? null : svc.getDb().currentPadType(g.typeKey, setupKey);
         PadCalibrationRecord rec = new PadCalibrationRecord();
         rec.jobId = id;
         rec.typeKey = g.typeKey != null ? g.typeKey : g.group;
-        rec.versionFrom = cur == null ? null : cur.version;
+        // a stand-in (no version of this setup yet) was calibrated from nothing (§22.2)
+        rec.versionFrom = cur == null || cur.standIn ? null : cur.version;
+        rec.setupKey = setupKey;
+        rec.needleSinceMs = needleSinceMs;
         rec.runs = new ArrayList<>(runs);
         rec.simulated = svc.isSimulatorConfirmed();
         rec.operator = req.operator;
@@ -1720,7 +2332,7 @@ final class PadCalibrationJob {
         }
         long now = System.currentTimeMillis();
         List<DoseRecord> fresh = DoseRecords.fresh(svc.getDb().doseRecords(null, now
-                - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3)), c, epochs(), now);
+                - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3)), c, epochs(), now, svc.getDb().flaggedJobs());
         rec.evidence = DoseRecords.ids(fresh, d.steps);
         String turn = DoseModel.turnName(d.steps);
         String dots = Texts.plural(d.perPad, turn + " dot", turn + " dots");
@@ -1768,10 +2380,10 @@ final class PadCalibrationJob {
         g.record = svc.applyPadCalibration(rec, v);
     }
 
-    private static void plan(PadType v, Decider.Decision d, DispenseConfig c, GroupPlan g) {
+    private void plan(PadType v, Decider.Decision d, DispenseConfig c, GroupPlan g) {
         v.dotSteps = d.steps;
         v.dotsPerPad = d.perPad;
-        v.tipKey = c.tip.key;
+        v.tipKey = setupKey;
         v.calAreaMm2 = g.areaMm2 > 0 ? g.areaMm2 : v.calAreaMm2;
     }
 
@@ -1815,6 +2427,60 @@ final class PadCalibrationJob {
     }
 
     /**
+     * A needle change is about to be recorded (§22.3): a job that runs, decides or plans stops at its next engine step
+     * (the change aborts the one that runs) with the needle's words as its result, nothing saved.
+     */
+    void needleChanging(long atMs) {
+        synchronized (lock) {
+            if (ended() || AWAITING.equals(state)) {
+                return;
+            }
+            tipHalt = needleChangedDuring(atMs);
+            stopRequested = true;
+            stopReason = tipHalt;
+        }
+    }
+
+    /**
+     * A needle change was recorded (§22.3): a job waiting for the readings of its coupons ends stopped (the engine wrote
+     * their skip rows: their dots were laid by the needle that came off). A job between its engine steps was stopped
+     * before the change ({@link PadCalibrationJobs#needleChanging}).
+     */
+    void needleChanged(NeedleChange nc) {
+        synchronized (lock) {
+            if (ended() || !AWAITING.equals(state)) {
+                return;
+            }
+            List<String> places = new ArrayList<>();
+            for (CouponPlan k : coupons) {
+                if (k.record != null && k.mass == null) {
+                    places.add(k.place);
+                }
+            }
+            voidedBy = nc;
+            stopRequested = true;
+            String why = "The needle was changed at " + ZCheck.clock(nc.atMs) + ": the dots on "
+                    + (places.isEmpty() ? "the coupons" : String.join(" and ", places)) + " no longer count. Wipe "
+                    + (places.size() == 1 ? "it" : "them") + "; the types stay as they were.";
+            stopReason = why;
+            tipHalt = why;
+            end(STOPPED, why);
+        }
+    }
+
+    /** The operator saved the landing the check asked about (POST /api/needle/landing {jobId, accept}). */
+    void landingAccepted(DispenseConfig.NeedleLanding l) {
+        synchronized (lock) {
+            landingText = landing == null ? null : landing.text;
+            if (result != null) {
+                result.put("landing", landingView());
+                result.put("sentence", landingText);
+                result.put("outcome", "measured");
+            }
+        }
+    }
+
+    /**
      * Ends the job FAILED, which releases its lock. An Error (a bug, out of memory) fails it as an exception does,
      * logged with its stack, and named in plain words.
      */
@@ -1852,12 +2518,14 @@ final class PadCalibrationJob {
         try {
             svc.getDb().event(null, DONE.equals(outcome) ? "INFO" : "WARN", "PCAL", new Gson().toJson(Views.map("job",
                     id, "state", outcome, "sentence", result.get("sentence"))));
-            if (manual == null && !DONE.equals(outcome)) {
+            if (manual == null && measure == null && !DONE.equals(outcome)) {
                 for (GroupPlan g : groups) {
                     if (g.record == null && g.typeKey != null) {
                         PadCalibrationRecord rec = new PadCalibrationRecord();
                         rec.jobId = id;
                         rec.typeKey = g.typeKey;
+                        rec.setupKey = setupKey;
+                        rec.needleSinceMs = needleSinceMs;
                         rec.outcome = FAILED.equals(outcome) ? PadCalibrationRecord.FAILED
                                 : CANCELLED.equals(outcome) ? PadCalibrationRecord.CANCELLED
                                         : PadCalibrationRecord.STOPPED;
@@ -1979,7 +2647,19 @@ final class PadCalibrationJob {
         m.put("steps", st);
         m.put("estimatedSeconds", Math.round(estimatedSeconds));
         m.put("pasteMg", Math.round(pasteMg));
-        if (layout != null) {
+        m.put("measure", measure);
+        m.put("forTip", setupKey);
+        m.put("tipName", setupName);
+        m.put("landing", landingPreview());
+        if (MEASURE_LANDING.equals(measure) && landingLayout != null && landingLayout.problem == null) {
+            double left = area.leftMm();
+            m.put("blank", Views.map("surfaceName", area.surfaceName, "x0", r1(landingLayout.x0), "x1",
+                    r1(landingLayout.x1), "y0", r1(landingLayout.y0), "y1", r1(landingLayout.y1), "usesMm",
+                    r1(landingLayout.reservedMm), "leftMm", r1(left), "leftAfterMm", r1(Math.max(0, left
+                            - landingLayout.reservedMm)), "heightMm", r1(area.heightMm()), "probe", blankNeeded,
+                    "probeWhy", blankWhy));
+        }
+        else if (layout != null) {
             double left = area.leftMm();
             m.put("blank", Views.map("surfaceName", area.surfaceName, "x0", r1(layout.x0), "x1", r1(layout.x1), "y0",
                     r1(layout.y0), "y1", r1(layout.y1), "usesMm", r1(layout.reservedMm), "leftMm", r1(left),
@@ -2010,7 +2690,7 @@ final class PadCalibrationJob {
         m.put("zCheck", Views.map("needed", zCheck.needed, "estimateS", zCheck.needed
                 ? DispenseService.PROBE_POINT_ESTIMATE_S : 0));
         List<Map<String, Object>> probes = new ArrayList<>();
-        for (double[] p : blankTargets) {
+        for (double[] p : area == null ? new ArrayList<double[]>() : blankTargets) {
             probes.add(Views.map("surface", area.surfaceName, "x", r2(p[0]), "y", r2(p[1])));
         }
         for (CouponPlan k : coupons) {
@@ -2046,6 +2726,19 @@ final class PadCalibrationJob {
         m.put("refusal", refusal);
         m.put("refusalCode", refusal == null ? null : refusalCode);
         return m;
+    }
+
+    /** The landing check's band and search (§22.6 preview: the band and R), or null for the other jobs. */
+    private Map<String, Object> landingPreview() {
+        if (!MEASURE_LANDING.equals(measure)) {
+            return null;
+        }
+        PadLadder.LandingLayout l = landingLayout;
+        boolean fits = l != null && l.problem == null;
+        return Views.map("searchMm", searchMm, "wide", req.wide, "expected", expected == null ? null
+                : new double[] {r3(expected[0]), r3(expected[1])}, "bandMm", l == null ? null : r1(l.reservedMm),
+                "band", fits ? Views.map("x0", r1(l.x0), "x1", r1(l.x1), "y0", r1(l.y0), "y1", r1(l.y1)) : null,
+                "frames", fits ? l.frames.size() : null, "problem", l == null ? null : l.problem);
     }
 
     private List<String> needsWords(DispenseConfig c) {
@@ -2088,6 +2781,18 @@ final class PadCalibrationJob {
         Step b = find("blank");
         if (b != null && blankNeeded) {
             s.add("Probes the blank with N1 (" + blankTargets.size() + " points, ≈ " + minSec(b.estimateS) + ").");
+        }
+        if (MEASURE_LANDING.equals(measure)) {
+            PadLadder.LandingLayout l = landingLayout;
+            if (l == null || l.problem != null || area == null) {
+                return String.join(" ", s);
+            }
+            s.add(String.format(Locale.ROOT, "Lays one dot, then %d purge dots and %d dots in a row on the blank (X "
+                    + "%.1f–%.1f, Y %.1f–%.1f), looks at them, and saves where the needle lands. Uses %s mm of the "
+                    + "calibration area (%s left). Searches ±%s mm.", PadLadder.LANDING_PURGE_DOTS,
+                    LandingFit.ROW_MM.length, l.x0, l.x1, l.y0, l.y1, Texts.num(l.reservedMm, 0),
+                    Texts.num(area.leftMm(), 1), Texts.num(searchMm, 0)));
+            return String.join(" ", s);
         }
         Step k = find("coupons");
         if (k != null) {
@@ -2178,6 +2883,10 @@ final class PadCalibrationJob {
         m.put("state", state);
         m.put("step", step);
         m.put("manual", manual);
+        m.put("measure", measure);
+        m.put("forTip", setupKey);
+        m.put("tipName", setupName);
+        m.put("needleSinceMs", needleSinceMs);
         m.put("startedAtMs", startedAtMs);
         m.put("endedAtMs", endedAtMs == 0 ? null : endedAtMs);
         m.put("planId", entry == null ? null : entry.plan.planId);
@@ -2208,7 +2917,7 @@ final class PadCalibrationJob {
                     int found = k.record.found == null ? k.record.n : k.record.found;
                     cs.add(Views.map("place", k.place, "label", k.label, "steps", k.steps, "turn", DoseModel.turnNoun(
                             k.steps), "dots", k.record.n, "found", found, "expectedMg", Math.round(found
-                                    * DoseModel.massMg(k.steps)), "recordId", k.record.id, "laidAtMs",
+                                    * countMgPerDot(k.steps)), "recordId", k.record.id, "laidAtMs",
                             k.record.createdAtMs, "crop", couponCrop(i)));
                     laid = Math.max(laid, k.record.createdAtMs);
                 }
@@ -2238,7 +2947,7 @@ final class PadCalibrationJob {
             if (k.record != null) {
                 int found = k.record.found == null ? k.record.n : k.record.found;
                 per.add(String.format(Locale.ROOT, "%s has %d %s dots (about %.3f g)", k.label, k.record.n,
-                        DoseModel.turnName(k.steps), found * DoseModel.massMg(k.steps) / 1000));
+                        DoseModel.turnName(k.steps), found * countMgPerDot(k.steps) / 1000));
             }
         }
         return "The dots are laid and the head is parked over the purge row. For each coupon: put it on the balance "
@@ -2321,7 +3030,16 @@ final class PadCalibrationJob {
         String clock = ZCheck.clock(System.currentTimeMillis());
         String sentence;
         String kind;
-        if (DONE.equals(outcome) && manual == null) {
+        if (DONE.equals(outcome) && MEASURE_LANDING.equals(measure)) {
+            LandingResult l = landing;
+            kind = l != null && l.saved ? "measured" : l != null && l.question != null ? "question" : "not-found";
+            sentence = landingText != null ? landingText : "Checked " + clock + ": nothing found.";
+        }
+        else if (DONE.equals(outcome) && MEASURE_TIP.equals(measure)) {
+            kind = "measured";
+            sentence = tipSentence(clock);
+        }
+        else if (DONE.equals(outcome) && manual == null) {
             List<String> ok = new ArrayList<>();
             List<String> not = new ArrayList<>();
             for (GroupPlan g : groups) {
@@ -2349,6 +3067,11 @@ final class PadCalibrationJob {
         else if (FAILED.equals(outcome)) {
             kind = "failed";
             sentence = "Failed " + clock + ": " + why;
+        }
+        else if (tipHalt != null && STOPPED.equals(outcome)) {
+            // a mount or a needle change (§22.3): its own words, nothing saved
+            kind = "stopped";
+            sentence = tipHalt;
         }
         else {
             kind = STOPPED.equals(outcome) ? "stopped" : "cancelled";
@@ -2386,11 +3109,114 @@ final class PadCalibrationJob {
         m.put("control", Views.map("pass", controlPass, "text", controlText, "medianAreaMm2", r3(controlMedianMm2),
                 "drift", driftSentence()));
         m.put("pendingCoupons", hasPending());
-        m.put("finishable", STOPPED.equals(outcome) || CANCELLED.equals(outcome));
+        m.put("finishable", (STOPPED.equals(outcome) || CANCELLED.equals(outcome)) && tipHalt == null);
+        m.put("photos", Views.photos(new ArrayList<>(photos)));
+        m.put("landing", landingView());
+        m.put("tipDots", MEASURE_TIP.equals(measure) ? tipDots() : null);
+        m.put("landingWarnings", landingWarnings());
         return m;
     }
 
+    /** The landing check's result (§22.6 result.landing), or null for the other jobs. */
+    private Map<String, Object> landingView() {
+        LandingResult l = landing;
+        if (!MEASURE_LANDING.equals(measure)) {
+            return null;
+        }
+        if (l == null) {
+            return Views.map("saved", false, "searchMm", searchMm, "text", landingText);
+        }
+        // without a locator dot nothing was measured: no landing numbers (a 0, 0 would read as a landing)
+        boolean measured = l.coarse != null;
+        return Views.map("jobId", l.jobId, "setupKey", l.setupKey, "needleSinceMs", l.needleSinceMs, "dxMm", measured
+                ? r3(l.dxMm) : null, "dyMm", measured ? r3(l.dyMm) : null, "sdMm", r3(l.sdMm), "n", l.n, "found",
+                l.found, "searchMm", l.searchMm, "expected",
+                l.expected, "coarse", l.coarse, "residual", l.residual, "pairs", l.pairs, "photoId", l.photoId,
+                "headOffset", l.headOffset, "saved", l.saved, "question", l.question, "text", landingText);
+    }
+
+    /**
+     * Measure its dots (§22.6 result.tipDots): per dose the dots found, their mean and d95 size, threads in hops, the
+     * spread and whether every camera check passed; the mass per turn of the dot table now.
+     */
+    private Map<String, Object> tipDots() {
+        List<Map<String, Object>> doses = new ArrayList<>();
+        for (PadLadder.Dose d : dosesUp()) {
+            DoseEvidence e = evidence.get(d.steps);
+            boolean seen = e != null && e.opticalFresh;
+            doses.add(Views.map("steps", d.steps, "turn", DoseModel.turnNoun(d.steps), "dots", seen ? e.n : 0, "found",
+                    seen ? e.n - e.misses : null, "dMeanMm", seen ? r3(e.dMeanMm) : null, "d95Mm", seen ? r3(e.d95Mm)
+                            : null, "threads", seen ? e.threads : null, "hops", seen ? e.hops : null, "spread", seen
+                                    ? r3(e.residCv) : null, "pass", seen ? e.opticalPass : null, "failures", seen
+                                            ? e.failures : null));
+        }
+        Tip now = mountedTip(svc);
+        int perRev = svc.getConfig().bStepsPerRev;
+        return Views.map("doses", doses, "mgPerTurn", now.mgPerStep == null ? null : r3(now.mgPerStep * perRev),
+                "confirmed", now.mgPerStepConfirmed, "measured", now.isMeasured(), "dots", now.dotsSource());
+    }
+
+    /** The ladder's doses, smallest first. */
+    private List<PadLadder.Dose> dosesUp() {
+        List<PadLadder.Dose> l = new ArrayList<>(ladderDoses);
+        l.sort((a, b) -> Integer.compare(a.steps, b.steps));
+        return l;
+    }
+
+    /** "Measured {HH:MM}: the {S}'s dots: quarter 0.71, half 0.93, one turn 1.12 mm; 1.57 mg per turn." */
+    private String tipSentence(String clock) {
+        List<String> sizes = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        for (PadLadder.Dose d : dosesUp()) {
+            DoseEvidence e = evidence.get(d.steps);
+            String turn = d.steps == DoseModel.ONE_TURN ? "one turn" : DoseModel.turnNoun(d.steps).replace(" turn", "");
+            if (e == null || !e.opticalFresh || e.dMeanMm == null) {
+                failed.add("no " + DoseModel.turnName(d.steps) + " dots were measured");
+            }
+            else {
+                sizes.add(turn + " " + Texts.mm(e.dMeanMm));
+                if (!e.opticalPass && !e.failures.isEmpty()) {
+                    failed.add(e.failures.get(0));
+                }
+            }
+        }
+        Tip now = mountedTip(svc);
+        String mass = now.mgPerStep == null ? "not weighed" : Texts.num(now.mgPerStep * svc.getConfig().bStepsPerRev, 2)
+                + " mg per turn" + (now.mgPerStepConfirmed ? "" : " (weighed once)");
+        return "Measured " + clock + ": the " + setupName + "'s dots: " + (sizes.isEmpty() ? "none"
+                : String.join(", ", sizes) + " mm") + "; " + mass + (failed.isEmpty() ? "." : "; " + String.join("; ",
+                        failed) + ".");
+    }
+
+    /**
+     * §22.3: "The dots land {dx}, {dy} mm off their spots: check where the {S} lands." for a ladder dose whose mean
+     * landing per axis is more than 0.15 mm off.
+     */
+    private List<String> landingWarnings() {
+        List<String> l = new ArrayList<>();
+        try {
+            for (Long rid : recordIds) {
+                DoseRecord r = svc.getDb().doseRecord(rid);
+                if (r == null || !DoseRecord.OPTICAL.equals(r.kind) || r.landingDxMm == null || r.landingDyMm == null) {
+                    continue;
+                }
+                if (Math.hypot(r.landingDxMm, r.landingDyMm) > LandingFit.SCATTER_MAX_MM + Limits.EPS) {
+                    l.add(String.format(Locale.ROOT, "The dots land %s, %s mm off their spots: check where the %s lands.",
+                            Views.signed(r.landingDxMm), Views.signed(r.landingDyMm), setupName));
+                    break;
+                }
+            }
+        }
+        catch (Exception e) {
+            Logger.warn(e, "pad calibration {}: the landing of its records was not read", id);
+        }
+        return l;
+    }
+
     private boolean hasPending() {
+        if (voidedBy != null) {
+            return false; // the needle change wrote their skip rows (§22.3)
+        }
         for (CouponPlan k : coupons) {
             if (k.record != null && k.mass == null) {
                 return true;
@@ -2439,8 +3265,31 @@ final class PadCalibrationJob {
                     "replacedText", d == null ? null : d.replacedText, "notes", d == null ? null : d.notes, "checks",
                     checks, "version", g.record == null ? null : g.record.versionTo, "calibrationId", g.record == null
                             ? null : g.record.id));
+            addRecord(l.get(l.size() - 1), g.record);
         }
         return l;
+    }
+
+    /**
+     * A group's "calibrated for" label and the pictures linked to its record (§22.5, §22.7). §22.6 calls the label
+     * {@code label}, but a group's {@code label} is its own name (§7.10, the result card's heading): the record's label
+     * is {@code calibrationLabel}, beside {@code calibrationId}.
+     */
+    private void addRecord(Map<String, Object> m, PadCalibrationRecord rec) {
+        Object[] label = null;
+        List<Map<String, Object>> pics = new ArrayList<>();
+        if (rec != null) {
+            try {
+                label = PadCalibrationEndpoints.label(svc, rec);
+                pics = Views.photos(svc.getDb().photos(null, rec.id, null, null, false, 50));
+            }
+            catch (Exception e) {
+                Logger.warn(e, "pad calibration {}: the label or the photos of record {} were not read", id, rec.id);
+            }
+        }
+        m.put("calibrationLabel", label == null ? null : label[0]);
+        m.put("calibrationLabelAuto", label == null ? null : label[1]);
+        m.put("photos", pics);
     }
 
     /** The control's drift against the weighed half turn the user validated (§1.3), or null. */
@@ -2448,8 +3297,8 @@ final class PadCalibrationJob {
         DispenseConfig c = svc.getConfig();
         int s = c.profile.netStepsPerDot;
         DoseEvidence e = evidence.get(s);
-        if (s != DoseModel.HALF || e == null || e.mgPerDot == null) {
-            return null;
+        if (tip == null || !tip.benchModel || s != DoseModel.HALF || e == null || e.mgPerDot == null) {
+            return null; // the bench's weighed half turn is the 22G bent taper's (§22.2)
         }
         double drift = e.mgPerDot / Anchor.BENCH.massPerPadMg - 1;
         return String.format(Locale.ROOT, "the validated half turn now gives %s mg, %s %% %s than the %s mg weighed on "
@@ -2477,7 +3326,8 @@ final class PadCalibrationJob {
                 perStep.add(DoseModel.turnNoun(s) + " " + Texts.num(ug, 2) + " µg/step");
                 min = Math.min(min, ug);
                 max = Math.max(max, ug);
-                p1 = (p1 == null || p1) && Math.abs(ug / 1.32 - 1) <= 0.10 + Limits.EPS;
+                // the 1.32 µg/step is the 22G bent taper's at 18 psi: another tip is compared across its doses only
+                p1 = (p1 == null || p1) && (!bench() || Math.abs(ug / 1.32 - 1) <= 0.10 + Limits.EPS);
             }
         }
         if (perStep.size() >= 2 && p1 != null) {
@@ -2499,9 +3349,13 @@ final class PadCalibrationJob {
         Boolean p3 = null;
         for (int s : doses) {
             DoseEvidence e = evidence.get(s);
-            if (e != null && e.dMeanMm != null) {
-                double lo = s == DoseModel.QUARTER ? DoseModel.dLoMm(s) : DoseModel.dHiMm(s) * 0.92;
-                double hi = s == DoseModel.QUARTER ? DoseModel.dHiMm(s) : DoseModel.dHiMm(s) * 1.08;
+            Tip.Measured own = bench() || tip == null || tip.measured == null ? null : tip.measured.get(s);
+            if (e != null && e.dMeanMm != null && (bench() || own != null)) {
+                // the bench model's band with the 22G; another tip's own dot table (as the job started) ±10 %
+                double lo = !bench() ? own.dMeanMm * 0.90 : s == DoseModel.QUARTER ? DoseModel.dLoMm(s)
+                        : DoseModel.dHiMm(s) * 0.92;
+                double hi = !bench() ? own.dMeanMm * 1.10 : s == DoseModel.QUARTER ? DoseModel.dHiMm(s)
+                        : DoseModel.dHiMm(s) * 1.08;
                 boolean in = e.dMeanMm >= lo - Limits.EPS && e.dMeanMm <= hi + Limits.EPS;
                 sizes.add(DoseModel.turnNoun(s) + " d " + Texts.mm(e.dMeanMm) + " mm (" + Texts.mm(lo) + "–"
                         + Texts.mm(hi) + ")");
@@ -2530,11 +3384,17 @@ final class PadCalibrationJob {
         l.add(pred("P7", "after a block switch the first 2 dots are within 2σ of their block", "reported, ≥ 95 %",
                 p7[1] == 0 ? null : p7[0] + " of " + p7[1] + " within 2σ", p7[1] == 0 ? null
                         : p7[0] >= 0.95 * p7[1] - Limits.EPS));
-        Boolean p8 = controlMedianMm2 == null ? null : Math.abs(controlMedianMm2 / Limits.BENCH_CONTROL_AREA_MM2 - 1)
-                <= 0.15 + Limits.EPS;
-        l.add(pred("P8", "the control matches the bench: 1.057 mm² ± 15 %", "as stated", controlMedianMm2 == null ? null
-                : Texts.num(controlMedianMm2, 3) + " mm²", p8));
+        Boolean p8 = controlMedianMm2 == null || !bench() ? null
+                : Math.abs(controlMedianMm2 / Limits.BENCH_CONTROL_AREA_MM2 - 1) <= 0.15 + Limits.EPS;
+        l.add(pred("P8", bench() ? "the control matches the bench: 1.057 mm² ± 15 %" : "the control matches the bench "
+                + "(the 22G bent taper's only)", "as stated", controlMedianMm2 == null ? null
+                        : Texts.num(controlMedianMm2, 3) + " mm²", p8));
         return l;
+    }
+
+    /** The tip is the bench's 22G (§1's model describes it). */
+    private boolean bench() {
+        return tip == null || tip.benchModel;
     }
 
     /** P7: the first 2 found dots of every block after a switch, within 2σ of the rest of their block: {in, of}. */

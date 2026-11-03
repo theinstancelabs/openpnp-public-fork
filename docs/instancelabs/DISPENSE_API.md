@@ -17,7 +17,9 @@ code. The test-board ladder (PC §20 decision 8, slice `pc-ladder`) is not in th
 for the final fix round (E1 engine safety, E2 engine correctness): the pressure hold looked at again on the machine
 thread by every task, a home that a STOP or a failure ends, the Z-check remedy under the same home, the blank's old
 points kept as a Z reference, the probe window against the board top, the stream's pad index, whole-pad test runs,
-the dose rule, the fiducial search and fit, and mass per dot laid.
+the dose rule, the fiducial search and fit, and mass per dot laid. Updated on `il/tip-setups` for tip setups (PC §22,
+marked *tips*, §9 below): a library of dispenser-and-needle setups with one mounted, pad profiles and the dispense
+profile per setup, mounting as a needle change, where each needle lands, pictures and "calibrated for" labels.
 
 ## 1. Lifecycle
 
@@ -40,13 +42,15 @@ the dose rule, the fiducial search and fit, and mass per dot laid.
 |---|---|
 | `public DispenseConfig getConfig()` | A copy (Gson-serialisable POJO, public fields). |
 | `public synchronized void updateConfig(DispenseConfig newCfg) throws IOException` | Validates (`DispenseConfig.validate()`, which includes `profile.validate(cfg)`), writes atomically, applies. `IllegalArgumentException` on invalid input. A changed `profile.startAngleDeg` stamps `profile.startAngleSetAtMs`; a changed `needleXyTrim` stamps `needleXyTrim.setAtMs`. |
+| `public synchronized DispenseConfig updateConfigAtomically(ConfigEdit edit) throws Exception` | *tips.* `ConfigEdit.apply(DispenseConfig live)` gets a copy of the **live** config and returns the new one, which is validated and written under the same lock (`PUT /api/config`): nothing a mount, a needle change, a run's purge reservation or another save wrote meanwhile is put back. |
 | `public synchronized DispenseProfile setStartAngle(Double angleDeg, String note) throws IOException` | I11: sets (`angleDeg` != null) or confirms (null) the screw start angle for the current controller power-up; stamps `startAngleSetAtMs`, logs an `I11` event. |
 | `public synchronized void resetPurgeRow() throws IOException` | The purge row was wiped: `usedSpots = 0`, `resetAtMs = now` (I9). |
 | `public synchronized void setLocation(String name, double x, double y, double z) throws IOException` | Named places (`waste`, `blank`, calibration cup, …): x/y in N2 machine coordinates, `z` = surface Z in OpenPnP's frame (the N1 nozzle Z touching that surface). |
-| `public synchronized void markNeedleChanged() throws IOException` | I4: invalidates the needle Z frame and the offset until a new frame and a touch-off. |
-| `public synchronized NeedleAnchor setNeedleAnchor(double surfaceZMm, double needleContactZMm, Double x, Double y[, Double rawSumMm])` | I4 needle Z frame: the same surface touched by N1 (`surfaceZMm`) and by the needle tip (`needleContactZMm`, N2 Z); offset := difference. `rawSumMm` records the bench relation K the contact came from (or null). Not a touch-off. |
+| `public synchronized NeedleChange recordNeedleChange(String why, String operator) throws IOException, SQLException` | *tips* (replaces `markNeedleChanged`). I4: a fact, never refused: the needle Z frame, the offset and where it lands are to do again (§9). |
+| `public synchronized NeedleFrameResult setNeedleAnchor(double surfaceZMm, double needleContactZMm, Double x, Double y, Double rawSumMm, Long needleChangedAtMs)` | I4 needle Z frame: the same surface touched by N1 (`surfaceZMm`) and by the needle tip (`needleContactZMm`, N2 Z); offset := difference. `rawSumMm` records the bench relation K the contact came from (or null). Not a touch-off. *Tips:* `needleChangedAtMs` is the needle token the heights were taken under (`EngineRefusal` 409 `needle-changed` when the needle was changed since); the result carries the frame, the offset, `question` (the frame more than `needleOffsetMaxDriftMm` from the setup's previous one: `… touches 1.20 mm higher than when it was on on 10-29: is the … on the dispenser?`) and `warning` (I4's offset rule). |
+| `public String needleFrameFromKRefusal()` | *rc1.* Why the frame cannot be recorded from K now (a failed Z check of this home, or a needle change since the frame), else null: the API refuses `needleContactRawSum` with it. |
 | `public double needleContactZFromRawSum(double n1ContactZ, double rawSumMm) throws Exception` | Needle contact (N2 Z, OpenPnP frame) from the bench relation "needle contact raw Z = K − N1 contact Z" (side camera, 2026-10-27: K = 65.59). On the Lumen see-saw (z2 = 63 − raw) that is N1 − 2.59: N1 5.5 → needle 2.91, offset −2.59. |
-| `public synchronized void setNeedleZOffset(double offsetMm, String method, String details) throws IOException, SQLException` | Manual offset entry or touch-off result; appends a `needle_touchoff` row. Must stay within `needleOffsetMaxDriftMm` of the frame's offset (I4). |
+| `public synchronized NeedleFrameResult setNeedleZOffset(double offsetMm, String method, String details, Long needleChangedAtMs) throws IOException, SQLException` | Manual offset entry or touch-off result; appends a `needle_touchoff` row. Must stay within `needleOffsetMaxDriftMm` of the frame's offset (I4). *Tips:* the needle token as `setNeedleAnchor`. |
 | `public synchronized SurfacePlane setSurface(String name, List<SurfacePoint> points, String note[, String boardFingerprint[, Boolean simulated]])` / `clearSurface(name)` / `surfacePlane(name)` | Probed surfaces (N1 contact heights, >= 3 points spanning an area; least-squares plane + convex hull). `board`: per-dot Z of board runs; `boardFingerprint` ties it to the board registration it was probed on (I4 asks for new probes after a re-seat). `blank`: the purge row, dot ladder and touch-off. |
 | `public static String boardFingerprint(BoardLocation bl)` | Global location (incl. Z), side, fiducial transform and every placement, hashed: plan staleness at Run. |
 | `public static String boardRegistration(BoardLocation bl)` | Board X/Y/rotation, side and fiducial transform only, hashed (`plan.boardRegistration`). A board surface is tied to it: I4 refuses an untied board surface and one probed on another registration (re-seat); editing placements or the nominal board Z does not change it. |
@@ -54,11 +58,16 @@ the dose rule, the fiducial search and fit, and mass per dot laid.
 | `public synchronized Long setNewSeat(boolean newSeat)` | *autoreg.* The new-seat flag (`newSeatAtMs`, null when cleared): the next registration is a new seat. Register board clears it when it saves a probed surface. |
 | `public static String boardZProblem(DispenseConfig c, double boardZ)` | *autoreg.* Why a board top Z cannot be an N1 contact height (more than `MAX_BOARD_Z_FROM_ANCHOR_MM` 2.0 from the needle-frame surface), or null. `planBoard` refuses with it. |
 
-### `DispenseConfig` (schema 3)
+### `DispenseConfig` (schema 4)
 
-`schemaVersion 3`. Schema 1/2 files load: removed keys are ignored, and `migrate()` brings the motion values to the
+`schemaVersion 4`. Schema 1/2 files load: removed keys are ignored, and `migrate()` brings the motion values to the
 bench recipe (`travelAccelMmS2` and `zLiftAccelMmS2` 2000, `zLiftFeedMmS` >= 50, `bMaxFeedDegS` >= 2400,
 `surfaceMaxResidualMm` <= 0.04, `surfaceMarginMm` >= 3.5, `zFrameToleranceMm` <= 1.2, `primeRotationDeg` 360 → 360.36).
+*Tips:* `migrate()` is stepwise (`schemaVersion < 3`: the block above; `< 4`: nothing changes), so a schema-3 file
+keeps its tuned motion values. A file from before tip setups (no `parkedTips` key: `isBeforeTipSetups`, which also
+catches a file an older jar saved over) is first copied to `dispense-config.json.v3-<yyyyMMdd-HHmmss>.bak` at the first
+save (an older jar, when the machine is bisected, drops `parkedTips` and `needleLanding`), and the start's reconcile
+(§9) makes the setups agree with it.
 Values a schema-2 file sets explicitly and `migrate()` does not touch (for example `valveSettleMs 1500` in
 `/home/lumen/instancelabs/config/dispense-config.json`) stay as they are.
 
@@ -79,8 +88,15 @@ Fields and defaults:
   catches it), `surfaceMaxResidualMm 0.04` (below the gap),
   `surfaceMarginMm 3.5` (the bench probes 8 mm in from the board edge, the edge pads lie ~3 mm beyond),
   `needleOffsetMaxDriftMm 1.0`, `touchOffPrimeExtraClearanceMm 0.5`;
-- needle XY: `needleXyTrim {dxMm 0, dyMm 0, setAtMs null, note null}` (within ±1 mm): the needle lands at camera +
-  N2 head offset + trim, so every dispensed target is moved by minus the trim;
+- needle XY: `needleXyTrim {dxMm 0, dyMm 0, setAtMs null, note null, headOffsetXMm, headOffsetYMm}` (within ±1 mm;
+  *tips:* stamped with N2's head offset in OpenPnP when set) and *tips* `needleLanding {dxMm, dyMm, setAtMs, jobId,
+  photoId, headOffsetXMm, headOffsetYMm, note}` or null (each axis within `MAX_LANDING_MM` 15, set only by a landing
+  check or Keep): the needle lands at camera + N2 head offset + landing + trim, so every dispensed target is moved by
+  minus (landing + trim);
+- *tips:* `parkedTips {setupKey: {profile, needleAnchor, needleZOffsetMm, needleZOffsetSetAtMs, needleZOffsetHomeAtMs,
+  needleXyTrim, needleLanding, parkedAtMs, profileFrom}}`: what every setup that is not mounted keeps (a new setup's
+  entry: a copy of a recipe, no frame, the mounted offset as a placeholder with both times null, a zero trim noted
+  `new tip`, no landing);
 - motion: `travelFeedMmS 200`, `travelAccelMmS2 2000`, `zDownFeedMmS 50`, `zLiftFeedMmS 50`, `zLiftAccelMmS2 2000`
   (each <= 5000), `bMaxFeedDegS 2400` (sent as `M203 B`; <= 400 rpm, the Vieweg maximum), `bStepsPerDeg 4.44`
   (Marlin `M92 B`; one screw revolution of 1600 steps is 360.36°), `bStepsPerRev 1600`, `bExtrudeSign +1`,
@@ -161,8 +177,11 @@ by `vision.PadCleanCheck` through `DotImager.brightFraction` (a default method; 
 
 ### Tip, paste and pad calibration (*profile*, `PROFILE_CALIBRATION_DESIGN.md` §5.4)
 
-- `tip {key "ad22tta-b", name "22G tip", idMm 0.41, odMm 0.72, minDotSteps 400}`: pad types and dose records name it;
+- `tip {key "ad22tta-b", name "22G bent taper", idMm 0.41, odMm 0.72, minDotSteps 400, setupVersion, model, dispenser,
+  form, bendDeg, bendToward}`: *tips:* the engine's view of the **mounted** tip setup (engine-stamped, protected in
+  `PUT /api/config`; the start's reconcile refreshes it from the setup, §9); pad types and dose records name its key;
   the OD (an assumption until measured) sets the same-pad dot pitch; a dose below `minDotSteps` is not allowed;
+  `profile` is the mounted setup's recipe;
 - `paste {key "gc50-t5", name "Loctite GC50 SAC305 T5", lot, loadedAtMs}`;
 - `calibrationArea {surfaceName "blank", x0Mm, y0Mm, widthMm, heightMm, usedMm, resetAtMs}` (unset: 40 × 20 mm at the
   blank place);
@@ -191,20 +210,20 @@ output command. `GcodeStreamValidator` applies the same check, and refuses the p
 `M106`, N1 valve `M106 P1 S180`, the VAC1 sensor set-up and select `M260 …`, the read `M261 A109 B3 S1`). The probe's
 I/O goes through `DispenseExecutor`'s gate (the abort flag checked before every line).
 
-Coordinates: X/Y are OpenPnP machine coordinates of the N2 needle tip (what `N2.moveTo()` takes); the stream goes to
-X/Y minus `needleXyTrim`. Surface Z (places, board, surfaces) is in OpenPnP's frame: the N1 nozzle Z touching the
-surface. Dispense Z (N2) = surface Z + `needleZOffsetMm` + `profile.gapMm`; on a board the surface Z of each dot is the
-probed `board` plane at the dot, on the purge row the `blank` plane; hop Z = dispense Z + `hopHeightMm`. On the Lumen
-(z2 = 63 − raw, K 65.59) the needle dispenses at raw Z = 65.49 − c for a surface at N1 contact c. B is degrees of the
-auger (Marlin units).
+Coordinates: X/Y are OpenPnP machine coordinates of the N2 needle tip (what `N2.moveTo()` takes); the stream goes to X/Y
+minus (`needleLanding` + `needleXyTrim`) (*tips*; `landingInEffect()`). Surface Z (places, board, surfaces) is in
+OpenPnP's frame: the N1 nozzle Z touching the surface. Dispense Z (N2) = surface Z + `needleZOffsetMm` +
+`profile.gapMm`; on a board the surface Z of each dot is the probed `board` plane at the dot, on the purge row the
+`blank` plane; hop Z = dispense Z + `hopHeightMm`. On the Lumen (z2 = 63 − raw, K 65.59) the needle dispenses at raw Z =
+65.49 − c for a surface at N1 contact c. B is degrees of the auger (Marlin units).
 
 ## 3. Data (`<configDir>/instancelabs/dispense.db`, SQLite, every table append-only via triggers)
 
 | Signature | Notes |
 |---|---|
 | `public DispenseDb getDb()` | Direct access; `DispenseDb.query(String sql, Object... args)` returns `List<Map<String,Object>>`. `recentRuns(int)`, `recentEvents(int)`. |
-| `public List<PadType> getPadTypes() throws SQLException` | Current version of each type, creation order. Seeds (§5.7): chip-0402/0603/0805/1206, sod-123, sot-23, soic, tssop, qfp, qfn-dfn-perimeter, qfn-centre (k 0.5), custom; all `not-started`. |
-| `public PadType savePadType(PadType p) throws SQLException` | Appends version n+1 (new key = new type, i.e. "New pad type"). Status: `not-started → provisional → characterized → validated`. |
+| `public List<PadType> getPadTypes() throws SQLException` | Current version of each type, creation order. Seeds (§5.7): chip-0402/0603/0805/1206, sod-123, sot-23, soic, tssop, qfp, qfn-dfn-perimeter, qfn-centre (k 0.5), custom; all `not-started`. *Tips:* the mounted setup's composed view (`TipSetups.typesFor`, §9). |
+| `public synchronized PadType savePadType(PadType v, String forSetup, Integer padVersion) throws SQLException` | Appends version n+1 (new key = new type, i.e. "New pad type"). Status: `not-started → provisional → characterized → validated`. *Tips:* `forSetup` must be the mounted setup (409 `tip-changed`); a pad edit names the `padVersion` it showed (409 `pad-changed`), a dose write (null) takes the pad fields from the composed view under the lock. `savePadTypeByHand(v, forSetup, padVersion, label, photoIds, operator)`: a status raised to characterized or validated, with its `by-hand` calibration record, label and pictures. |
 | `public PadRule savePadRule(PadRule r) throws SQLException` | Per-type layout rule: `largestSingleDotPadMm2` and `maxDots` (a pad larger than that gets a grid, §4). |
 | `public Calibration getCurrentCalibration() throws SQLException` | Scale records and dot-ladder rows hang off a calibration record (seed #1). The planner no longer uses it (no q model). |
 | `public List<DotLadderRow> getDotLadder(long calibrationId) throws SQLException` | |
@@ -228,6 +247,20 @@ second open is a no-op. Dose records: `insertDoseRecord`, `doseRecord(id)`, `dos
 `pendingCoupons(sinceMs)` (coupon records without a mass row yet); `insertPadCalibration`, `padCalibrations(typeKey,
 limit)`. `runs.kind` adds `pad-ladder` and `pad-weigh`; `events` add `PCAL` (each calibration, the area used, each
 job's end).
+
+*Tips:* `dispense.db` schema 3 (§9): a `.v2-<time>.bak` copy before the first step that runs, then one transaction
+each: `to2()`, then `to3()`, which drops and recreates `pad_types_current` and the new view `pad_types_by_setup`
+together, adds the nullable columns `pad_calibrations.setup_key`, `method` (`auto` | `by-hand`; null = `auto`),
+`needle_since_ms`, `dose_records.landing_dx_mm`, `landing_dy_mm` and `runs.setup_key`, the append-only tables
+`tip_setups`, `tip_mounts`, `photos`, `photo_links`, `photo_events`, `cal_labels`, `cal_flags`, the seeded setup's row
+(the 22G bent taper) and a placeholder setup (form and taper `unknown`, no ID or OD: it cannot be mounted until it is
+completed) for every other tip key of `pad_types` and `dose_records`. Nothing existing is rewritten; `schema_info` 3
+is written only on an upgrade. `pad_types` rows with `tip_key` null belong to the seeded setup (`Tip.setupOf`, in SQL
+`COALESCE(tip_key, 'ad22tta-b')`); a `pad_calibrations` row without `setup_key` resolves to its job's dose records'
+tip, else its version's, else the seed. `events` add `TIP` (adds, edits, mounts, needle changes, landing checks,
+pictures). The no-arg `currentPadTypes()` / `currentPadType(key)` are gone: `currentPadTypes(setup)`,
+`currentPadType(key, setup)` (composed), `padTypeHistory(key)`, `typeKeyExists(key)`, `newestOwnVersion(key, setup)`,
+`padCalibrations(typeKey, setup, limit)`.
 
 ## 4. Planning
 
@@ -271,6 +304,13 @@ per dose (the profile's dose first, then descending; nearest neighbour + 2-opt i
 starts on the purge row), and holds back a pad that is too close to a neighbour for its dots (`MAY_BRIDGE`, decision 14
 of PC §20.1: per pad, not per group). A type calibrated with another tip is `STATUS_BELOW_MIN` with the tip in its text
 (decision 16). `DoseBlocks` (pure): `isAllowed`, `dosesOf(plan, profileSteps)`, `purgeSpotsNeeded`, `fillDemand`.
+
+*Tips.* Plans carry `setupKey`, `setupName` and `setupVersion` (a plan of another setup, or another version of it, is
+stale) and `PlannedPad.typePadVersion`; the resolver's fingerprint is `key:padVersion/version@S` per type plus
+`|tip:S@setupVersion`. `newPlanner()` takes the mounted tip (`withTip(svc.mountedTip())`; no tip: `the planner needs
+the mounted tip`): the same-pad pitch and the dot-gap flag use its dot sizes, and a pad whose dose its dot table does
+not know at this recipe and paste gets the blocking flag `DOSE_UNKNOWN` (no dots, a plan warning naming the dose).
+Stand-ins (no version of the mounted setup) are `STATUS_BELOW_MIN`.
 
 ## 5. Execution
 
@@ -451,7 +491,7 @@ else the job's post-ladder reweigh keeps the checked grid and dose and says so),
 | I1 | `DispenseExecutor.shutdown` | The Stop sequence (F9) on any error (an `Error` too, rc1 review: an OutOfMemoryError used to leave the pump and valve on; the N1 probe's points likewise), abort, I7 trip, OpenPnP Stop/disable (machine listener). Each line attempted, through `sendCritical`. The web status reports `stopCommandCheck`: OpenPnP's own Stop is OK only if the driver's `DISABLE_COMMAND` contains the exact contiguous F9 sequence. |
 | I2 | `GcodeStreamBuilder` + `GcodeStreamValidator` | No B move before `G92 B0`; flag cleared on home, enable, disable, abort. |
 | I3 | `Interlocks` | Refuses if N2 has compatible nozzle tips or a loaded tip (names reported). |
-| I4 | `Interlocks` (+ builder floor, validator Z window) | *autoreg:* a board surface tied to a plan is checked against the plan's board top Z, every other surface and place against the needle-frame anchor (one reference per surface, `AUTO_REGISTER_DESIGN.md` §16 item 1); a surface probed on the simulator is refused on a machine that is not. **Z after a home:** the needle frame, the touch-off and the surfaces measured before the last home are accepted only after a passing Z check for this home that vouches for each of them (a touch vouches only for data of its own Z frame); a failed check refuses (`I4: Z moved …`); a task that homes or checks Z first gets a note instead. Before: refuses without a needle Z frame recorded since the last needle change; unless touched off since the change and the frame (named waiver: the touch-off run); if the offset is more than `needleOffsetMaxDriftMm` from the frame's; if a waste/blank place Z or any surface point is more than `zFrameToleranceMm` from the frame surface; board / ladder runs: without the probed surface, with a plane residual above `surfaceMaxResidualMm`, with a dot more than `surfaceMarginMm` outside the probed hull, (board) a plan made on another surface map, or a board surface probed on another board registration (`boardFingerprint`). The purge row's surface gets the same checks for the purge spots (`Scope.moreSurfaces`). Hard floor: no dot below frame surface − tolerance + offset − 0.1. |
+| I4 | `Interlocks` (+ builder floor, validator Z window) | *tips:* texts name the setup (`I4: the 25G straight was put on at 14:07: record its needle Z frame (Setup › Needle Z frame)`); **the landing rule**: while where the needle lands is not checked (`isNeedleXyChecked()`: `needleLanding` set since the needle change under N2's head offset now, and a non-zero trim set under it too) only prime, the test dot and the landing check dispense (`Scope.landingWaiver` `waste` \| `landing-check`): `I4: the … was put on at 14:07 and where it lands has not been checked: check where it lands (Setup › Dispenser & tip).`; **the offset rule**: a frame whose offset is below 2 × `zFrameToleranceMm` + 0.1 mm refuses dispensing (`The …'s tip is 1.50 mm from N1's: I4 cannot tell a height taken with the needle; lower zFrameToleranceMm below 0.70 mm (Settings).`) and planning takes a board top within min(2.0, offset − 0.5) mm of the frame. *Autoreg:* a board surface tied to a plan is checked against the plan's board top Z, every other surface and place against the needle-frame anchor (one reference per surface, `AUTO_REGISTER_DESIGN.md` §16 item 1); a surface probed on the simulator is refused on a machine that is not. **Z after a home:** the needle frame, the touch-off and the surfaces measured before the last home are accepted only after a passing Z check for this home that vouches for each of them (a touch vouches only for data of its own Z frame); a failed check refuses (`I4: Z moved …`); a task that homes or checks Z first gets a note instead. Before: refuses without a needle Z frame recorded since the last needle change; unless touched off since the change and the frame (named waiver: the touch-off run); if the offset is more than `needleOffsetMaxDriftMm` from the frame's; if a waste/blank place Z or any surface point is more than `zFrameToleranceMm` from the frame surface; board / ladder runs: without the probed surface, with a plane residual above `surfaceMaxResidualMm`, with a dot more than `surfaceMarginMm` outside the probed hull, (board) a plan made on another surface map, or a board surface probed on another board registration (`boardFingerprint`). The purge row's surface gets the same checks for the purge spots (`Scope.moreSurfaces`). Hard floor: no dot below frame surface − tolerance + offset − 0.1. |
 | I5 | `Interlocks` | Pressure window via `BarrelPressureSensor`; disabled by default. |
 | I6 | `Interlocks` (note) | The regulator is set by hand to `profile.pressurePsi` (18); reported with every check. *Profile:* **I6-feed** refuses a plan or a dose-blocks step whose block asks the screw for more paste per second than `profile.sustainedFeedMgS` (2.6 mg/s, the bench's 2.56 at 18 psi): `I6: block 2 (one turn) asks the screw for 3.07 mg/s; the most it was seen to keep up with at 18.0 psi is 2.60 mg/s: lengthen the dwell or use more, smaller dots`. |
 | I7 | `Interlocks` (estimate) + `DispenseExecutor` (runtime) | Max continuous pump+valve on-time. |
@@ -459,7 +499,7 @@ else the job's post-ladder reweigh keeps the checked grid and dose and says so),
 | I10 | `Interlocks` + `runPlan` (board runs) | With `cleanPadCheck.enabled`: a top camera must be available, and the clean-pad check must pass right before the pressure goes on. |
 | I11 | `Interlocks` (board runs, partial-turn profile) | `profile.startAngleSetAtMs` must exist and be >= `controllerConnectedAtMs` (set or confirm after every connect); `runPlan` also refuses when the controller does not report the B step count. *Profile:* also when any block of the plan is a partial turn. |
 | MACHINE | `Interlocks` | *autoreg:* "not homed" is a note (`MACHINE: not homed: homes first`) when the task homes first (`homeFirst`); "not enabled" always refuses (nothing presses Start for the operator). |
-| PLAN | `Interlocks` | Blocked pads (`… pad(s) not dispensable: …`, a note `… flagged pad(s) will be skipped` with `refuseFlaggedPads: false`), a plan with no dots. *Profile:* a pad type whose dose the tip does not take (`pad type x v2 has … dots; the 22G tip takes quarter, half or one-turn dots (a quarter turn at least): edit it and plan again`), a pad of less than half a turn in a row (R6: `… gives each pad 400 steps (a quarter turn); every pad needs at least half a screw turn in a row …`), and a plan made before the tip, the gate, a pad type or a mapping changed (`the tip changed after planning: …`, `the pad-type gate changed after planning: …`, `pad types or package mappings changed after planning (…); plan again`). A type calibrated with another tip is `STATUS_BELOW_MIN` (decision 16); a pad too close to a neighbour for its dots is held back as `MAY_BRIDGE` (decision 14). |
+| PLAN | `Interlocks` | Blocked pads (`… pad(s) not dispensable: …`, a note `… flagged pad(s) will be skipped` with `refuseFlaggedPads: false`), a plan with no dots. *Profile:* a pad type whose dose the tip does not take (`pad type x v2 has … dots; the 22G tip takes quarter, half or one-turn dots (a quarter turn at least): edit it and plan again`), a pad of less than half a turn in a row (R6: `… gives each pad 400 steps (a quarter turn); every pad needs at least half a screw turn in a row …`), and a plan made before the tip, the gate, a pad type or a mapping changed (`the tip changed after planning: …`, `the pad-type gate changed after planning: …`, `pad types or package mappings changed after planning (…); plan again`). A type calibrated with another tip is `STATUS_BELOW_MIN` (decision 16); a pad too close to a neighbour for its dots is held back as `MAY_BRIDGE` (decision 14). *Tips:* the plan's setup and version must be the mounted one's (`the tip changed after planning (the 25G straight was mounted at 14:07): plan again`, `the 25G straight changed after planning (OD 0.51 → 0.55 mm): plan again`), a pad-type read that fails refuses the run (`the pad types could not be read (…): plan again`), and a planned dose the tip does not know is refused (`pad type … v8 has half-turn dots, which the 25G straight never measured at this recipe and paste: measure its dots (Setup › Dispenser & tip)`). |
 
 ## 8. Known limits (measured or read, not guessed)
 
@@ -500,3 +540,101 @@ else the job's post-ladder reweigh keeps the checked grid and dose and says so),
   the gap to the surface, and its records are `simulated` (never evidence on the machine).
 - No HTTP endpoints here; this is the Java service the web layer calls (`docs/instancelabs/WEB_API.md`; the bench
   recipe added `POST /api/plan/{id}/clean-check`, `POST /api/screw/start-angle`, `POST /api/purge-row/reset`).
+
+## 9. Tip setups, pictures and labels (*tips*, `PROFILE_CALIBRATION_DESIGN.md` §22)
+
+A **tip setup** is a dispenser with a needle (`TipSetup`: `key` = the tip key records already carry, `name`,
+`dispenser` (default `Vieweg DV-5005`), `tipModel`, `gauge`, `idMm`, `odMm`, `odSource` (`measured` | `assumed`),
+`form` (`bent` | `straight` | `unknown`), `bendDeg`, `bendToward` (`+x`, `-x`, `+y`, `-y`), `taper`
+(`tapered-plastic` | `straight-steel` | `unknown`), `lengthMm`, `minDotSteps` (400, 800 or 1600), `model`
+(`bench-22g` for the seed only), `notes`, `retired`; append-only versions in `tip_setups`, the newest counts;
+`problems()`, `isComplete()` (ID, OD, form and taper known), `summary()`, `toSpec()`). The seed is the 22G bent taper
+(`ad22tta-b`, ADL AD22TTA-B, 22G, ID 0.41, OD 0.72 assumed, bent 30°, tapered plastic, `bench-22g`). One setup is
+mounted: `cfg.tip.key`; the others are parked in `cfg.parkedTips`. `TipSetups` (pure helpers): `typesFor(db, setup)`,
+`deriveKey(setup, taken)` (`25g-straight`, `27g-bent45`, `22g-taper`, then `-2`, `-3`), `checkEdit(was, next, inUse,
+correction)` (identity fields of a setup with records: `another-needle`; tip model, ID within 0.03 mm, bend and length:
+`correction`), `copyOf(...)`, `newEntry(live, profile, profileFrom)`.
+
+**What the mounted setup uses** (`getPadTypes()` → `TipSetups.typesFor(db, S)`): per type key the pad fields (name,
+family with `Retired`, pattern, pad size and roundness, layout, pitch, t, k; `padVersion`) from the newest version of
+**any** setup, and the dose fields (status, dotSteps, dotsPerPad, calAreaMm2, doseFp, massPerPadMg, origin, notes;
+`version`) from S's newest own version; a type with none is a **stand-in** (`standIn`, `version` 0, `not-started`, no
+plan, notes `Not calibrated for the {S} yet.`). Creation order and version numbers stay one line per key across
+setups. `mountedTip()` → `padprofile.Tip` with S's dot table (`DoseRecords.dotTable(records, S, doseFp, pasteKey,
+simulated, flaggedJobs)`: per dose the newest passing optical record of S at S's recipe, the loaded paste and the
+simulator flag, any age, outside jobs flagged `wrong-tip`; the mass per step from S's newest confirmed weighing),
+cached per (setup version, recipe, paste, simulator flag, newest dose record, flagged jobs). `Tip.knows(steps)`,
+`dLoMm`, `dHiMm`, `massMg` give the bench model's values for the seed and the measured ones otherwise, and throw for a
+dose the tip does not know (no NaN reaches a comparison or a view); `isMeasured()` (its smallest dose has a size and
+it has a weighing). A tip without the bench model and not measured gets no suggestions but `measure-tip`;
+`characterized` without the bench model needs S's own evidence for every dose; the control compares with the bench
+only for the seed, else with S's own dots, or passes as `first measurement of this tip`. Anchors (the amount a joint
+needs) stay shared across setups.
+
+**Needle changes and mounting.** `recordNeedleChange(why, operator) → NeedleChange` (synchronized, never refuses): a
+running engine task is stopped first (`abort("the needle was reported changed")`), `needleChangedAtMs` = max(now,
+previous + 1) (the **needle token**: strictly increasing), every coupon waiting for its readings gets a skip row
+(`skipCoupon`), a `tip_mounts` row `needle` and a `TIP` event. `switchTip(key, why, operator) → MountResult` (the API
+runs it inside `PadCalibrationJobs.whileNoJob` and the engine holds its busy flag around the write): refused while a
+task runs, the pressure is held, or for a retired or incomplete setup; parks S (profile, frame, offset with its times,
+trim, landing, `parkedAtMs`), brings in the incoming entry (its recipe takes the live start angle and its time; one
+that no longer validates is reset to the default profile named `{name} (reset: {problem})`), `cfg.tip` = the incoming
+view, one config write without the start-angle and trim stamping (restored values keep their times), a `tip_mounts`
+row `mount` and a `TIP` event. `undoMount(operator)`: within 2 min of a mount of another setup, no task run and
+nothing measured since, the previous mount exactly from a snapshot in memory (`too-late` otherwise); `undoUntilMs()`.
+Every value measured for a needle carries the token (`setNeedleAnchor`, `setNeedleZOffset`, `setXyTrim`, `setLanding`,
+`keepLanding`: `EngineRefusal` 409 `needle-changed`), every pad-type write its setup (`savePadType`: `tip-changed`,
+`pad-changed`), and a pad calibration's every dose-blocks step its setup and token (`DoseBlocksRequest.forTip`,
+`needleSinceMs`: refused on the machine thread; `applyPadCalibration` refuses a write that names another setup or
+needle). Stale after a change: the frame (`isNeedleAnchored`), the offset (`isNeedleTouchedOff`), where it lands
+(`isNeedleXyChecked`), dose records made before it; not the surfaces, places, purge row or calibration area.
+
+**Where the needle lands.** `needleLanding` per setup (parked with it), measured by the landing check
+(`PadCalibrationJob` `measure: "landing"`: a locator dot, then the purge and a row of 8 dots fitted by
+`padprofile.LandingFit`, `PadLadder.landingLayout` for the band and its frames; `DoseBlocksRequest.landingCheck`,
+`DoseBlocksResult.newBlobs`) and saved with `setLanding(LandingResult r, boolean accepted, Long needleChangedAtMs)`:
+saved at once when the fit holds and the setup had no landing of its own within 1.0 mm, else the result's `question`
+and nothing saved until accepted. `keepLanding(token)` (a straight setup whose landing a check set under today's head
+offset; `keepLandingProblem()` says why not), `setXyTrim(dx, dy, note, token)` (±1 mm, stamped with the head offset),
+`headOffsetNow()` (N2's head offset in OpenPnP, read only), `landingInEffect()`. A change of N2's head offset in
+OpenPnP stales every landing and trim set under the old one. The trim resets to 0 when a landing is saved. Every pad
+calibration ladder also records `landing_dx_mm` / `landing_dy_mm`.
+
+**Pictures** (`PhotoStore`, synchronized; `Photo`: `kind` `tip` | `setup` | `result`, `source` `bottom-camera` |
+`top-camera` | `upload`, the setup, `needleSinceMs`, job, dose, coupon, file, SHA-256, size, mm/px, frame centre,
+caption, simulated): every picture is re-encoded (JPEG 0.85, at most 2048 px on the long side, no metadata; result
+photos at most 1600 px wide) with a 320 px thumbnail, written to a temporary file in its month folder and moved to
+`<configDir>/instancelabs/photos/<yyyy-MM>/<20 hex of the SHA-256>.jpg` (equal pictures share a file); the decode reads
+the header first and subsamples to at most 2048 px (never the full raster); alpha and indexed PNGs are drawn onto RGB.
+Limits: JPEG or PNG by its bytes, 64–12,000 px a side, 40 Mpx, 8 MiB per request (`MAX_REQUEST_BYTES`), 6 tip pictures
+per record, 20 unlinked pictures per setup, 2 GB of removable pictures, captions ≤ 200 characters. One upload at a time
+(`PhotoStore.PIPELINE`, a `Semaphore(1)` taken without waiting). Removal appends a `photo_events` `remove` row (the
+file stays 7 days; `restore`); result photos cannot be removed or chosen as the main picture (`result-photo`). The
+start sweep deletes files no live row names, files removed more than 7 days ago and result photos never linked after
+30 days. Links (`linkPhotos(photoIds, calibrationIds, role)`, roles `result` | `tip` | `reference`) need the
+record's setup (`setup-mismatch`) and, for a bottom-camera picture, the same needle (`needle-changed`).
+`storePhoto(PhotoStore.Input)` (an upload, with its `TIP` event), `storeResultPhotos(jobId, DoseBlocksResult)` (one
+after frame per block, carried as JPEG bytes in `DoseBlocksResult.photos`), `takeTipPicture(TipPictureRequest) →
+Future<TipPictureResult>` (an engine task, run kind `tip-picture`: N2 to the bottom camera's X/Y at `travelSafeZMm`,
+never lower, refused when N2's safe Z zone does not hold it, unhomed, under the pressure hold, for a setup not mounted;
+`refuseIfStoppedSince` after the move and before the store; the token checked again: a needle change meanwhile stores
+nothing), `TipCamera` (`isAvailable`, `locationMm`, `capture`; `OpenPnpTipCamera` = OpenPnP's first up-looking camera,
+`setTipCamera` for tests). At its decision a calibration links each record to the result photos of its chosen dose
+and to its setup's main picture of that moment (role `reference`).
+
+**Labels and the wrong tip.** Every calibration record gets a "calibrated for" label (`cal_labels`, the newest row
+counts): written automatically by the job's decision and the by-hand save (`autoLabel`: `Texts.calLabel` `Chip 0603 ·
+22G bent taper · Vieweg DV-5005 · 18 psi · Loctite GC50 SAC305 T5`, type first, over 160 characters the paste then the
+type cut with `…`), editable (`cleanLabel`: 1–160 characters), computed when read for records from before schema 3.
+`markWrongTip(jobId, operator) → List<PadType>`: a `cal_flags` row for the job, its waiting coupons skipped, its dose
+records out of the setup's evidence and dot table, and every version it wrote that is still its setup's newest replaced
+by a version restoring the setup's previous own dose fields (or a stand-in's cleared plan), notes `restored:
+calibration {id} was made with another tip`.
+
+**At start** (`reconcileTip()`, once the config and the database are open): (1) a `cfg.tip.key` that names no setup
+gets one made from `cfg.tip` (form and taper `unknown`); (2) `cfg.tip` is compared with its setup on `idMm`, `odMm`
+and `minDotSteps` only (never the name) and a version appended from the file when they differ; (3) `cfg.tip` is
+refreshed from the setup (so an old `22G tip` reads `22G bent taper`); (4) an empty `tip_mounts` gets a row `seed`, a
+newest row of another key a row `reconcile`; (5) the first time, a needle change finished before the update keeps
+its landing (`{0, 0}` with N2's head offset now, note `kept from before the update (boards ran with it)`) and an open
+one asks for it.

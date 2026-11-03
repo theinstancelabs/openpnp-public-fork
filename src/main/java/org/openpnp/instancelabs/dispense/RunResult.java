@@ -30,6 +30,8 @@ public class RunResult {
     public String runId;
     /** board | dot-ladder | touch-off | shots | board-registration | surface-probe | z-check */
     public String kind;
+    /** The tip setup mounted when the run started (tip setups design §22.1, {@code runs.setup_key}); null = not known. */
+    public String setupKey;
     public String planId;
     public String boardName;
     public long calibrationId;

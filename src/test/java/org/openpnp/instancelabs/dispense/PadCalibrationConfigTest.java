@@ -34,7 +34,7 @@ public class PadCalibrationConfigTest {
         DispenseConfig c = new DispenseConfig();
         assertEquals(new ArrayList<>(), c.validate());
         assertEquals("ad22tta-b", c.tip.key);
-        assertEquals("22G tip", c.tip.name);
+        assertEquals("22G bent taper", c.tip.name);
         assertEquals(0.41, c.tip.idMm, 0);
         assertEquals(0.72, c.tip.odMm, 0, "decision 12: the assumed OD lives in TipSpec");
         assertEquals(400, c.tip.minDotSteps);

@@ -7,7 +7,9 @@ adds Register board (fiducials and the N1 vacuum probe), home at job start and t
 (`AUTO_REGISTER_DESIGN.md`), the KiCad upload and the board drawing (`BOARD_IMPORT_DESIGN.md`), and missing paste
 profiles: the profile check, per-pad-type doses and the pad calibration with the weigh coupons
 (`PROFILE_CALIBRATION_DESIGN.md`; the SIM acceptance `il_sim_acceptance.py padcal` runs it end to end on the SIM
-paste and balance). The simulator cannot show the items below. Each one says why, and how to check it on the machine.
+paste and balance). Branch `il/tip-setups` adds tip setups (`PROFILE_CALIBRATION_DESIGN.md` §22: per-tip profiles,
+mounting, where each tip lands, "calibrated for" labels and pictures; `il_sim_acceptance.py tips`). The simulator
+cannot show the items below. Each one says why, and how to check it on the machine.
 
 ## Next session, in this order
 
@@ -22,8 +24,8 @@ needle. Use a jar built from `il/rc1` (or a dist made from it, item 3).
    the user's decision) before anyone relies on STOP during a home.
 3. **A board without fiducials** (F10): probe-only registration on the blank, then a short run.
 4. **Vent before lift** (item 22, F7): measure on board 3.
-5. Then the first-session items still open (1, 2, 4, 5, 9–13), the registration items 15–32, and the board-import and
-   profile items 33–54 as their slices reach the machine.
+5. Then the first-session items still open (1, 2, 4, 5, 9–13), the registration items 15–32, the board-import and
+   profile items 33–54 as their slices reach the machine, and the tip-setup items 55–68.
 
 ## Real sessions of 2026-10-28 to 10-30 (automatic registration, board 3 and the blank)
 
@@ -474,6 +476,52 @@ job, or a test board.
     (or skips them with Setup › Settings › Refuse flagged pads off). Decide on a reflowed test board (one turn against
     half a turn) and raise the type by hand, or wait for the test-board ladder (`pc-ladder`, a follow-up).
 
+## Tip setups (`PROFILE_CALIBRATION_DESIGN.md` §22.10)
+
+Built on `il/tip-setups`: a library of tip setups with one mounted (the seed is the 22G bent taper in use), pad
+profiles and the dispense profile per setup, mounting as a needle change, where each tip lands as a measured value
+(Check where it lands), Measure its dots, a "calibrated for" label and pictures on every calibration record, and the
+web UI for them (`UI_DESIGN.md` §8.6). The SIM acceptance `il_sim_acceptance.py tips` runs it end to end on the SIM
+paste, cameras and balance, with a SIM 25G straight that lays smaller dots and lands 2.4, −0.4 mm off; its numbers
+are the simulator's by design and never evidence on the machine. Item numbers continue the list; T1–T14 are §22.10's.
+
+55. **T1 The bottom-camera picture at travel height** (N2 Z 31.5): focus, scale and glare of the ring light. Does it
+    tell the bent 22G from a straight 25G from below? If not, the phone picture is the record and the caption keeps
+    `may be soft`. No paste on the bottom camera's window after 10 pictures taken right after runs (a needle carries
+    paste at its end); if there is, the task must prime at the waste first.
+56. **T2 Where each tip lands against the 22G bent taper** (mm): the straight 25G, the 22G straight taper, and a 45°
+    bent 25G with its bend pointed as the 22G's. Within the ±6 mm search, or does a first check need `wide` (±9 mm, a
+    taller calibration area)? Record the 22G's `bendToward` on the way (Setup › Dispenser & tip › Bend).
+57. **T3 The landing check on the real blank:** the locator dot found among the blank's texture, the band's 20 mm for
+    a first check and 12 mm for a remount, the purge dots of a needle whose landing is known only from the locator,
+    and where the prime of a new needle lands at the waste (±6 mm around the waste spot must be waste).
+58. **T4 The needle frame of each new tip** by Both tips touch, against session 4's side-camera K; then the touch-off
+    after the landing check on a tip that was never on. (Since `il/rc1`, From K is refused after every needle change,
+    so a remounted tip is framed with both tips too.)
+59. **T5 Needle length and travel height:** the end of a straight 12.7 mm tube against the tapered 22G's at travel Z
+    (side camera); clearance over feeders and boards; the length difference behind the "up to about 10 mm" the design
+    uses.
+60. **T6 Mass per step of the 25G, 27G and 30G at 18 psi:** how far below the 22G's 1.32 µg/step (slip in the auger
+    against the tube's resistance, about 1/r^1.8 and its length)? Measure its dots weighs it. A wider tip (21G, 18G)
+    against the × 1.5 the feed check (R7) uses before it is weighed.
+61. **T7 Pressure for fine tips:** does 18 psi feed a 27G or 30G (the DV-5005 allows 21.7 psi)? Does the 30G clog (a
+    0.15 mm bore is about 6 T5 balls of 25 µm across)?
+62. **T8 The smallest dot per tip:** the quarter turn's thread rate at the hop with a 25G (§1.5's rule was the 22G's).
+    In the SIM the 25G's quarter-turn dots were too small to find, so its setups use a half turn as the smallest dot;
+    set `minDotSteps` (Edit…) from what the machine shows.
+63. **T9 OD of each tip** (bottom or side camera) → `odSource measured`, which moves the same-pad pitch.
+64. **T10 Start angle across tip changes:** the ripple peak (ψ ≈ 299°) stays with the screw (a mount keeps the live
+    angle).
+65. **T11 Photos in practice:** a phone picture copied to the PC (orientation, HEIC from an iPhone, size), disk use
+    per month.
+66. **T12 A remount of the same 22G model** ("I changed the needle") with its bend pointed as recorded: how far does
+    the landing move (0.1–0.4 mm expected for a straight tip, more for a bent one)? Is `Keep where it lands` ever
+    right for a straight one?
+67. **T13 Is this the tip you think it is?** The 1.00 mm frame and 1.0 mm landing thresholds against a deliberately
+    wrong tip (25G on, 22G mounted): both asked, and the control's band. (In the SIM the landing check asked and the
+    control named another tip.)
+68. **T14 A frame close to N1's:** does any tip's |offset| fall below 2.1 mm (I4's offset rule)?
+
 ## Software limits to keep in mind on the machine (review 1 and the final fix round)
 
 From the first review of the merged backend and the final fix round (E1 engine safety, E2 engine correctness, merged on
@@ -510,6 +558,12 @@ surprise on the machine.
   fit against the previous registration is compared in the machine frame (re-seat a board about 10° turned once to
   confirm it is accepted); two pads of one name are no split pad; a two-turn profile is refused by the settings; a test
   run with fewer dots lays whole pads; no run or probe starts while an upload reads its file.
+- **Tip setups, left open** (`PROFILE_CALIBRATION_DESIGN.md` §22 "As built"): the touch-off still judges every tip's
+  dots by the 22G bent taper's model (its steady-dot size and the 60 % reference rule), so on a finer tip it may refuse
+  its conclusion: read the contact from the photos, as item 1 says; an Undo of a mount within its 2 min puts back the
+  old recipe, so a recipe edit made in those 2 min is lost; the landing check's start card does not check the needle
+  frame first (the job then fails at its first step with the I4 text); a calibration decided from an earlier job's
+  fresh dots lays none and links no result photo of its own (the card says so).
 - **Left from E2:** a run started in the same instant an upload takes the import pipeline (well under a second) can
   still overlap the parse: start runs with the upload dialog closed. A two-fiducial board near 45° re-seated by more
   than about 13° can still be refused against its last registration (a similarity fit cannot separate the machine's

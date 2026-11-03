@@ -3,25 +3,40 @@ package org.openpnp.instancelabs.api;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import org.openpnp.instancelabs.dispense.Calibration;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
+import org.openpnp.instancelabs.dispense.DispenseDb;
 import org.openpnp.instancelabs.dispense.DispensePlan;
 import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.BoardRegistration;
+import org.openpnp.instancelabs.dispense.DoseRecords;
 import org.openpnp.instancelabs.dispense.DotLadderRow;
 import org.openpnp.instancelabs.dispense.HomeReport;
 import org.openpnp.instancelabs.dispense.HomeTracker;
 import org.openpnp.instancelabs.dispense.InterlockReport;
+import org.openpnp.instancelabs.dispense.MountResult;
+import org.openpnp.instancelabs.dispense.NeedleChange;
+import org.openpnp.instancelabs.dispense.PadCalibrationRecord;
 import org.openpnp.instancelabs.dispense.PadCleanReport;
 import org.openpnp.instancelabs.dispense.PadType;
+import org.openpnp.instancelabs.dispense.PadTypeStatus;
+import org.openpnp.instancelabs.dispense.Photo;
+import org.openpnp.instancelabs.dispense.PhotoStore;
 import org.openpnp.instancelabs.dispense.PlaneReport;
 import org.openpnp.instancelabs.dispense.RegistrationResult;
 import org.openpnp.instancelabs.dispense.RunResult;
 import org.openpnp.instancelabs.dispense.SurfaceProbeResult;
+import org.openpnp.instancelabs.dispense.TipPictureResult;
+import org.openpnp.instancelabs.dispense.TipSetup;
+import org.openpnp.instancelabs.dispense.TipSetups;
 import org.openpnp.instancelabs.dispense.VacuumProber;
+import org.openpnp.instancelabs.padprofile.DoseModel;
+import org.openpnp.instancelabs.padprofile.Texts;
+import org.openpnp.instancelabs.padprofile.Tip;
 
 /** JSON shapes of engine objects (stable names for the web UI; engine enums as their db names). */
 final class Views {
@@ -233,6 +248,10 @@ final class Views {
         m.put("needleZOffsetMm", p.needleZOffsetMm);
         m.put("hopHeightMm", p.hopHeightMm);
         m.put("surfaceProbed", p.surfaceFingerprint != null);
+        // the tip setup the plan was made for (§22.3: another mounted since, or a new version of it, makes it stale)
+        m.put("setupKey", p.setupKey);
+        m.put("setupName", p.setupName);
+        m.put("setupVersion", p.setupVersion);
 
         Map<String, Object> s = new LinkedHashMap<>();
         int blocked = p.blockedPads().size();
@@ -265,6 +284,8 @@ final class Views {
             d.put("packageId", x.packageId);
             d.put("typeKey", x.typeKey);
             d.put("typeVersion", x.typeVersion);
+            d.put("typePadVersion", x.typePadVersion);
+            d.put("typeTipKey", x.typeTipKey);
             d.put("typeStatus", x.typeStatus == null ? null : x.typeStatus.dbName);
             d.put("source", x.source == null ? null : x.source.name());
             d.put("x", x.xMm);
@@ -454,7 +475,293 @@ final class Views {
         m.put("createdAtMs", t.createdAtMs);
         m.put("operator", t.operator);
         PadProfileViews.padTypeFields(m, t);
+        // tip setups (§22.2): the row of a setup's composed view
+        m.put("setupKey", t.setupKey);
+        m.put("padVersion", t.padVersion);
+        m.put("standIn", t.standIn);
         return m;
+    }
+
+    /** A pad calibration record (§12.2, §22.6): its fields; the list adds its setup, label, photos and flags. */
+    static Map<String, Object> padCalibration(PadCalibrationRecord r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", r.id);
+        m.put("createdAtMs", r.createdAtMs);
+        m.put("jobId", r.jobId);
+        m.put("typeKey", r.typeKey);
+        m.put("versionFrom", r.versionFrom);
+        m.put("versionTo", r.versionTo);
+        m.put("outcome", r.outcome);
+        m.put("steps", r.steps);
+        m.put("dotsPerPad", r.dotsPerPad);
+        m.put("massPerPadMg", r.massPerPadMg);
+        m.put("checks", r.checks);
+        m.put("evidence", r.evidence);
+        m.put("runs", r.runs);
+        m.put("simulated", r.simulated);
+        m.put("message", r.message);
+        m.put("operator", r.operator);
+        m.put("setupKey", r.setupKey);
+        m.put("method", r.method);
+        m.put("needleSinceMs", r.needleSinceMs);
+        return m;
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Tip setups and photos (PROFILE_CALIBRATION_DESIGN.md §22.6)
+    // ------------------------------------------------------------------------------------------
+
+    /** The URL of a stored picture, or of its 320 px thumbnail. */
+    static String photoUrl(long id, boolean thumb) {
+        return "/api/photos/" + id + (thumb ? "/thumb.jpg" : ".jpg");
+    }
+
+    /** The photo view of §22.6 (removable: a tip or setup picture that is not removed; result photos stay). */
+    static Map<String, Object> photo(Photo p) {
+        if (p == null) {
+            return null;
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", p.id);
+        m.put("kind", p.kind);
+        m.put("source", p.source);
+        m.put("atMs", p.createdAtMs);
+        m.put("url", photoUrl(p.id, false));
+        m.put("thumbUrl", photoUrl(p.id, true));
+        m.put("caption", p.caption);
+        m.put("widthPx", p.widthPx);
+        m.put("heightPx", p.heightPx);
+        m.put("links", p.links == null ? new ArrayList<>() : new ArrayList<>(p.links));
+        m.put("removable", !Photo.KIND_RESULT.equals(p.kind) && p.removedAtMs == null);
+        m.put("setupKey", p.setupKey);
+        m.put("needleSinceMs", p.needleSinceMs);
+        m.put("jobId", p.jobId);
+        m.put("doseSteps", p.doseSteps);
+        m.put("couponPlace", p.couponPlace);
+        m.put("mmPerPx", p.mmPerPx);
+        m.put("xMm", p.xMm);
+        m.put("yMm", p.yMm);
+        m.put("bytes", p.bytes);
+        m.put("simulated", p.simulated);
+        m.put("operator", p.operator);
+        m.put("removedAtMs", p.removedAtMs);
+        m.put("removedWhy", p.removedWhy);
+        m.put("restoreUntilMs", p.removedAtMs == null ? null : p.removedAtMs + PhotoStore.KEEP_REMOVED_MS);
+        return m;
+    }
+
+    static List<Map<String, Object>> photos(List<Photo> l) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (l != null) {
+            for (Photo p : l) {
+                out.add(photo(p));
+            }
+        }
+        return out;
+    }
+
+    /** The tip picture task's result (§22.4). */
+    static Map<String, Object> tipPicture(TipPictureResult r) {
+        if (r == null) {
+            return null;
+        }
+        return map("ok", r.ok, "message", r.message, "run", run(r.run, false), "photo", photo(r.photo));
+    }
+
+    /**
+     * The setup view of §22.6: the fields, whether it is complete and mounted, what may be edited, its summary, its
+     * recipe (parked or live), where it lands, its pad types, its dot sizes and its pictures.
+     *
+     * @param mountedAtMs when the mounted setup was mounted (null: before the update), for the mounted one
+     */
+    static Map<String, Object> setup(DispenseService svc, TipSetup s, DispenseConfig cfg, Long mountedAtMs)
+            throws Exception {
+        DispenseDb db = svc.getDb();
+        boolean mounted = s.key.equals(cfg.tip.key);
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("key", s.key);
+        m.put("version", s.version);
+        m.put("name", s.name);
+        m.put("dispenser", s.dispenser);
+        m.put("tipModel", s.tipModel);
+        m.put("gauge", s.gauge);
+        m.put("idMm", s.idMm);
+        m.put("odMm", s.odMm);
+        m.put("odSource", s.odSource);
+        m.put("form", s.form);
+        m.put("bendDeg", s.bendDeg);
+        m.put("bendToward", s.bendToward);
+        m.put("taper", s.taper);
+        m.put("lengthMm", s.lengthMm);
+        m.put("minDotSteps", s.minDotSteps);
+        m.put("model", s.model);
+        m.put("notes", s.notes);
+        m.put("createdAtMs", s.createdAtMs);
+        m.put("complete", s.isComplete());
+        m.put("retired", s.retired);
+        m.put("mounted", mounted);
+        m.put("mountedAtMs", mounted ? mountedAtMs : null);
+        m.put("editable", map("identity", !db.tipSetupInUse(s.key), "correction", true));
+        m.put("summary", s.summary());
+        DispenseConfig.ParkedTip parked = cfg.parkedTips.get(s.key);
+        DispenseProfile p = mounted ? cfg.profile : parked == null ? null : parked.profile;
+        m.put("profile", p == null ? null : map("name", p.name, "pressurePsi", p.pressurePsi, "netStepsPerDot",
+                p.netStepsPerDot, "parked", !mounted, "from", parked == null ? null : parked.profileFrom));
+        DispenseConfig.NeedleLanding l = mounted ? cfg.needleLanding : parked == null ? null : parked.needleLanding;
+        m.put("landing", l == null ? null : map("dxMm", l.dxMm, "dyMm", l.dyMm, "setAtMs", l.setAtMs, "checked",
+                mounted && svc.isNeedleXyChecked(), "note", l.note, "jobId", l.jobId, "photoId", l.photoId));
+        m.put("padTypes", padTypeCounts(TipSetups.typesFor(db, s.key)));
+        if (mounted) {
+            m.put("dots", dots(svc.mountedTip(), cfg.bStepsPerRev));
+        }
+        else if (TipSetup.MODEL_BENCH.equals(s.model)) {
+            m.put("dots", benchDots(s.minDotSteps));
+        }
+        else {
+            String fp = p == null ? null : p.doseFingerprint();
+            boolean sim = svc.isSimulatorConfirmed();
+            m.put("dots", dots(DoseRecords.dotTable(db.doseRecordsOf(s.key, fp, cfg.paste.key, sim), s.key, fp,
+                    cfg.paste.key, sim, db.flaggedJobs(), DoseRecords.settings(cfg.padCalibration)), s.minDotSteps,
+                    cfg.bStepsPerRev));
+        }
+        m.put("mainPhoto", photo(db.mainPhoto(s.key)));
+        List<Map<String, Object>> photos = new ArrayList<>();
+        for (Photo x : db.photos(s.key, null, null, null, false, 100)) {
+            if (!Photo.KIND_RESULT.equals(x.kind)) {
+                photos.add(photo(x));
+            }
+        }
+        m.put("photos", photos);
+        return m;
+    }
+
+    /** A setup's calibrated pad types (§22.6 padTypes): counts per status above not-started, and their names. */
+    static Map<String, Object> padTypeCounts(List<PadType> types) {
+        int validated = 0;
+        int characterized = 0;
+        int provisional = 0;
+        List<String> names = new ArrayList<>();
+        for (PadType t : types) {
+            if (t.standIn || PadTypeEndpoints.RETIRED.equals(t.family) || t.status == null) {
+                continue;
+            }
+            if (t.status == PadTypeStatus.VALIDATED) {
+                validated++;
+            }
+            else if (t.status == PadTypeStatus.CHARACTERIZED) {
+                characterized++;
+            }
+            else if (t.status == PadTypeStatus.PROVISIONAL) {
+                provisional++;
+            }
+            if (t.status.atLeast(PadTypeStatus.CHARACTERIZED)) {
+                names.add(Texts.typeWords(t.family, t.name == null ? t.typeKey : t.name));
+            }
+        }
+        return map("validated", validated, "characterized", characterized, "provisional", provisional, "names",
+                names);
+    }
+
+    /** Where a dose's dot sizes come from: bench | measured | none (the strip and the check's tip, §22.6). */
+    static String dotsSource(Tip t) {
+        return t.benchModel ? "bench" : t.isMeasured() ? "measured" : "none";
+    }
+
+    /** §22.6 dots of the mounted tip: the bench model's, or its dot table's (masses per turn). */
+    static Map<String, Object> dots(Tip t, int stepsPerRev) {
+        if (t.benchModel) {
+            return benchDots(t.minDotSteps);
+        }
+        Long at = t.mgPerStepAtMs;
+        List<Map<String, Object>> doses = new ArrayList<>();
+        for (Map.Entry<Integer, Tip.Measured> e : t.measured.entrySet()) {
+            Tip.Measured x = e.getValue();
+            doses.add(map("steps", e.getKey(), "diameterMm", new double[] {r3(x.dMeanMm), r3(x.d95Mm)}, "source",
+                    "measured", "recordId", x.recordId, "atMs", x.atMs));
+            at = at == null || x.atMs > at ? x.atMs : at;
+        }
+        return map("source", dotsSource(t), "atMs", at, "mgPerTurn", t.mgPerStep == null ? null
+                : r3(t.mgPerStep * stepsPerRev), "doses", doses);
+    }
+
+    /** As above for a setup that is not mounted: its dot table at its parked recipe, the loaded paste and the flag. */
+    static Map<String, Object> dots(DoseRecords.DotTable d, int minDotSteps, int stepsPerRev) {
+        Long at = d.mgPerStepAtMs;
+        List<Map<String, Object>> doses = new ArrayList<>();
+        for (Map.Entry<Integer, Tip.Measured> e : d.doses.entrySet()) {
+            Tip.Measured x = e.getValue();
+            doses.add(map("steps", e.getKey(), "diameterMm", new double[] {r3(x.dMeanMm), r3(x.d95Mm)}, "source",
+                    "measured", "recordId", x.recordId, "atMs", x.atMs));
+            at = at == null || x.atMs > at ? x.atMs : at;
+        }
+        boolean measured = d.doses.containsKey(minDotSteps) && d.mgPerStep != null;
+        return map("source", measured ? "measured" : "none", "atMs", at, "mgPerTurn", d.mgPerStep == null ? null
+                : r3(d.mgPerStep * stepsPerRev), "doses", doses);
+    }
+
+    /** §1's bench model (the seeded 22G bent taper): every allowed dose with its model sizes, 2.11 mg per turn. */
+    static Map<String, Object> benchDots(int minDotSteps) {
+        List<Map<String, Object>> doses = new ArrayList<>();
+        for (int s : DoseModel.ALLOWED_STEPS) {
+            if (s >= minDotSteps) {
+                doses.add(map("steps", s, "diameterMm", new double[] {r3(DoseModel.dLoMm(s)), r3(DoseModel.dHiMm(s))},
+                        "source", "model"));
+            }
+        }
+        return map("source", "bench", "atMs", null, "mgPerTurn", DoseModel.M_REV_MG, "doses", doses);
+    }
+
+    /** A needle change as the engine recorded it (§22.3): {atMs, setupKey, setupName, why, voided, text}. */
+    static Map<String, Object> needleChange(NeedleChange nc) {
+        if (nc == null) {
+            return null;
+        }
+        return map("atMs", nc.atMs, "setupKey", nc.setupKey, "setupName", nc.setupName, "why", nc.why, "operator",
+                nc.operator, "voided", map("coupons", nc.voided.coupons, "job", nc.voided.job, "task", nc.voided.task),
+                "text", nc.text);
+    }
+
+    /**
+     * The mount response of §22.3: what is mounted, what it replaced, its recipe, what the needle change voided, what
+     * went stale, N2's head offset now against the one the incoming landing was checked under, the next steps, until
+     * when it can be undone, and the text.
+     */
+    static Map<String, Object> mount(MountResult r, NeedleChange nc, List<Map<String, Object>> next, String text) {
+        NeedleChange c = nc != null ? nc : r.needleChange;
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("mounted", r.mounted);
+        m.put("mountedName", r.mountedName);
+        m.put("from", r.from);
+        m.put("fromName", r.fromName);
+        m.put("atMs", r.atMs);
+        m.put("needleChangedAtMs", r.needleChangedAtMs);
+        m.put("profile", r.profile == null ? null : map("name", r.profile.name, "pressurePsi", r.profile.pressurePsi,
+                "netStepsPerDot", r.profile.netStepsPerDot, "fingerprint", r.profile.fingerprint()));
+        m.put("voided", c == null ? null : map("coupons", c.voided.coupons, "job", c.voided.job, "task",
+                c.voided.task));
+        m.put("needleChange", needleChange(c));
+        m.put("stale", r.stale == null ? new ArrayList<>() : new ArrayList<>(r.stale));
+        m.put("headOffset", map("now", r.headOffsetNow, "landingWas", r.headOffsetLandingWas));
+        m.put("next", next);
+        m.put("undoUntilMs", r.undoUntilMs);
+        m.put("warnings", r.warnings == null ? new ArrayList<>() : new ArrayList<>(r.warnings));
+        m.put("text", text);
+        return m;
+    }
+
+    /** "+2.32" / "−0.41": a signed millimetre value as the texts write it (two decimals, a real minus sign). */
+    static String signed(double v) {
+        String s = String.format(Locale.ROOT, "%.2f", Math.abs(v));
+        return (v < -0.005 ? "\u2212" : "+") + s;
+    }
+
+    static Double r3(Double x) {
+        return x == null ? null : Math.round(x * 1000) / 1000.0;
+    }
+
+    /** A number as the texts write it: at most 3 decimals, no trailing zeros ("18", "0.72", "0.8"). */
+    static String num(double v) {
+        return java.math.BigDecimal.valueOf(Math.round(v * 1000) / 1000.0).stripTrailingZeros().toPlainString();
     }
 
     static Map<String, Object> calibration(Calibration c) {

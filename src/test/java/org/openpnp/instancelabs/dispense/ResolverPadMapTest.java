@@ -142,7 +142,7 @@ public class ResolverPadMapTest {
         assertEquals(PadTypeResolver.Resolution.PAD_MAP, m.get("U1.4").typeRule);
         assertEquals("4", m.get("U1.4").typeRuleMatched);
         DispenseConfig c = GcodeStreamTest.toyConfig();
-        DispensePlan p = new DispensePlanner(c, r).planBoard(bl, 100, 50);
+        DispensePlan p = TestTips.planner(c, r).planBoard(bl, 100, 50);
         Map<String, String> byPad = new HashMap<>();
         for (DispensePlan.PlannedPad x : p.pads) {
             byPad.put(x.padId, x.typeKey + " " + x.typeRule);

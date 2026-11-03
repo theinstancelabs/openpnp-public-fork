@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -13,6 +14,7 @@ import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DoseBlocksRequest;
 import org.openpnp.instancelabs.dispense.DoseBlocksResult;
 import org.openpnp.instancelabs.dispense.ManualBalance;
+import org.openpnp.instancelabs.dispense.NeedleChange;
 import org.openpnp.instancelabs.dispense.SurfaceProbeRequest;
 import org.openpnp.instancelabs.dispense.SurfaceProbeResult;
 import org.openpnp.instancelabs.sim.SimBalance;
@@ -110,6 +112,43 @@ final class PadCalibrationJobs {
             recent.remove(recent.keySet().iterator().next());
         }
         executor.submit(job::run);
+    }
+
+    /**
+     * Runs {@code body} on the jobs' monitor (as {@link #start}) while no pad calibration job is active (tip setups
+     * design §22.3): the switch of a mount, so no job starts between its checks and its write; a job that has not
+     * ended refuses it (409 "A pad calibration is stopping: mount again in a moment.").
+     */
+    synchronized <T> T whileNoJob(Callable<T> body) throws Exception {
+        PadCalibrationJob j = current;
+        if (j != null && !j.ended()) {
+            throw ApiException.refused(j.holdsLock() ? "A pad calibration is stopping: mount again in a moment."
+                    : "A pad calibration is waiting for the readings of its coupons: type them, skip them or cancel it "
+                            + "first (Calibrate › Pad calibration).");
+        }
+        return body.call();
+    }
+
+    /**
+     * Before the engine records a needle change (tip setups design §22.3): a job that runs, decides or plans stops
+     * with the needle's words at its engine step (the change aborts that step), as STOP stops it.
+     */
+    void needleChanging(long atMs) {
+        PadCalibrationJob j = current;
+        if (j != null && j.holdsLock()) {
+            j.needleChanging(atMs);
+        }
+    }
+
+    /**
+     * After the engine recorded a needle change (§22.3): a job waiting for the readings of its coupons ends
+     * stopped (the engine wrote their skip rows: the dots were laid by the needle that came off).
+     */
+    void needleChanged(NeedleChange nc) {
+        PadCalibrationJob j = current;
+        if (j != null) {
+            j.needleChanged(nc);
+        }
     }
 
     /** Runs a step of a job on the jobs' thread (the decision after the readings). */

@@ -120,6 +120,8 @@ public final class LadderStats {
         public boolean driftFail;
         public Double landingMeanMm;
         public Double landingSdMm;
+        /** The mean landing per axis, found - commanded (mm; tip setups design §22.3); its length is landingMeanMm. */
+        public Double landingDxMm, landingDyMm;
         public Double dMeanMm;
         public Double dCv;
         public Double d95Mm;
@@ -418,6 +420,8 @@ public final class LadderStats {
             double mx = mean(toArray(dx));
             double my = mean(toArray(dy));
             st.landingMeanMm = Math.hypot(mx, my);
+            st.landingDxMm = mx;
+            st.landingDyMm = my;
             st.landingSdMm = Math.max(sd(toArray(dx)), sd(toArray(dy)));
             add(st, "landing", st.landingMeanMm <= Limits.LANDING_MEAN_MM + Limits.EPS, st.landingMeanMm,
                     Limits.LANDING_MEAN_MM, "the dots landed " + Texts.mm(st.landingMeanMm) + " mm off on average (at most "
@@ -558,11 +562,25 @@ public final class LadderStats {
      */
     public static Check control(int steps, double medianAreaMm2, Double newestPassingMedianMm2, double psi,
             Settings set) {
+        return control(steps, medianAreaMm2, newestPassingMedianMm2, psi, set, null);
+    }
+
+    /**
+     * The control for the mounted tip setup (tip setups design §22.2): against the bench only with the bench model,
+     * else against the setup's newest passing record of the dose ({@code newestPassingMedianMm2}, from its dot table,
+     * ±10 %), or against nothing (it passes with the text "first measurement of this tip"). The failure text adds "or
+     * another tip than the {S} is on" (§22.3). {@code tip} null: as {@link #control(int, double, Double, double,
+     * Settings)}.
+     */
+    public static Check control(int steps, double medianAreaMm2, Double newestPassingMedianMm2, double psi,
+            Settings set, Tip tip) {
         Settings s = set != null ? set : new Settings();
         String turn = DoseModel.turnName(steps);
-        Double bench = steps == DoseModel.HALF ? Limits.BENCH_CONTROL_AREA_MM2
+        boolean bench0 = tip == null || tip.benchModel;
+        Double bench = !bench0 ? null : steps == DoseModel.HALF ? Limits.BENCH_CONTROL_AREA_MM2
                 : steps == DoseModel.ONE_TURN ? DoseModel.ONE_TURN_AREA_MM2 : null;
-        String fix = ": check the regulator (" + Texts.num(psi, 0) + " psi) and the paste before calibrating";
+        String fix = ": check the regulator (" + Texts.num(psi, 0) + " psi) and the paste before calibrating"
+                + (tip == null ? "" : ", or another tip than the " + tip.name + " is on");
         if (bench != null && Math.abs(medianAreaMm2 / bench - 1) > s.controlTolerance + Limits.EPS) {
             double e = medianAreaMm2 / bench - 1;
             return new Check("control", false, medianAreaMm2, bench, "the control " + turn + " dots are "
@@ -576,6 +594,10 @@ public final class LadderStats {
                     + " dots are " + Texts.mm(medianAreaMm2) + " mm², " + Texts.pct(e) + " % "
                     + (e < 0 ? "below" : "above") + " the " + Texts.mm(newestPassingMedianMm2)
                     + " mm² of the last calibration" + fix);
+        }
+        if (!bench0 && newestPassingMedianMm2 == null) {
+            // §22.2: nothing to compare a setup's first dots of this dose with
+            return new Check("control", true, medianAreaMm2, null, "first measurement of this tip");
         }
         return new Check("control", true, medianAreaMm2, bench, null);
     }

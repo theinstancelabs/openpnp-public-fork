@@ -58,14 +58,14 @@ public class InterlocksBlocksTest {
         DispenseConfig c = in.cfg;
         c.profile.netStepsPerDot = 1600;
         List<PadGeometry> pads = PlannerDoseTest.part("U1", "TAB_PKG", 102, 90, 4.0, 2.0, 1.5, PlannerDoseTest.TAB);
-        DispensePlanner pl = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(PlannerDoseTest.TAB),
+        DispensePlanner pl = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(PlannerDoseTest.TAB),
                 null));
         in.plan = pl.plan("whole", pads, 77.5, 40);
         in.purgeDots = DoseBlocks.purgeSpotsNeeded(in.plan, c);
         assertFalse(Interlocks.check(in).has("I11"), Interlocks.check(in).toString());
         // the same profile with a quarter-turn type on the board: I11
         pads.addAll(PlannerDoseTest.part("Q1", "SOT_Q", 120, 90, 3.0, 1.475, 0.6, PlannerDoseTest.SOT));
-        in.plan = new DispensePlanner(c, new PadTypeResolver(java.util.Arrays.asList(PlannerDoseTest.TAB,
+        in.plan = TestTips.planner(c, new PadTypeResolver(java.util.Arrays.asList(PlannerDoseTest.TAB,
                 PlannerDoseTest.SOT), null)).plan("whole", pads, 77.5, 40);
         assertEquals(2, in.plan.blocks.size());
         assertTrue(Interlocks.check(in).toString().contains("I11: the screw start angle has never been set"),
@@ -91,7 +91,7 @@ public class InterlocksBlocksTest {
         for (int i = 0; i < parts; i++) {
             pads.add(PlannerDoseTest.pad("C" + i, "PKG", "1", 100 + 2.0 * (i % 10), 80 + 2.0 * (i / 10), 0, 1.5, 1.5, t));
         }
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(t), null)).plan("feed",
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(t), null)).plan("feed",
                 pads, 77.5, 40);
         p.boardZMm = 5.5;
         return p;

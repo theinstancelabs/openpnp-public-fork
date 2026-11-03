@@ -193,12 +193,12 @@ public class RegistrationSimTest {
     void setUp() throws Exception {
         ok(call("PUT", "/api/locations/waste", "{\"x\":80,\"y\":40,\"z\":5.5}"));
         ok(call("PUT", "/api/locations/blank", "{\"x\":90,\"y\":40,\"z\":5.5}"));
-        ok(post("/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
-        ok(post("/api/needle/offset", "{\"offsetMm\":-2.59}"));
+        ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
+        ok(post("/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}"));
         ok(call("PUT", "/api/surfaces/blank", "{\"points\":[[60,30,5.5],[200,30,5.5],[60,55,5.5],[200,55,5.5]]}"));
         ok(call("PUT", "/api/config", "{\"purgeRow\":{\"x0Mm\":80,\"y0Mm\":47,\"pitchXMm\":2.5,\"spots\":48},"
                 + "\"vacuumProbe\":{\"vacuumSettleMs\":300,\"readDelayMs\":0}}"));
-        ok(call("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}"));
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         ok(post("/api/screw/start-angle", "{}"));
     }
 
@@ -831,7 +831,9 @@ public class RegistrationSimTest {
         assertEquals(300, c.getAsJsonObject("vacuumProbe").get("vacuumSettleMs").getAsInt(), "the rest kept");
         assertEquals(400, call("PUT", "/api/config", "{\"vacuumProbe\":{\"floorBelowMm\":9}}").status);
         assertEquals(400, call("PUT", "/api/config", "{\"fiducialCheck\":{\"searchRadiusMm\":20}}").status);
-        assertEquals(200, call("PUT", "/api/config", ok(get("/api/config")).toString()).status, "a round trip");
+        JsonObject all = ok(get("/api/config"));
+        all.addProperty("forTip", "ad22tta-b"); // the settings editor names the tip its profile was edited for (§22.1)
+        assertEquals(200, call("PUT", "/api/config", all.toString()).status, "a round trip");
         // a board top Z typed in the needle's frame (2.59 mm off) is refused at planning
         Res needleZ = post("/api/plan", planBody(null).replace("\"z\":" + NZ, "\"z\":" + (NZ - 2.59)));
         assertEquals(409, needleZ.status);
@@ -960,14 +962,15 @@ public class RegistrationSimTest {
         JsonObject needle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle");
         assertTrue(needle.get("kRefusal").getAsString().startsWith("K was measured under another home: Z moved -0.70 mm "
                 + "at the home of "), needle.toString());
-        Res fromK = post("/api/needle/anchor", "{\"surfaceZ\":" + (BLANK_Z - 0.70) + ",\"needleContactRawSum\":65.59}");
+        Res fromK = post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":" + (BLANK_Z - 0.70)
+                + ",\"needleContactRawSum\":65.59}");
         assertEquals(409, fromK.status, fromK.toString());
         assertTrue(fromK.json().get("reason").getAsString().endsWith("Record the needle frame with both tips touching the "
                 + "same spot"), fromK.toString());
         double offset = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle").get("zOffsetMm")
                 .getAsDouble();
-        JsonObject both = ok(post("/api/needle/anchor", "{\"surfaceZ\":" + (BLANK_Z - 0.70) + ",\"needleContactZ\":"
-                + (BLANK_Z - 0.70 - 2.30) + "}"));
+        JsonObject both = ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":" + (BLANK_Z - 0.70)
+                + ",\"needleContactZ\":" + (BLANK_Z - 0.70 - 2.30) + "}"));
         assertEquals(-2.30, both.get("offsetMm").getAsDouble(), 1e-9, "measured, not carried over from "
                 + offset);
         // the places moved too: the status lists those set before the home until their Z is taken again

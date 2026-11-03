@@ -145,6 +145,21 @@ public final class DoseBlocks {
         return DoseModel.M_REV_MG / cfg.bStepsPerRev;
     }
 
+    /**
+     * R7's paste per motor step for the mounted tip setup (tip setups design §22.2): the bench model's for the bench
+     * setup (the 22G as before); otherwise its weighed mass per step, else the bench's × 1.5 when its bore is wider
+     * than the 22G's 0.41 mm (a wider bore slips less, so the bench value would understate the demand).
+     */
+    public static double feedMgPerStep(DispenseConfig cfg, org.openpnp.instancelabs.padprofile.Tip tip) {
+        if (tip == null || tip.benchModel) {
+            return modelMgPerStep(cfg);
+        }
+        if (tip.mgPerStep != null && tip.mgPerStep > 0) {
+            return tip.mgPerStep;
+        }
+        return modelMgPerStep(cfg) * (tip.idMm > 0.41 + 1e-9 ? 1.5 : 1);
+    }
+
     /** R7: the paste a block asks of the screw, mg/s. */
     public static double demandMgS(int dots, int steps, double mgPerStep, double seconds) {
         return seconds > 0 ? dots * (double) steps * mgPerStep / seconds : Double.POSITIVE_INFINITY;

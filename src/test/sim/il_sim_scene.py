@@ -26,6 +26,7 @@ Python API (tests compute every expected value from the transforms):
   CAMERA_XML_SETS, FAST_TIMINGS, FAST_VACUUM
   padcal(sc, paste=True, coupons=True, balance="display", bench_blank=True, config_dir=None), variant(sc, name, ...),
   needle_offsets(config_dir), PASTE, COUPONS, BENCH_BLANK_BGR, VARIANTS
+  TIP_CAMERA_XML_SET, parse_paste_by_tip(text), paste_by_tip(sc, key, entry), physical_tip(sc, key)
 
 CLI:
   il_sim_scene.py write --config DIR --board FILE --x X --y Y --rot DEG --z Z
@@ -36,6 +37,12 @@ CLI:
   il_sim_scene.py amend --config DIR [PADCAL]      the session's scene file, changed in place (it reloads on its stamp)
   il_sim_scene.py selftest [--board FILE] [--config DIR]
   PADCAL: [--paste] [--coupons] [--balance display|connected] [--bench-blank] [--variant NAME]
+          [--paste-by-tip KEY:mRevMg=M,c=C,e=E,landing=DX:DY]... [--physical-tip KEY|mounted]
+
+Tip setups (PROFILE_CALIBRATION_DESIGN.md §22.8): --paste-by-tip gives one tip setup its own paste (mass per
+revolution, footprint law, where it lands off the commanded spot; fields left out are the paste's), --physical-tip
+names the tip "on the head" (default: the mounted setup; "mounted" removes the field), and TIP_CAMERA_XML_SET installs
+the SIM bottom camera, which draws that tip end-on.
 Python 3 standard library only.
 """
 import argparse
@@ -53,6 +60,8 @@ LIVE_CONFIG = os.path.join(os.path.expanduser("~"), ".openpnp2")
 CAMERA_XML_SETS = [".//camera[@name='Top']@class=org.openpnp.instancelabs.sim.SimBoardCamera",
                    ".//camera[@name='Top']@width=1920",
                    ".//camera[@name='Top']@height=1080"]
+# Installs the SIM bottom camera (tip setups §22.8): it draws the tip on the head end-on when N2 is over it.
+TIP_CAMERA_XML_SET = ".//camera[@looking='Up']@class=org.openpnp.instancelabs.sim.SimTipCamera"
 # Engine settings (PUT /api/config) for fast simulated probes: refused on a real machine (spec §4.4).
 FAST_TIMINGS = {"vacuumProbe": {"vacuumSettleMs": 300, "readDelayMs": 0}}
 # Sensor time constants that go with FAST_TIMINGS: a baseline 300 ms after the valve opens, and reads right
@@ -369,6 +378,53 @@ def variant(sc, name, config_dir=None):
     return sc
 
 
+PASTE_BY_TIP_FIELDS = ("mRevMg", "c", "e", "landing")
+
+
+def parse_paste_by_tip(text):
+    """'KEY:mRevMg=1.6,c=0.6,e=0.77,landing=2.4:-0.4' -> (KEY, the byTip entry of the scene's paste, §22.8)."""
+    key, sep, rest = text.partition(":")
+    if not key or not sep or not rest:
+        raise ValueError("--paste-by-tip %r: expected KEY:mRevMg=..,c=..,e=..,landing=DX:DY" % text)
+    entry = {}
+    for item in rest.split(","):
+        name, eq, value = item.partition("=")
+        name = name.strip()
+        if not eq or name not in PASTE_BY_TIP_FIELDS:
+            raise ValueError("--paste-by-tip %r: %r is not one of %s" % (text, item, ", ".join(PASTE_BY_TIP_FIELDS)))
+        if name == "landing":
+            xy = value.split(":")
+            if len(xy) != 2:
+                raise ValueError("--paste-by-tip %r: landing=DX:DY (mm)" % text)
+            entry["landingBiasMm"] = [float(xy[0]), float(xy[1])]
+            continue
+        v = float(value)
+        if not v > 0:
+            raise ValueError("--paste-by-tip %r: %s must be > 0" % (text, name))
+        if name == "mRevMg":
+            entry["mRevMg"] = v
+        else:
+            entry.setdefault("footprint", {})[name] = v
+    return key, entry
+
+
+def paste_by_tip(sc, key, entry):
+    """Gives tip setup KEY its own paste (SimScene paste.byTip): the scene needs the paste block."""
+    if sc.get("paste") is None:
+        raise ValueError("--paste-by-tip needs the paste block (--paste)")
+    sc["paste"].setdefault("byTip", {})[key] = entry
+    return sc
+
+
+def physical_tip(sc, key):
+    """The tip "on the head" (SimScene physicalTip); None or "mounted": the mounted setup (the field removed)."""
+    if key is None or key == "mounted":
+        sc.pop("physicalTip", None)
+    else:
+        sc["physicalTip"] = key
+    return sc
+
+
 def scene_path(config_dir):
     return os.path.join(config_dir, SCENE_REL)
 
@@ -422,13 +478,21 @@ def cmd_write(a):
     path = write(a.config, sc)
     print(json.dumps({"scene": path, "seat": true_seat, "fiducials": len(sc["board"]["fiducials"]),
                       "movedFromNominalMm": round(moved_mm(a.board, seat(a.x, a.y, a.rot), true_seat, a.config), 4),
-                      "padcal": sorted(k for k in ("paste", "coupons", "balance") if k in sc)}))
+                      "padcal": sorted(k for k in ("paste", "coupons", "balance") if k in sc),
+                      "byTip": sorted((sc.get("paste") or {}).get("byTip", {})), "physicalTip": sc.get("physicalTip")}))
 
 
 def _padcal_args(sc, a):
     padcal(sc, paste=a.paste, coupons=a.coupons, balance=a.balance, bench_blank=a.bench_blank, config_dir=a.config)
     if a.variant:
         variant(sc, a.variant, a.config)
+    for text in a.paste_by_tip:
+        try:
+            paste_by_tip(sc, *parse_paste_by_tip(text))
+        except ValueError as e:
+            raise SystemExit("il_sim_scene: %s" % e)
+    if a.physical_tip is not None:
+        physical_tip(sc, a.physical_tip)
 
 
 def cmd_amend(a):
@@ -441,7 +505,8 @@ def cmd_amend(a):
     _padcal_args(sc, a)
     write(a.config, sc)
     print(json.dumps({"scene": path, "padcal": sorted(k for k in ("paste", "coupons", "balance") if k in sc),
-                      "variant": a.variant}))
+                      "variant": a.variant, "byTip": sorted((sc.get("paste") or {}).get("byTip", {})),
+                      "physicalTip": sc.get("physicalTip")}))
 
 
 def _add_padcal_args(p):
@@ -450,6 +515,10 @@ def _add_padcal_args(p):
     p.add_argument("--balance", choices=BALANCE_MODES, help="the SIM balance: display (typed) or connected")
     p.add_argument("--bench-blank", action="store_true", help="the bench blank colour (DotInspector sees the paste)")
     p.add_argument("--variant", choices=sorted(VARIANTS), help="one negative control of §11.7")
+    p.add_argument("--paste-by-tip", action="append", default=[], metavar="KEY:mRevMg=M,c=C,e=E,landing=DX:DY",
+                   help="a tip setup's own paste (§22.8; fields left out are the paste's)")
+    p.add_argument("--physical-tip", metavar="KEY", help="the tip on the head (default the mounted one; 'mounted' "
+                   "removes it)")
 
 
 def _close(a, b, tol=1e-9):
@@ -493,6 +562,28 @@ def cmd_selftest(a):
               (v != padcal({})) == (VARIANTS[name][0] is not None))
     check("variant needle-gap-0.25: 0.15 below the engine's", variant(padcal({}), "needle-gap-0.25")["paste"]
           ["needleZOffsetMm"] == -0.15)
+    k, e = parse_paste_by_tip("25g-straight:mRevMg=1.6,c=0.6,landing=2.4:-0.4")
+    check("paste-by-tip: §22.8's example", k == "25g-straight"
+          and e == {"mRevMg": 1.6, "footprint": {"c": 0.6}, "landingBiasMm": [2.4, -0.4]})
+    check("paste-by-tip: e alone", parse_paste_by_tip("x:e=0.8")[1] == {"footprint": {"e": 0.8}})
+    for bad in ("25g-straight", "25g-straight:", "k:mRevMg=0", "k:c=-1", "k:landing=2.4", "k:speed=3", "k:mRevMg"):
+        try:
+            parse_paste_by_tip(bad)
+            check("paste-by-tip refuses %r" % bad, False)
+        except ValueError:
+            check("paste-by-tip refuses %r" % bad, True)
+    sc = paste_by_tip(padcal({}), k, e)
+    check("paste-by-tip: in paste.byTip, the paste untouched", sc["paste"]["byTip"][k] == e
+          and sc["paste"]["mRevMg"] == 2.30 and "byTip" not in PASTE)
+    try:
+        paste_by_tip({}, k, e)
+        check("paste-by-tip needs the paste block", False)
+    except ValueError:
+        check("paste-by-tip needs the paste block", True)
+    check("physical-tip: set, then back to the mounted one", physical_tip({}, k) == {"physicalTip": k}
+          and physical_tip({"physicalTip": k}, "mounted") == {})
+    check("the bottom camera's xml-set", TIP_CAMERA_XML_SET.endswith("@class=org.openpnp.instancelabs.sim.SimTipCamera")
+          and "@looking='Up'" in TIP_CAMERA_XML_SET)
     if a.board:
         f = fiducials(a.board, a.config)
         check("board fiducials found (%d)" % len(f), len(f) >= 2)

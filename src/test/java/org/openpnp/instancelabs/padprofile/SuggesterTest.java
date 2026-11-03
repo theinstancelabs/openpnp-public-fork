@@ -64,8 +64,9 @@ public class SuggesterTest {
         ProfileCheck.Group g = r.groups.get(0);
         assertEquals(ProfileCheck.BELOW_GATE, g.reason);
         assertEquals("SOT-23 · 1.48 × 0.60 mm", g.label);
-        assertEquals("SOT-23 is not calibrated yet (status: not started). Boards need pad types that are at least "
-                + "characterized: calibrate it automatically or by hand.", g.reasonText);
+        assertEquals("SOT-23 is not calibrated for the " + Tip.SEED_NAME + " yet (status: not started). Boards need pad "
+                + "types that are at least characterized: calibrate it for this tip automatically or by hand.",
+                g.reasonText);
         assertEquals("not calibrated yet", g.shortText);
         assertEquals(1.90, g.minPitchMm, 0.005);
         Suggestion s = g.suggestion;

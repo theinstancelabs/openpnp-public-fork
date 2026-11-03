@@ -66,7 +66,7 @@ public class PadInstancesTest {
         assertNull(qi.dotSteps);
         // the check reads a plan's flags for blocking
         CheckInputs in = PadInstances.inputs(l, Arrays.asList(PlannerDoseTest.chip0603(), PlannerDoseTest.TAB,
-                PlannerDoseTest.SOT), null, c, null, true);
+                PlannerDoseTest.SOT), null, c, null, true, PadInstances.specTip(c.tip));
         ProfileCheck.Result r = ProfileCheck.of(in);
         boolean bridge = false;
         for (ProfileCheck.Group g : r.groups) {
@@ -115,7 +115,7 @@ public class PadInstancesTest {
         Map<String, PadRule> rules = new HashMap<>();
         rules.put("chip-0603", new PadRule("chip-0603", 3, null, 1.2));
         CheckInputs in = PadInstances.inputs(new ArrayList<>(), Arrays.asList(chip, gone), rules, c,
-                Collections.singleton("MIXED"), false);
+                Collections.singleton("MIXED"), false, PadInstances.specTip(c.tip));
         assertEquals("provisional", in.gate);
         assertEquals("ad22tta-b", in.tip.key);
         assertEquals(0.72, in.tip.odMm, 0);

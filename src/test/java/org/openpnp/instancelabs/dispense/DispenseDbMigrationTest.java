@@ -1,5 +1,6 @@
 package org.openpnp.instancelabs.dispense;
 
+import org.openpnp.instancelabs.padprofile.Tip;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -21,9 +22,9 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
- * Schema 1 -> 2 (profile calibration design §5.4): a schema-1 file made with the schema-1 DDL is
- * backed up and migrated on open, old rows read with null new fields, every table stays
- * append-only, and a second open changes nothing.
+ * Schema 1 -> 2 (profile calibration design §5.4), then -> 3 in the same open (tip setups design §22.1): a
+ * schema-1 file made with the schema-1 DDL is backed up once and migrated step by step on open, old rows read
+ * with null new fields, every table stays append-only, and a second open changes nothing.
  */
 public class DispenseDbMigrationTest {
     /** The schema-1 DDL as DispenseDb created it before schema 2 (frozen). */
@@ -142,6 +143,12 @@ public class DispenseDbMigrationTest {
         return l;
     }
 
+    /** The newest version of a type as stored (not composed for a setup). */
+    static PadType stored(DispenseDb db, String key) throws SQLException {
+        List<PadType> h = db.padTypeHistory(key);
+        return h.get(h.size() - 1);
+    }
+
     static List<Integer> schemaRows(DispenseDb db) throws SQLException {
         List<Integer> l = new ArrayList<>();
         for (Map<String, Object> m : db.query("SELECT version FROM schema_info ORDER BY rowid")) {
@@ -155,9 +162,9 @@ public class DispenseDbMigrationTest {
         File dir = schemaOneDir();
         assertEquals(0, backups(dir).length);
         try (DispenseDb db = DispenseDb.open(dir)) {
-            assertEquals(2, DispenseDb.SCHEMA_VERSION);
-            assertEquals(2, (int) db.schemaVersion());
-            assertEquals(Arrays.asList(1, 2), schemaRows(db), "schema_info is append-only: a new row");
+            assertEquals(3, DispenseDb.SCHEMA_VERSION);
+            assertEquals(3, (int) db.schemaVersion());
+            assertEquals(Arrays.asList(1, 2, 3), schemaRows(db), "schema_info is append-only: a new row per step");
             assertTrue(columns(db, "pad_types").containsAll(NEW_PAD_TYPE_COLUMNS), columns(db, "pad_types").toString());
             assertTrue(columns(db, "package_pad_type").contains("pad_names"));
             assertTrue(columns(db, "runs").contains("skipped_pads"));
@@ -171,8 +178,8 @@ public class DispenseDbMigrationTest {
             // the view was made again: it lists the new columns
             assertTrue(columns(db, "pad_types_current").containsAll(NEW_PAD_TYPE_COLUMNS));
             // old rows read with null new fields; nothing was seeded again
-            assertEquals(2, db.currentPadTypes().size());
-            PadType chip = db.currentPadType("chip-0603");
+            assertEquals(2, db.currentPadTypes(Tip.SEED_KEY).size());
+            PadType chip = stored(db, "chip-0603");
             assertEquals(2, chip.version);
             assertEquals(PadTypeStatus.VALIDATED, chip.status);
             assertNull(chip.dotSteps);
@@ -186,10 +193,11 @@ public class DispenseDbMigrationTest {
             List<Map<String, Object>> runs = db.recentRuns(5);
             assertEquals("board 2", runs.get(0).get("message"));
             assertNull(runs.get(0).get("skipped_pads"));
-            Map<String, Object> ev = db.recentEvents(1).get(0);
-            assertEquals("SCHEMA", ev.get("code"));
-            assertTrue(((String) ev.get("message")).startsWith("dispense.db schema 1 -> 2; the old file is kept as "
-                    + "dispense.db.v1-"), (String) ev.get("message"));
+            List<Map<String, Object>> evs = db.query("SELECT message FROM events WHERE code = 'SCHEMA' ORDER BY id");
+            assertEquals(2, evs.size(), evs.toString());
+            assertTrue(((String) evs.get(0).get("message")).startsWith("dispense.db schema 1 -> 2; the old file is kept "
+                    + "as dispense.db.v1-"), evs.toString());
+            assertEquals("dispense.db schema 2 -> 3", evs.get(1).get("message"), "one backup, before the first step");
 
             // the new fields round-trip on the migrated file
             PadType v3 = chip.copy();
@@ -202,7 +210,7 @@ public class DispenseDbMigrationTest {
             v3.massPerPadMg = 1.056;
             v3.origin = PadType.ORIGIN_AUTO_CALIBRATED;
             db.insertPadTypeVersion(v3);
-            PadType back = db.currentPadType("chip-0603");
+            PadType back = db.currentPadType("chip-0603", Tip.SEED_KEY);
             assertEquals(3, back.version);
             assertEquals(800, (int) back.dotSteps);
             assertEquals(1, (int) back.dotsPerPad);
@@ -261,37 +269,39 @@ public class DispenseDbMigrationTest {
             padTypeColumns = columns(db, "pad_types");
         }
         try (DispenseDb db = DispenseDb.open(dir)) {
-            assertEquals(Arrays.asList(1, 2), schemaRows(db));
+            assertEquals(Arrays.asList(1, 2, 3), schemaRows(db));
             assertEquals(padTypeRows, db.query("SELECT * FROM pad_types").size());
             assertEquals(padTypeColumns, columns(db, "pad_types"));
-            assertEquals(1, db.query("SELECT * FROM events WHERE code = 'SCHEMA'").size());
+            assertEquals(2, db.query("SELECT * FROM events WHERE code = 'SCHEMA'").size());
         }
         assertEquals(1, backups(dir).length);
     }
 
     @Test
-    public void newDatabaseIsCreatedAtSchemaTwo() throws Exception {
+    public void newDatabaseIsCreatedAtTheCurrentSchema() throws Exception {
         File dir = Files.createTempDirectory("dispense-v2").toFile();
         try (DispenseDb db = DispenseDb.open(dir)) {
-            assertEquals(Arrays.asList(2), schemaRows(db), "created at 2 directly");
+            assertEquals(Arrays.asList(3), schemaRows(db), "created at 3 directly");
             assertTrue(columns(db, "pad_types").containsAll(NEW_PAD_TYPE_COLUMNS));
             assertTrue(columns(db, "pad_types_current").containsAll(NEW_PAD_TYPE_COLUMNS));
             assertTrue(columns(db, "package_pad_type").contains("pad_names"));
             assertTrue(columns(db, "runs").contains("skipped_pads"));
-            assertEquals(12, db.currentPadTypes().size());
-            for (PadType t : db.currentPadTypes()) {
+            assertEquals(12, db.currentPadTypes(Tip.SEED_KEY).size());
+            for (PadType c : db.currentPadTypes(Tip.SEED_KEY)) {
+                PadType t = stored(db, c.typeKey);
                 assertEquals("seed", t.origin, t.typeKey);
                 assertNull(t.dotSteps, t.typeKey);
                 assertNull(t.tipKey, t.typeKey);
+                assertEquals("ad22tta-b", c.tipKey, "a seed belongs to the seeded setup (§22.1)");
             }
             assertTrue(db.query("SELECT * FROM events WHERE code = 'SCHEMA'").isEmpty());
         }
         assertEquals(0, backups(dir).length);
         try (DispenseDb db = DispenseDb.open(dir)) {
-            assertEquals(Arrays.asList(2), schemaRows(db));
+            assertEquals(Arrays.asList(3), schemaRows(db));
         }
         try (DispenseDb mem = DispenseDb.inMemory()) {
-            assertEquals(Arrays.asList(2), schemaRows(mem));
+            assertEquals(Arrays.asList(3), schemaRows(mem));
             assertTrue(columns(mem, "dose_records").contains("paste_key"));
         }
     }

@@ -13,6 +13,11 @@ public final class Suggestion {
     public static final String CALIBRATE_EXISTING = "calibrate-existing";
     public static final String NEW = "new";
     public static final String NONE = "none";
+    /**
+     * The mounted tip setup is not measured (§22.2): "Measure the {S}'s dots first (...)": nothing is suggested
+     * until its dot sizes and paste per turn are known.
+     */
+    public static final String MEASURE_TIP = "measure-tip";
 
     public String kind;
     /** "s" + 12 hex of SHA-1 over the group, the plan, the anchor, the evidence used and the types. */

@@ -35,9 +35,20 @@ Scenarios (plan §4.4, §4.5, §8.1; bench recipe 2026-10-28):
               with a plan, 5 partial), Calibrate automatically for its two groups (SW_SPST characterized, the
               LED_0805 stays provisional: no allowed dose is within -25 %/+10 % of its amount), its next plan run.
               controls: §11.7's other negative controls, each ending with its reason. --padcal-parts runs some parts
+  tips        Tip setups (PROFILE_CALIBRATION_DESIGN.md §22, §22.9's ts-integration row) on padcal.kicad_pcb with the
+              SIM paste, camera, bottom camera and balance, one session: the 25G straight added with a picture and
+              mounted (the plan made with the 22G bent taper is stale, its pad types are stand-ins; Undo within 2 min,
+              then mounted again), its needle Z frame by both tips (a height taken before the change refused), prime
+              while where it lands is not checked (a ladder refused), Check where it lands (the SIM's 2.4, -0.4 mm
+              found and saved), Measure its dots (half and one turn, the readings typed at the SIM balance), the SW
+              group calibrated for it with its label (edited, automatic again), a picture from below (the SIM bottom
+              camera) and a phone picture linked to the record, Records by tip, the 22G mounted back (its pad types its
+              own again, K refused after the change), and the 25G on the head with the 22G mounted: the landing check
+              asks, the calibration's control names another tip, Made with another tip flags the record
 
-    il_sim_acceptance.py [--out DIR] [--prefix P] [--api-port N] all | load | stop | board | register | import |
-                         padcal [--padcal-parts main,nano,controls] | bench | dph --stream FILE
+    il_sim_acceptance.py [--out DIR] [--prefix P] [--api-port N [--api-ports K]]
+                         all | load | stop | board | register | import | padcal [--padcal-parts main,nano,controls] |
+                         tips | bench | dph --stream FILE
 
 Sim-only changes on top of the patched copy (reported in results.json):
   * machine.xml copy (uinav --xml-set; not in the load scenario): head visual-homing-method=None (the
@@ -147,22 +158,28 @@ def free_port():
 
 
 def api_port(a):
-    """The web API port of the next session: with --api-port N the first free one of N … N+8 (taken in turn, so a
-    run stays inside the range it was given), else any free port."""
+    """The web API port of the next session: with --api-port N the first free one of N … N+K-1 (--api-ports K, default
+    9; taken in turn, so a run stays inside the range it was given; with K 1 every session takes N, which the session
+    before has just left: it waits up to a minute for it), else any free port."""
     first = getattr(a, "api_port", None)
     if not first:
         return free_port()
-    for k in range(9):
-        p = first + (getattr(a, "port_turn", 0) + k) % 9
-        with socket.socket() as so:
-            so.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                so.bind(("127.0.0.1", p))
-            except OSError:
-                continue
-        a.port_turn = p - first + 1
-        return p
-    raise RuntimeError("no free web API port in %d..%d" % (first, first + 8))
+    n = max(1, getattr(a, "api_ports", None) or 9)
+    until = time.time() + 60
+    while True:
+        for k in range(n):
+            p = first + (getattr(a, "port_turn", 0) + k) % n
+            with socket.socket() as so:
+                so.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    so.bind(("127.0.0.1", p))
+                except OSError:
+                    continue
+            a.port_turn = p - first + 1
+            return p
+        if time.time() > until:
+            raise RuntimeError("no free web API port in %d..%d" % (first, first + n - 1))
+        time.sleep(1)
 
 
 def strip(line):
@@ -346,9 +363,13 @@ def setup_machine(s, characterize=True):
     s.api("POST", "/api/machine/enable")
     s.wait_status(lambda st: st["machine"]["enabled"], 30, "enabled")
     s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
-    s.wait_status(lambda st: st["machine"]["homed"], 60, "homed")
-    anchor = s.api("POST", "/api/needle/anchor", NEEDLE_FRAME)
-    s.api("POST", "/api/needle/offset", {"offsetMm": NEEDLE_OFFSET,
+    st = s.wait_status(lambda st: st["machine"]["homed"], 60, "homed")
+    # tip setups (PROFILE_CALIBRATION_DESIGN.md §22.3): needle values name the needle change they were taken after,
+    # pad-type writes the tip setup they were made for
+    token = st["dispense"]["needle"].get("changedAtMs")
+    tip = st["dispense"]["tip"]["key"]
+    anchor = s.api("POST", "/api/needle/anchor", dict(NEEDLE_FRAME, needleChangedAtMs=token))
+    s.api("POST", "/api/needle/offset", {"offsetMm": NEEDLE_OFFSET, "needleChangedAtMs": token,
                                           "note": "sim acceptance (no needle): the frame offset confirmed"})
     s.api("PUT", "/api/surfaces/blank", {"points": [list(p) for p in BLANK_PROBES],
                                          "note": "sim: bench N1 probes along the purge row"})
@@ -357,7 +378,7 @@ def setup_machine(s, characterize=True):
     # I11: the start angle is valid for this controller connection only (confirmed after enable).
     s.api("POST", "/api/screw/start-angle", {"note": "sim acceptance: confirmed after connect"})
     if characterize:
-        s.api("PUT", "/api/pad-types/chip-0603", {"status": "characterized",
+        s.api("PUT", "/api/pad-types/chip-0603", {"status": "characterized", "forSetup": tip,
                                                    "notes": "SIM ONLY: marked characterized for the acceptance run"})
     cfg = s.api("GET", "/api/config")
     cfg["_anchor_response"] = anchor
@@ -1828,21 +1849,25 @@ def padcal_main(a):
         png = urllib.request.urlopen(s.base + crop, timeout=30).read() if crop else b""
         ok["crops_load"] = png[:4] == b"\x89PNG"
 
-        # what was written: the types, one pad_calibrations row each, the weighings, all made in the simulator
+        # what was written: the types, one pad_calibrations row each, the weighings, all made in the simulator (the
+        # set-up's chip-0603 raised by hand is a by-hand record of its own, PC §22.5)
         types = {t_["typeKey"]: t_ for f in s.api("GET", "/api/pad-types")["families"] for t_ in f["types"]}
-        rows = s.api("GET", "/api/pad-calibrations")
+        listed = s.api("GET", "/api/pad-calibrations")
+        rows = [r for r in listed if r.get("method", "auto") == "auto"]
+        by_hand = sorted(r["typeKey"] for r in listed if r.get("method") == "by-hand")
         recs = s.api("GET", "/api/dose-records?freshOnly=true")
         mass = [r for r in recs if r["kind"] == "mass"]
         res["written"] = {
             "types": {k: {f: types[k].get(f) for f in ("status", "dotSteps", "dotsPerPad", "origin", "massPerPadMg")}
                       for k in (jt.get("typeKey"), qt.get("typeKey")) if k in types},
             "pad_calibrations": [{k: r.get(k) for k in ("typeKey", "outcome", "steps", "dotsPerPad", "massPerPadMg",
-                                                         "simulated")} for r in rows],
+                                                         "simulated", "method")} for r in listed],
             "mass_records": [{k: r.get(k) for k in ("couponPlace", "steps", "n", "totalMg", "mgPerDot", "mgPerStep",
                                                      "confirmedBy", "method", "simulated")} for r in mass]}
         ok["written"] = (all(types.get(k, {}).get("status") == "characterized"
                              and types[k].get("origin") == "auto-calibrated" for k in (jt.get("typeKey"), qt.get("typeKey")))
                          and len(rows) == 2 and all(r["simulated"] and r["outcome"] == "characterized" for r in rows)
+                         and by_hand == ["chip-0603"]
                          and len(mass) == 2 and all(r["simulated"] and r["method"] == "typed"
                                                     and abs(r["mgPerStep"] - 0.575 / 400) <= 0.575 / 400 * 0.04
                                                     for r in mass))
@@ -2049,14 +2074,15 @@ def padcal_controls(a):
                     "blank surface probed: ") and (row.get("sentence") or "").endswith("every camera check passed.")
                 and "P7" in [p.get("id") for p in job["result"].get("predictions") or []])
         dwell = cfg["profile"]["dwellMs"]
+        tip = s.api("GET", "/api/status")["dispense"]["tip"]["key"]  # a profile patch names its tip (PC §22.1)
 
         def short_dwell():
-            s.api("PUT", "/api/config", {"profile": {"dwellMs": 50}})
+            s.api("PUT", "/api/config", {"profile": {"dwellMs": 50}, "forTip": tip})
             s.api("POST", "/api/screw/start-angle", {"note": "sim padcal: dwell 50 ms"})
             try:
                 return by_hand(s, "ladder", 1600, "chip-0805")
             finally:
-                s.api("PUT", "/api/config", {"profile": {"dwellMs": dwell}})
+                s.api("PUT", "/api/config", {"profile": {"dwellMs": dwell}, "forTip": tip})
                 s.api("POST", "/api/screw/start-angle", {"note": "sim padcal: dwell back"})
         control("dwell-50-one-turn", "by hand: one-turn ladder at profile dwellMs 50", short_dwell,
                 lambda job, row: job["state"] == "failed" and row["laid"] == 0 and has("asks the screw for", "I6")(
@@ -2084,6 +2110,392 @@ def scenario_padcal(a):
         res[part]["seconds"] = round(time.time() - t0)
         log("padcal", part, "PASS" if res[part]["pass"] else "FAIL", "%d s" % res[part]["seconds"])
     res["pass"] = all(res[p]["pass"] for p in a.padcal_parts) and set(a.padcal_parts) == set(PADCAL_PARTS)
+    return res
+
+
+# --------------------------------------------------------------------------- scenario: tips
+
+# Tip setups (PROFILE_CALIBRATION_DESIGN.md §22, §22.9's ts-integration row). The second tip is §22.8's: a 25G straight
+# (DSKIT1, the Add a tip preset) whose SIM paste lays smaller dots than the 22G bent taper's and lands 2.4, -0.4 mm off
+# the N2 head offset; its smallest dot is the half turn (this paste's quarter-turn dots are too small to find).
+K22, K25 = "ad22tta-b", "25g-straight"
+TIP25 = {"name": "25G straight", "tipModel": "DSKIT1 25G", "gauge": 25, "idMm": 0.25, "odMm": 0.51,
+         "form": "straight", "taper": "straight-steel", "lengthMm": 12.7, "minDotSteps": 800,
+         "notes": "sim acceptance: the second tip of §22.8"}
+PASTE_25 = "25g-straight:mRevMg=1.6,c=0.6,landing=2.4:-0.4"
+TIP_FIXTURES = os.path.join(REPO, "src", "test", "web", "fixtures", "tips")
+# The padcal scene's blank grown downward to 50 mm: a tip's first landing check searches ±6 mm in a band of 20 mm, and
+# Measure its dots and the calibration need the rest after a wipe. The waste sits beside it (prime, §22.3's order).
+TIPS_BLANK = [280.0, 200.0, 365.0, 250.0]
+TIPS_WASTE = (270.0, 212.0)
+
+
+def tips_scene(s, board):
+    """The padcal scene on the taller blank, with the 25G's own SIM paste; the tip on the head is the mounted one."""
+    sc = scn.scene(board, nominal_seat(), BOARD_PLANE, config_dir=s.cfg, vacuum=scn.FAST_VACUUM)
+    sc["blank"]["rect"] = list(TIPS_BLANK)
+    scn.padcal(sc, balance="display", config_dir=s.cfg)
+    scn.paste_by_tip(sc, *scn.parse_paste_by_tip(PASTE_25))
+    scn.write(s.cfg, sc)
+    time.sleep(0.6)  # the session reads the scene again once its stamp changed (250 ms)
+    return sc
+
+
+def physical_tip(s, key):
+    """The tip "on the head" of the SIM (scene physicalTip; None: the mounted one), the deposits left as they are."""
+    with open(scn.scene_path(s.cfg)) as f:
+        sc = json.load(f)
+    scn.physical_tip(sc, key)
+    scn.write(s.cfg, sc)
+    time.sleep(0.6)
+
+
+def needle(s):
+    return s.api("GET", "/api/status")["dispense"]["needle"]
+
+
+def both_tips(s, token):
+    """The needle Z frame with N1 and the needle touching the same spot (the SIM's needle 2.59 mm under N1), and its
+    offset confirmed, under the needle token the heights were taken after."""
+    a = s.api("POST", "/api/needle/anchor", {"surfaceZ": 5.5, "needleContactZ": 5.5 + NEEDLE_OFFSET,
+                                            "needleChangedAtMs": token, "note": "sim tips: both tips touch"})
+    s.api("POST", "/api/needle/offset", {"offsetMm": NEEDLE_OFFSET, "needleChangedAtMs": token,
+                                          "note": "sim tips: the frame offset confirmed"})
+    return a
+
+
+def landing_check(s):
+    """Check where it lands (§22.3), waited for: the job view."""
+    r = s.api("POST", "/api/pad-calibrations", dict(attested(), measure="landing", wait=True), timeout=900)
+    return r["result"] if r.get("finished") else await_job(s)
+
+
+def upload_photo(s, query, path, mime):
+    """POST /api/photos?query with a picture file as the body (as the browser sends it): the photo view."""
+    req = urllib.request.Request(s.base + "/api/photos?" + query, data=open(path, "rb").read(), method="POST")
+    req.add_header("Content-Type", mime)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())["photo"]
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("POST /api/photos -> %d %s" % (e.code, e.read()[:800]))
+
+
+def fetch(s, path, headers=None):
+    """(status, headers by lower-case name, body) of a GET, an HTTP error included (a 304 too)."""
+    req = urllib.request.Request(s.base + path, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, {k.lower(): v for k, v in e.headers.items()}, e.read()
+
+
+def record_of(s, cal_id, setup=None):
+    """A calibration record as GET /api/pad-calibrations lists it (optionally filtered by setup), or None."""
+    q = "/api/pad-calibrations?limit=100" + ("&setup=" + setup if setup else "")
+    return next((r for r in s.api("GET", q) if r["id"] == cal_id), None)
+
+
+def group_of(check, package):
+    """The group of a package whose suggestion calibrates it (new or calibrate-existing), or None."""
+    return next((g for g in check["groups"] if g["packageIds"][0] == package and g.get("fixable")
+                 and (g.get("suggestion") or {}).get("kind") in ("new", "calibrate-existing")), None)
+
+
+def tip_type(s, type_key):
+    """A pad type as GET /api/pad-types gives it for the mounted setup (its composed row), or None."""
+    return next((t for f in s.api("GET", "/api/pad-types")["families"] for t in f["types"]
+                 if t["typeKey"] == type_key), None)
+
+
+def scenario_tips(a):
+    """Tip setups end to end on the SIM paste, camera, bottom camera and balance (§22.9 ts-integration): the 25G
+    straight added with a picture and mounted (Undo within 2 min, then mounted again), its needle Z frame by both tips,
+    prime before the landing check, where it lands, its dots measured, the padcal board's SW group calibrated for it
+    with its label, a picture from below and an upload, Records by tip, the 22G bent taper mounted back (K refused, its
+    pad types its own again), and the 25G on the head with the 22G mounted: the landing question, the control naming
+    another tip, Made with another tip."""
+    s = Session(a, "tips", xml_sets=SIM_XML_SETS + [scn.TIP_CAMERA_XML_SET])
+    res, ok = {"session": s.name}, {}
+    try:
+        cfg = setup_machine(s)
+        cfg.pop("_anchor_response")
+        pv, board = padcal_import(s, KICAD_PADCAL, "padcal")
+        sc = tips_scene(s, board)
+        lay = padcal_layout(sc)
+        s.api("PUT", "/api/config", dict(scn.FAST_TIMINGS, purgeRow=lay["purgeRow"]))
+        s.api("PUT", "/api/surfaces/blank", {"points": lay["surface"], "note": "sim tips: the SIM blank's plane"})
+        s.api("PUT", "/api/locations/blank", lay["blank"])
+        s.api("PUT", "/api/calibration-area", lay["area"])
+        for k in sc["coupons"]:
+            r = k["rect"]
+            s.api("PUT", "/api/locations/" + k["place"], {"x": (r[0] + r[2]) / 2, "y": (r[1] + r[3]) / 2, "z": k["z"]})
+        s.api("PUT", "/api/locations/waste", {"x": TIPS_WASTE[0], "y": TIPS_WASTE[1],
+                                              "z": round(scn.blank_contact_z(sc, *TIPS_WASTE), 3)})
+        wiped(s)
+        res["layout"] = lay
+        lib0 = s.api("GET", "/api/tip-setups")
+        s22 = next(x for x in lib0["setups"] if x["key"] == K22)
+        chip22 = s.api("GET", "/api/pad-types/chip-0603")["current"]
+        plan22 = tied_plan(s, board, sc)
+        res["seed"] = {k: s22.get(k) for k in ("name", "dispenser", "model", "summary", "complete")}
+        res["seed"]["dots"] = s22["dots"]["source"]
+        ok["seed"] = (lib0["mounted"] == K22 and s22["name"] == "22G bent taper" and s22["model"] == "bench-22g"
+                      and s22["dispenser"] == "Vieweg DV-5005" and s22["dots"]["source"] == "bench"
+                      and plan22.get("setupKey", K22) == K22)
+
+        # add: the 25G straight, its recipe a copy of the 22G's, and its picture (a phone picture copied over)
+        added = s.api("POST", "/api/tip-setups", TIP25)
+        photo = upload_photo(s, "kind=setup&setup=%s&caption=%s" % (K25, urllib.parse.quote("25G straight, from the side")),
+                             os.path.join(TIP_FIXTURES, "tip-25g-straight.png"), "image/png")
+        lib1 = s.api("GET", "/api/tip-setups")
+        s25 = next(x for x in lib1["setups"] if x["key"] == K25)
+        res["add"] = {"note": added.get("note"), "key": added["setup"]["key"], "profile": s25.get("profile"),
+                      "complete": s25["complete"], "dots": s25["dots"]["source"], "photo": photo["id"],
+                      "mainPhoto": (s25.get("mainPhoto") or {}).get("id"), "setups": len(lib1["setups"])}
+        ok["add"] = (added.get("note") == "Added. It has no pad profiles yet." and added["setup"]["key"] == K25
+                     and s25["complete"] and s25["profile"]["parked"] and s25["profile"]["name"].endswith(" · 25G straight")
+                     and s25["dots"]["source"] == "none" and photo["kind"] == "setup" and photo["source"] == "upload"
+                     and res["add"]["mainPhoto"] == photo["id"] and lib1["mounted"] == K22 and len(lib1["setups"]) == 2)
+
+        # mount: a needle change and the switch; the plan made with the 22G is stale, the 25G's pad types are stand-ins;
+        # Undo within 2 min puts the 22G back with its frame and needle token, then the 25G is mounted again
+        token0 = needle(s).get("changedAtMs")
+        preview = s.api("GET", "/api/tip-setups/%s/mount-preview" % K25)
+        m1 = s.api("POST", "/api/tip-setups/%s/mount" % K25, {"why": "sim tips: the 25G straight is on"})
+        undo = s.api("POST", "/api/tip-setups/undo-mount", {})
+        back = needle(s)
+        m = s.api("POST", "/api/tip-setups/%s/mount" % K25, {"why": "sim tips: the 25G straight is on, again"})
+        st = s.api("GET", "/api/status")["dispense"]
+        stale_run = s.api("POST", "/api/run", {"planId": plan22["planId"]}, ok=(409,))
+        chip25 = tip_type(s, "chip-0603")
+        res["mount"] = {"preview": preview.get("text"), "text": m.get("text"), "stale": m.get("stale"),
+                        "undo": undo.get("text"), "undoBack": {"anchored": back.get("anchored"),
+                                                              "changedAtMs": back.get("changedAtMs"), "token0": token0},
+                        "tip": st["tip"], "anchored": st["needle"]["anchored"], "run": stale_run.get("reason"),
+                        "chip0603": {k: (chip25 or {}).get(k) for k in ("status", "standIn", "version", "setupKey")}}
+        ok["mount"] = (preview.get("refusal") is None and "Nothing dispenses until you record the 25G straight's needle "
+                       "Z frame (Both tips touch, or touch off) and check where it lands." in preview.get("text", "")
+                       and m1["mounted"] == K25 and (m1.get("undoUntilMs") or 0) > time.time() * 1000
+                       and undo["mounted"] == K22 and back["anchored"] and back.get("changedAtMs") == token0
+                       and m["mounted"] == K25 and m["from"] == K22 and "needle Z frame" in m["stale"]
+                       and re.match(r"^25G straight mounted at \d\d:\d\d\. Next: record its needle Z frame", m["text"] or "")
+                       and st["tip"]["key"] == K25 and st["tip"]["name"] == "25G straight" and not st["needle"]["anchored"]
+                       and "PLAN: the tip changed after planning (the 25G straight was mounted at " in stale_run.get(
+                           "reason", "")
+                       and chip25 is not None and chip25.get("standIn") is True and chip25.get("status") == "not-started")
+
+        # frame: a height taken before the change is refused (the needle token); both tips touch for the new tip
+        token = needle(s)["changedAtMs"]
+        old = s.api("POST", "/api/needle/anchor", {"surfaceZ": 5.5, "needleContactZ": 5.5 + NEEDLE_OFFSET,
+                                                  "needleChangedAtMs": token0}, ok=(409,))
+        both_tips(s, token)
+        nd = needle(s)
+        res["frame"] = {"oldToken": [old.get("error"), old.get("reason")], "anchored": nd["anchored"],
+                        "touchedOff": nd["touchedOff"], "offset": nd.get("anchorOffsetMm"), "xyChecked": nd["xyChecked"]}
+        ok["frame"] = (old.get("error") == "needle-changed" and (old.get("reason") or "").startswith(
+            "The needle was changed at ") and nd["anchored"] and nd["touchedOff"]
+            and abs(nd["anchorOffsetMm"] - NEEDLE_OFFSET) < 1e-6 and not nd["xyChecked"])
+
+        # prime: before where it lands is known only prime, the test dot and the landing check dispense
+        ladder = s.api("POST", "/api/pad-calibrations", dict(attested(), steps=["ladder"], doseSteps=800,
+                                                              typeKeys=["chip-0603"]), ok=(409,))
+        prime = s.api("POST", "/api/prime", {"wait": True}, timeout=300)
+        res["prime"] = {"ladder": ladder.get("reason"), "prime": [(prime.get("result") or {}).get("status"),
+                                                                  (prime.get("result") or {}).get("message")]}
+        ok["prime"] = (re.match(r"^I4: the 25G straight was put on at \d\d:\d\d and where it lands has not been "
+                                r"checked: check where it lands \(Setup › Dispenser & tip\)\.", ladder.get("reason") or "")
+                       and (prime.get("result") or {}).get("status") == "OK")
+
+        # landing: a first check of a tip without a landing of its own searches ±6 mm; it finds the 2.4, -0.4 mm
+        pvl = s.api("GET", "/api/pad-calibrations/preview?measure=landing&regulatorPsi=18&regulatorAtMs=%d"
+                           "&pasteLifeAtMs=%d" % (int(time.time() * 1000), int(time.time() * 1000)))
+        jl = landing_check(s)
+        l25 = (jl.get("result") or {}).get("landing") or {}
+        nd = needle(s)
+        res["landing"] = {"preview": {k: pvl.get(k) for k in ("sentence", "refusal", "landing")},
+                          "state": jl["state"], "outcome": (jl.get("result") or {}).get("outcome"),
+                          "sentence": (jl.get("result") or {}).get("sentence"),
+                          "landing": {k: l25.get(k) for k in ("dxMm", "dyMm", "sdMm", "n", "searchMm", "saved",
+                                                               "photoId")},
+                          "photos": len((jl.get("result") or {}).get("photos") or []), "xyChecked": nd["xyChecked"]}
+        ok["landing"] = (pvl.get("refusal") is None and (pvl.get("landing") or {}).get("searchMm") == 6
+                         and "Searches ±6 mm." in (pvl.get("sentence") or "") and jl["state"] == "done"
+                         and res["landing"]["outcome"] == "measured" and l25.get("saved") is True
+                         and abs((l25.get("dxMm") or 0) - 2.4) <= 0.15 and abs((l25.get("dyMm") or 0) + 0.4) <= 0.15
+                         and (l25.get("n") or 0) >= 6 and l25.get("photoId") and res["landing"]["photos"] >= 1
+                         and nd["xyChecked"])
+
+        # measure: the 25G's dots (half and one turn) on the wiped blank and its paste per turn on the two coupons
+        wiped(s)
+        pvm = s.api("GET", "/api/pad-calibrations/preview?measure=tip&regulatorPsi=18&regulatorAtMs=%d"
+                           "&pasteLifeAtMs=%d" % (int(time.time() * 1000), int(time.time() * 1000)))
+        t0 = time.time()
+        s.api("POST", "/api/pad-calibrations", dict(attested(), measure="tip"))
+        job = await_job(s)
+        done, res_readings = weigh_and_type(s, job) if job["state"] == "awaiting-reading" else (job, [])
+        td = (done.get("result") or {}).get("tipDots") or {}
+        tip_now = s.api("GET", "/api/status")["dispense"]["tip"]
+        res["measure"] = {"preview": {k: pvm.get(k) for k in ("sentence", "refusal")}, "seconds": round(time.time() - t0),
+                          "state": done["state"], "sentence": (done.get("result") or {}).get("sentence"),
+                          "doses": [{k: d.get(k) for k in ("steps", "found", "dMeanMm", "d95Mm", "pass")}
+                                    for d in td.get("doses") or []], "mgPerTurn": td.get("mgPerTurn"),
+                          "measured": td.get("measured"), "dots": tip_now.get("dots"), "readings": res_readings}
+        ok["measure"] = (pvm.get("refusal") is None and done["state"] == "done" and td.get("measured") is True
+                         and [d["steps"] for d in td.get("doses") or []] == [800, 1600]
+                         and all(d.get("pass") for d in td["doses"])
+                         and abs((td.get("mgPerTurn") or 0) - 1.6) <= 1.6 * 0.10 and tip_now.get("dots") == "measured"
+                         and (done["result"]["sentence"] or "").startswith("Measured "))
+
+        # calibrate: the padcal board planned for the 25G; its SW group calibrated with the 25G's dot sizes and mass
+        wiped(s)
+        plan25 = tied_plan(s, board, sc)
+        sw = group_of(plan25["profileCheck"], "SW_SPST_3.9x2.9mm")
+        res["calibrate"] = {"planSetup": plan25.get("setupKey"), "group": sw and {
+            k: (sw.get(k) if k != "suggestion" else {x: sw["suggestion"].get(x) for x in ("kind", "confidence",
+                                                                                          "sentence")})
+            for k in ("group", "label", "reason", "suggestion")}}
+        if not sw:
+            raise RuntimeError("no calibration suggestion for SW_SPST with the 25G: %s" % json.dumps(
+                groups_by_package(plan25["profileCheck"]))[:1500])
+        t0 = time.time()
+        calibrate_groups(s, plan25["planId"], [sw])
+        job = await_job(s)
+        done = weigh_and_type(s, job)[0] if job["state"] == "awaiting-reading" else job
+        g = next((x for x in (done.get("result") or {}).get("groups") or [] if x.get("group") == sw["group"]), {})
+        cal_id = g.get("calibrationId")
+        sw_type = tip_type(s, g.get("typeKey")) or {}
+        chip22_now = s.api("GET", "/api/pad-types/chip-0603")
+        own22 = sorted((h for h in chip22_now.get("history") or [] if h.get("setupKey") == K22),
+                       key=lambda h: h.get("version") or 0)
+        res["calibrate"].update({"seconds": round(time.time() - t0), "state": done["state"],
+                                 "sentence": (done.get("result") or {}).get("sentence"),
+                                 "outcome": g.get("outcome"), "typeKey": g.get("typeKey"), "calibrationId": cal_id,
+                                 "label": g.get("calibrationLabel"), "labelAuto": g.get("calibrationLabelAuto"),
+                                 "photos": [(p.get("kind"), p.get("source")) for p in g.get("photos") or []],
+                                 "type": {k: sw_type.get(k) for k in ("status", "setupKey", "standIn", "version")},
+                                 "chip22": [(h.get("version"), h.get("status")) for h in own22][-1:]})
+        ok["calibrate"] = (done["state"] == "done" and g.get("outcome") == "characterized" and bool(cal_id)
+                           and " · 25G straight · Vieweg DV-5005 · 18 psi · " in (g.get("calibrationLabel") or "")
+                           and g.get("calibrationLabelAuto") is True and sw_type.get("status") == "characterized"
+                           and sw_type.get("setupKey") == K25
+                           and any(p.get("id") == photo["id"] for p in g.get("photos") or [])
+                           and bool(own22) and own22[-1]["version"] == chip22["version"]
+                           and own22[-1]["status"] == chip22["status"])
+
+        # picture: the 25G from below with the SIM bottom camera, linked to the record; a phone picture uploaded too
+        pic = s.api("POST", "/api/tip-setups/%s/picture" % K25, {"calibrationIds": [cal_id], "wait": True},
+                    timeout=300)
+        pp = ((pic.get("result") or {}).get("photo")) or {}
+        code, hdr, body = fetch(s, pp.get("url") or "/api/photos/0.jpg")
+        code304 = fetch(s, pp.get("url") or "/api/photos/0.jpg", {"If-None-Match": hdr.get("etag", "")})[0]
+        up = upload_photo(s, "kind=tip&setup=%s&calibrations=%d&caption=%s" % (K25, cal_id, urllib.parse.quote(
+            "the 25G straight, a phone picture")), os.path.join(TIP_FIXTURES, "tip-22g-bent.jpg"), "image/jpeg")
+        res["picture"] = {"ok": (pic.get("result") or {}).get("ok"), "photo": {k: pp.get(k) for k in (
+            "id", "kind", "source", "setupKey", "caption", "widthPx", "heightPx", "links")},
+            "jpeg": [code, body[:3] == b"\xff\xd8\xff", hdr.get("etag")], "notModified": code304,
+            "upload": {k: up.get(k) for k in ("id", "kind", "source", "links")}}
+        ok["picture"] = ((pic.get("result") or {}).get("ok") is True and pp.get("kind") == "tip"
+                         and pp.get("source") == "bottom-camera" and pp.get("setupKey") == K25
+                         and cal_id in (pp.get("links") or []) and code == 200 and body[:3] == b"\xff\xd8\xff"
+                         and bool(hdr.get("etag")) and code304 == 304 and up["kind"] == "tip"
+                         and cal_id in (up.get("links") or []))
+
+        # label: the operator's words on the record, and the automatic text again
+        mine = "SW_SPST for the 25G straight: sim acceptance %s" % time.strftime("%H:%M")
+        lab = s.api("PUT", "/api/pad-calibrations/%d/label" % cal_id, {"label": "  " + mine.replace(": ", ":   ") + " "})
+        auto = s.api("PUT", "/api/pad-calibrations/%d/label" % cal_id, {"auto": True})
+        lab2 = s.api("PUT", "/api/pad-calibrations/%d/label" % cal_id, {"label": mine})
+        empty = s.api("PUT", "/api/pad-calibrations/%d/label" % cal_id, {"label": "   "}, ok=(400,))
+        res["label"] = {"edited": lab.get("label"), "auto": [auto.get("label"), auto.get("auto")],
+                        "again": lab2.get("label"), "empty": empty.get("reason")}
+        ok["label"] = (lab.get("label") == mine and lab.get("auto") is False and auto.get("auto") is True
+                       and auto.get("label") == g.get("calibrationLabel") and lab2.get("label") == mine
+                       and empty.get("reason") == "The label must be 1 to 160 characters.")
+
+        # Records: the calibrations of the 25G (its label, how, its pictures), not under the 22G
+        r25 = record_of(s, cal_id, K25)
+        r22 = record_of(s, cal_id, K22)
+        kinds = sorted((p.get("kind"), p.get("source")) for p in (r25 or {}).get("photos") or [])
+        res["records"] = {"row": r25 and {k: r25.get(k) for k in ("setupKey", "setupName", "method", "label",
+                                                                  "labelAuto", "flags", "outcome", "jobInMemory")},
+                          "photos": kinds, "under22": r22 is not None}
+        ok["records"] = (r25 is not None and r22 is None and r25["setupName"] == "25G straight"
+                         and r25["method"] == "auto" and r25["label"] == mine and r25["labelAuto"] is False
+                         and r25["flags"] == [] and ("tip", "bottom-camera") in kinds and ("tip", "upload") in kinds
+                         and ("setup", "upload") in kinds)
+
+        # mount back: the 22G bent taper's pad types are its own again (no new version); K is refused after the change
+        mb = s.api("POST", "/api/tip-setups/%s/mount" % K22, {"why": "sim tips: the 22G bent taper is on again"})
+        chip_back = tip_type(s, "chip-0603") or {}
+        sw_back = tip_type(s, g.get("typeKey")) or {}
+        nd = needle(s)
+        token = nd["changedAtMs"]
+        fromk = s.api("POST", "/api/needle/anchor", dict(NEEDLE_FRAME, needleChangedAtMs=token), ok=(409,))
+        both_tips(s, token)
+        nd2 = needle(s)
+        res["mount_back"] = {"text": mb.get("text"), "chip0603": {k: chip_back.get(k) for k in ("status", "version",
+                                                                                                "standIn")},
+                             "sw": {k: sw_back.get(k) for k in ("status", "standIn")},
+                             "swOthers": [(o.get("setupKey"), o.get("status")) for o in sw_back.get("others") or []],
+                             "kRefusal": nd.get("kRefusal"), "fromK": fromk.get("reason"),
+                             "anchored": nd2["anchored"], "xyChecked": nd2["xyChecked"]}
+        ok["mount_back"] = (mb["mounted"] == K22 and chip_back.get("status") == chip22["status"]
+                            and chip_back.get("version") == chip22["version"] and not chip_back.get("standIn")
+                            and sw_back.get("standIn") is True and (K25, "characterized") in res["mount_back"]["swOthers"]
+                            and (nd.get("kRefusal") or "").startswith("K was measured with the needle before the change at")
+                            and (fromk.get("reason") or "").endswith("record the needle frame with both tips touching "
+                                                                     "the same spot")
+                            and nd2["anchored"] and not nd2["xyChecked"])
+
+        # wrong tip: the 25G on the head, the 22G mounted. The landing check asks (nothing saved); the operator says
+        # the 22G is on (the wrong answer); the calibration's control then names another tip; Made with another tip
+        physical_tip(s, K25)
+        wiped(s)
+        jq = landing_check(s)
+        lq = (jq.get("result") or {}).get("landing") or {}
+        nd = needle(s)
+        accept = s.api("POST", "/api/needle/landing", {"jobId": jq["id"], "accept": True,
+                                                       "needleChangedAtMs": nd["changedAtMs"]})
+        wiped(s)
+        plan22b = tied_plan(s, board, sc)
+        sw22 = group_of(plan22b["profileCheck"], "SW_SPST_3.9x2.9mm")
+        if not sw22:
+            raise RuntimeError("no calibration suggestion for SW_SPST with the 22G: %s" % json.dumps(
+                groups_by_package(plan22b["profileCheck"]))[:1500])
+        calibrate_groups(s, plan22b["planId"], [sw22])
+        jw = await_job(s)
+        if jw["state"] == "awaiting-reading":
+            jw = weigh_and_type(s, jw)[0]
+        rw = (jw.get("result") or {})
+        named = "or another tip than the 22G bent taper is on"
+        rec_w = next((r for r in s.api("GET", "/api/pad-calibrations?limit=100&setup=" + K22)
+                      if r.get("jobId") == jw["id"]), None)
+        flag = s.api("POST", "/api/pad-calibrations/%d/wrong-tip" % rec_w["id"], {}) if rec_w else {}
+        rec_after = record_of(s, rec_w["id"]) if rec_w else None
+        physical_tip(s, None)
+        res["wrong_tip"] = {"question": [jq["state"], (jq.get("result") or {}).get("outcome"), lq.get("question"),
+                                         lq.get("saved"), nd.get("xyChecked")],
+                            "accepted": [(accept.get("needleLanding") or {}).get("dxMm"), accept.get("xyChecked")],
+                            "calibration": {"state": jw["state"], "sentence": rw.get("sentence"),
+                                            "control": rw.get("control")},
+                            "record": rec_w and {k: rec_w.get(k) for k in ("id", "jobId", "outcome", "setupKey")},
+                            "flag": flag, "flags": (rec_after or {}).get("flags")}
+        ok["wrong_tip"] = (jq["state"] == "done" and (jq.get("result") or {}).get("outcome") == "question"
+                           and lq.get("saved") is False and "is the 22G bent taper on the dispenser" in (
+                               lq.get("question") or "") and not nd["xyChecked"] and accept.get("xyChecked") is True
+                           and (named in (rw.get("sentence") or "") or named in ((rw.get("control") or {}).get("text")
+                                                                                 or ""))
+                           and rec_w is not None and flag.get("flagged") == jw["id"]
+                           and (rec_after or {}).get("flags") == ["wrong-tip"])
+    except Exception:
+        res["error"] = traceback.format_exc()
+        log("tips:", res["error"])
+    finally:
+        res["checks"] = ok
+        res["pass"] = len(ok) == 13 and all(ok.values()) and "error" not in res
+        s.stop()
     return res
 
 
@@ -2221,7 +2633,8 @@ def bench_validation():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("what", choices=["all", "load", "stop", "board", "register", "import", "padcal", "bench", "dph"])
+    ap.add_argument("what", choices=["all", "load", "stop", "board", "register", "import", "padcal", "tips", "bench",
+                                     "dph"])
     ap.add_argument("--stream", help="dph: a saved board-run-streamed.gcode")
     ap.add_argument("--purge-dots", type=int, default=8, help="dph: purge dots at the start of --stream")
     for k, v in DEF.items():
@@ -2229,6 +2642,8 @@ def main(argv=None):
     ap.add_argument("--prefix", default="il-acc-", help="uinav session name prefix")
     ap.add_argument("--api-port", type=int, help="the sessions' web API ports: the first free one of N … N+8 "
                                                  "(default any free port)")
+    ap.add_argument("--api-ports", type=int, default=9, help="with --api-port: how many ports from N the sessions "
+                                                             "take in turn (1: every session on N)")
     ap.add_argument("--padcal-parts", default=",".join(PADCAL_PARTS),
                     help="padcal: the parts to run (%s; the scenario passes only with all three)" % ", ".join(PADCAL_PARTS))
     a = ap.parse_args(argv)
@@ -2256,7 +2671,8 @@ def main(argv=None):
                                     "screw start angle confirmed after connect (web API; I11)",
                                     "cleanPadCheck.enabled=false (web API; I10: static simulated top camera)",
                                     "valveSettleMs=3000, the bench's (web API; the dist file is schema 2 with 1500)",
-                                    "chip-0603 status characterized (web API; §5.7 rule)",
+                                    "chip-0603 status characterized (web API; §5.7 rule; a by-hand calibration record, "
+                                    "PC §22.5)",
                                     "the Top camera is the SIM top camera, 1920 x 1080 (uinav --xml-set; not in the "
                                     "load scenario)",
                                     "the SIM scene (instancelabs/sim-scene.json in the copy; not in the load scenario): "
@@ -2269,7 +2685,11 @@ def main(argv=None):
                                     "display, the bench blank colour); the blank surface typed from the scene's plane, "
                                     "the purge row 5 mm above the SIM blank's lower edge, the calibration area and the "
                                     "blank place above it, the coupon places on the scene's coupons (web API); "
-                                    "refuseFlaggedPads false for the runs (no per-run skip yet, PC §20 decision 6)"],
+                                    "refuseFlaggedPads false for the runs (no per-run skip yet, PC §20 decision 6)",
+                                    "tips: the padcal scene on a blank grown to 50 mm (y 200–250), the 25G straight's "
+                                    "SIM paste (%s), the SIM bottom camera (SimTipCamera, uinav --xml-set), the waste "
+                                    "beside the blank at %s (web API); the 25G added with minDotSteps 800" % (
+                                        PASTE_25, TIPS_WASTE)],
                "started": time.strftime("%Y-%m-%d %H:%M:%S")}
     rpath = os.path.join(a.out, "results.json")
 
@@ -2299,6 +2719,12 @@ def main(argv=None):
     if a.what in ("all", "padcal"):
         results["padcal"] = scenario_padcal(a)
         log("padcal", "PASS" if results["padcal"]["pass"] else "FAIL")
+        save()
+    if a.what in ("all", "tips"):
+        t0 = time.time()
+        results["tips"] = scenario_tips(a)
+        results["tips"]["seconds"] = round(time.time() - t0)
+        log("tips", "PASS" if results["tips"]["pass"] else "FAIL", "%d s" % results["tips"]["seconds"])
         save()
     if a.what in ("all", "board", "bench"):
         results["dph_model_bench_validation"] = bench_validation()

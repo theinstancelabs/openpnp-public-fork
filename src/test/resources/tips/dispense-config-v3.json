@@ -1,0 +1,177 @@
+{
+  "schemaVersion": 3,
+  "nozzle": "N2",
+  "bAxisName": "b",
+  "pumpToValveSettleMs": 1000,
+  "valveSettleMs": 3000,
+  "profile": {
+    "name": "18 psi half turn",
+    "pressurePsi": 18.0,
+    "netStepsPerDot": 800,
+    "suckBackDeg": 10.0,
+    "startAngleDeg": 298.0,
+    "startAngleSetAtMs": 1793300200000,
+    "screwRpm": 180.0,
+    "screwAccelDegS2": 20000.0,
+    "dwellMs": 250,
+    "gapMm": 0.1,
+    "purgeDots": 8,
+    "sustainedFeedMgS": 2.6,
+    "notes": "Window is narrow: 16 psi starved the screw, 20 psi drooled. Never run the screw faster than the paste feeds it (it pulls in air; 30-50 turns to recover)."
+  },
+  "purgeRow": {
+    "surfaceName": "blank",
+    "x0Mm": null,
+    "y0Mm": null,
+    "pitchXMm": 2.5,
+    "pitchYMm": 0.0,
+    "spots": 0,
+    "usedSpots": 0,
+    "resetAtMs": null
+  },
+  "cleanPadCheck": {
+    "enabled": true,
+    "grayLevel": 200,
+    "minBrightFraction": 0.8,
+    "boxWMm": 0.806,
+    "boxHMm": 0.807
+  },
+  "locations": {
+    "waste": {
+      "x": 80.0,
+      "y": 40.0,
+      "z": 5.5
+    },
+    "blank": {
+      "x": 90.0,
+      "y": 40.0,
+      "z": 5.45
+    }
+  },
+  "wasteLocationName": "waste",
+  "blankLocationName": "blank",
+  "hopHeightMm": 1.0,
+  "travelSafeZMm": 31.5,
+  "needleZOffsetMm": -2.59,
+  "needleZOffsetSetAtMs": 1793300100000,
+  "needleZOffsetHomeAtMs": null,
+  "needleChangedAtMs": null,
+  "needleXyTrim": {
+    "dxMm": 0.0,
+    "dyMm": 0.0,
+    "setAtMs": null,
+    "note": null
+  },
+  "needleAnchor": {
+    "surfaceZMm": 5.5,
+    "needleContactZMm": 2.91,
+    "xMm": null,
+    "yMm": null,
+    "setAtMs": 1793300000000,
+    "homeAtMs": null,
+    "rawSumMm": null
+  },
+  "surfaces": {},
+  "boardSurfaceName": "board",
+  "zFrameToleranceMm": 1.0,
+  "surfaceMaxResidualMm": 0.04,
+  "surfaceMarginMm": 3.5,
+  "needleOffsetMaxDriftMm": 1.0,
+  "touchOffPrimeExtraClearanceMm": 0.5,
+  "travelFeedMmS": 200.0,
+  "travelAccelMmS2": 3000.0,
+  "zDownFeedMmS": 50.0,
+  "zLiftFeedMmS": 50.0,
+  "zLiftAccelMmS2": 2000.0,
+  "bMaxFeedDegS": 2400.0,
+  "bStepsPerDeg": 4.44,
+  "bStepsPerRev": 1600,
+  "bExtrudeSign": 1,
+  "honorBacklash": true,
+  "commandTimeoutMs": 10000,
+  "primeRotationDeg": 360.36,
+  "testDotOffsetXMm": 2.0,
+  "testDotOffsetYMm": 0.0,
+  "keepaliveEnabled": true,
+  "keepaliveWindowMs": 3000,
+  "keepaliveIntervalMs": 1000,
+  "maxContinuousOnTimeS": 600.0,
+  "pressureInterlockEnabled": false,
+  "pressureMinPsi": 1.0,
+  "pressureMaxPsi": 19.0,
+  "minPadTypeStatus": "characterized",
+  "refuseFlaggedPads": true,
+  "pasteThicknessMm": 0.1,
+  "pasteDensityMgMm3": 3.7,
+  "includeDisabledPlacements": true,
+  "twoOptMaxPasses": 50,
+  "homeBeforeRun": "whenNeeded",
+  "fiducialCheck": {
+    "minFiducials": 2,
+    "searchRadiusMm": 8.0,
+    "seatToleranceMm": 0.1
+  },
+  "vacuumProbe": {
+    "startAboveMm": 2.5,
+    "floorBelowMm": 1.5,
+    "openAirMinCounts": -1900000,
+    "openAirMaxCounts": -1200000,
+    "alternates": 4,
+    "padKeepOutMm": 1.4,
+    "vacuumSettleMs": 1500,
+    "readDelayMs": 70,
+    "boardSpots": {}
+  },
+  "boardRegistrations": {},
+  "newSeatAtMs": null,
+  "tip": {
+    "key": "ad22tta-b",
+    "name": "22G tip",
+    "idMm": 0.41,
+    "odMm": 0.72,
+    "minDotSteps": 400
+  },
+  "paste": {
+    "key": "gc50-t5",
+    "name": "Loctite GC50 SAC305 T5",
+    "lot": null,
+    "loadedAtMs": null
+  },
+  "calibrationArea": {
+    "surfaceName": "blank",
+    "x0Mm": null,
+    "y0Mm": null,
+    "widthMm": null,
+    "heightMm": null,
+    "usedMm": 0.0,
+    "resetAtMs": null
+  },
+  "padCalibration": {
+    "maxResidCv": 0.13,
+    "maxHalfSplit": 0.13,
+    "maxQuarterAmplitude": 0.2,
+    "massTolLow": 0.25,
+    "massTolHigh": 0.1,
+    "confirmTolerance": 0.05,
+    "controlTolerance": 0.15,
+    "weighTargetMg": 70.0,
+    "doseRecordMaxAgeH": 8.0,
+    "readingConfirmAfterMin": 15.0,
+    "couponPlaces": [
+      "coupon1",
+      "coupon2"
+    ],
+    "couponSizeMm": [
+      40.0,
+      30.0
+    ],
+    "couponMarginMm": 3.0,
+    "couponWindowMm": 0.3,
+    "flushDots": 4,
+    "ladderDotsPerPhase": 12,
+    "minLadderDots": 28,
+    "minHops": 60,
+    "threadRateOk": 0.03,
+    "missRateOk": 0.005
+  }
+}

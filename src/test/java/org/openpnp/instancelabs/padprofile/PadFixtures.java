@@ -112,9 +112,11 @@ final class PadFixtures {
         return m;
     }
 
+    /** The check's inputs around these pads with the bench tip (the 22G, §1's model). */
     static CheckInputs inputs(List<PadInstance> pads) {
         CheckInputs in = new CheckInputs();
         in.pads = pads;
+        in.tip = Tip.g22();
         return in;
     }
 }

@@ -15,16 +15,21 @@
   const fmt = IL.fmt;
   /** Server stamp (ms) → 24 h clock on this computer. */
   const tm = (ms) => (ms ? IL.fmtTime(ms - S.skewMs) : '—');
+  /** Server stamp → "10-27" (today: "today, 14:05"). */
+  const dayOf = (ms) => { if (!ms) return '—'; const t = new Date(ms - S.skewMs); return t.toDateString() === new Date().toDateString() ? 'today, ' + IL.fmtTime(t.getTime())
+    : String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0'); };
   const disp = (s) => (s && s.dispense) || {};
   const sentence = (t) => { const x = IL.cap(String(t || '').trim()); return x && !/[.:!?]$/.test(x) ? x + '.' : x; };
   const abbr = (text, title) => el('abbr', { title, text });
   const STATUS_LABELS = { 'not-started': 'not started', provisional: 'provisional', characterized: 'characterized', validated: 'validated on a board' };
   const PLACE_RE = /^[A-Za-z0-9_-]{1,40}$/;
-  /** Settings only their own actions may change: never sent by the JSON editor (WEB_API.md, PUT /api/config). */
-  const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces', 'schemaVersion',
-    'boardRegistrations', 'newSeatAtMs']);
-  const STAMPED_NESTED = new Set(['profile.startAngleSetAtMs', 'needleXyTrim.setAtMs', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
-  const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'needleXyTrim', 'fiducialCheck', 'vacuumProbe']);
+  /** Settings only their own actions may change: never sent by the JSON editor (WEB_API.md, PUT /api/config). Since the
+   *  tip setups (PROFILE_CALIBRATION_DESIGN.md §22.1) the mounted tip, what the other tips keep, where the needle lands
+   *  and its trim are set by Setup › Dispenser & tip, Check where it lands and the trim panel. */
+  const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleZOffsetHomeAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces',
+    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim']);
+  const STAMPED_NESTED = new Set(['profile.startAngleSetAtMs', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
+  const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe']);
   /** Maps PUT /api/config replaces whole: the editor diffs them per entry and Save sends the server's map as it is then
    *  with only the edited entries changed (a place saved meanwhile on the Places card is kept). */
   const BY_ENTRY = new Set(['locations']);
@@ -45,8 +50,8 @@
   function fld(input, o) {
     const kind = input.type === 'checkbox' ? 'check' : input.tagName === 'SELECT' ? 'select' : input.tagName === 'TEXTAREA' ? 'text' : 'num';
     const f = Object.assign({ el: input, kind, d: undefined, edited: false, server: kind === 'check' ? false : '' }, o || {});
-    input.addEventListener(kind === 'check' || kind === 'select' ? 'change' : 'input', () => { f.edited = true; paint(f); IL.render(); });
-    input.addEventListener('blur', () => { if (f.edited && same(f)) f.edited = false; paint(f); });
+    input.addEventListener(kind === 'check' || kind === 'select' ? 'change' : 'input', () => { if (!f.edited) f.tok = curToken(); f.edited = true; paint(f); IL.render(); });
+    input.addEventListener('blur', () => { if (f.edited && same(f)) unedit(f); paint(f); });
     ALL.push(f);
     return f;
   }
@@ -72,9 +77,13 @@
     return Number.isFinite(x) && Math.abs(x - Number(b)) < 1e-9;
   }
   const dirty = (f) => !!f && f.edited && !same(f);
+  /** The needle token now (§22.3): status dispense.needle.changedAtMs, null when no needle change is recorded. */
+  const curToken = () => (IL.tips ? IL.tips.token() : null);
+  /** The edit is over: the field follows the server again and forgets the token its edit was taken under. */
+  function unedit(f) { f.edited = false; f.tok = undefined; }
   function sync(f, v) {
     f.server = serverStr(f, v);
-    if (f.edited && same(f) && document.activeElement !== f.el) f.edited = false;
+    if (f.edited && same(f) && document.activeElement !== f.el) unedit(f);
     if (!f.edited && document.activeElement !== f.el) {
       if (f.kind === 'check') { if (f.el.checked !== f.server) f.el.checked = f.server; }
       else if (f.el.value !== f.server) f.el.value = f.server;
@@ -89,10 +98,11 @@
   function setVal(f, v) {
     if (f.kind === 'check') f.el.checked = !!v; else f.el.value = v;
     f.edited = true;
+    f.tok = curToken();
     paint(f);
     IL.render();
   }
-  const clean = (...fs) => { for (const f of fs) if (f) { f.edited = false; paint(f); } };
+  const clean = (...fs) => { for (const f of fs) if (f) { unedit(f); paint(f); } };
   /** The number in a field, or a 400-style error naming it. */
   function need(f, what) {
     const t = val(f);
@@ -184,7 +194,7 @@
     // the card's flash scrolled its top into view: the field itself may lie below the fold (Refuse flagged pads)
     if (f && f.focus) { f.focus({ preventScroll: true }); if (f.select) f.select(); f.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
   }
-  const SECTION_CARD = { needle: 'needle', trim: 'needle', surfaces: 'surfaces', blank: 'surfaces', purge: 'purge', pressure: 'pressure',
+  const SECTION_CARD = { tip: 'tip', needle: 'needle', trim: 'needle', surfaces: 'surfaces', blank: 'surfaces', purge: 'purge', pressure: 'pressure',
     prime: 'pressure', places: 'places', camera: 'camera', angle: 'angle', settings: 'settings' };
 
   // ================================================================================== geometry helpers
@@ -236,6 +246,10 @@
       add({ key: 'settings', title: 'Settings', state: ci ? 'ok' : 'wait', card: 'settings', code: 'CONFIG',
         value: cfg && isNum(cfg.valveSettleMs) ? 'valve settle ' + cfg.valveSettleMs + ' ms' : 'valid', detail: 'The dispenser settings are valid.' });
     }
+    // 2b Dispenser & tip (PROFILE_CALIBRATION_DESIGN.md §22.7): the mounted tip setup; ok its name, need its dots not
+    // measured, block incomplete
+    const tipSt = IL.tips ? IL.tips.step(s) : null;
+    if (tipSt) add({ key: 'tip', title: 'Dispenser & tip', state: tipSt.state, card: 'tip', value: tipSt.value, detail: tipSt.detail, fixes: tipSt.fixes });
     // 3 Regulator (you)
     const reg = IL.attest.valid('regulator', s);
     const ri = it.regulator;
@@ -266,10 +280,15 @@
       add({ key: 'places', title: 'Places', state: 'ok', card: 'places', value: names.slice(0, 3).join(', ') + (names.length > 3 ? ' +' + (names.length - 3) : ''),
         detail: 'Places: ' + names.join(', ') + '.' });
     }
-    // 5 Needle Z frame (I4 needle)
+    // 5 Needle Z frame (I4 needle); with its frame and offset done, where it lands is a step of its own (8 below)
     const ni = it.needle;
-    add({ key: 'needle', title: 'Needle Z frame', state: ni.state, card: 'needle', code: 'I4', detail: ni.detail, fixes: ni.fixes,
-      value: ni.state === 'ok' ? IL.fmt(nd.zOffsetMm, 3) + ' mm' : ni.state === 'need' ? 'confirm offset' : ni.value });
+    if (ni.value === 'landing') {
+      add({ key: 'needle', title: 'Needle Z frame', state: 'ok', card: 'needle', code: 'I4', value: IL.fmt(nd.zOffsetMm, 3) + ' mm',
+        detail: 'Needle Z offset ' + IL.fmt(nd.zOffsetMm, 3) + ' mm (frame ' + IL.fmt(nd.anchorOffsetMm, 3) + ' mm).' });
+    } else {
+      add({ key: 'needle', title: 'Needle Z frame', state: ni.state, card: 'needle', code: 'I4', detail: ni.detail, fixes: ni.fixes,
+        value: ni.state === 'ok' ? IL.fmt(nd.zOffsetMm, 3) + ' mm' : ni.state === 'need' ? 'confirm offset' : ni.value });
+    }
     // 6 Blank surface
     const bsn = pr.surfaceName || bn;
     const bsf = (d.surfaces || {})[bsn];
@@ -290,11 +309,22 @@
     add({ key: 'prime', title: 'Prime and test dot', card: 'pressure', you: !!seen, state: seen ? 'you' : 'need', value: seen ? IL.fmtTime(seen.atMs) : 'not seen yet',
       detail: seen ? 'You saw paste come out at ' + IL.fmtTime(seen.atMs) + ' (kept in this browser for 8 h).' : 'Prime and a test dot at the waste show that paste comes out. Tick "I saw the dot" when it did.',
       fixes: [{ href: '#setup/pressure', label: 'Prime and test dot' }] });
-    // 8 Needle XY trim
+    // 8 Where the needle lands (§22.3: checked since the change under today's N2 head offset; the trim is the hand
+    // fine-tune on top)
     const tr = nd.xyTrim || {};
-    add({ key: 'trim', title: 'Needle XY trim', card: 'needle', state: tr.setAtMs ? 'ok' : 'off',
-      value: tr.setAtMs ? IL.fmtSigned(tr.dxMm, 3) + ' / ' + IL.fmtSigned(tr.dyMm, 3) + ' mm' : 'not set · 0, 0',
-      detail: tr.setAtMs ? 'Trim set ' + tm(tr.setAtMs) + '.' : 'Not set (0, 0): the needle lands at the N2 head offset.' });
+    const land = nd.landing || {};
+    const trimText = tr.setAtMs && (tr.dxMm || tr.dyMm) ? ' · trim ' + IL.fmtSigned(tr.dxMm, 3) + ' / ' + IL.fmtSigned(tr.dyMm, 3) + ' mm' : '';
+    if (nd.xyChecked === false) {
+      add({ key: 'trim', title: 'Where the needle lands', card: 'tip', state: 'block', code: 'I4', value: 'not checked',
+        detail: nd.headOffsetChanged ? 'N2’s head offset changed in OpenPnP since the ' + ((d.tip || {}).name || 'tip') + '’s landing was checked: set it back, or check where it lands.'
+          : 'The ' + ((d.tip || {}).name || 'tip') + ' was put on' + (isNum(nd.changedAtMs) ? ' at ' + tm(nd.changedAtMs) : '') + ': where it lands has not been checked.',
+        fixes: [{ fix: 'landing-check', label: 'Check where it lands…' }].concat(land.keepable ? [{ fix: 'landing-keep', label: 'Keep where it lands' }] : []) });
+    } else {
+      add({ key: 'trim', title: 'Where the needle lands', card: 'tip', state: land.known || tr.setAtMs ? 'ok' : 'off',
+        value: land.known ? IL.fmtSigned(land.dxMm, 2) + ', ' + IL.fmtSigned(land.dyMm, 2) + ' mm' + trimText : 'not set · 0, 0',
+        detail: land.known ? 'The needle lands ' + IL.fmtSigned(land.dxMm, 2) + ', ' + IL.fmtSigned(land.dyMm, 2) + ' mm from the N2 head offset (' + (land.jobId ? 'checked ' : 'set ') + tm(land.setAtMs) + ')'
+          + (tr.setAtMs ? '; trim ' + IL.fmtSigned(tr.dxMm, 3) + ' / ' + IL.fmtSigned(tr.dyMm, 3) + ' mm, set ' + tm(tr.setAtMs) : '') + '.' : 'Not checked: the needle lands at the N2 head offset.' });
+    }
     // 9 Screw start angle (I11)
     const ai = it.angle;
     add({ key: 'angle', title: 'Screw start angle', card: 'angle', code: 'I11', state: ai.state, detail: ai.detail, fixes: ai.fixes,
@@ -458,6 +488,13 @@
       'aria-label': 'Purge row: ' + pr.usedSpots + ' used, ' + pr.spotsLeft + ' free, the next board uses ' + need }, cells);
   }
 
+  // ================================================================================== 0 Dispenser & tip (tipsetup.js fills it)
+  function buildTip() {
+    const c = C.tip = card('tip', 'Dispenser & tip', 'the needle on the dispenser: its recipe and pad profiles go with it', { stateId: 'tip-state', span: true });
+    if (IL.tips) IL.tips.buildCard(c);
+    return c.root;
+  }
+
   // ================================================================================== 1 Needle Z frame
   function buildNeedle() {
     const c = C.needle = card('needle', 'Needle Z frame', [abbr('I4', 'Interlock I4: needle Z frame, needle offset and surfaces'), " · needle tip height in OpenPnP's Z"],
@@ -479,8 +516,14 @@
     c.capN1.addEventListener('click', () => { const p = IL.positions(S.status).n1; if (p) setVal(F.n1, p.z.toFixed(3)); });
     c.capN2.addEventListener('click', () => { const p = IL.positions(S.status).n2; if (p) setVal(F.n2, p.z.toFixed(3)); });
     c.kInfo = el('span', { class: 'su-derived' });
-    c.rowK = field(abbr('K', 'Bench relation: needle contact raw Z = K − N1 contact Z (side camera, 2026-10-27: K = 65.59)'), 'mm',
+    c.kCap = el('div', { class: 'field__h', id: 'anchor-k-cap' });
+    c.rowK = field(abbr('K', 'The mounted tip’s own relation: needle contact raw Z = K − N1 contact Z (the 22G bent taper’s, side camera 2026-10-27: K = 65.59)'), 'mm',
       el('div', { class: 'row su-row-mid' }, F.k.el, c.kInfo), { for: 'anchor-k' });
+    c.rowK.appendChild(c.kCap);
+    // a tip that was never on: no K of its own (another tip's K never fits, §22.3), Both tips touch preselected
+    c.lead = el('div', { class: 'notebox notebox--info', id: 'anchor-lead', hidden: true });
+    // the frame question (§22.3 "Is this the tip you think it is?"): the answer's question, with the main picture
+    c.question = el('div', { class: 'notebox notebox--need su-frame-q', id: 'anchor-question', hidden: true, role: 'status' });
     c.rowN2 = field('Needle contact Z, tip touching the same spot', 'mm', el('div', { class: 'row' }, F.n2.el, c.capN2), { for: 'anchor-n2' });
     c.offErr = el('div', { class: 'field__err', id: 'needle-offset-err', hidden: true });
     c.offWhy = el('div', { class: 'reason', hidden: true });
@@ -488,7 +531,7 @@
       field('Needle Z offset you measured', 'mm', F.off.el, { hint: 'Saved with the button below instead of the frame offset. It must lie within 1.00 mm of the frame offset (I4).' }), c.offErr);
     c.body.setAttribute('data-enter-submits', 'btn-anchor-k');
     c.body.append(
-      el('div', { class: 'minis' }, c.mFrame.node, c.mNeedle.node), c.anchorState,
+      el('div', { class: 'minis' }, c.mFrame.node, c.mNeedle.node), c.anchorState, c.question, c.lead,
       el('div', { class: 'seg seg--block', role: 'group', 'aria-label': 'How to record the frame' }, c.segK, c.segBoth), c.kWhy,
       field('N1 contact Z, tip touching the blank', 'mm', el('div', { class: 'row' }, F.n1.el, c.capN1), { for: 'anchor-n1' }),
       c.rowK, c.rowN2, c.other);
@@ -497,7 +540,7 @@
     c.bOff = btn('Confirm offset', { id: 'btn-needle-offset', title: 'Confirms the frame offset as the needle offset (clears the touched-off part of I4), or saves the one under Other offset….' });
     c.bTouch = btn('Touch-off', { class: 'btn btn--quiet', title: 'Calibrate › Touch-off: measures the needle offset on the blank' });
     c.bTouch.appendChild(IL.icon('i-chev'));
-    c.bChanged = btn('I changed the needle', { id: 'btn-needle-changed', title: 'Dispensing is blocked until the needle Z frame is recorded again and the offset confirmed or touched off.' });
+    c.bChanged = btn('I changed the needle', { id: 'btn-needle-changed', title: 'Opens Change tip: say which tip is on (the same kind again, or another). Dispensing waits for its needle Z frame and where it lands.' });
     c.bTouch.addEventListener('click', () => IL.go('#calibrate/touch-off'));
     footReason(c);
     c.foot.append(c.bK, c.bBoth, c.bOff, c.reason, el('span', { class: 'spacer' }), c.bTouch, c.bChanged, c.offWhy);
@@ -508,18 +551,21 @@
     c.root.insertBefore(el('div', { class: 'su-trim' }, el('div', { class: 'su-trim__t' }, el('b', { text: 'Needle XY trim' }), c.trimState), c.bTrim), c.ref);
 
     const opts = { refusalIn: c.ref };
+    // every needle value carries the needle token it was taken under (§22.3): where its field's edit began, else now (tokenOf)
     c.bK.addEventListener('click', () => IL.act(c.bK, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), k = need(F.k, 'K');
-      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k });
+      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k, needleChangedAtMs: tokenOf([F.n1, F.k]) });
       clean(F.n1, F.k, F.n2);
+      frameAnswer(r);
       IL.planRefreshSoon();
       return r;
     }, Object.assign({ ok: (r) => 'Needle frame recorded from K = ' + fmt(F.k.el.value, 2) + ': needle contact Z ' + fmt(r.anchor.needleContactZMm, 3)
       + ' mm, offset ' + fmt(r.offsetMm, 3) + ' mm. Confirm the offset or touch off next.' }, opts)));
     c.bBoth.addEventListener('click', () => IL.act(c.bBoth, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), n2 = need(F.n2, 'the needle contact Z');
-      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2 });
+      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2, needleChangedAtMs: tokenOf([F.n1, F.n2]) });
       clean(F.n1, F.n2);
+      frameAnswer(r);
       IL.planRefreshSoon();
       return r;
     }, Object.assign({ ok: (r) => 'Needle frame recorded: offset ' + fmt(r.offsetMm, 3) + ' mm. Confirm the offset or touch off next.' }, opts)));
@@ -529,17 +575,34 @@
       const manual = dirty(F.off);
       const off = manual ? need(F.off, 'the needle offset in mm') : nd.anchorOffsetMm;
       if (!isNum(off)) throw bad('Record the needle Z frame first.');
-      const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(Number(off).toFixed(4)), note: manual ? 'entered in the web UI' : 'confirmed frame offset (web UI)' });
+      const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(Number(off).toFixed(4)), note: manual ? 'entered in the web UI' : 'confirmed frame offset (web UI)',
+        needleChangedAtMs: tokenOf([F.off]) });
       clean(F.off);
+      frameAnswer(r);
       IL.planRefreshSoon();
       return { r, off, manual };
     }, Object.assign({ ok: (x) => 'Needle offset ' + fmt(x.off, 3) + ' mm ' + (x.manual ? 'saved.' : 'confirmed: the frame offset.') }, opts));
-    IL.press2(c.bChanged, 'needle changed', async () => {
-      const r = await IL.api('POST', '/api/needle/changed');
-      IL.planRefreshSoon();
-      return r;
-    }, Object.assign({ ok: 'Needle marked as changed: record the needle Z frame again, then confirm or touch off.' }, opts));
+    // one way in (§22.7): "I changed the needle" opens Change tip with the mounted tip's "again (a new needle)" row checked
+    c.bChanged.addEventListener('click', () => { if (IL.tips) IL.tips.openChange({ again: true }); });
     return c.root;
+  }
+  /**
+   * The needle token a press posts (§22.3): an edited field keeps the token of the moment its edit began (typing) or
+   * of its last capture, and a field edited under another needle than now gives its token, which the engine refuses
+   * (409 needle-changed); else now (the press takes the values shown). So a value typed before a needle change never
+   * goes out under the new needle's token: not when it only differs from the server's after the change (a focused
+   * field keeps it), nor after more keystrokes. A press passes only the fields it posts. Tokens compare by equality.
+   */
+  function tokenOf(fs) {
+    const now = curToken();
+    const old = fs.find((f) => f.edited && f.tok !== undefined && f.tok !== now);
+    return old ? old.tok : now;
+  }
+  /** The frame or offset answer's question ("is the {S} on the dispenser?") and the I4 offset warning, kept until the next. */
+  function frameAnswer(r) {
+    const x = r && (r.r || r);
+    W.frameQ = x && (x.question || x.warning) ? { question: x.question || null, warning: x.warning || null, tok: IL.tips ? IL.tips.token() : null } : null;
+    IL.render();
   }
   /** The offset typed under Other offset… minus the frame offset (mm), or null. */
   function offsetDrift() {
@@ -562,14 +625,38 @@
   function renderNeedle(s, m) {
     const c = C.needle;
     const d = disp(s), nd = d.needle || {}, a = nd.anchor;
+    // K belongs to the needle on the dispenser (§22.7): prefilled only from the mounted tip's own frame (the seeded 22G
+    // bent taper without one: its bench value); a tip that was never on has none: Both tips touch is preselected
+    const mt = IL.tips ? IL.tips.mountedSetup() : null;
+    const tipName = (d.tip || {}).name || 'tip';
+    const known = !!mt;
+    const bench = !a && known && mt.model === 'bench-22g';
+    const never = known && !a && !bench;
+    const ctx = [(d.tip || {}).key, nd.changedAtMs, !!a, !!(a && isNum(a.rawSumMm)), bench, known].join('|');
     // K holds for the home and the needle it was measured with: after a failed Z check of this home or a needle change
     // the engine refuses it (nd.kRefusal), and only both tips touching measure the frame
     const noK = d.running && nd.kRefusal ? nd.kRefusal : null;
+    if (W.methodCtx !== ctx) {
+      const fresh = !W.methodCtx || W.methodCtx.split('|').slice(0, 2).join('|') !== ctx.split('|').slice(0, 2).join('|');
+      if (fresh) W.methodChosen = false;   // another tip or needle: the method follows it again
+      W.methodCtx = ctx;
+      if (!W.methodChosen) setMethod(never || noK || (a && !isNum(a.rawSumMm)) ? 'both' : 'k');
+    }
     if (noK && W.method !== 'both') setMethod('both');
-    else if (!W.methodChosen && W.method === undefined) setMethod(a && !isNum(a.rawSumMm) ? 'both' : 'k');
     IL.gate(c.segK, noK);
     IL.setText(c.kWhy, noK ? sentence(noK) : '');
     IL.show(c.kWhy, !!noK);
+    IL.setText(c.kCap, a && isNum(a.rawSumMm) ? 'recorded for the ' + tipName + ' on ' + dayOf(a.setAtMs) : a ? 'the ' + tipName + '’s last frame was recorded with both tips'
+      : bench || !known ? 'the ' + tipName + '’s bench value (side camera, 2026-10-27)' : 'K of the ' + tipName + ': not known yet');
+    IL.show(c.lead, never);
+    IL.setText(c.lead, never ? 'A tip that was never on: touch the same spot with N1 and with the needle (jog in OpenPnP). Another tip’s K does not fit: lengths differ by up to 10 mm.' : '');
+    // the frame question of the last answer (this needle only)
+    const q = W.frameQ && W.frameQ.tok === (IL.tips ? IL.tips.token() : null) ? W.frameQ : null;
+    IL.show(c.question, !!q);
+    IL.keyed(c.question, q ? JSON.stringify([q.question, q.warning, mt && mt.mainPhoto && mt.mainPhoto.id]) : '', () => (q ? [
+      mt && IL.tips ? IL.tips.thumb(mt, 'sm', true) : null,
+      el('div', { class: 'su-frame-q__t' }, q.question ? el('b', { text: q.question }) : null, q.warning ? el('span', { text: q.warning }) : null,
+        q.question ? el('div', { class: 'btn-row' }, IL.fixButton({ fix: 'tip-change', label: 'Change tip…' }, { cls: 'btn--sm' })) : null)] : null));
     const step = m.steps.find((x) => x.key === 'needle');
     const drift = isNum(nd.zOffsetMm) && isNum(nd.anchorOffsetMm) ? nd.zOffsetMm - nd.anchorOffsetMm : null;
     let kind = 'ok', text;
@@ -590,10 +677,13 @@
     IL.setText(c.anchorState, !a ? 'Frame not set: nothing can be dispensed until N1 and the needle touched the same surface (or the frame is recorded from K).'
       : (nd.anchored ? 'Frame recorded ' : 'Frame OUT OF DATE (needle changed): recorded ') + tm(a.setAtMs) + ': N1 contact ' + fmt(a.surfaceZMm, 3) + ' mm, needle contact '
         + fmt(a.needleContactZMm, 3) + ' mm' + (isNum(a.rawSumMm) ? ' (from K = ' + fmt(a.rawSumMm, 2) + ')' : '') + '.');
-    // fields (server values)
-    sync(F.n1, a ? a.surfaceZMm : null);
-    sync(F.k, a && isNum(a.rawSumMm) ? a.rawSumMm : 65.59);
-    sync(F.n2, a ? a.needleContactZMm : null);
+    // fields (server values). After a needle change the frame's contacts are the old needle's (§22.3): the fields stay
+    // empty until N1 and the new needle are captured (or typed), so one press cannot record the old frame again. K stays
+    // shown: the engine refuses it after a change (nd.kRefusal) and the card says why.
+    const frameOk = !!a && nd.anchored;
+    sync(F.n1, frameOk ? a.surfaceZMm : null);
+    sync(F.k, a && isNum(a.rawSumMm) ? a.rawSumMm : bench || !known ? 65.59 : null);
+    sync(F.n2, frameOk ? a.needleContactZMm : null);
     sync(F.off, nd.zOffsetMm);
     // derived needle contact from K: needle contact = N1 + C − K, C from the frame recorded with K (OpenPnP's see-saw map)
     const seesaw = a && isNum(a.rawSumMm) ? a.needleContactZMm - a.surfaceZMm + a.rawSumMm : null;
@@ -632,8 +722,9 @@
     footReason(c, lock);
     // trim
     const t = nd.xyTrim || {};
-    IL.setText(c.trimState, t.setAtMs ? IL.fmtSigned(t.dxMm, 3) + ' / ' + IL.fmtSigned(t.dyMm, 3) + ' mm · set ' + tm(t.setAtMs) + (t.note ? ' · ' + t.note : '')
-      : 'Not set (0, 0): the needle lands at the N2 head offset.');
+    const lnd = nd.landing || {};
+    IL.setText(c.trimState, (t.setAtMs ? IL.fmtSigned(t.dxMm, 3) + ' / ' + IL.fmtSigned(t.dyMm, 3) + ' mm · set ' + tm(t.setAtMs) + (t.note ? ' · ' + t.note : '') : 'No trim (0, 0)')
+      + (nd.xyChecked === false ? ' · where it lands is not checked since the change' : lnd.known ? ' · lands ' + IL.fmtSigned(lnd.dxMm, 2) + ', ' + IL.fmtSigned(lnd.dyMm, 2) + ' mm from the N2 head offset' : ''));
   }
 
   // ---------------------------------------------------------------------------------- needle XY trim (panel view)
@@ -675,8 +766,8 @@
         T.reason = el('div', { class: 'reason', hidden: true });
         T.save.addEventListener('click', () => IL.act(T.save, async () => {
           const dx = need(F.dx, 'dx in mm (0 for none)'), dy = need(F.dy, 'dy in mm (0 for none)');
-          if (Math.abs(dx) > 1 || Math.abs(dy) > 1) throw bad('The trim is limited to ±1 mm: a larger error belongs in the N2 head offset in OpenPnP.');
-          const r = await IL.api('PUT', '/api/config', { needleXyTrim: { dxMm: dx, dyMm: dy, note: IL.str(F.note.el) || null } });
+          if (Math.abs(dx) > 1 || Math.abs(dy) > 1) throw bad('The trim is at most ±1 mm on each axis: a needle that lands farther off needs its landing checked (Setup › Dispenser & tip › Check where it lands).');
+          const r = await IL.api('POST', '/api/needle/xy-trim', { dxMm: dx, dyMm: dy, note: IL.str(F.note.el) || null, needleChangedAtMs: tokenOf([F.dx, F.dy, F.note]) });
           clean(F.dx, F.dy, F.note);
           IL.loadConfig();
           IL.planRefreshSoon();
@@ -684,7 +775,7 @@
           return r;
         }, { ok: 'Needle XY trim saved: it applies to the next run (the plan does not change).', refusalIn: p.foot }));
         p.body.append(
-          el('p', { class: 'panel__lead', text: 'Where the needle lands relative to its target, in machine mm (X right, Y up). Every dot is moved by minus the trim. Within ±1 mm; a larger error belongs in the N2 head offset in OpenPnP.' }),
+          el('p', { class: 'panel__lead', text: 'The hand fine-tune on top of where the needle lands (Check where it lands, Setup › Dispenser & tip), in machine mm (X right, Y up). Every dot is moved by minus the landing and the trim. Within ±1 mm; a needle that lands farther off needs its landing checked.' }),
           T.sketch, T.cur,
           el('div', { class: 'fgrid', 'data-enter-submits': 'btn-trim' },
             field('dx: landing right of the target', 'mm', F.dx.el), field('dy: landing above the target', 'mm', F.dy.el),
@@ -697,7 +788,7 @@
       sync(F.note, t.note || '');
       IL.keyed(T.sketch, val(F.dx) + '|' + val(F.dy), trimSketch);
       IL.setText(T.cur, t.setAtMs ? 'Saved ' + tm(t.setAtMs) + ': dx ' + IL.fmtSigned(t.dxMm, 3) + ' mm, dy ' + IL.fmtSigned(t.dyMm, 3) + ' mm' + (t.note ? ' · ' + t.note : '') + '.'
-        : 'Not set (0, 0): the needle lands at the N2 head offset.');
+        : 'No trim (0, 0): the needle lands where Check where it lands found it.');
       const lock = IL.lockReason(s, { pressureOff: false, engine: true });
       const any = dirty(F.dx) || dirty(F.dy) || dirty(F.note);
       IL.gate(T.save, lock || (any ? null : 'No unsaved changes'), T.reason);
@@ -1973,8 +2064,9 @@
     c.jReason = el('span', { class: 'reason su-foot-reason' });
     c.adv = el('details', { class: 'disclose su-adv', id: 'set-advanced' }, el('summary', { text: 'All settings (advanced JSON)' }),
       el('div', { class: 'su-col', 'data-refusals': '' },
-        el('p', { class: 'su-note', text: 'Every engine setting. Save sends only the keys you changed (one level deep for profile, purgeRow, cleanPadCheck and needleXyTrim). Keys stamped by the engine are read-only here: '
-          + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, profile.startAngleSetAtMs, needleXyTrim.setAtMs. '
+        el('p', { class: 'su-note', text: 'Every engine setting. Save sends only the keys you changed (one level deep for profile, purgeRow and cleanPadCheck). Keys stamped by the engine are read-only here: '
+          + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, profile.startAngleSetAtMs; the tip (tip, parkedTips) is set in Setup › Dispenser & tip, '
+          + 'where the needle lands (needleLanding, needleXyTrim) by Check where it lands and the trim panel. The profile is the mounted tip’s recipe. '
           + 'Places (locations) are sent one by one: a place saved elsewhere meanwhile is kept.' }),
         F.json.el, c.jErr, c.jStale, c.jDiff,
         el('div', { class: 'btn-row' }, c.jSave, c.jReload, c.jReason)));
@@ -2004,6 +2096,8 @@
         const now = await IL.api('GET', '/api/config');
         for (const k of whole) body[k] = applyEntries(now[k], body[k]);
       }
+      // a profile patch names the tip the settings were read under (§22.1): a mount since answers 409 tip-changed
+      if (body.profile) body.forTip = (J.base && J.base.tip && J.base.tip.key) || (IL.S.status && IL.S.status.dispense.tip && IL.S.status.dispense.tip.key);
       const r = await IL.api('PUT', '/api/config', body);
       J.edited = false;
       await IL.loadConfig();
@@ -2198,7 +2292,7 @@
       W.root = root;
       root.classList.add('su-ws');
       root.append(...buildHead(),
-        el('div', { class: 'grid-cards su-cards' }, buildNeedle(), buildSurfaces(), buildPurge(), buildPressure(), buildPlaces(), buildCamera(), buildAngle(), buildSettings()));
+        el('div', { class: 'grid-cards su-cards' }, buildTip(), buildNeedle(), buildSurfaces(), buildPurge(), buildPressure(), buildPlaces(), buildCamera(), buildAngle(), buildSettings()));
       setMethod('k');
       W.method = undefined;
       IL.on('taskend', () => { if (W.shown || J.base) IL.loadConfig(); });
@@ -2233,6 +2327,7 @@
       IL.show(W.lock, !!lock);
       if (lock) IL.setText(W.lock.lastChild, lock + ': saves, captures, prime, test dot and Pressure on. STOP and Pressure off still work.');
       renderBand(s, m);
+      if (IL.tips) IL.tips.renderCard(s, { cardState });
       renderNeedle(s, m);
       renderSurfaces(s);
       renderPurge(s, m);

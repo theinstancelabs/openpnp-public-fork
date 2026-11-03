@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.instancelabs.vision.Dot;
 import org.openpnp.instancelabs.vision.SpotDot;
 import org.openpnp.machine.reference.driver.GcodeDriver;
@@ -100,16 +101,16 @@ public class DispenseServiceSimTest {
         c.purgeRow.spots = 16;
         svc.updateConfig(c);
         // I4 needle frame: N1 at 5.5 and the needle at 2.91 on the same surface (offset -2.59)
-        svc.setNeedleAnchor(5.5, 2.91, null, null);
-        svc.setNeedleZOffset(-2.59, "manual", "test");
+        svc.setNeedleAnchor(5.5, 2.91, null, null, null, svc.getConfig().needleChangedAtMs);
+        svc.setNeedleZOffset(-2.59, "manual", "test", svc.getConfig().needleChangedAtMs);
         // probed surfaces: the board (around the toy pads, Z 5.6) and the blank (Z 5.45, purge row too)
         svc.setSurface("board", pts(new double[][] {{95, 75, 5.6}, {115, 75, 5.6}, {95, 90, 5.6}, {115, 90, 5.6}}),
                 "test", TOY_BOARD); // tied to the toy board's registration (I4)
         svc.setSurface("blank", pts(new double[][] {{85, 35, 5.45}, {130, 35, 5.45}, {85, 50, 5.45},
             {130, 50, 5.45}}), "test");
-        PadType t = svc.getDb().currentPadType("chip-0603");
+        PadType t = svc.getDb().currentPadType("chip-0603", Tip.SEED_KEY);
         t.status = PadTypeStatus.PROVISIONAL;
-        svc.savePadType(t);
+        svc.savePadType(t, Tip.SEED_KEY, t.padVersion);
         // I11: the start angle is confirmed after this controller connect
         svc.setStartAngle(null, "confirmed after power-up");
     }
@@ -158,7 +159,7 @@ public class DispenseServiceSimTest {
     }
 
     DispensePlan plan() throws Exception {
-        PadType t = svc.getDb().currentPadType("chip-0603");
+        PadType t = svc.getDb().currentPadType("chip-0603", Tip.SEED_KEY);
         List<PadGeometry> pads = new ArrayList<>();
         pads.add(new PadGeometry("R1.1", 100.0, 80.0, 0, 0.8, 0.95, 5.6, t));
         pads.add(new PadGeometry("R1.2", 101.65, 80.0, 0, 0.8, 0.95, 5.6, t));
@@ -464,7 +465,7 @@ public class DispenseServiceSimTest {
                 + "board again."), r.message);
 
         // 1. the needle frame again: N1 and the needle on the blank, both 0.80 mm higher now
-        svc.setNeedleAnchor(5.5 + 0.80, 2.91 + 0.80, null, null);
+        svc.setNeedleAnchor(5.5 + 0.80, 2.91 + 0.80, null, null, null, svc.getConfig().needleChangedAtMs);
         svc.setDotImager(squashImager());
         sim.server.mark();
         RunResult early = svc.runNeedleTouchOff(new NeedleTouchOff.Request(), true).get(60, TimeUnit.SECONDS).run;
@@ -651,7 +652,7 @@ public class DispenseServiceSimTest {
         assertEquals(2.91, svc.needleContactZFromRawSum(5.5, 65.59), 1e-9);
         assertEquals(5.6 - 2.59, svc.needleContactZFromRawSum(5.6, 65.59), 1e-9);
         DispenseConfig.NeedleAnchor a = svc.setNeedleAnchor(5.5, svc.needleContactZFromRawSum(5.5, 65.59), null, null,
-                65.59);
+                65.59, svc.getConfig().needleChangedAtMs).anchor;
         assertEquals(-2.59, a.offsetMm(), 1e-9);
         assertEquals(65.59, svc.getConfig().needleAnchor.rawSumMm, 0);
         assertEquals(-2.59, svc.getConfig().needleZOffsetMm, 1e-9);
@@ -680,7 +681,7 @@ public class DispenseServiceSimTest {
 
     @Test
     public void interlockRefusalSendsNothing() throws Exception {
-        svc.markNeedleChanged(); // I4
+        svc.recordNeedleChange(null, null); // I4
         DispensePlan plan = plan();
         sim.server.mark();
         RunResult r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
@@ -975,7 +976,7 @@ public class DispenseServiceSimTest {
      */
     @Test
     public void needleChangeBlocksEverythingButTheTouchOff() throws Exception {
-        svc.markNeedleChanged();
+        svc.recordNeedleChange(null, null);
         sim.server.mark();
         RunResult prime = svc.runShots("waste", 90, 1, true).get(60, TimeUnit.SECONDS);
         assertEquals(RunResult.Status.REFUSED, prime.status, prime.toString());
@@ -987,12 +988,23 @@ public class DispenseServiceSimTest {
             assertFalse(l.startsWith("M106") || l.startsWith("G1"), "nothing pressurised or moved: " + l);
         }
         // new frame (the replacement needle is 0.3 mm longer): prime, ladder still refused
-        svc.setNeedleAnchor(5.5, 2.61, null, null);
+        svc.setNeedleAnchor(5.5, 2.61, null, null, null, svc.getConfig().needleChangedAtMs);
         assertEquals(RunResult.Status.REFUSED, svc.runShots("waste", 90, 1, true).get(60, TimeUnit.SECONDS).status);
         DotLadderCalibration.Request lr = new DotLadderCalibration.Request();
         lr.rotationsDeg = new double[] {30};
         lr.repeats = 1;
         assertEquals(RunResult.Status.REFUSED, svc.runDotLadder(lr).get(60, TimeUnit.SECONDS).run.status);
+        // tip setups §22.3: where the new needle lands is not checked yet, so the touch-off waits for the landing check
+        RunResult early = svc.runNeedleTouchOff(new NeedleTouchOff.Request(), true).get(60, TimeUnit.SECONDS).run;
+        assertEquals(RunResult.Status.REFUSED, early.status, early.toString());
+        assertTrue(early.message.contains("where it lands has not been checked: check where it lands"), early.message);
+        LandingResult landed = new LandingResult();
+        landed.setupKey = svc.getConfig().tip.key;
+        landed.needleSinceMs = svc.getConfig().needleChangedAtMs;
+        landed.n = 8;
+        landed.sdMm = 0.03;
+        assertNotNull(svc.setLanding(landed, false, svc.getConfig().needleChangedAtMs));
+        assertTrue(svc.isNeedleXyChecked());
         // the touch-off runs under its waiver; its prime is 0.5 mm higher than a normal prime
         svc.setDotImager(squashImager());
         sim.server.mark();

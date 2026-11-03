@@ -3,9 +3,12 @@ package org.openpnp.instancelabs.api;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.WeakHashMap;
 
 import org.openpnp.instancelabs.dispense.DispensePlan;
@@ -13,11 +16,16 @@ import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DoseBlocks;
 import org.openpnp.instancelabs.dispense.PadInstances;
 import org.openpnp.instancelabs.dispense.PadType;
+import org.openpnp.instancelabs.dispense.PadTypeStatus;
+import org.openpnp.instancelabs.dispense.TipSetup;
+import org.openpnp.instancelabs.dispense.TipSetups;
 import org.openpnp.instancelabs.padprofile.Anchor;
 import org.openpnp.instancelabs.padprofile.CheckInputs;
 import org.openpnp.instancelabs.padprofile.DoseModel;
+import org.openpnp.instancelabs.padprofile.PadInstance;
 import org.openpnp.instancelabs.padprofile.ProfileCheck;
 import org.openpnp.instancelabs.padprofile.Suggester;
+import org.openpnp.instancelabs.padprofile.TypeInfo;
 import org.pmw.tinylog.Logger;
 
 /**
@@ -80,7 +88,11 @@ final class PadProfileViews {
                 out.put("profileCheckError", MachineEndpoints.rootMessage(x));
             }
         }
-        out.put("profileCheck", r == null ? null : check(r, in.pastePartialPackages));
+        Map<String, Object> view = r == null ? null : check(r, in.pastePartialPackages, in.types);
+        if (view != null) {
+            view.put("otherTips", otherTips(svc, in));
+        }
+        out.put("profileCheck", view);
         List<Map<String, Object>> pads = (List<Map<String, Object>>) out.get("pads");
         for (int i = 0; pads != null && i < pads.size() && i < p.pads.size(); i++) {
             DispensePlan.PlannedPad x = p.pads.get(i);
@@ -91,12 +103,13 @@ final class PadProfileViews {
             d.put("dotsPerPad", x.dotsPerPad);
             d.put("startPhase", x.startPhase);
             boolean dose = x.dotSteps != null && in != null;
-            d.put("predictedMassMg", dose && x.dotCount > 0
-                    ? r3(x.dotCount * Suggester.mgPerDot(in.evidence, x.dotSteps)) : null);
+            // §22.2: null where the mounted tip does not know the dose (never NaN in the JSON)
+            Double perDot = dose ? Suggester.mgPerDot(in.evidence, x.dotSteps, in.tip) : null;
+            d.put("predictedMassMg", perDot != null && x.dotCount > 0 ? r3(x.dotCount * perDot) : null);
             d.put("padRipplePct", dose && x.dotsPerPad > 0 ? rounded(DoseModel.padRipplePct(x.dotSteps * x.dotsPerPad))
                     : null);
             d.put("anchorMassMg", info == null ? null : info.anchorMassMg);
-            d.put("dotDiameterMm", dose ? Suggester.dotDiameterMm(in.evidence, x.dotSteps) : null);
+            d.put("dotDiameterMm", dose ? Suggester.dotDiameterMm(in.evidence, x.dotSteps, in.tip) : null);
             d.put("clearanceMm", info == null ? null : info.clearanceMm);
         }
         List<Map<String, Object>> dots = (List<Map<String, Object>>) out.get("dots");
@@ -109,7 +122,8 @@ final class PadProfileViews {
             d.put("netSteps", steps);
             d.put("block", x.block);
             d.put("padIndex", x.padIndex);
-            d.put("diameterMm", steps > 0 && in != null ? Suggester.dotDiameterMm(in.evidence, steps)[1] : null);
+            double[] size = steps > 0 && in != null ? Suggester.dotDiameterMm(in.evidence, steps, in.tip) : null;
+            d.put("diameterMm", size == null ? null : size[1]);
         }
         List<Map<String, Object>> blocks = new ArrayList<>();
         for (DispensePlan.Block b : p.blocks) {
@@ -120,29 +134,84 @@ final class PadProfileViews {
         out.put("blocks", blocks);
     }
 
-    /** §3.5: the check as JSON, with the packages whose dispensable pads are pasted although others are not. */
-    static Map<String, Object> check(ProfileCheck.Result r, java.util.Collection<String> pastePartial) {
+    /**
+     * §3.5: the check as JSON, with the packages whose dispensable pads are pasted although others are not, and per
+     * group its pad type as the mounted setup sees it (§22.2: a stand-in, the setup, the other setups' statuses, the
+     * setup a plan was copied from). The callers that read the database add {@code otherTips}.
+     */
+    static Map<String, Object> check(ProfileCheck.Result r, java.util.Collection<String> pastePartial,
+            Map<String, TypeInfo> types) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("ok", r.ok);
         m.put("fixable", r.fixable);
         m.put("tipBlocking", r.tipBlocking);
         m.put("notes", r.notes);
         m.put("computedAtMs", r.computedAtMs);
+        // §22.6: the setup's version and dispenser, where its dot sizes come from; minDotMm null when not known
         m.put("tip", Views.map("key", r.tip.key, "name", r.tip.name, "odMm", r.tip.odMm, "minDotSteps",
-                r.tip.minDotSteps, "minDotMm", r.tip.minDotMm));
+                r.tip.minDotSteps, "minDotMm", r.tip.minDotMm, "setupVersion", r.tip.setupVersion, "dispenser",
+                r.tip.dispenser, "dots", r.tip.dots));
         List<Map<String, Object>> anchors = new ArrayList<>();
         for (Anchor a : r.anchors) {
             anchors.add(Views.map("family", a.family, "typeKey", a.typeKey, "bench", a.bench, "massPerPadMg",
-                    a.massPerPadMg, "areaMm2", a.areaMm2, "mgPerMm2", a.mgPerMm2, "text", a.text));
+                    a.massPerPadMg, "areaMm2", a.areaMm2, "mgPerMm2", a.mgPerMm2, "text", a.text, "setupName",
+                    a.setupName));
         }
         m.put("anchors", anchors);
         List<Map<String, Object>> groups = new ArrayList<>();
         for (ProfileCheck.Group g : r.groups) {
-            groups.add(group(g));
+            Map<String, Object> x = group(g);
+            TypeInfo t = g.typeKey == null || types == null ? null : types.get(g.typeKey);
+            x.put("type", t == null ? null : Views.map("standIn", t.standIn, "setupName", t.setupName, "others",
+                    t.others, "copiedFrom", t.copiedFrom));
+            groups.add(x);
         }
         m.put("groups", groups);
         m.put("pastePartialPackages", pastePartial == null ? new ArrayList<>() : new ArrayList<>(pastePartial));
         return m;
+    }
+
+    /**
+     * §22.6 {@code otherTips}: the setups not retired, other than the mounted one, whose own versions of every pad type
+     * the pads use are at or above the gate ({key, name, covers, of}): Needs a profile names them ("The 22G bent taper
+     * has all 5 pad types of this board"). A failed read leaves the list empty.
+     */
+    static List<Map<String, Object>> otherTips(DispenseService svc, CheckInputs in) {
+        List<Map<String, Object>> l = new ArrayList<>();
+        Set<String> used = new TreeSet<>();
+        for (PadInstance p : in.pads) {
+            if (p.typeKey != null) {
+                used.add(p.typeKey);
+            }
+        }
+        if (svc == null || used.isEmpty()) {
+            return l;
+        }
+        try {
+            PadTypeStatus gate = svc.getConfig().minPadTypeStatus();
+            for (TipSetup s : svc.getDb().currentTipSetups(false)) {
+                if (s.key.equals(in.tip.key)) {
+                    continue;
+                }
+                Map<String, PadType> own = new HashMap<>();
+                for (PadType t : TipSetups.typesFor(svc.getDb(), s.key)) {
+                    own.put(t.typeKey, t);
+                }
+                int covers = 0;
+                for (String k : used) {
+                    PadType t = own.get(k);
+                    covers += t != null && !t.standIn && t.status != null && t.status.atLeast(gate)
+                            && !PadTypeEndpoints.RETIRED.equals(t.family) ? 1 : 0;
+                }
+                if (covers == used.size()) {
+                    l.add(Views.map("key", s.key, "name", s.name, "covers", covers, "of", used.size()));
+                }
+            }
+        }
+        catch (SQLException | RuntimeException e) {
+            Logger.warn(e, "the other tips of a profile check were not read");
+        }
+        return l;
     }
 
     /** One group of §3.5 ("short" is the group's shortText). */

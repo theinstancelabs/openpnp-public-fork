@@ -141,6 +141,8 @@
   pcr.loadPadTypes = loadPadTypes;
   const allTypes = () => (PT.data ? PT.data.families.flatMap((f) => f.types.map((t) => Object.assign({ retired: !!f.retired }, t))) : []);
   const typeByKey = (k) => allTypes().find((t) => t.typeKey === k) || null;
+  /** A long KiCad name with line-break chances after "_" and "-" (never inside a word or a number). */
+  const breakable = (id) => String(id).split(/(?<=[_-])/).flatMap((x, i) => (i ? [el('wbr'), x] : [x]));
   const gateStatus = (s) => (PT.data && PT.data.minPadTypeStatus) || (s && s.dispense && s.dispense.minPadTypeStatus) || 'characterized';
   /** Pads and dots of the plan shown, per pad type. */
   function planStats() {
@@ -199,7 +201,7 @@
     { id: 'pf-notes', key: 'notes', text: true, textarea: true, label: 'Notes' },
   ];
   const FINGERPRINT_KEYS = new Set(['pressurePsi', 'netStepsPerDot', 'suckBackDeg', 'screwRpm', 'screwAccelDegS2', 'dwellMs', 'gapMm', 'purgeDots']);
-  const PF = { dirty: new Set(), expect: null, expectUntil: 0, turnKey: null, errors: {} };
+  const PF = { dirty: new Set(), expect: null, expectUntil: 0, turnKey: null, errors: {}, tipKey: null };
 
   function readVal(f) {
     const e = $(f.id);
@@ -221,6 +223,9 @@
     if (e.value !== t) e.value = t;
   }
   const srvProfile = (s) => (s && s.dispense && s.dispense.profile) || null;
+  /** The mounted tip setup (status dispense.tip): its key goes with every write made for it (forTip, forSetup). */
+  const tipKey = (s) => (s && s.dispense && s.dispense.tip && s.dispense.tip.key) || null;
+  const tipName = (s) => (s && s.dispense && s.dispense.tip && s.dispense.tip.name) || 'mounted tip';
   /** The values the form compares with: the server's, or what we just saved until the status shows it. */
   function baseProfile(s) {
     const p = srvProfile(s);
@@ -326,6 +331,8 @@
   function syncProfile(s) {
     const b = baseProfile(s);
     if (!b) return;
+    // the tip setup whose recipe the form shows (§22.1): kept while edits are unsaved, so a save after a mount is refused
+    if (!PF.dirty.size || !PF.tipKey) PF.tipKey = tipKey(s);
     fillTurn(b);
     const active = document.activeElement;
     for (const f of FIELDS) {
@@ -407,7 +414,7 @@
   async function doSave(body) {
     const s0 = S.status;
     const before = srvProfile(s0) || {};
-    await IL.api('PUT', '/api/config', { profile: body });
+    await IL.api('PUT', '/api/config', { profile: body, forTip: PF.tipKey || tipKey(s0) });
     PF.expect = Object.assign({}, body);
     PF.expectUntil = Date.now() + 4000;
     IL.planRefreshSoon();
@@ -476,7 +483,7 @@
     const card = el('section', { class: 'card pf-card', id: 'pf-card', 'data-enter-submits': 'btn-pf-save', 'data-refusals': '' },
       el('div', { class: 'card__head' },
         el('div', {}, el('h2', { class: 'card__title', text: 'Dispense profile' }),
-          el('div', { class: 'card__sub' }, el('span', { id: 'pf-title-name' }), ' · the recipe of every dot on a board and on the purge row')),
+          el('div', { class: 'card__sub' }, el('span', { id: 'pf-title-name' }), el('span', { id: 'pf-title-tip', text: ' · the recipe of every dot on a board and on the purge row' }))),
         el('span', { class: 'card__state', id: 'pf-state' })),
       el('div', { class: 'card__body pf-body' },
         el('div', { class: 'notebox notebox--block', id: 'pf-problems-box', hidden: true },
@@ -568,12 +575,14 @@
     retired.addEventListener('change', () => { PT.showRetired = retired.checked; IL.render(); });
     const segAll = el('button', { type: 'button', 'aria-pressed': 'true', 'data-filter': 'all' }, 'All types');
     const segPlan = el('button', { type: 'button', 'aria-pressed': 'false', 'data-filter': 'plan', id: 'pt-filter-plan' }, 'Used by this plan');
-    for (const b of [segAll, segPlan]) b.addEventListener('click', () => { if (!b.disabled) { PT.filter = b.dataset.filter; IL.render(); } });
+    // every tip's status per pad type (§22.7), only with more than one tip
+    const segTip = el('button', { type: 'button', 'aria-pressed': 'false', 'data-filter': 'by-tip', id: 'pt-by-tip', hidden: true, title: 'Each tip’s status of every pad type: the mounted one first' }, 'By tip');
+    for (const b of [segAll, segPlan, segTip]) b.addEventListener('click', () => { if (!b.disabled) { PT.filter = b.dataset.filter; IL.render(); } });
     const section = el('div', { class: 'pt-section', id: 'pt-section' },
       el('div', { class: 'pt-head' },
         el('div', { class: 'pt-head__t' }, el('h2', { text: 'Pad types' }), el('span', { class: 'count', id: 'pt-count' })),
         el('div', { class: 'pt-tools' },
-          el('div', { class: 'seg', role: 'group', 'aria-label': 'Which pad types', id: 'pt-filter' }, segAll, segPlan),
+          el('div', { class: 'seg', role: 'group', 'aria-label': 'Which pad types', id: 'pt-filter' }, segAll, segPlan, segTip),
           el('label', { class: 'check' }, retired, 'show retired'),
           add)),
       el('p', { class: 'pt-hint', id: 'profiles-hint' }),
@@ -596,15 +605,21 @@
     IL.setText(fp, hasPlan ? 'Used by this plan · ' + Object.keys(stats).length : 'Used by this plan');
     const gate = gateStatus(s);
     const prof = srvProfile(s);
+    const tips = liveTips();
+    const bt = $('pt-by-tip');
+    IL.show(bt, tips.length > 1);
+    if (tips.length < 2 && PT.filter === 'by-tip') PT.filter = 'all';
     IL.setText($('profiles-hint'), 'A board refuses pads whose type is below “' + (STATUS_OPTION[gate] || gate) + '” (Lowest pad-type status allowed on a board, in Setup › Settings). '
-      + IL.pt.texts.hint(prof));
+      + IL.pt.texts.hint(prof) + (PT.data && PT.data.forSetup ? ' Statuses are the ' + PT.data.forSetup.name + '’s, the tip on the dispenser.' : ''));
     const n = allTypes().filter((t) => !t.retired).length;
     IL.setText($('pt-count'), PT.data ? String(n) : '');
-    const key = JSON.stringify([PT.ver, PT.error, PT.showRetired, PT.filter, hasPlan ? S.plan.planId : '', hasPlan ? S.plan.pads.length : 0, gate]);
+    const key = JSON.stringify([PT.ver, PT.error, PT.showRetired, PT.filter, hasPlan ? S.plan.planId : '', hasPlan ? S.plan.pads.length : 0, gate,
+      tips.map((x) => [x.key, x.name, x.mainPhoto && x.mainPhoto.id])]);
     const rebuilt = IL.keyed(host, key, () => {
       if (!PT.data) return el('div', { class: 'card ws-note' }, PT.error ? el('div', { class: 'refusal', role: 'alert' }, el('div', { class: 'refusal__t', text: 'Could not load the pad types: ' + PT.error }))
         : el('p', { class: 'muted', text: 'Loading pad types…' }));
       const fams = PT.data.families.filter((f) => (!f.retired || PT.showRetired));
+      if (PT.filter === 'by-tip') return byTipTables(fams, tips);
       const out = [];
       for (const fam of fams) {
         const types = fam.types.filter((t) => PT.filter === 'all' || (PT.filter === 'plan' ? stats[t.typeKey] : !IL.pt.filters[PT.filter] || IL.pt.filters[PT.filter](t)));
@@ -632,7 +647,7 @@
     }
   }
   function padTypeRow(t, st, prof) {
-    const edit = el('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'edit:' + t.typeKey, title: 'Change this type (saved as version ' + (t.version + 1) + ')' }, 'Edit');
+    const edit = el('button', { type: 'button', class: 'btn btn--sm', 'data-focus-key': 'edit:' + t.typeKey, title: 'Change this type (saved as version ' + (t.nextVersion || t.version + 1) + ')' }, 'Edit');
     const more = el('button', { type: 'button', class: 'btn btn--sm btn--quiet', 'data-focus-key': 'more:' + t.typeKey,
       title: 'Set up, validate, history, pad rule, retire', 'aria-label': 'More about ' + t.name }, 'More', IL.icon('i-chev'));
     edit.addEventListener('click', () => openPadType(typeByKey(t.typeKey)));
@@ -643,15 +658,65 @@
       + ' A stencil of t ' + IL.fmt(t.tMm, 2) + ' mm and k ' + IL.fmt(t.k, 2) + ' would print ' + IL.fmt(t.targetMassMg, 3) + ' mg (information).';
     const plan = st ? el('span', { class: st.blocked ? 'pt-blocked' : null, title: st.pads + ' pads, ' + st.dots + ' dots in the plan shown' + (st.blocked ? '; ' + st.blocked + ' cannot be dispensed (below the gate)' : '') },
       String(st.pads), st.blocked ? el('small', { text: ' · ' + st.blocked + ' blocked' }) : null) : el('span', { class: 'dim', text: '—' });
-    return el('tr', { 'data-key': t.typeKey, class: (t.retired ? 'is-retired' : '') + (t.dispensable ? ' is-allowed' : '') },
+    // other tips' versions of this type (§22.7): "+2 tips" opens the side panel at Other tips
+    const others = (t.others || []).length;
+    const tipsBtn = others ? el('button', { type: 'button', class: 'pt-tips', 'data-focus-key': 'tips:' + t.typeKey, title: 'Calibrated for ' + (t.others || []).map((o) => 'the ' + o.setupName).join(', ') + ': open' },
+      '+' + IL.plural(others, 'tip')) : null;
+    if (tipsBtn) tipsBtn.addEventListener('click', (ev) => { ev.stopPropagation(); PT.focusTips = true; IL.go('#profile/pad-types/' + t.typeKey); });
+    return el('tr', { 'data-key': t.typeKey, class: (t.retired ? 'is-retired' : '') + (t.dispensable ? ' is-allowed' : '') + (t.standIn ? ' is-standin' : '') },
       el('td', { class: 'pt-name', title: t.typeKey + ' v' + t.version + (t.packagePattern ? '\npackages: ' + t.packagePattern : '') + (t.notes ? '\n' + t.notes : '') },
-        el('div', { class: 'pt-name__t', text: t.name }), el('div', { class: 'pt-name__k', text: t.typeKey + ' · v' + t.version })),
-      el('td', {}, pcr.badge(t.status, t.retired)),
+        el('div', { class: 'pt-name__t' }, el('span', { text: t.name }), tipsBtn),
+        el('div', { class: 'pt-name__k', text: t.typeKey + (t.standIn ? '' : ' · v' + t.version) })),
+      el('td', {}, pcr.badge(t.standIn ? 'not-started' : t.status, t.retired),
+        t.standIn && !t.retired ? el('div', { class: 'pt-standin', text: 'Not calibrated for the ' + (PT.data && PT.data.forSetup ? PT.data.forSetup.name : 'mounted tip') + ' yet' }) : null),
       el('td', { class: 'r nowrap', text: pcr.fmtPadPair(t.padWMm, t.padHMm) }),
       el('td', { class: 'r nowrap', title: dotTitle, text: dots }),
       el('td', { class: 'r nowrap' }, plan),
       el('td', { class: 'nowrap' }, t.lastValidatedAtMs ? IL.timeEl(t.lastValidatedAtMs - S.skewMs) : el('span', { class: 'dim', text: '—' })),
       el('td', { class: 'pt-act' }, el('div', { class: 'pt-act__b' }, edit, more)));
+  }
+
+  /** The tip setups that are not retired, the mounted one first (IL.tips' library). */
+  function liveTips() {
+    const d = IL.tips && IL.tips.data();
+    return d ? (d.setups || []).filter((x) => !x.retired).sort((a, b) => (b.mounted ? 1 : 0) - (a.mounted ? 1 : 0)) : [];
+  }
+  /**
+   * A "calibrated for" label without its pad type (the first part) and the tip's name: "Vieweg DV-5005 · 18 psi · …".
+   * Only the automatic label has that shape ({type} · {tip} · …); a label the operator wrote is shown whole.
+   */
+  function labelRest(label, setupName) {
+    const parts = String(label || '').split(' · ');
+    return parts.length > 1 && setupName && parts[1] === setupName ? parts.slice(2).join(' · ') : String(label || '');
+  }
+  /** By tip (§22.7): rows are pad types, one column per tip with the mounted one first; a cell opens that tip's version. */
+  function byTipTables(fams, tips) {
+    const out = [];
+    for (const fam of fams) {
+      if (fam.retired) continue;
+      const types = fam.types;
+      if (!types.length) continue;
+      out.push(el('section', { class: 'card family pt-bytip', 'data-family': fam.family },
+        el('div', { class: 'family__head' }, el('h2', { text: fam.family }), el('span', { class: 'count', text: String(types.length) }),
+          el('span', { class: 'family__s', text: 'each tip’s own status' })),
+        el('div', { class: 'pt-bytip__wrap' }, el('table', { class: 'tbl pt-bytip__t' },
+          el('thead', {}, el('tr', {}, el('th', { scope: 'col', class: 'pt-bytip__name' }, 'Pad type'),
+            tips.map((x) => el('th', { scope: 'col', 'data-setup': x.key }, el('div', { class: 'pt-bytip__h' }, IL.tips.thumb(x, 'xs'),
+              el('span', { class: 'pt-bytip__hn', text: x.name }), x.mounted ? el('span', { class: 'tag tag--now', text: 'on now' }) : null))))),
+          el('tbody', {}, types.map((t) => el('tr', { 'data-key': t.typeKey },
+            el('td', { class: 'pt-name' }, el('div', { class: 'pt-name__t', text: t.name }), el('div', { class: 'pt-name__k', text: t.typeKey })),
+            tips.map((x) => {
+              const o = x.mounted ? (t.standIn ? null : { status: t.status, version: t.version, label: t.label })
+                : (t.others || []).find((k) => k.setupKey === x.key) || null;
+              if (!o) return el('td', { 'data-setup': x.key }, el('span', { class: 'dim pt-bytip__none', text: 'not calibrated' }));
+              const b = el('button', { type: 'button', class: 'pt-bt', 'data-setup': x.key, 'data-type': t.typeKey, 'data-focus-key': 'bt:' + x.key + ':' + t.typeKey,
+                title: 'The ' + x.name + '’s version ' + o.version + (o.label ? ': ' + o.label : '') }, pcr.badge(o.status),
+              o.label ? el('span', { class: 'pt-bt__l', text: labelRest(o.label, x.name) }) : el('span', { class: 'pt-bt__l', text: 'v' + o.version }));
+              b.addEventListener('click', () => { PT.focusSetup = x.mounted ? null : x.key; PT.focusTips = !x.mounted; IL.go('#profile/pad-types/' + t.typeKey); });
+              return el('td', { 'data-setup': x.key }, b);
+            }))))))));
+    }
+    return out.length ? out : [el('div', { class: 'card ws-note' }, el('p', { class: 'muted', text: 'No pad types.' }))];
   }
 
   // ================================================================================== pad-type dialog (#dlg-padtype)
@@ -732,12 +797,18 @@
     if (PT.dlg) return;
     const gate = gateStatus(S.status);
     PT.editKey = t ? t.typeKey : null;
+    // the editor saves for the tip mounted now (forSetup) and the pad version it showed (padVersion, §22.2)
+    PT.dlgTip = tipKey(S.status);
+    PT.dlgPadVersion = t && isNum(t.padVersion) ? t.padVersion : null;
+    const tn = tipName(S.status);
+    const next = t ? (t.nextVersion || t.version + 1) : 1;
     IL.setText($('dlg-padtype-title'), t ? 'Edit ' + t.name : 'New pad type');
-    IL.setText($('pt-eyebrow'), t ? 'Pad type · ' + t.typeKey + ' · version ' + t.version : 'Pad type · new');
+    IL.setText($('pt-eyebrow'), (t ? 'Pad type · ' + t.typeKey : 'Pad type · new') + ' · for the ' + tn);
+    const keeps = t ? (t.others || []).map((o) => 'the ' + o.setupName + ' keeps version ' + o.version) : [];
     const ver = $('pt-version');
-    ver.replaceChildren(IL.glyph('info', 'xs'), el('span', { text: t
-      ? 'Saving adds version ' + (t.version + 1) + '. Nothing is overwritten: History keeps every version (' + (t.versions || t.version) + ' so far).'
-      : 'A new type starts at version 1. Its key cannot change later; edits add versions.' }));
+    ver.replaceChildren(IL.glyph('info', 'xs'), el('span', { text: (t
+      ? 'Saves version ' + next + ' for the ' + tn + (keeps.length ? '; ' + keeps.join(', ') : '') + '. Nothing is overwritten: History keeps every version.'
+      : 'A new type starts at version 1, for the ' + tn + '. Its key cannot change later; edits add versions.') + ' Size, pattern, name, k and t are shared by every tip.' }));
     fillFamilySelect(t ? t.family : 'Custom');
     $('pt-status').replaceChildren(...STATUS_ORDER.map((k) => el('option', { value: k, text: STATUS_OPTION[k] + (k === gate ? ' (the gate)' : '') })));
     const set = (id, v) => { $(id).value = v === null || v === undefined ? '' : String(v); };
@@ -757,7 +828,7 @@
     $('pt-footprint').value = '';
     $('pt-error').replaceChildren();
     for (const n of $('padtype-form').querySelectorAll('.input--invalid')) n.classList.remove('input--invalid');
-    IL.setText($('pt-save'), t ? 'Save version ' + (t.version + 1) : 'Save');
+    IL.setText($('pt-save'), t ? 'Save version ' + next : 'Save');
     for (const x of IL.pt.editorExtras) x.open(t, srvProfile(S.status));
     PT.dlg = IL.dialog.showNative($('dlg-padtype'), { initialFocus: '#pt-name', onClose: () => { PT.dlg = null; } });
     ptDerived();
@@ -831,7 +902,8 @@
     }
     $('pt-derived').replaceChildren(...out);
     const t = PT.editKey ? typeByKey(PT.editKey) : null;
-    IL.setText($('pt-sum'), t ? 'Version ' + t.version + ' → ' + (t.version + 1) + (t.status !== v.status ? ' · status ' + STATUS_OPTION[t.status] + ' → ' + STATUS_OPTION[v.status] : '')
+    IL.setText($('pt-sum'), t ? (t.standIn ? 'New version ' + (t.nextVersion || 1) + ' for the ' + tipName(S.status) : 'Version ' + t.version + ' → ' + (t.nextVersion || t.version + 1))
+      + (t.status !== v.status ? ' · status ' + STATUS_OPTION[t.status] + ' → ' + STATUS_OPTION[v.status] : '')
       : (v.name ? '“' + v.name + '” in ' + (v.family || '—') + ', version 1' : 'New type, version 1'));
     if ($('padtype-form').dataset.tried) {
       const errs = ptErrors(v);
@@ -894,6 +966,8 @@
       pitchMm: v.pitch === undefined ? null : v.pitch, tMm: v.t, k: v.k, status: v.status, packagePattern: v.pattern || null, notes: v.notes || null };
     const editKey = PT.editKey;
     if (!editKey && v.typeKey) body.typeKey = v.typeKey;
+    body.forSetup = PT.dlgTip || tipKey(S.status);
+    if (editKey && isNum(PT.dlgPadVersion)) body.padVersion = PT.dlgPadVersion;
     for (const x of IL.pt.editorExtras) if (x.body) x.body(body);
     await IL.act(btn, async () => {
       const r = editKey ? await IL.api('PUT', '/api/pad-types/' + encodeURIComponent(editKey), body) : await IL.api('POST', '/api/pad-types', body);
@@ -903,42 +977,63 @@
       await loadPadTypes();
       IL.planRefreshSoon();
       return r;
-    }, { ok: (r) => 'Saved ' + r.padType.name + ' (' + r.padType.typeKey + ' v' + r.padType.version + ').', refusalIn: $('pt-error') });
+    }, { ok: (r) => 'Saved ' + r.padType.name + ' (' + r.padType.typeKey + ' v' + r.padType.version + ', for the ' + tipName(S.status) + ').'
+      + (r.calibration && r.calibration.label ? ' Calibrated for ' + r.calibration.label + '.' : ''), refusalIn: $('pt-error') });
   }
 
   // ================================================================================== history dialog (#dlg-history)
   function buildHistoryDialog() {
     const close = el('button', { type: 'button', class: 'btn', id: 'history-close' }, 'Close');
     close.addEventListener('click', () => { if (PT.hist) PT.hist.close('close'); });
+    const segThis = el('button', { type: 'button', 'aria-pressed': 'true', 'data-hist': 'this', id: 'history-this' }, 'This tip');
+    const segAll = el('button', { type: 'button', 'aria-pressed': 'false', 'data-hist': 'all', id: 'history-all' }, 'All tips');
+    for (const b of [segThis, segAll]) b.addEventListener('click', () => { PT.histTips = b.dataset.hist; if (PT.histData) historyTable(PT.histData); });
     return el('dialog', { id: 'dlg-history', class: 'dialog pt-dlg pt-hist', 'aria-labelledby': 'dlg-history-title' },
       el('div', { class: 'dlg-form' },
         el('div', { class: 'dialog__head' }, el('div', {}, el('div', { class: 'eyebrow', text: 'Pad type history' }), el('h2', { id: 'dlg-history-title', text: 'History' })),
           el('div', { class: 'dialog__keys' }, el('kbd', { text: 'Esc' }), ' closes ', el('kbd', { text: 'F9' }), ' stops')),
+        el('div', { class: 'pt-hist__tools' }, el('div', { class: 'seg', role: 'group', 'aria-label': 'Which tips', id: 'history-tips' }, segThis, segAll)),
         el('div', { class: 'dialog__body', id: 'history-body' }),
-        el('div', { class: 'dialog__foot' }, el('div', { class: 'dialog__sum', text: 'Newest first. Changed values are marked against the version before.' }), close)));
+        el('div', { class: 'dialog__foot' }, el('div', { class: 'dialog__sum', id: 'history-sum', text: 'Newest first. Changed values are marked against the version before of the same tip.' }), close)));
   }
   async function showHistory(key, btn) {
     const h = await IL.api('GET', '/api/pad-types/' + encodeURIComponent(key));
+    PT.histData = h;
+    PT.histTips = 'this';
+    historyTable(h);
+    PT.hist = IL.dialog.showNative($('dlg-history'), { initialFocus: '#history-close', onClose: () => { PT.hist = null; } });
+    return h;
+  }
+  /** History: newest first, a Tip column; "changed" marks compare with the previous version of the same tip (§22.7). */
+  function historyTable(h) {
+    const key = h.current.typeKey;
+    const mine = (h.forSetup && h.forSetup.key) || tipKey(S.status);
+    for (const b of $('history-tips').children) IL.setAttr(b, 'aria-pressed', String(b.dataset.hist === PT.histTips));
     IL.setText($('dlg-history-title'), 'History of ' + h.current.name + ' (' + key + ')');
-    const cols = [['v', (x) => 'v' + x.version, 'version'], ['Saved', (x) => IL.fmtDateTime(x.createdAtMs - S.skewMs), null], ['By', (x) => x.operator || '—', null],
+    const cols = [['v', (x) => 'v' + x.version, 'version'], ['Tip', (x) => x.setupName || x.setupKey || '—', null], ['Saved', (x) => IL.fmtDateTime(x.createdAtMs - S.skewMs), null], ['By', (x) => x.operator || '—', null],
       ['Family', (x) => x.family, 'family'], ['Status', (x) => (STATUS_OPTION[x.status] || x.status), 'status'],
       ['Pad mm', (x) => pcr.fmtPad(x.padWMm) + ' × ' + pcr.fmtPad(x.padHMm) + (x.padRoundness ? ' · ' + IL.fmt(x.padRoundness, 0) + ' %' : ''), 'pad'],
       ['Layout', (x) => (x.layout || '—') + (x.pitchMm ? ' · ' + pcr.fmtPad(x.pitchMm) : ''), 'layout'], ['t · k', (x) => IL.fmt(x.tMm, 3) + ' · ' + IL.fmt(x.k, 2), 'tk'],
       ['Packages', (x) => x.packagePattern || '—', 'pattern'], ['Notes', (x) => x.notes || '', 'notes']];
     const sig = (x, c) => c[1](x);
-    const list = h.history.slice().sort((a, b) => b.version - a.version);
-    if (!list.some((x) => x.operator)) cols.splice(2, 1);
+    const all = h.history.slice().sort((a, b) => b.version - a.version);
+    const list = PT.histTips === 'all' ? all : all.filter((x) => (x.setupKey || mine) === mine);
+    if (!list.some((x) => x.operator)) cols.splice(cols.findIndex((c) => c[0] === 'By'), 1);
+    if (PT.histTips !== 'all') cols.splice(1, 1);
     $('history-body').replaceChildren(el('div', { class: 'pt-hist__wrap' }, el('table', { class: 'tbl pt-hist__t' },
       el('thead', {}, el('tr', {}, cols.map((c) => el('th', { scope: 'col' }, IL.unitText(c[0]))))),
-      el('tbody', {}, list.map((x, i) => {
-        const older = list[i + 1];
-        return el('tr', {}, cols.map((c) => {
+      el('tbody', {}, list.length ? list.map((x) => {
+        // the version before of the same tip
+        const older = all.find((y) => y.version < x.version && (y.setupKey || mine) === (x.setupKey || mine));
+        return el('tr', { 'data-setup': x.setupKey || '' }, cols.map((c) => {
           const changed = older && c[2] && c[2] !== 'version' && sig(x, c) !== sig(older, c);
-          return el('td', { class: (changed ? 'chg' : '') + (c[0] === 'Notes' || c[0] === 'Packages' || c[0] === 'Family' ? ' wrap' : ''), title: changed ? 'Changed from: ' + sig(older, c) : null, text: sig(x, c) });
+          return el('td', { class: (changed ? 'chg' : '') + (c[0] === 'Notes' || c[0] === 'Packages' || c[0] === 'Family' || c[0] === 'Tip' ? ' wrap' : ''), title: changed ? 'Changed from: ' + sig(older, c) : null, text: sig(x, c) });
         }));
-      })))));
-    PT.hist = IL.dialog.showNative($('dlg-history'), { initialFocus: '#history-close', onClose: () => { PT.hist = null; } });
-    return h;
+      }) : [el('tr', {}, el('td', { colspan: String(cols.length), class: 'muted', text: 'No version for the ' + tipName(S.status) + ' yet: All tips shows the others.' }))]))));
+    const newest = all[0];
+    const other = all.find((x) => x.setupKey && x.setupKey !== mine);
+    IL.setText($('history-sum'), 'Newest first. Changed values are marked against the version before of the same tip.'
+      + (other ? ' Version numbers count across tips: v' + other.version + ' is the ' + (other.setupName || other.setupKey) + '’s.' : newest ? ' Version numbers count across tips.' : ''));
   }
 
   // ================================================================================== context panel `pt`
@@ -1040,7 +1135,7 @@
         const t = typeByKey(k);
         const btn = el('button', { type: 'button', class: 'pt-plan__i', 'data-focus-key': 'plan:' + k },
           t ? pcr.badge(t.status, t.retired) : IL.glyph('block', 'xs'),
-          el('span', { class: 'pt-plan__n', text: t ? t.name : v.label || k }),
+          el('span', { class: 'pt-plan__n' }, breakable(t ? t.name : v.label || k)),
           el('span', { class: 'pt-plan__v' + (v.blocked ? ' pt-blocked' : ''), text: IL.plural(v.pads, 'pad') + (v.blocked ? ' · ' + v.blocked + ' blocked' : '') }),
           IL.icon('i-chev'));
         btn.addEventListener('click', () => (t ? IL.go('#profile/pad-types/' + k) : IL.go(v.href || '#profile/new-pad-type/' + ([...v.packages][0] || ''))));
@@ -1058,14 +1153,15 @@
       p.top.append(el('div', { class: 'pt-ph' }, back, el('div', { class: 'pt-ph__t' }, el('div', { class: 'eyebrow', id: 'pt-ph-e', text: 'Pad type' }), el('h2', { id: 'pt-ph-n', text: key })), el('span', { id: 'pt-ph-b' })));
       // the pad-rule form is its own region: rebuilt only for another type or a newly saved rule, never on a poll or when
       // the package list arrives (typed values stay, §15)
-      p.body.append(el('div', { id: 'pt-side' }), el('div', { id: 'pt-rule-box' }), el('div', { id: 'pt-retire-box' }));
+      p.body.append(el('div', { id: 'pt-side' }), el('section', { id: 'pt-side-tips', class: 'pt-side-tips', 'aria-label': 'Other tips', 'data-refusals': '' }),
+        el('div', { id: 'pt-rule-box' }), el('div', { id: 'pt-retire-box' }));
       const edit = el('button', { type: 'button', class: 'btn btn--primary', id: 'pt-side-edit' }, 'Edit…');
       const hist = el('button', { type: 'button', class: 'btn', id: 'pt-side-history' }, 'History');
       edit.addEventListener('click', () => { const x = typeByKey(PT.sel); if (x) openPadType(x); });
       hist.addEventListener('click', () => IL.act(hist, () => showHistory(PT.sel, hist)));
       p.foot.append(el('div', { class: 'btn-row', 'data-refusals': '' }, edit, hist));
     }
-    const clearRest = () => { IL.keyed($('pt-rule-box'), '', () => null); IL.keyed($('pt-retire-box'), '', () => null); };
+    const clearRest = () => { IL.keyed($('pt-rule-box'), '', () => null); IL.keyed($('pt-retire-box'), '', () => null); IL.keyed($('pt-side-tips'), '', () => null); };
     if (!PT.data) { IL.keyed($('pt-side'), 'loading', () => el('p', { class: 'panel__lead', text: 'Loading the pad types…' })); clearRest(); return; }
     if (!t) {
       IL.keyed($('pt-side'), 'missing' + key, () => el('div', { class: 'notebox notebox--need' }, 'No pad type “' + key + '”. ', el('button', { type: 'button', class: 'link', text: 'Back to the profile', onclick: () => IL.go('#profile') })));
@@ -1073,7 +1169,7 @@
       return;
     }
     IL.setText($('pt-ph-n'), t.name);
-    IL.setText($('pt-ph-e'), 'v' + t.version + ' · ' + t.family);
+    IL.setText($('pt-ph-e'), (t.standIn ? 'not for the ' + tipName(s) + ' yet' : 'v' + t.version) + ' · ' + t.family);
     IL.keyed($('pt-ph-b'), t.status + t.retired, () => pcr.badge(t.status, t.retired));
     const st = IL.pt.planStats()[t.typeKey];
     const m = matchedPackages(t.packagePattern);
@@ -1094,7 +1190,8 @@
             ['Dot plan', IL.pt.texts.dotPlan(t, srvProfile(s))],
             ['Stencil equivalent', 't ' + IL.fmt(t.tMm, 2) + ' mm · k ' + IL.fmt(t.k, 2) + ' → ' + IL.fmt(t.targetMassMg, 3) + ' mg (information)'],
             ['In this plan', st ? IL.plural(st.pads, 'pad') + ', ' + IL.plural(st.dots, 'dot') + (st.blocked ? ', ' + st.blocked + ' blocked' : '') : S.plan ? 'not used' : 'no plan shown'],
-            ['Versions', t.versions + ' · this one ' + IL.fmtDateTime(t.createdAtMs - S.skewMs) + (t.operator ? ' by ' + t.operator : '')],
+            ['Versions', t.standIn ? 'none for the ' + tipName(s) + ' yet (the pad: version ' + t.padVersion + ')'
+              : t.versions + ' · this one ' + IL.fmtDateTime(t.createdAtMs - S.skewMs) + (t.operator ? ' by ' + t.operator : '')],
             ['Last validated', t.lastValidatedAtMs ? IL.fmtDateTime(t.lastValidatedAtMs - S.skewMs) : 'never'],
           ].flatMap(([k, v]) => [el('dt', { text: k }), el('dd', { text: IL.nb(v) })])),
         t.notes ? el('p', { class: 'panel__lead', text: t.notes }) : null,
@@ -1106,6 +1203,16 @@
             el('div', { class: 'pt-pkgs__l' }, m === null ? 'Loading OpenPnP packages…' : m.bad ? 'Not a valid regular expression.'
               : m.list.length ? m.list.join(', ') : 'No OpenPnP package matches.')))];
     });
+    // the other tips' versions of this type (§22.7): status, label, result picture, and a copy of their dots to start from
+    const det = typeDetail(t);
+    const tk = JSON.stringify([t.typeKey, t.version, t.status, t.standIn, t.others, det ? det.ver : null, tipKey(s)]);
+    const tipsBuilt = IL.keyed($('pt-side-tips'), tk, () => sideTips(t, det, s));
+    if (PT.focusTips && (tipsBuilt || !PT.focusDone)) {
+      PT.focusDone = true;
+      const sel = PT.focusSetup ? '#pt-side-tips .pt-tip[data-setup="' + CSS.escape(PT.focusSetup) + '"]' : '#pt-side-tips';
+      requestAnimationFrame(() => { const n = document.querySelector(sel); if (n) { n.scrollIntoView({ block: 'nearest' }); IL.flash(n); } });
+      PT.focusTips = false;
+    }
     IL.keyed($('pt-rule-box'), JSON.stringify([t.typeKey, t.rule ? t.rule.version : 0]), () => {
       const ruleSave = el('button', { type: 'button', class: 'btn', id: 'btn-pt-rule-save' }, 'Save pad rule');
       ruleSave.addEventListener('click', () => IL.act(ruleSave, () => saveRule(t), { ok: (r) => 'Pad rule saved for ' + t.name + ' (v' + r.version + ').' }));
@@ -1124,23 +1231,76 @@
           el('div', { class: 'btn-row' }, ruleSave))];
     });
     IL.keyed($('pt-retire-box'), t.typeKey + '|' + !!t.retired, () => {
-      const retire = el('button', { type: 'button', class: 'btn btn--danger-ghost', id: 'pt-side-retire' }, 'Retire…');
-      IL.press2(retire, 'retire ' + t.name, async () => {
-        const r = await IL.api('DELETE', '/api/pad-types/' + encodeURIComponent(t.typeKey));
+      const retire = el('button', { type: 'button', class: 'btn btn--danger-ghost', id: 'pt-side-retire' }, 'Retire for every tip…');
+      IL.press2(retire, 'retire ' + t.name + ' for every tip', async () => {
+        const body = { forSetup: tipKey(S.status) };
+        if (isNum(t.padVersion)) body.padVersion = t.padVersion;
+        const r = await IL.api('DELETE', '/api/pad-types/' + encodeURIComponent(t.typeKey), body);
         IL.go('#profile');
         await loadPadTypes();
         return r;
-      }, { ok: 'Retired ' + t.name + ': kept in the history, never matched to a package, never dispensed.' });
+      }, { ok: (r) => 'Retired ' + t.name + ': ' + ((r && r.note) || 'kept in the history, never matched to a package, never dispensed') + '.' });
       return [
         t.retired ? null : el('div', { class: 'pt-retire', 'data-refusals': '' },
           el('div', { class: 'section-k' }, el('span', { text: 'Retire' }), el('span', { class: 'rule' })),
-          el('p', { class: 'field__h', text: 'A retired type stays in the history but is never matched to a package or dispensed.' }), retire)];
+          el('p', { class: 'field__h', text: 'A retired type is never matched to a package or dispensed, whichever tip is on. It stays in the history.' }), retire)];
     });
     // live rule preview (cheap; inputs are never rewritten)
     const lg = IL.num('pt-rule-largest'), mx = IL.num('pt-rule-maxdots');
     const n = lg > 0 && t.padAreaMm2 > lg ? Math.min(mx > 0 ? mx : 6, Math.ceil(t.padAreaMm2 / lg - 1e-9)) : 1;
     IL.setText($('pt-rule-pre'), 'With this rule a ' + pcr.fmtPad(t.padWMm) + ' × ' + pcr.fmtPad(t.padHMm) + ' mm pad (' + IL.fmt(t.padAreaMm2, 2) + ' mm²) gets ' + IL.plural(n, 'dot') + '.');
     IL.gate($('pt-side-retire'), IL.lockReason(s, { idle: false, pressureOff: false }));
+  }
+  /** GET /api/pad-types/{key} (its versions per tip, bySetup): read once per type version, for the other tips' dot plans. */
+  function typeDetail(t) {
+    const k = t.typeKey + '@' + t.version + '@' + (t.others || []).map((o) => o.setupKey + o.version).join(',');
+    PT.details = PT.details || {};
+    const d = PT.details[k];
+    if (!d) {
+      const x = PT.details[k] = { loading: true, ver: 0 };
+      IL.api('GET', '/api/pad-types/' + encodeURIComponent(t.typeKey)).then((r) => { x.r = r; }, () => { x.r = null; }).then(() => { x.loading = false; x.ver = 1; IL.render(); });
+      return null;
+    }
+    return d.loading ? null : d;
+  }
+  const TURN_ADJ = { 400: 'quarter-turn', 800: 'half-turn', 1600: 'one-turn' };
+  /** section#pt-side-tips: per other tip div.pt-tip[data-setup] (version, status, label, result photo, Copy its dots). */
+  function sideTips(t, det, s) {
+    const others = t.others || [];
+    const tn = tipName(s);
+    const below = t.standIn || !['characterized', 'validated'].includes(t.status);
+    const prof = srvProfile(s) || {};
+    const out = [IL.sectionK('Other tips', others.length || null)];
+    if (!others.length) { out.push(el('p', { class: 'muted pt-tip__none', text: 'Not calibrated for any other tip.' })); return out; }
+    for (const o of others) {
+      const v = det && det.r && det.r.bySetup ? det.r.bySetup[o.setupKey] : null;
+      const steps = v ? (v.dotSteps || prof.netStepsPerDot) : null;
+      const plan = v && isNum(v.dotsPerPad) ? v.dotsPerPad + ' ' + (TURN_ADJ[steps] || IL.turnLabel(steps)) + ' ' + (v.dotsPerPad === 1 ? 'dot' : 'dots') + ' per pad' : null;
+      let pic = null;
+      if (o.thumbUrl) {
+        pic = el('button', { type: 'button', class: 'photo-thumb photo-thumb--sm', title: 'The result photo of the ' + o.setupName + '’s calibration' },
+          el('img', { src: o.thumbUrl, alt: 'Result photo: ' + (o.label || o.setupName), loading: 'lazy', width: '72', height: '54' }));
+        pic.addEventListener('click', () => IL.photos && IL.photos.view({ id: o.calibrationId, url: o.thumbUrl.replace(/\/thumb\.jpg$/, '.jpg'), thumbUrl: o.thumbUrl,
+          caption: o.label || 'Calibrated for the ' + o.setupName, kind: 'result', atMs: o.atMs }, { from: pic }));
+      }
+      let copy = null, note = null;
+      if (below && o.status && o.status !== 'not-started') {
+        copy = el('button', { type: 'button', class: 'btn btn--sm', 'data-action': 'copy-from', 'data-setup': o.setupKey }, 'Copy its dots to start from');
+        note = el('div', { class: 'pt-tip__note', text: 'Saves a provisional version for the ' + tn + ' with this plan' + (plan ? ': ' + plan : '') + '. Nothing measured comes with it.' });
+        copy.addEventListener('click', () => IL.act(copy, async () => {
+          const r = await IL.api('POST', '/api/pad-types/' + encodeURIComponent(t.typeKey) + '/copy', { fromSetup: o.setupKey, forSetup: tipKey(S.status) });
+          await loadPadTypes();
+          IL.planRefreshSoon();
+          return r;
+        }, { ok: (r) => 'Saved ' + t.name + ' v' + r.padType.version + ' for the ' + tn + ' as provisional: copied from the ' + o.setupName + ', nothing measured.' }));
+      }
+      out.push(el('div', { class: 'pt-tip', 'data-setup': o.setupKey },
+        el('div', { class: 'pt-tip__h' }, el('b', { text: o.setupName }), pcr.badge(o.status), el('span', { class: 'dim', text: 'v' + o.version + (o.atMs ? ' · ' + IL.fmtDateTime(IL.toClient(o.atMs)) : '') })),
+        o.label ? el('div', { class: 'pt-tip__l', text: 'Calibrated for ' + o.label }) : null,
+        plan ? el('div', { class: 'pt-tip__p', text: plan }) : null,
+        pic || copy ? el('div', { class: 'pt-tip__a' }, pic, copy) : null, note));
+    }
+    return out;
   }
   async function saveRule(t) {
     const body = { maxDots: IL.num('pt-rule-maxdots') === undefined ? null : IL.num('pt-rule-maxdots'),
@@ -1172,6 +1332,8 @@
    */
   IL.pt = { PT, route: null, panel: null, planStats, newForPackage, openPadType, selectType, filters: {}, sectionExtras: [], renderExtras: [],
     sidePanelExtras: [], editorExtras: [], navSubs: [],
+    /** Unsaved recipe or pad-type edits (Change tip's Mount waits for them, §22.7). */
+    unsaved: () => PF.dirty.size > 0 || !!PT.dlg,
     texts: {
       meta: 'One recipe for every dot. Plans made before a change are refused: plan again.',
       dotsCol: 'Dots per pad, each one dot of the dispense profile',
@@ -1229,12 +1391,21 @@
       const p = srvProfile(s);
       if (p) {
         IL.setText($('pf-title-name'), p.name);
-        IL.setText($('pf-h1-sub'), p.name);
+        // the mounted tip (§22.7): its picture, "· for the {S}" and Change tip…
+        const tn = tipName(s), thumbUrl = s.dispense.tip && s.dispense.tip.thumbUrl;
+        IL.setText($('pf-title-tip'), ' · the recipe of the ' + tn + ': every dot on a board and on the purge row');
+        IL.keyed($('pf-h1-sub'), JSON.stringify([p.name, tn, thumbUrl]), () => {
+          const change = el('button', { type: 'button', class: 'link pf-tip-change', id: 'pf-tip-change', text: 'Change tip…' });
+          change.addEventListener('click', () => { if (IL.tips) IL.tips.openChange({}); });
+          return [thumbUrl ? el('img', { class: 'tip-thumb tip-thumb--xs', src: thumbUrl, alt: 'The ' + tn }) : el('span', { class: 'tip-thumb tip-thumb--xs tip-thumb--none', title: 'No picture of the ' + tn + ' yet' }, IL.tips ? IL.tips.noPicture() : null),
+            el('span', { class: 'pf-h1-sub__t', text: p.name + ' · for the ' + tn }), change];
+        });
         IL.keyed($('pf-recipe'), JSON.stringify(IL.recipeParts(p)), () => IL.recipeEl(p, { title: 'The saved dispense profile' }));
         syncProfile(s);
         renderAngle(s);
       }
-      const wk = p ? p.fingerprint + '|' + (s.dispense.minPadTypeStatus || '') : '';
+      // another tip mounted (or its details corrected): its own pad types (§22.2)
+      const wk = p ? p.fingerprint + '|' + (s.dispense.minPadTypeStatus || '') + '|' + tipKey(s) + '@' + ((s.dispense.tip || {}).setupVersion || '') : '';
       if (PT.watchKey !== null && wk !== PT.watchKey && PT.data) loadPadTypes();
       PT.watchKey = wk;
       renderPadTypes(s);

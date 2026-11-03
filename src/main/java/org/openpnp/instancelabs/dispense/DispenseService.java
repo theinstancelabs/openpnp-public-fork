@@ -24,6 +24,8 @@ import org.openpnp.instancelabs.board.EdtRunner;
 import org.openpnp.instancelabs.padprofile.DoseModel;
 import org.openpnp.instancelabs.padprofile.LadderStats;
 import org.openpnp.instancelabs.padprofile.Limits;
+import org.openpnp.instancelabs.padprofile.Texts;
+import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.instancelabs.sim.SimGuard;
 import org.openpnp.instancelabs.vision.BareSpotCheck;
 import org.openpnp.instancelabs.vision.Dot;
@@ -86,6 +88,32 @@ public final class DispenseService {
         }
     }
 
+    /** A configuration edit applied to the live configuration under the service's lock ({@link #updateConfigAtomically}). */
+    public interface ConfigEdit {
+        /**
+         * The new configuration, made from {@code live} (a copy of the live configuration: the edit's comparisons of
+         * protected settings run against it); throw to refuse.
+         */
+        DispenseConfig apply(DispenseConfig live) throws Exception;
+    }
+
+    /**
+     * What recording a needle Z frame or offset answers (tip setups design §22.3): the frame, the offset and two
+     * warnings; the values are saved either way (they measure what is on).
+     */
+    public static class NeedleFrameResult {
+        /** The needle Z frame now (null when only the offset was set). */
+        public DispenseConfig.NeedleAnchor anchor;
+        public double offsetMm;
+        /**
+         * "The {S}'s tip touches {d} mm higher than when it was on on {date}: is the {S} on the dispenser?" when the
+         * frame moved more than needleOffsetMaxDriftMm from the setup's previous one, else null.
+         */
+        public String question;
+        /** The I4 offset rule's warning (a frame too close to N1's to tell a height taken with the needle), or null. */
+        public String warning;
+    }
+
     private final Configuration configuration;
     private final File configDir;
     private final DispenseDb db;
@@ -125,6 +153,58 @@ public final class DispenseService {
      * queued in the gap between two steps never pressurises (profile calibration design §7.8).
      */
     private final AtomicLong stopEpoch = new AtomicLong();
+    /** Engine tasks started (an undo of a mount is refused once one has run since, §22.3). */
+    private final AtomicLong tasksStarted = new AtomicLong();
+    /** The camera that photographs the tip from below in tests ({@link #setTipCamera}); null = OpenPnP's. */
+    private volatile TipCamera tipCameraOverride;
+    /** The pictures (tip setups design §22.4). */
+    private final PhotoStore photoStore;
+    /** The mounted setup with its dot table and the identity it was made for ({@link #mountedTip}). */
+    private volatile TipCache tipCache;
+    /** The last mount of another setup, kept for its undo (§22.3), or null. */
+    private volatile UndoSnapshot undo;
+    /** The token the last needle change wrote and the one it replaced {new, old} (old null: none), for the undo. */
+    private volatile Long[] lastChange;
+
+    /** An undo window: how long after a mount of another setup it may be undone (§22.3). */
+    public static final long UNDO_MS = 2 * 60 * 1000L;
+    /** The events code of the tip setup facts (§22.3, §22.4): needle changes, mounts, landing, trims, pictures. */
+    public static final String TIP_EVENT = "TIP";
+
+    /**
+     * Tests only (tip setups design §22.8, the race tests): called at named points of a path ("switch": a mount holding
+     * the lock and the busy flag; "dose-blocks": a step on the machine thread before its checks) so a latch can pause
+     * it there. Null in every other use.
+     */
+    static volatile java.util.function.Consumer<String> testHook;
+
+    private static void hook(String point) {
+        java.util.function.Consumer<String> h = testHook;
+        if (h != null) {
+            h.accept(point);
+        }
+    }
+
+    /** The mounted tip with its dot table and the identity (setup, recipe, paste, records) it was made for. */
+    private static final class TipCache {
+        final String key;
+        final Tip tip;
+
+        TipCache(String key, Tip tip) {
+            this.key = key;
+            this.tip = tip;
+        }
+    }
+
+    /** The configuration before a mount of another setup, and what has to stay untouched for its undo. */
+    private static final class UndoSnapshot {
+        DispenseConfig before;
+        DispenseConfig after;
+        String fromKey;
+        String toKey;
+        long atMs;
+        long tasksAtMount;
+    }
 
     // ------------------------------------------------------------------------------------------
     // Lifecycle
@@ -171,6 +251,25 @@ public final class DispenseService {
         this.cfg = DispenseConfig.load(configDir);
         this.db = DispenseDb.open(configDir);
         resolveNozzle();
+        try {
+            reconcileTip();
+        }
+        catch (SQLException | IOException | RuntimeException e) {
+            // the settings file is the truth: the engine starts with it as it is, and the next start tries again
+            Logger.warn(e, "dispense: the tip setup reconcile at start failed");
+            db.event(null, "WARN", TIP_EVENT, "the tip setup reconcile at start failed (" + e.getMessage() + "): the "
+                    + "settings file's tip is used as it is");
+            if (!Tip.SEED_KEY.equals(cfg.tip.key)) {
+                cfg.tip.model = null; // only the seeded setup has the bench model (§22.11 item 10)
+            }
+        }
+        this.photoStore = new PhotoStore(PhotoStore.folderFor(configDir), db);
+        try {
+            photoStore.sweep(System.currentTimeMillis());
+        }
+        catch (Exception e) {
+            Logger.warn(e, "dispense: the picture sweep at start failed");
+        }
         Machine machine = configuration.getMachine();
         homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
         if (machine != null) {
@@ -317,6 +416,139 @@ public final class DispenseService {
         }
     }
 
+    /**
+     * The start-up reconcile of the mounted tip setup (tip setups design §22.1), in this order: (1) a {@code cfg.tip}
+     * key that names no setup gets a setup made from {@code cfg.tip} (form and taper unknown); (2) {@code cfg.tip}
+     * is compared with its setup's newest version on the ID, the OD and the smallest dot only (every config saved
+     * before tip setups names the 22G "22G tip", {@link Tip#OLD_SEED_NAME}): when they differ a version with the
+     * config's values is appended; a seed row still so named gets {@link Tip#SEED_NAME}; (3) {@code cfg.tip} is
+     * refreshed from the setup, its name included; (4) an empty {@code tip_mounts} gets a {@code seed} row, one whose
+     * newest row names another setup a {@code reconcile} row; (5) at that first start, a landing kept from before the
+     * update when the needle change was finished. The config is the truth: it is written first, then the rows.
+     */
+    private void reconcileTip() throws SQLException, IOException {
+        DispenseConfig c = cfg.copy();
+        boolean changed = DispenseConfig.isBeforeTipSetups(readConfigFile());
+        String key = c.tip.key;
+        TipSetup s = db.currentTipSetup(key);
+        if (s == null) {
+            TipSetup n = new TipSetup();
+            n.key = key;
+            n.name = freeName(c.tip.name, key);
+            n.dispenser = c.tip.dispenser == null ? TipSetup.DEFAULT_DISPENSER : c.tip.dispenser;
+            n.idMm = c.tip.idMm;
+            n.odMm = c.tip.odMm;
+            n.odSource = TipSetup.OD_ASSUMED;
+            n.form = TipSetup.FORM_UNKNOWN;
+            n.taper = TipSetup.TAPER_UNKNOWN;
+            n.minDotSteps = c.tip.minDotSteps;
+            n.notes = "Made from the settings file, which named this tip: fill in its form and taper.";
+            n.why = "the settings file names this tip";
+            n.operator = "reconcile";
+            s = db.insertTipSetupVersion(n);
+            db.event(null, "WARN", TIP_EVENT, "the settings file names the tip " + key + ", which no tip setup had: "
+                    + "made the setup " + s.name + " of it (form and taper to fill in)");
+        }
+        else if (!sameNumber(s.idMm, c.tip.idMm) || !sameNumber(s.odMm, c.tip.odMm) || s.minDotSteps != c.tip.minDotSteps) {
+            TipSetup n = s.copy();
+            n.idMm = c.tip.idMm;
+            n.odMm = c.tip.odMm;
+            n.odSource = n.odSource == null ? TipSetup.OD_ASSUMED : n.odSource;
+            n.minDotSteps = c.tip.minDotSteps;
+            n.why = "from the settings file at the update";
+            n.operator = "reconcile";
+            s = db.insertTipSetupVersion(n);
+            db.event(null, "INFO", TIP_EVENT, "the settings file's tip differs from the " + s.name + "'s version "
+                    + (s.version - 1) + ": version " + s.version + " takes its ID, OD and smallest dot");
+        }
+        if (Tip.SEED_KEY.equals(s.key) && Tip.OLD_SEED_NAME.equals(s.name) && ("seed".equals(s.operator)
+                || "reconcile".equals(s.operator))) {
+            // a seed written before it was named "22G bent taper" (§22.1), never renamed by the operator
+            TipSetup n = s.copy();
+            n.name = freeName(Tip.SEED_NAME, s.key);
+            n.why = "the seed's name at the update";
+            n.operator = "reconcile";
+            s = db.insertTipSetupVersion(n);
+        }
+        TipSpec spec = s.toSpec();
+        if (!new com.google.gson.Gson().toJson(spec).equals(new com.google.gson.Gson().toJson(c.tip))) {
+            c.tip = spec;
+            changed = true;
+        }
+        List<TipSetups.Mount> last = db.tipMounts(1);
+        boolean first = last.isEmpty();
+        double[] ho = headOffsetNow();
+        if (first && c.needleLanding == null && (c.needleChangedAtMs == null || c.isNeedleTouchedOff())) {
+            DispenseConfig.NeedleLanding l = new DispenseConfig.NeedleLanding();
+            l.setAtMs = c.needleZOffsetSetAtMs != null ? c.needleZOffsetSetAtMs : System.currentTimeMillis();
+            l.headOffsetXMm = ho == null ? null : ho[0];
+            l.headOffsetYMm = ho == null ? null : ho[1];
+            l.note = "kept from before the update (boards ran with it)";
+            c.needleLanding = l;
+            if (c.needleXyTrim.dxMm != 0 || c.needleXyTrim.dyMm != 0) {
+                c.needleXyTrim.headOffsetXMm = l.headOffsetXMm;
+                c.needleXyTrim.headOffsetYMm = l.headOffsetYMm;
+            }
+            changed = true;
+        }
+        if (changed) {
+            List<String> problems = c.validate();
+            if (!problems.isEmpty()) {
+                Logger.warn("dispense: the tip setup reconcile left the settings invalid ({}): kept as they were",
+                        problems);
+            }
+            else {
+                c.save(configDir);
+                cfg = c;
+            }
+        }
+        if (first || !last.get(0).setupKey.equals(cfg.tip.key)) {
+            TipSetups.Mount m = new TipSetups.Mount();
+            m.kind = first ? TipSetups.Mount.SEED : TipSetups.Mount.RECONCILE;
+            m.setupKey = cfg.tip.key;
+            m.setupVersion = cfg.tip.setupVersion;
+            m.fromSetupKey = first ? null : last.get(0).setupKey;
+            m.needleChangedAtMs = cfg.needleChangedAtMs;
+            m.headOffsetXMm = ho == null ? null : ho[0];
+            m.headOffsetYMm = ho == null ? null : ho[1];
+            m.landingJson = new com.google.gson.Gson().toJson(cfg.needleLanding);
+            m.why = first ? "in use before the update" : "the settings file names the " + cfg.tip.name
+                    + ", the last mount another tip";
+            m.operator = "reconcile";
+            db.insertTipMount(m);
+        }
+    }
+
+    /** The settings file as it is on disk, or "" when there is none. */
+    private String readConfigFile() {
+        try {
+            File f = DispenseConfig.fileFor(configDir);
+            return f.isFile() ? new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                    java.nio.charset.StandardCharsets.UTF_8) : "";
+        }
+        catch (IOException e) {
+            return "";
+        }
+    }
+
+    /** A setup name not taken by another live setup: {@code name} (at most 40 characters), else "{name} ({key})". */
+    private String freeName(String name, String key) throws SQLException {
+        String n = name == null || name.trim().isEmpty() ? key : name.trim();
+        if (n.length() > TipSetup.MAX_NAME) {
+            n = n.substring(0, TipSetup.MAX_NAME - 1).trim() + "…";
+        }
+        for (TipSetup o : db.currentTipSetups(false)) {
+            if (o.name.equalsIgnoreCase(n)) {
+                return (n + " (" + key + ")").length() <= TipSetup.MAX_NAME ? n + " (" + key + ")" : key;
+            }
+        }
+        return n;
+    }
+
+    private static boolean sameNumber(Double a, double b) {
+        return a != null && Math.abs(a - b) < 1e-9;
+    }
+
     // ------------------------------------------------------------------------------------------
     // State and configuration
     // ------------------------------------------------------------------------------------------
@@ -346,15 +578,23 @@ public final class DispenseService {
         return cfg.copy();
     }
 
+    /** The mounted tip setup's key, without copying the configuration (the SIM reads it per line). */
+    public String mountedKey() {
+        return cfg.tip.key;
+    }
+
     /**
      * Validates, saves to dispense-config.json and applies a new configuration. A changed start
-     * angle or needle XY trim is stamped with the time it was set (calibration values).
+     * angle or needle XY trim is stamped with the time it was set (calibration values). A
+     * configuration made from a copy taken before a mount or a needle change is refused
+     * ({@link #refuseStaleTip}).
      */
     public synchronized void updateConfig(DispenseConfig newCfg) throws IOException {
         List<String> problems = newCfg.validate();
         if (!problems.isEmpty()) {
             throw new IllegalArgumentException("invalid dispense config: " + problems);
         }
+        refuseStaleTip(newCfg);
         DispenseConfig c = newCfg.copy();
         long now = System.currentTimeMillis();
         if (cfg != null && c.profile.startAngleDeg != cfg.profile.startAngleDeg) {
@@ -362,11 +602,60 @@ public final class DispenseService {
         }
         if (cfg != null && (c.needleXyTrim.dxMm != cfg.needleXyTrim.dxMm || c.needleXyTrim.dyMm != cfg.needleXyTrim.dyMm)) {
             c.needleXyTrim.setAtMs = now;
+            // §22.3: the trim belongs to the N2 head offset it was set under
+            double[] ho = headOffsetNow();
+            c.needleXyTrim.headOffsetXMm = ho == null ? null : ho[0];
+            c.needleXyTrim.headOffsetYMm = ho == null ? null : ho[1];
         }
+        writeConfig(c);
+        db.event(null, "INFO", "CONFIG", "configuration updated");
+    }
+
+    /**
+     * Tip setups (§22.1, §22.3): only a mount, its undo and a needle change write the mounted tip and the needle
+     * token. A configuration made from a copy taken before one of them (a settings form, or a request that copied the
+     * configuration outside this lock) would put back the tip that came off, or make the frame of the needle before
+     * count again: it is refused (409 tip-changed or needle-changed). A tip key changed with the same token is no
+     * stale copy but a tip changed by hand: 400, a tip is mounted.
+     */
+    private void refuseStaleTip(DispenseConfig next) {
+        DispenseConfig live = cfg;
+        if (live == null) {
+            return;
+        }
+        Long token = live.needleChangedAtMs;
+        boolean older = token != null && (next.needleChangedAtMs == null || next.needleChangedAtMs < token);
+        if (!live.tip.key.equals(next.tip.key)) {
+            if (older) {
+                throw tipChanged();
+            }
+            throw new IllegalArgumentException("The tip is the mounted tip setup: change it in Setup › Dispenser & tip.");
+        }
+        if (older) {
+            throw new EngineRefusal(409, "needle-changed", "The needle was changed at " + ZCheck.clock(token)
+                    + " while this was open: reload.").with("needleChangedAtMs", token);
+        }
+    }
+
+    /** Saves and applies a configuration as it is (no checks, no stamps): the caller validated it. */
+    private void writeConfig(DispenseConfig c) throws IOException {
         c.save(configDir);
         cfg = c;
         resolveNozzle();
-        db.event(null, "INFO", "CONFIG", "configuration updated");
+        tipCache = null;
+    }
+
+    /**
+     * Applies an edit to the live configuration under this service's lock (tip setups design §22.1): the edit gets a
+     * copy of the live configuration, and its result is validated and written as {@link #updateConfig} does, so
+     * nothing a mount, a needle change or a run's reservation wrote meanwhile is put back. Returns the new config.
+     */
+    public synchronized DispenseConfig updateConfigAtomically(ConfigEdit edit) throws Exception {
+        DispenseConfig next = edit.apply(cfg.copy());
+        if (next != null) {
+            updateConfig(next);
+        }
+        return cfg.copy();
     }
 
     /**
@@ -417,17 +706,629 @@ public final class DispenseService {
         updateConfig(c);
     }
 
-    /** I4: a needle change invalidates the needle Z offset until the next touch-off. */
-    public synchronized void markNeedleChanged() throws IOException {
-        DispenseConfig c = cfg.copy();
-        c.needleChangedAtMs = System.currentTimeMillis();
-        updateConfig(c);
-        db.event(null, "INFO", "I4", "needle changed; touch-off required");
+    /**
+     * Records a needle change (tip setups design §22.3); never refuses. Stops a running engine task first, sets the
+     * needle token {@code needleChangedAtMs} = max(now, previous + 1), writes a skip row for every coupon still
+     * waiting for its readings, a {@code tip_mounts} row {@code needle} and a TIP event: frame, offset and landing
+     * are to do.
+     */
+    public synchronized NeedleChange recordNeedleChange(String why, String operator) throws IOException, SQLException {
+        NeedleChange nc = new NeedleChange();
+        DispenseConfig before = cfg;
+        RunResult running = activeRun;
+        if (busy.get()) {
+            abort("the needle was reported changed");
+            nc.voided.task = running == null ? "an engine task" : running.kind;
+        }
+        long now = System.currentTimeMillis();
+        long token = Math.max(now, before.needleChangedAtMs == null ? 0 : before.needleChangedAtMs + 1);
+        // later than everything measured for a needle so far (the mounted setup's and the parked ones'), also when the
+        // clock was set back since: a frame stamped after the token would still count for the needle put on now
+        token = Math.max(token, measuredStamp(before.needleAnchor, before.needleZOffsetSetAtMs, before.needleLanding) + 1);
+        for (DispenseConfig.ParkedTip p : before.parkedTips.values()) {
+            token = Math.max(token, measuredStamp(p.needleAnchor, p.needleZOffsetSetAtMs, p.needleLanding) + 1);
+        }
+        DispenseConfig c = before.copy();
+        c.needleChangedAtMs = token;
+        writeConfig(c); // a fact: never refused, so never held back by a check of other settings
+        lastChange = new Long[] {token, before.needleChangedAtMs};
+        String at = ZCheck.clock(token);
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerConnectedAtMs(), isSimulatorConfirmed());
+        List<DoseRecord> pending = new ArrayList<>();
+        try {
+            pending = db.pendingCoupons(now - (long) (before.padCalibration.doseRecordMaxAgeH * 3600e3));
+        }
+        catch (SQLException e) {
+            // their dots no longer count either way (dispensed before the change); only the skip rows are missing
+            Logger.warn(e, "dispense: the coupons waiting for readings were not read at the needle change");
+        }
+        for (DoseRecord coupon : pending) {
+            if (!weighable(coupon, now, before, ep)) {
+                continue;
+            }
+            try {
+                skipCoupon(coupon, "the needle was changed at " + at, operator, coupon.jobId);
+                if (coupon.couponPlace != null && !nc.voided.coupons.contains(coupon.couponPlace)) {
+                    nc.voided.coupons.add(coupon.couponPlace);
+                }
+                if (coupon.jobId != null) {
+                    nc.voided.job = coupon.jobId;
+                }
+            }
+            catch (SQLException | RuntimeException e) {
+                Logger.warn(e, "dispense: the skip row of coupon record {} was not written", coupon.id);
+            }
+        }
+        nc.atMs = token;
+        nc.setupKey = c.tip.key;
+        nc.setupName = c.tip.name;
+        nc.why = why;
+        nc.operator = operator;
+        TipSetups.Mount m = mountRow(TipSetups.Mount.NEEDLE, c, null, why == null ? "I changed the needle" : why,
+                operator);
+        m.voidedJson = new Gson().toJson(nc.voided);
+        try {
+            db.insertTipMount(m);
+        }
+        catch (SQLException | RuntimeException x) {
+            // the change is recorded in the settings, which are the truth; the row is only its history
+            Logger.warn(x, "dispense: the needle change's row was not written");
+        }
+        db.event(null, "INFO", TIP_EVENT, "needle changed (" + c.tip.name + "): needle Z frame, offset and landing to do"
+                + (nc.voided.coupons.isEmpty() ? "" : "; the dots on " + String.join(" and ", nc.voided.coupons)
+                        + " no longer count")
+                + (nc.voided.task == null ? "" : "; the " + nc.voided.task + " was stopped"));
+        nc.text = "The needle change is recorded at " + at + ": record the " + c.tip.name + "'s needle Z frame and check "
+                + "where it lands." + (nc.voided.coupons.isEmpty() ? "" : " Wipe " + String.join(" and ",
+                        nc.voided.coupons) + " before " + (nc.voided.coupons.size() == 1 ? "its" : "their")
+                        + " next use: the dots on " + (nc.voided.coupons.size() == 1 ? "it" : "them")
+                        + " no longer count.");
+        undo = null;
+        return nc;
     }
 
-    /** Sets the needle Z offset (manual entry or touch-off result) and records it. */
-    public synchronized void setNeedleZOffset(double offsetMm, String method, String details)
+    /** When a needle frame, offset or landing was last measured (epoch ms), or {@code Long.MIN_VALUE + 1} for none. */
+    private static long measuredStamp(DispenseConfig.NeedleAnchor anchor, Long offsetSetAtMs,
+            DispenseConfig.NeedleLanding landing) {
+        long n = Long.MIN_VALUE + 1;
+        for (Long t : new Long[] {anchor == null ? null : anchor.setAtMs, offsetSetAtMs,
+            landing == null ? null : landing.setAtMs}) {
+            if (t != null) {
+                n = Math.max(n, t);
+            }
+        }
+        return n;
+    }
+
+    /** A row of {@code tip_mounts} of the mounted setup now (its version, token, head offset, profile and landing). */
+    private TipSetups.Mount mountRow(String kind, DispenseConfig c, String from, String why, String operator) {
+        TipSetups.Mount m = new TipSetups.Mount();
+        m.kind = kind;
+        m.setupKey = c.tip.key;
+        m.setupVersion = c.tip.setupVersion;
+        m.fromSetupKey = from;
+        m.needleChangedAtMs = c.needleChangedAtMs;
+        double[] ho = headOffsetNow();
+        m.headOffsetXMm = ho == null ? null : ho[0];
+        m.headOffsetYMm = ho == null ? null : ho[1];
+        m.profileJson = new Gson().toJson(c.profile);
+        m.landingJson = c.needleLanding == null ? null : new Gson().toJson(c.needleLanding);
+        m.why = why;
+        m.simulated = isSimulatorConfirmed();
+        m.operator = operator;
+        return m;
+    }
+
+    /** "The needle change is recorded: ...": the end of every refusal of a switch (§22.3). */
+    private static String recordedWords(String name) {
+        return " The needle change is recorded: nothing dispenses until the " + name + " is mounted and its needle Z "
+                + "frame recorded.";
+    }
+
+    /**
+     * Mounts another tip setup (tip setups design §22.3, the choice after {@link #recordNeedleChange}): refused (409
+     * {@link EngineRefusal} "refused") while a task runs, the pressure hold is on, or the setup is retired or
+     * incomplete; else parks the mounted setup, brings in the incoming one (live start angle kept), sets
+     * {@code cfg.tip} and writes the config, then a {@code tip_mounts} row {@code mount} and a TIP event.
+     */
+    public synchronized MountResult switchTip(String key, String why, String operator) throws IOException, SQLException {
+        TipSetup in = db.currentTipSetup(key);
+        if (in == null) {
+            throw new EngineRefusal(404, "not-found", "There is no tip " + key + ".");
+        }
+        String fromKey = cfg.tip.key;
+        String fromName = cfg.tip.name;
+        if (!busy.compareAndSet(false, true)) {
+            throw new EngineRefusal(409, "refused", "An engine task is running: a needle cannot come off while the head "
+                    + "moves (press STOP first)." + recordedWords(in.name));
+        }
+        try {
+            if (pressureHoldActive.getAsBoolean()) {
+                throw new EngineRefusal(409, "refused", "Switch the pressure off first: a needle comes off with the "
+                        + "pressure off." + recordedWords(in.name));
+            }
+            if (in.retired) {
+                throw new EngineRefusal(409, "refused", "The " + in.name + " is retired: bring it back first (Change tip "
+                        + "› Show retired tips)." + recordedWords(in.name));
+            }
+            if (in.missing() != null) {
+                throw new EngineRefusal(409, "refused", "The " + in.name + " has no " + in.missing() + " yet: fill it in "
+                        + "first (Edit…)." + recordedWords(in.name));
+            }
+            hook("switch");
+            long now = System.currentTimeMillis();
+            MountResult r = new MountResult();
+            r.mounted = key;
+            r.mountedName = in.name;
+            r.from = fromKey;
+            r.fromName = fromName;
+            r.atMs = now;
+            if (key.equals(fromKey)) {
+                // a "mount" of the mounted setup is the needle change alone (§22.3)
+                r.needleChangedAtMs = cfg.needleChangedAtMs;
+                r.profile = cfg.profile.copy();
+                r.text = in.name + " stays mounted: record its needle Z frame (Setup › Needle Z frame).";
+                return r;
+            }
+            // the switch stands on the needle change recorded just before it (§22.3): without it, the incoming setup's
+            // parked frame, offset or landing could be newer than the token and count for the needle put on now
+            Long token = cfg.needleChangedAtMs;
+            DispenseConfig.ParkedTip incoming = cfg.parkedTips.get(key);
+            if (token == null || incoming != null && measuredStamp(incoming.needleAnchor, incoming.needleZOffsetSetAtMs,
+                    incoming.needleLanding) >= token) {
+                throw new IllegalStateException("A mount needs the needle change recorded first (recordNeedleChange): "
+                        + "nothing was changed.");
+            }
+            DispenseConfig before = cfg.copy();
+            Long[] change = lastChange;
+            if (change != null && change[0].equals(before.needleChangedAtMs)) {
+                // the mount's own needle change came just before: an undo puts back the token from before it
+                before.needleChangedAtMs = change[1];
+            }
+            DispenseConfig c = cfg.copy();
+            DispenseConfig.ParkedTip park = new DispenseConfig.ParkedTip();
+            DispenseConfig.ParkedTip was = c.parkedTips.get(fromKey);
+            park.profile = c.profile.copy();
+            park.needleAnchor = c.needleAnchor;
+            park.needleZOffsetMm = c.needleZOffsetMm;
+            park.needleZOffsetSetAtMs = c.needleZOffsetSetAtMs;
+            park.needleZOffsetHomeAtMs = c.needleZOffsetHomeAtMs;
+            park.needleXyTrim = c.needleXyTrim;
+            park.needleLanding = c.needleLanding;
+            park.parkedAtMs = now;
+            park.profileFrom = was == null ? null : was.profileFrom;
+            DispenseConfig.ParkedTip e = c.parkedTips.remove(key);
+            if (e == null) {
+                e = TipSetups.newEntry(c, c.profile, fromKey, in.name); // a setup that never got its entry
+            }
+            c.parkedTips.put(fromKey, park);
+            DispenseProfile prof = e.profile == null ? new DispenseProfile() : e.profile.copy();
+            // the start angle belongs to the controller's power-up and the screw, not to the needle (§22.3)
+            prof.startAngleDeg = c.profile.startAngleDeg;
+            prof.startAngleSetAtMs = c.profile.startAngleSetAtMs;
+            List<String> problems = prof.validate(c);
+            if (!problems.isEmpty()) {
+                DispenseProfile reset = new DispenseProfile();
+                reset.name = in.name + " (reset: " + problems.get(0) + ")";
+                reset.startAngleDeg = c.profile.startAngleDeg;
+                reset.startAngleSetAtMs = c.profile.startAngleSetAtMs;
+                r.warnings.add("The " + in.name + "'s dispense profile no longer validates (" + problems.get(0)
+                        + "): it was reset to the default recipe.");
+                prof = reset;
+            }
+            c.profile = prof;
+            c.needleAnchor = e.needleAnchor;
+            c.needleZOffsetMm = e.needleZOffsetMm;
+            c.needleZOffsetSetAtMs = e.needleZOffsetSetAtMs;
+            c.needleZOffsetHomeAtMs = e.needleZOffsetHomeAtMs;
+            c.needleXyTrim = e.needleXyTrim != null ? e.needleXyTrim : new DispenseConfig.NeedleXyTrim();
+            c.needleLanding = e.needleLanding;
+            c.tip = in.toSpec();
+            List<String> invalid = c.validate();
+            if (!invalid.isEmpty()) {
+                throw new IllegalArgumentException("invalid dispense config after the mount: " + invalid);
+            }
+            writeConfig(c); // the config is the truth: written first, a row that fails is repaired at the next start
+            r.needleChangedAtMs = c.needleChangedAtMs;
+            r.profile = c.profile.copy();
+            r.stale.addAll(java.util.Arrays.asList("needle Z frame", "needle Z offset", "where it lands", "plans",
+                    "regulator reading", "prime"));
+            r.headOffsetNow = headOffsetNow();
+            DispenseConfig.NeedleLanding l = c.needleLanding;
+            if (l != null && l.headOffsetXMm != null && l.headOffsetYMm != null) {
+                r.headOffsetLandingWas = new double[] {l.headOffsetXMm, l.headOffsetYMm};
+            }
+            UndoSnapshot u = new UndoSnapshot();
+            u.before = before;
+            u.after = c.copy();
+            u.fromKey = fromKey;
+            u.toKey = key;
+            u.atMs = now;
+            u.tasksAtMount = tasksStarted.get();
+            undo = u;
+            r.undoUntilMs = now + UNDO_MS;
+            r.text = in.name + " mounted at " + ZCheck.clock(now) + ". Next: record its needle Z frame (Setup › Needle Z "
+                    + "frame)." + headOffsetWords(in.name, r.headOffsetNow, r.headOffsetLandingWas);
+            TipSetups.Mount m = mountRow(TipSetups.Mount.MOUNT, c, fromKey, why == null ? "mounted" : why, operator);
+            try {
+                db.insertTipMount(m);
+            }
+            catch (SQLException | RuntimeException x) {
+                Logger.warn(x, "dispense: the mount row was not written (the next start repairs it)");
+            }
+            db.event(null, "INFO", TIP_EVENT, "mounted the " + in.name + " (was the " + fromName + ")"
+                    + (r.warnings.isEmpty() ? "" : "; " + String.join(" ", r.warnings)));
+            return r;
+        }
+        finally {
+            busy.set(false);
+        }
+    }
+
+    /** The mount text's head offset sentence (§22.3), or "" when N2's head offset is the one the landing had. */
+    private static String headOffsetWords(String name, double[] now, double[] was) {
+        if (now == null || was == null || Math.abs(now[0] - was[0]) <= 0.001 && Math.abs(now[1] - was[1]) <= 0.001) {
+            return "";
+        }
+        return String.format(Locale.ROOT, " N2's head offset is (%.3f, %.3f) now; the %s's landing was checked with "
+                + "(%.3f, %.3f): set it back in OpenPnP, or check where it lands.", now[0], now[1], name, was[0], was[1]);
+    }
+
+    /**
+     * Restores the previous mount exactly (setup, profile, frame, offset, trim, landing and the needle token) within
+     * 2 min of a mount of another setup when no task ran and nothing was measured since; a {@code tip_mounts} row
+     * {@code undo}. Otherwise 409 "Too late to undo: ...".
+     */
+    public synchronized MountResult undoMount(String operator) throws IOException, SQLException {
+        UndoSnapshot u = undo;
+        if (u == null) {
+            throw new EngineRefusal(409, "too-late", "Nothing to undo: no other tip was mounted in the last 2 min.");
+        }
+        String old = u.before.tip.name;
+        String late = null;
+        if (System.currentTimeMillis() > u.atMs + UNDO_MS) {
+            late = "2 min have passed";
+        }
+        else if (tasksStarted.get() != u.tasksAtMount) {
+            late = "something ran";
+        }
+        else if (!cfg.tip.key.equals(u.toKey) || !measuredSame(cfg, u.after)) {
+            late = "the frame was recorded";
+        }
+        if (late != null) {
+            throw new EngineRefusal(409, "too-late", "Too late to undo: " + late + ". Mount the " + old
+                    + " again instead.");
+        }
+        if (!busy.compareAndSet(false, true)) {
+            throw new EngineRefusal(409, "too-late", "Too late to undo: something ran. Mount the " + old
+                    + " again instead.");
+        }
+        try {
+            DispenseConfig c = cfg.copy();
+            DispenseConfig b = u.before;
+            c.tip = b.tip;
+            c.profile = b.profile.copy();
+            c.profile.startAngleDeg = cfg.profile.startAngleDeg;
+            c.profile.startAngleSetAtMs = cfg.profile.startAngleSetAtMs;
+            c.needleAnchor = b.needleAnchor;
+            c.needleZOffsetMm = b.needleZOffsetMm;
+            c.needleZOffsetSetAtMs = b.needleZOffsetSetAtMs;
+            c.needleZOffsetHomeAtMs = b.needleZOffsetHomeAtMs;
+            c.needleXyTrim = b.needleXyTrim;
+            c.needleLanding = b.needleLanding;
+            c.needleChangedAtMs = b.needleChangedAtMs;
+            c.parkedTips = new java.util.LinkedHashMap<>(b.copy().parkedTips);
+            for (Map.Entry<String, DispenseConfig.ParkedTip> e : cfg.parkedTips.entrySet()) {
+                // a setup added since the mount keeps its entry: the undo puts back the mount, nothing else
+                if (!e.getKey().equals(b.tip.key)) {
+                    c.parkedTips.putIfAbsent(e.getKey(), e.getValue());
+                }
+            }
+            writeConfig(c);
+            undo = null;
+            MountResult r = new MountResult();
+            r.mounted = c.tip.key;
+            r.mountedName = c.tip.name;
+            r.from = u.toKey;
+            r.fromName = u.after.tip.name;
+            r.atMs = System.currentTimeMillis();
+            r.needleChangedAtMs = c.needleChangedAtMs;
+            r.profile = c.profile.copy();
+            r.headOffsetNow = headOffsetNow();
+            r.text = "The " + c.tip.name + " never left the dispenser: it is mounted again with its needle Z frame, "
+                    + "offset and landing.";
+            db.insertTipMount(mountRow(TipSetups.Mount.UNDO, c, u.toKey, "undo: the " + c.tip.name
+                    + " never left the dispenser", operator));
+            db.event(null, "INFO", TIP_EVENT, "undid the mount of the " + u.after.tip.name + ": the " + c.tip.name
+                    + " never left the dispenser");
+            return r;
+        }
+        finally {
+            busy.set(false);
+        }
+    }
+
+    /** The needle frame, offset, trim and landing are the ones the mount left (nothing was measured since). */
+    private static boolean measuredSame(DispenseConfig now, DispenseConfig after) {
+        Gson g = new Gson();
+        return g.toJson(now.needleAnchor).equals(g.toJson(after.needleAnchor))
+                && now.needleZOffsetMm == after.needleZOffsetMm
+                && java.util.Objects.equals(now.needleZOffsetSetAtMs, after.needleZOffsetSetAtMs)
+                && g.toJson(now.needleXyTrim).equals(g.toJson(after.needleXyTrim))
+                && g.toJson(now.needleLanding).equals(g.toJson(after.needleLanding));
+    }
+
+    /** Until when the last mount of another setup can be undone (epoch ms), or null. */
+    public Long undoUntilMs() {
+        UndoSnapshot u = undo;
+        if (u == null || System.currentTimeMillis() > u.atMs + UNDO_MS || tasksStarted.get() != u.tasksAtMount
+                || !cfg.tip.key.equals(u.toKey) || !measuredSame(cfg, u.after)) {
+            return null;
+        }
+        return u.atMs + UNDO_MS;
+    }
+
+    /** The needle token check (§22.3): values taken under another needle are refused (409 needle-changed). */
+    private void requireToken(Long needleChangedAtMs) {
+        Long now = cfg.needleChangedAtMs;
+        if (!java.util.Objects.equals(needleChangedAtMs, now)) {
+            throw new EngineRefusal(409, "needle-changed", "The needle was changed at " + (now == null ? "?"
+                    : ZCheck.clock(now)) + " after these values were taken: take them again.")
+                            .with("needleChangedAtMs", now);
+        }
+    }
+
+    /**
+     * Sets the hand trim on top of the landing (±1 mm, §22.3) with N2's head offset now; 409 {@code needle-changed}
+     * when the token is not the needle's, refused while the engine is busy.
+     */
+    public synchronized DispenseConfig.NeedleXyTrim setXyTrim(double dx, double dy, String note,
+            Long needleChangedAtMs) throws IOException {
+        requireToken(needleChangedAtMs);
+        if (busy.get()) {
+            throw new EngineRefusal(409, "busy", "The trim cannot change while a task runs: wait for it to end.");
+        }
+        if (!(Math.abs(dx) <= 1 && Math.abs(dy) <= 1)) {
+            throw new IllegalArgumentException("The trim must be within ±1 mm on each axis: where the needle lands "
+                    + "is set by Check where it lands.");
+        }
+        DispenseConfig c = cfg.copy();
+        c.needleXyTrim = trim(dx, dy, note);
+        List<String> problems = c.validate();
+        if (!problems.isEmpty()) {
+            throw new IllegalArgumentException("invalid dispense config: " + problems);
+        }
+        writeConfig(c);
+        db.event(null, "INFO", TIP_EVENT, String.format(Locale.ROOT, "needle XY trim of the %s set to %+.3f, %+.3f mm%s",
+                c.tip.name, dx, dy, note == null ? "" : ": " + note));
+        return c.needleXyTrim;
+    }
+
+    /** A trim stamped now with N2's head offset now. */
+    private DispenseConfig.NeedleXyTrim trim(double dx, double dy, String note) {
+        DispenseConfig.NeedleXyTrim t = new DispenseConfig.NeedleXyTrim();
+        t.dxMm = dx;
+        t.dyMm = dy;
+        t.setAtMs = System.currentTimeMillis();
+        t.note = note;
+        double[] ho = headOffsetNow();
+        t.headOffsetXMm = ho == null ? null : ho[0];
+        t.headOffsetYMm = ho == null ? null : ho[1];
+        return t;
+    }
+
+    /** "toward −Y": a bend direction in words. */
+    static String toward(String t) {
+        return t == null ? null : "toward " + (t.startsWith("-") ? "−" : "+") + t.substring(1).toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * Saves a landing check's landing as the mounted setup's (§22.3) with its job, photo and N2's head offset, and
+     * resets the trim. Not accepted and more than 1.0 mm from the setup's own landing: nothing is saved, the result's
+     * question is set and null is returned. 409 {@code needle-changed} for another needle's result.
+     */
+    public synchronized DispenseConfig.NeedleLanding setLanding(LandingResult r, boolean accepted,
+            Long needleChangedAtMs) throws IOException, SQLException {
+        requireToken(needleChangedAtMs);
+        if (r.needleSinceMs != null && !r.needleSinceMs.equals(cfg.needleChangedAtMs)) {
+            requireToken(r.needleSinceMs);
+        }
+        if (r.setupKey != null && !r.setupKey.equals(cfg.tip.key)) {
+            throw tipChanged();
+        }
+        if (r.n < org.openpnp.instancelabs.padprofile.LandingFit.MIN_MATCHES) {
+            // a landing is measured by a row that fitted (§22.3): no locator dot or too few dots is nothing to save
+            throw new EngineRefusal(409, "refused", "The landing check found no landing to save (" + r.n + " of "
+                    + org.openpnp.instancelabs.padprofile.LandingFit.ROW_MM.length + " dots near their spots): check "
+                    + "where it lands again.");
+        }
+        if (!(Math.abs(r.dxMm) <= DispenseConfig.MAX_LANDING_MM && Math.abs(r.dyMm) <= DispenseConfig.MAX_LANDING_MM)) {
+            throw new IllegalArgumentException("A landing must be within ±" + (int) DispenseConfig.MAX_LANDING_MM
+                    + " mm on each axis.");
+        }
+        DispenseConfig c = cfg.copy();
+        String name = c.tip.name;
+        DispenseConfig.NeedleLanding own = c.needleLanding;
+        double moved = own == null ? 0 : Math.hypot(r.dxMm - own.dxMm, r.dyMm - own.dyMm);
+        if (own != null && moved > org.openpnp.instancelabs.padprofile.LandingFit.MOVED_MM + 1e-9 && !accepted) {
+            r.saved = false;
+            String dir = TipSetup.FORM_BENT.equals(c.tip.form) && c.tip.bendToward != null
+                    ? ", its bend " + toward(c.tip.bendToward) + " as in its picture" : "";
+            r.question = String.format(Locale.ROOT, "The %s lands %.1f mm from where it landed on %s: is the %s on the "
+                    + "dispenser%s?", name, moved, own.setAtMs == null ? "the last check" : day(own.setAtMs), name, dir);
+            r.text = r.question;
+            db.event(null, "WARN", TIP_EVENT, "landing check of the " + name + " not saved: " + r.question);
+            return null;
+        }
+        // not before the needle change it measures (as the frame and the offset: a clock set back meanwhile)
+        long now = Math.max(System.currentTimeMillis(), c.needleChangedAtMs == null ? 0 : c.needleChangedAtMs);
+        DispenseConfig.NeedleLanding l = new DispenseConfig.NeedleLanding();
+        l.dxMm = r.dxMm;
+        l.dyMm = r.dyMm;
+        l.setAtMs = now;
+        l.jobId = r.jobId;
+        l.photoId = r.photoId;
+        double[] ho = r.headOffset != null ? r.headOffset : headOffsetNow();
+        l.headOffsetXMm = ho == null ? null : ho[0];
+        l.headOffsetYMm = ho == null ? null : ho[1];
+        l.note = accepted && own != null && moved > org.openpnp.instancelabs.padprofile.LandingFit.MOVED_MM
+                ? "saved by the operator: the " + name + " is on" : "set by a landing check";
+        c.needleLanding = l;
+        c.needleXyTrim = trim(0, 0, "reset by the landing check");
+        List<String> problems = c.validate();
+        if (!problems.isEmpty()) {
+            throw new IllegalArgumentException("invalid dispense config: " + problems);
+        }
+        writeConfig(c);
+        r.saved = true;
+        r.question = null;
+        r.text = String.format(Locale.ROOT, "The %s lands %s, %s mm from the N2 head offset (%d dots, scatter %.2f mm). "
+                + "Saved: every dot is corrected by it.", name, signed(r.dxMm), signed(r.dyMm), r.n,
+                r.sdMm == null ? 0 : r.sdMm);
+        db.event(null, "INFO", TIP_EVENT, "landing of the " + name + " saved: " + new Gson().toJson(r));
+        return l;
+    }
+
+    /** "+2.32", "−0.41": a signed landing for the texts. */
+    static String signed(double v) {
+        String n = String.format(Locale.ROOT, "%.2f", Math.abs(v));
+        return (v < 0 && !"0.00".equals(n) ? "−" : "+") + n;
+    }
+
+    /** "2026-10-29": the day of a time. */
+    static String day(long ms) {
+        return new java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(new java.util.Date(ms));
+    }
+
+    /** 409 tip-changed (§22.2): a write for a setup that is no longer mounted. */
+    private EngineRefusal tipChanged() {
+        String at = "";
+        try {
+            for (TipSetups.Mount m : db.tipMounts(20)) {
+                if (m.setupKey.equals(cfg.tip.key) && !TipSetups.Mount.NEEDLE.equals(m.kind)) {
+                    at = " at " + ZCheck.clock(m.createdAtMs);
+                    break;
+                }
+            }
+        }
+        catch (SQLException e) {
+            at = "";
+        }
+        return new EngineRefusal(409, "tip-changed", "The tip changed while this was open (the " + cfg.tip.name
+                + " was mounted" + at + "): reload.").with("mounted", cfg.tip.key);
+    }
+
+    /**
+     * Keeps where the mounted setup lands across a needle change (§22.3, straight setups only, a landing of its own
+     * under N2's head offset now): stamps it set now; otherwise 409 with {@link #keepLandingProblem()}.
+     */
+    public synchronized DispenseConfig.NeedleLanding keepLanding(Long needleChangedAtMs)
             throws IOException, SQLException {
+        requireToken(needleChangedAtMs);
+        String why = keepLandingProblem();
+        if (why != null) {
+            throw new EngineRefusal(409, "refused", why);
+        }
+        DispenseConfig c = cfg.copy();
+        c.needleLanding.setAtMs = Math.max(System.currentTimeMillis(), c.needleChangedAtMs == null ? 0
+                : c.needleChangedAtMs);
+        c.needleLanding.note = c.needleChangedAtMs == null ? "kept" : "kept after the needle change at "
+                + ZCheck.clock(c.needleChangedAtMs);
+        writeConfig(c);
+        db.event(null, "INFO", TIP_EVENT, "kept where the " + c.tip.name + " lands: " + new Gson().toJson(c.needleLanding));
+        return c.needleLanding;
+    }
+
+    /**
+     * Why "Keep where it lands" is refused now (the §22.3 text: a bent tip, no landing of its own, N2's head offset
+     * changed), or null when it is allowed.
+     */
+    public String keepLandingProblem() {
+        DispenseConfig c = cfg;
+        String name = c.tip.name;
+        if (!TipSetup.FORM_STRAIGHT.equals(c.tip.form)) {
+            return "A bent tip lands where its bend points: check where it lands.";
+        }
+        if (c.needleLanding == null) {
+            return "The " + name + " has no landing of its own yet: check where it lands.";
+        }
+        if (!sameHeadOffset(c.needleLanding.headOffsetXMm, c.needleLanding.headOffsetYMm)) {
+            return "N2's head offset changed since the " + name + "'s landing was checked: check where it lands.";
+        }
+        return null;
+    }
+
+    /** True when the recorded head offset is N2's now within 0.001 mm (unknown now: true). */
+    private boolean sameHeadOffset(Double x, Double y) {
+        double[] now = headOffsetNow();
+        if (now == null) {
+            return true;
+        }
+        return x != null && y != null && Math.abs(x - now[0]) <= 0.001 && Math.abs(y - now[1]) <= 0.001;
+    }
+
+    /**
+     * Where the needle lands is checked (§22.3): the landing set since the needle change (or no change recorded)
+     * under N2's head offset now (within 0.001 mm), and a trim that is not zero set under it too.
+     */
+    public boolean isNeedleXyChecked() {
+        return needleXyProblem(cfg) == null;
+    }
+
+    /** Why where the needle lands is not checked (the readiness and I4 text), or null when it is. */
+    public String needleXyProblem() {
+        return needleXyProblem(cfg);
+    }
+
+    private String needleXyProblem(DispenseConfig c) {
+        String name = c.tip.name;
+        DispenseConfig.NeedleLanding l = c.needleLanding;
+        String on = "the " + name + " was put on" + (c.needleChangedAtMs == null ? "" : " at "
+                + ZCheck.clock(c.needleChangedAtMs));
+        if (l == null || l.setAtMs == null || c.needleChangedAtMs != null && l.setAtMs < c.needleChangedAtMs) {
+            return on + " and where it lands has not been checked: check where it lands (Setup › Dispenser & tip).";
+        }
+        if (!sameHeadOffset(l.headOffsetXMm, l.headOffsetYMm)) {
+            return "N2's head offset changed in OpenPnP since the " + name + "'s landing was checked: set it back, or "
+                    + "check where it lands";
+        }
+        DispenseConfig.NeedleXyTrim t = c.needleXyTrim;
+        if ((t.dxMm != 0 || t.dyMm != 0) && !sameHeadOffset(t.headOffsetXMm, t.headOffsetYMm)) {
+            return "N2's head offset changed in OpenPnP since the " + name + "'s XY trim was set: set it back, or "
+                    + "check where it lands";
+        }
+        return null;
+    }
+
+    /** N2's head offset in OpenPnP now {x, y} (mm; {@code nozzle.getHeadOffsets()}, read only), or null. */
+    public double[] headOffsetNow() {
+        Nozzle n = nozzle;
+        if (n == null) {
+            return null;
+        }
+        try {
+            Location l = n.getHeadOffsets().convertToUnits(LengthUnit.Millimeters);
+            return new double[] {l.getX(), l.getY()};
+        }
+        catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * The frame of the mounted setup before its last needle change (§22.3: "is this the tip you think it is?"), kept
+     * when a new frame replaces it; null when none was replaced since the start.
+     */
+    private volatile Object[] previousFrame;
+
+    /**
+     * Sets the needle Z offset (manual entry or touch-off result) and records it, for the values taken under the needle
+     * token {@code needleChangedAtMs} (tip setups design §22.3): 409 {@code needle-changed} when the needle was changed
+     * after they were taken; answers the frame question and the I4 offset warning.
+     */
+    public synchronized NeedleFrameResult setNeedleZOffset(double offsetMm, String method, String details,
+            Long needleChangedAtMs) throws IOException, SQLException {
+        requireToken(needleChangedAtMs);
         DispenseConfig c = cfg.copy();
         double prev = c.needleZOffsetMm;
         c.needleZOffsetMm = offsetMm;
@@ -436,22 +1337,33 @@ public final class DispenseService {
         c.needleZOffsetHomeAtMs = homeTracker.frameHomeAtMs();
         updateConfig(c);
         db.insertTouchOff(method, offsetMm, prev, details, null);
+        NeedleFrameResult r = new NeedleFrameResult();
+        r.anchor = cfg.needleAnchor;
+        r.offsetMm = offsetMm;
+        Object[] pf = previousFrame;
+        if (pf != null && c.tip.key.equals(pf[0])) {
+            r.question = frameQuestion(c, offsetMm, (Double) pf[1], (Long) pf[2]);
+        }
+        r.warning = Interlocks.frameTooClose(cfg);
+        return r;
     }
 
     /**
-     * I4 needle Z frame: the same surface touched by N1 (OpenPnP frame, {@code surfaceZMm}) and by the
-     * needle tip ({@code needleContactZMm}, N2 Z). Sets the offset to their difference; a touch-off
-     * (or a manual entry within the drift limit) is still required before dispensing.
+     * I4 needle Z frame: the same surface touched by N1 (OpenPnP frame, {@code surfaceZMm}) and by the needle tip
+     * ({@code needleContactZMm}, N2 Z); sets the offset to their difference, and a touch-off (or a manual entry within
+     * the drift limit) is still required before dispensing. {@code rawSumMm} records the bench relation the needle
+     * contact came from (or null). The heights were captured under the needle token {@code needleChangedAtMs} (§22.3):
+     * 409 {@code needle-changed} after a needle change; answers the frame question (the setup's previous frame) and the
+     * I4 offset warning.
      */
-    public synchronized DispenseConfig.NeedleAnchor setNeedleAnchor(double surfaceZMm, double needleContactZMm,
-            Double xMm, Double yMm) throws IOException, SQLException {
-        return setNeedleAnchor(surfaceZMm, needleContactZMm, xMm, yMm, null);
-    }
-
-    /** As above; {@code rawSumMm} records the bench relation the needle contact came from (or null). */
-    public synchronized DispenseConfig.NeedleAnchor setNeedleAnchor(double surfaceZMm, double needleContactZMm,
-            Double xMm, Double yMm, Double rawSumMm) throws IOException, SQLException {
+    public synchronized NeedleFrameResult setNeedleAnchor(double surfaceZMm, double needleContactZMm, Double xMm,
+            Double yMm, Double rawSumMm, Long needleChangedAtMs) throws IOException, SQLException {
+        requireToken(needleChangedAtMs);
         DispenseConfig c = cfg.copy();
+        DispenseConfig.NeedleAnchor was = c.needleAnchor;
+        if (was != null && !c.isNeedleAnchored()) {
+            previousFrame = new Object[] {c.tip.key, was.offsetMm(), was.setAtMs};
+        }
         double prev = c.needleZOffsetMm;
         long now = Math.max(System.currentTimeMillis(), c.needleChangedAtMs == null ? 0 : c.needleChangedAtMs);
         c.needleAnchor = new DispenseConfig.NeedleAnchor(surfaceZMm, needleContactZMm, xMm, yMm, now);
@@ -464,7 +1376,33 @@ public final class DispenseService {
         db.event(null, "INFO", "I4", String.format(java.util.Locale.ROOT,
                 "needle frame: N1 contact %.3f, needle contact %.3f -> offset %.3f; touch-off required",
                 surfaceZMm, needleContactZMm, c.needleZOffsetMm));
-        return c.needleAnchor;
+        NeedleFrameResult r = new NeedleFrameResult();
+        r.anchor = c.needleAnchor;
+        r.offsetMm = c.needleZOffsetMm;
+        Object[] pf = previousFrame;
+        if (pf != null && c.tip.key.equals(pf[0])) {
+            r.question = frameQuestion(c, c.needleZOffsetMm, (Double) pf[1], (Long) pf[2]);
+        }
+        r.warning = Interlocks.frameTooClose(cfg);
+        if (r.question != null) {
+            db.event(null, "WARN", TIP_EVENT, r.question);
+        }
+        return r;
+    }
+
+    /**
+     * "The {S}'s tip touches {d} mm higher than when it was on on {date}: is the {S} on the dispenser?" when the
+     * offset moved more than needleOffsetMaxDriftMm from the setup's previous frame (§22.3), else null.
+     */
+    static String frameQuestion(DispenseConfig c, double offsetMm, Double previousMm, Long previousAtMs) {
+        if (previousMm == null || Math.abs(offsetMm - previousMm) <= c.needleOffsetMaxDriftMm + 1e-9) {
+            return null;
+        }
+        double d = offsetMm - previousMm;
+        String name = c.tip.name;
+        return String.format(Locale.ROOT, "The %s's tip touches %.2f mm %s than when it was on on %s: is the %s on the "
+                + "dispenser?", name, Math.abs(d), d > 0 ? "higher" : "lower", previousAtMs == null ? "the last frame"
+                        : day(previousAtMs), name);
     }
 
     /**
@@ -670,6 +1608,21 @@ public final class DispenseService {
         dotImagerOverride = imager;
     }
 
+    /** Overrides the camera that photographs the tip from below (tests; null = {@link OpenPnpTipCamera}). */
+    public void setTipCamera(TipCamera camera) {
+        tipCameraOverride = camera;
+    }
+
+    /** The camera that photographs the tip from below: the test's, else OpenPnP's first camera looking up. */
+    TipCamera tipCamera() {
+        TipCamera t = tipCameraOverride;
+        if (t != null) {
+            return t;
+        }
+        Machine m = configuration.getMachine();
+        return m == null ? null : new OpenPnpTipCamera(m);
+    }
+
     /**
      * Thread-safe: stops the active stream before its next line; pneumatics are switched off (I1).
      * Every task queued before it refuses at its start ({@link #stopEpoch}). A task OpenPnP dropped
@@ -728,15 +1681,339 @@ public final class DispenseService {
     // Data
     // ------------------------------------------------------------------------------------------
 
+    /** Every pad type as the mounted tip setup sees it (§22.2: {@link TipSetups#typesFor}). */
     public List<PadType> getPadTypes() throws SQLException {
-        return db.currentPadTypes();
+        return TipSetups.typesFor(db, cfg.tip.key);
     }
 
-    /** Appends a new version of a pad type (new type if the key is new). */
-    public PadType savePadType(PadType p) throws SQLException {
-        PadType stored = db.insertPadTypeVersion(p);
-        db.event(null, "INFO", "PAD_TYPE", "saved " + stored);
-        return stored;
+    /**
+     * Appends a pad type version for the mounted setup (tip setups design §22.2), under the lock: {@code forSetup}
+     * must be the mounted setup (409 {@code tip-changed}). A pad edit sends the {@code padVersion} it showed (409
+     * {@code pad-changed} when another was written meanwhile); a dose write ({@code padVersion} null) takes the pad
+     * fields of the composed view now. Returns the stored row as the setup's composed view shows it.
+     */
+    public synchronized PadType savePadType(PadType v, String forSetup, Integer padVersion) throws SQLException {
+        String s = cfg.tip.key;
+        if (forSetup == null || !forSetup.equals(s)) {
+            throw tipChanged();
+        }
+        PadType cur = db.currentPadType(v.typeKey, s);
+        PadType w = v.copy();
+        if (cur != null && padVersion == null) {
+            // a dose write: the pad fields as every setup sees them now (a pad edit made meanwhile stays)
+            w.family = cur.family;
+            w.name = cur.name;
+            w.padWMm = cur.padWMm;
+            w.padHMm = cur.padHMm;
+            w.padRoundness = cur.padRoundness;
+            w.layout = cur.layout;
+            w.pitchMm = cur.pitchMm;
+            w.tMm = cur.tMm;
+            w.k = cur.k;
+            w.packagePattern = cur.packagePattern;
+        }
+        else if (cur != null && !padVersion.equals(cur.padVersion)) {
+            TipSetup other = null;
+            for (PadType h : db.padTypeHistory(v.typeKey)) {
+                if (h.version == cur.padVersion) {
+                    other = db.currentTipSetup(org.openpnp.instancelabs.padprofile.Tip.setupOf(h.tipKey));
+                }
+            }
+            throw new EngineRefusal(409, "pad-changed", (cur.name == null ? v.typeKey : cur.name) + " was changed "
+                    + "meanwhile (version " + cur.padVersion + ", with " + (other == null ? "another tip"
+                            : "the " + other.name) + "): reload.").with("padVersion", cur.padVersion);
+        }
+        boolean raised = w.status != null && w.status.atLeast(PadTypeStatus.CHARACTERIZED)
+                && (cur == null || cur.standIn || !cur.status.atLeast(PadTypeStatus.CHARACTERIZED));
+        if (raised) {
+            // §22.2: without the bench model nothing the mounted setup did not measure goes above provisional (a
+            // stand-in or a copy raised by hand included); the bench setup is refused as before by the editor's rule
+            requireEvidence(cfg, w);
+        }
+        w.tipKey = s; // every new version names its setup (§22.1)
+        PadType stored = db.insertPadTypeVersion(w);
+        db.event(null, "INFO", "PAD_TYPE", "saved " + stored + " for the " + cfg.tip.name);
+        PadType view = db.currentPadType(stored.typeKey, s);
+        return view != null ? view : stored;
+    }
+
+    /**
+     * The pad-type editor's save that raises the mounted setup's version to characterized or validated (§22.5): the
+     * version as {@link #savePadType(PadType, String, Integer)}, and a {@code pad_calibrations} record of method
+     * by-hand with its label (null = the automatic one), the given photos and the main picture linked.
+     */
+    public synchronized PadCalibrationRecord savePadTypeByHand(PadType v, String forSetup, String label,
+            List<Long> photoIds, String operator) throws SQLException {
+        PadType before = db.currentPadType(v.typeKey, cfg.tip.key);
+        return savePadTypeByHand(v, forSetup, before == null ? null : before.padVersion, label, photoIds, operator);
+    }
+
+    /**
+     * As {@link #savePadTypeByHand(PadType, String, String, List, String)} for the editor that names the pad it showed
+     * (§22.2): {@code padVersion} for a pad edited with the raise (409 {@code pad-changed} when another was written
+     * meanwhile), null when only the status and the dose were edited (the pad as every setup sees it now).
+     */
+    public synchronized PadCalibrationRecord savePadTypeByHand(PadType v, String forSetup, Integer padVersion,
+            String label, List<Long> photoIds, String operator) throws SQLException {
+        if (v.status != PadTypeStatus.CHARACTERIZED && v.status != PadTypeStatus.VALIDATED) {
+            throw new IllegalArgumentException("a by-hand calibration raises the status to characterized or validated");
+        }
+        // the label and the pictures are checked before anything is written: a refusal leaves no version or record
+        String text = label == null ? null : cleanLabel(label);
+        List<Photo> pictures = picturesFor(photoIds);
+        PadType before = db.currentPadType(v.typeKey, cfg.tip.key);
+        PadType stored = savePadType(v, forSetup, padVersion);
+        DispenseConfig c = cfg;
+        long now = System.currentTimeMillis();
+        PadCalibrationRecord rec = new PadCalibrationRecord();
+        rec.jobId = "hand-" + now;
+        rec.typeKey = stored.typeKey;
+        rec.versionFrom = before == null || before.standIn ? null : before.version;
+        rec.versionTo = stored.version;
+        rec.outcome = stored.status == PadTypeStatus.VALIDATED ? PadCalibrationRecord.VALIDATED
+                : PadCalibrationRecord.CHARACTERIZED;
+        rec.steps = stored.dotSteps;
+        rec.dotsPerPad = stored.dotsPerPad;
+        rec.massPerPadMg = stored.massPerPadMg;
+        rec.method = PadCalibrationRecord.METHOD_BY_HAND;
+        rec.setupKey = c.tip.key;
+        rec.needleSinceMs = c.needleChangedAtMs;
+        rec.simulated = isSimulatorConfirmed();
+        rec.operator = operator;
+        List<Long> evidence = new ArrayList<>();
+        if (stored.status == PadTypeStatus.VALIDATED) {
+            rec.checks.add(new PadCalibrationRecord.Check("validated-by-you", true, "validated on a board by "
+                    + (operator == null ? "you" : operator)));
+        }
+        else {
+            DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerConnectedAtMs(), isSimulatorConfirmed());
+            List<DoseRecord> fresh = DoseRecords.fresh(db.doseRecords(null, now - (long) (c.padCalibration
+                    .doseRecordMaxAgeH * 3600e3)), c, ep, now, db.flaggedJobs());
+            int steps = stored.dotSteps != null ? stored.dotSteps : c.profile.netStepsPerDot;
+            evidence.addAll(DoseRecords.ids(fresh, steps));
+            PadCalibrationRecord.Check k = new PadCalibrationRecord.Check("status-evidence", true, "records "
+                    + evidence);
+            rec.checks.add(k);
+        }
+        rec.evidence = evidence;
+        rec.message = "raised by hand to " + stored.status.dbName + " for the " + c.tip.name;
+        PadCalibrationRecord out = db.insertPadCalibration(rec);
+        labelAndLink(out, stored, text, operator);
+        // the result photos of the jobs its evidence came from, the photos given, the main picture
+        java.util.Set<String> jobs = new java.util.LinkedHashSet<>();
+        for (Long id : evidence) {
+            DoseRecord r = db.doseRecord(id);
+            if (r != null && r.jobId != null) {
+                jobs.add(r.jobId);
+            }
+        }
+        for (String job : jobs) {
+            for (Photo ph : db.photos(c.tip.key, null, job, Photo.KIND_RESULT, false, 20)) {
+                linkQuietly(ph.id, out.id, Photo.ROLE_RESULT, operator);
+            }
+        }
+        for (Photo p : pictures) {
+            // a result photo (the guide ladder's) is the record's result, any other picture one of the tip (§22.4)
+            linkPhotos(java.util.Collections.singletonList(p.id), java.util.Collections.singletonList(out.id),
+                    Photo.KIND_RESULT.equals(p.kind) ? Photo.ROLE_RESULT : Photo.ROLE_TIP);
+        }
+        db.event(null, "INFO", "PCAL", "by hand: " + new Gson().toJson(out));
+        return out;
+    }
+
+    /**
+     * The pictures a by-hand record will show, checked as their links will be (§22.4): each exists, is of the mounted
+     * setup (409 {@code setup-mismatch}), a picture from below of the needle on now (409 {@code needle-changed}), and
+     * at most {@link PhotoStore#MAX_TIP_PER_RECORD} of the tip (409 {@code too-many}).
+     */
+    private List<Photo> picturesFor(List<Long> photoIds) throws SQLException {
+        List<Photo> l = new ArrayList<>();
+        int tips = 0;
+        for (Long id : photoIds == null ? new ArrayList<Long>() : new ArrayList<>(new java.util.LinkedHashSet<>(
+                photoIds))) {
+            Photo p = db.photo(id);
+            if (p == null) {
+                throw new EngineRefusal(404, "not-found", "There is no picture " + id + ".");
+            }
+            if (!cfg.tip.key.equals(p.setupKey)) {
+                throw new EngineRefusal(409, "setup-mismatch", "This picture is of the " + nameOf(p.setupKey)
+                        + "; this calibration is made with the " + cfg.tip.name + ".");
+            }
+            if (Photo.SOURCE_BOTTOM_CAMERA.equals(p.source) && !java.util.Objects.equals(p.needleSinceMs,
+                    cfg.needleChangedAtMs)) {
+                throw new EngineRefusal(409, "needle-changed", "Picture " + id + " was taken with another needle than "
+                        + "the one on the dispenser now: a needle change came between them.");
+            }
+            tips += Photo.KIND_TIP.equals(p.kind) ? 1 : 0;
+            l.add(p);
+        }
+        if (tips > PhotoStore.MAX_TIP_PER_RECORD) {
+            throw new EngineRefusal(409, "too-many", "A calibration shows at most " + PhotoStore.MAX_TIP_PER_RECORD
+                    + " pictures of the tip: choose fewer.");
+        }
+        return l;
+    }
+
+    /**
+     * The mounted tip setup as the check, the planner and the suggester see it (§22.2): {@code cfg.tip} with its dot
+     * table at the current recipe, paste and simulator flag, cached until one of those or the records change.
+     */
+    public Tip mountedTip() throws SQLException {
+        DispenseConfig c = cfg;
+        TipSpec t = c.tip;
+        boolean sim = isSimulatorConfirmed();
+        String doseFp = c.profile.doseFingerprint();
+        java.util.Set<String> flagged = db.flaggedJobs();
+        // the statistics' settings too: a job's records of a dose are pooled as the job judged them
+        String key = new Gson().toJson(t) + "|" + doseFp + "|" + c.paste.key + "|" + sim + "|"
+                + db.newestDoseRecordId() + "|" + flagged + "|" + new Gson().toJson(c.padCalibration);
+        TipCache cached = tipCache;
+        if (cached != null && key.equals(cached.key)) {
+            return copyTip(cached.tip);
+        }
+        Tip tip = PadInstances.specTip(t);
+        DoseRecords.DotTable table = DoseRecords.dotTable(db.doseRecordsOf(t.key, doseFp, c.paste.key, sim), t.key,
+                doseFp, c.paste.key, sim, flagged, DoseRecords.settings(c.padCalibration));
+        tip.measured.putAll(table.doses);
+        tip.mgPerStep = table.mgPerStep;
+        tip.mgPerStepAtMs = table.mgPerStepAtMs;
+        tip.mgPerStepConfirmed = table.mgPerStepConfirmed;
+        tipCache = new TipCache(key, tip); // one write: a tip is never paired with another identity's key
+        return copyTip(tip);
+    }
+
+    /** The mounted setup's dot table (the setup view's dots, §22.6). */
+    public DoseRecords.DotTable dotTable() throws SQLException {
+        DispenseConfig c = cfg;
+        boolean sim = isSimulatorConfirmed();
+        String doseFp = c.profile.doseFingerprint();
+        return DoseRecords.dotTable(db.doseRecordsOf(c.tip.key, doseFp, c.paste.key, sim), c.tip.key, doseFp,
+                c.paste.key, sim, db.flaggedJobs(), DoseRecords.settings(c.padCalibration));
+    }
+
+    private static Tip copyTip(Tip t) {
+        Tip x = new Tip(t.key, t.name, t.idMm, t.odMm, t.minDotSteps);
+        x.setupVersion = t.setupVersion;
+        x.dispenser = t.dispenser;
+        x.benchModel = t.benchModel;
+        x.measured.putAll(t.measured);
+        x.mgPerStep = t.mgPerStep;
+        x.mgPerStepAtMs = t.mgPerStepAtMs;
+        x.mgPerStepConfirmed = t.mgPerStepConfirmed;
+        return x;
+    }
+
+    /**
+     * Writes a coupon's skip mass row (no readings, {@code why}): the weighing never came (tip setups design §22.3: a
+     * needle change, a wrong tip). Returns the row.
+     */
+    public synchronized DoseRecord skipCoupon(DoseRecord coupon, String why, String operator, String jobId)
+            throws SQLException {
+        DoseRecord m = new DoseRecord();
+        m.kind = DoseRecord.MASS;
+        m.steps = coupon.steps;
+        m.n = coupon.n;
+        m.couponRecordId = coupon.id;
+        m.couponPlace = coupon.couponPlace;
+        m.pressurePsi = coupon.pressurePsi;
+        m.doseFp = coupon.doseFp;
+        m.tipKey = coupon.tipKey;
+        m.pasteKey = coupon.pasteKey;
+        m.regulatorPsi = coupon.regulatorPsi;
+        m.regulatorAtMs = coupon.regulatorAtMs;
+        m.pasteLifeAtMs = coupon.pasteLifeAtMs;
+        m.controllerConnectedAtMs = coupon.controllerConnectedAtMs;
+        m.startAngleSetAtMs = coupon.startAngleSetAtMs;
+        m.startAngleDeg = coupon.startAngleDeg;
+        m.method = coupon.simulated ? "sim" : "typed";
+        m.simulated = coupon.simulated;
+        m.runUuid = coupon.runUuid;
+        m.jobId = jobId;
+        m.operator = operator;
+        m.why = why == null || why.trim().isEmpty() ? "the weighing was skipped" : why;
+        return db.insertDoseRecord(m);
+    }
+
+    /**
+     * "Made with another tip" (§22.3): flags the job wrong-tip (its dose records leave the setup's evidence and dot
+     * table), skips its waiting coupons, and for every record of the job whose version is still its setup's newest
+     * of that type writes a version restoring the previous own dose fields. Returns the versions written.
+     */
+    public synchronized List<PadType> markWrongTip(String jobId, String operator) throws SQLException {
+        List<PadCalibrationRecord> records = db.padCalibrationsOfJob(jobId);
+        if (records.isEmpty()) {
+            throw new EngineRefusal(404, "not-found", "There is no calibration of job " + jobId + ".");
+        }
+        List<String> jobs = new ArrayList<>();
+        jobs.add(jobId);
+        for (PadCalibrationRecord r : records) {
+            if (PadCalibrationRecord.METHOD_BY_HAND.equals(r.method)) {
+                for (Long id : r.evidence) {
+                    DoseRecord d = db.doseRecord(id);
+                    if (d != null && d.jobId != null && !jobs.contains(d.jobId)) {
+                        jobs.add(d.jobId);
+                    }
+                }
+            }
+        }
+        String setup = records.get(0).setupKey;
+        for (String j : jobs) {
+            db.insertCalFlag(j, setup, "wrong-tip", "made with another tip than the " + setup, operator);
+        }
+        DispenseConfig c = cfg;
+        long now = System.currentTimeMillis();
+        DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerConnectedAtMs(), isSimulatorConfirmed());
+        for (DoseRecord coupon : db.pendingCoupons(now - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3))) {
+            if (coupon.jobId != null && jobs.contains(coupon.jobId)) {
+                skipCoupon(coupon, "the calibration was made with another tip", operator, coupon.jobId);
+            }
+        }
+        List<PadType> restored = new ArrayList<>();
+        for (PadCalibrationRecord r : records) {
+            if (r.versionTo == null) {
+                continue;
+            }
+            String s = r.setupKey;
+            PadType newest = db.newestOwnVersion(r.typeKey, s);
+            if (newest == null || newest.version != r.versionTo) {
+                continue; // a later version of that setup stays
+            }
+            PadType previous = null;
+            for (PadType h : db.padTypeHistory(r.typeKey)) {
+                if (h.version < r.versionTo && org.openpnp.instancelabs.padprofile.Tip.setupOf(h.tipKey).equals(s)) {
+                    previous = h;
+                }
+            }
+            PadType pad = db.currentPadType(r.typeKey, s);
+            PadType w = pad.copy();
+            if (previous != null) {
+                w.status = previous.status;
+                w.dotSteps = previous.dotSteps;
+                w.dotsPerPad = previous.dotsPerPad;
+                w.calAreaMm2 = previous.calAreaMm2;
+                w.doseFp = previous.doseFp;
+                w.massPerPadMg = previous.massPerPadMg;
+                w.origin = previous.origin;
+            }
+            else {
+                w.status = PadTypeStatus.NOT_STARTED;
+                w.dotSteps = null;
+                w.dotsPerPad = null;
+                w.calAreaMm2 = null;
+                w.doseFp = null;
+                w.massPerPadMg = null;
+                w.origin = null;
+            }
+            w.tipKey = s;
+            w.notes = "restored: calibration " + r.id + " was made with another tip";
+            w.operator = operator;
+            PadType stored = db.insertPadTypeVersion(w);
+            restored.add(stored);
+        }
+        tipCache = null;
+        db.event(null, "WARN", TIP_EVENT, "job " + jobId + " was made with another tip than the " + setup
+                + ": its records left the evidence; restored " + restored);
+        return restored;
     }
 
     /** Appends a new version of a per-type dot layout rule. */
@@ -772,7 +2049,7 @@ public final class DispenseService {
     public DispensePlanner newPlanner() throws SQLException {
         DispenseConfig.PurgeRow row = cfg.purgeRow;
         return new DispensePlanner(cfg, padTypeResolver()).withRules(db.currentPadRules())
-                .withSurface(planeOf(cfg, cfg.boardSurfaceName))
+                .withSurface(planeOf(cfg, cfg.boardSurfaceName)).withTip(mountedTip())
                 .withPurgeSpots(k -> row.isDefined() && k < row.spotsLeft() ? row.spot(row.usedSpots + k) : null);
     }
 
@@ -821,13 +2098,19 @@ public final class DispenseService {
      */
     public static String boardZProblem(DispenseConfig c, double boardZ) {
         DispenseConfig.NeedleAnchor a = c.needleAnchor;
-        if (a == null || Math.abs(boardZ - a.surfaceZMm) <= MAX_BOARD_Z_FROM_ANCHOR_MM + 1e-9) {
+        if (a == null) {
+            return null;
+        }
+        // §22.3: a frame whose offset o is near N1's would let a height taken with the needle pass: min(2.0, o - 0.5)
+        double o = Math.abs(a.offsetMm());
+        double limit = Math.min(MAX_BOARD_Z_FROM_ANCHOR_MM, o - 0.5);
+        if (Math.abs(boardZ - a.surfaceZMm) <= limit + 1e-9) {
             return null;
         }
         return String.format(Locale.ROOT, "the board top Z %.3f is %.2f mm from the needle-frame surface %.3f (at most "
                 + "%.1f mm: the board and the blank sit on the same bed). The board top Z is the height where N1 "
-                + "touches the board; a height taken with the needle is about 2.6 mm off. Set the board Z again.",
-                boardZ, Math.abs(boardZ - a.surfaceZMm), a.surfaceZMm, MAX_BOARD_Z_FROM_ANCHOR_MM);
+                + "touches the board; a height taken with the needle is about %.1f mm off. Set the board Z again.",
+                boardZ, Math.abs(boardZ - a.surfaceZMm), a.surfaceZMm, Math.max(0, limit), o);
     }
 
     private double[] planStart() {
@@ -980,20 +2263,31 @@ public final class DispenseService {
         }
         in.pressureSensor = pressureSensor;
         in.plan = plan;
+        try {
+            in.tip = mountedTip();
+        }
+        catch (Exception e) {
+            in.tip = null; // unknown: R1 is still checked against cfg.tip
+        }
+        in.xyUncheckedWhy = needleXyProblem(c);
+        in.xyChecked = in.xyUncheckedWhy == null;
+        in.tipOnAtMs = c.needleChangedAtMs;
         if (plan != null) {
             try {
-                List<PadType> types = db.currentPadTypes();
+                PadTypeResolver now = new PadTypeResolver(TipSetups.typesFor(db, c.tip.key), db.packageMappings())
+                        .withPastePartial(db.pastePartialPackages()).withSetup(c.tip.key, c.tip.setupVersion);
                 in.padTypesNow = new java.util.HashMap<>();
-                for (PadType t : types) {
+                for (PadType t : now.types()) {
                     in.padTypesNow.put(t.typeKey, t);
                 }
-                in.padTypesFingerprintNow = new PadTypeResolver(types, db.packageMappings())
-                        .withPastePartial(db.pastePartialPackages()).fingerprint();
+                in.padTypesFingerprintNow = now.fingerprint();
             }
             catch (Exception e) {
-                in.padTypesNow = null; // unknown: the version checks are skipped, the gate check still runs
-                in.padTypesFingerprintNow = null;
+                // §22.2: a read that fails refuses the run (its version checks cannot be made)
+                in.padTypesReadError = String.valueOf(e.getMessage());
             }
+            in.setupDiff = setupDiff(c, plan);
+            in.tipOnAtMs = mountedAtMs(c);
         }
         in.estimatedPressurisedSeconds = est;
         in.opticalCheckAvailable = imager() != null && imager().isAvailable();
@@ -1007,6 +2301,86 @@ public final class DispenseService {
         in.zCheck = homeTracker.getZCheck();
         in.simulatorConfirmed = isSimulatorConfirmed();
         return in;
+    }
+
+    /** The corrections of the mounted setup since the plan's version ("OD 0.72 → 0.90 mm"), or null. */
+    private String setupDiff(DispenseConfig c, DispensePlan plan) {
+        if (plan.setupKey == null || !plan.setupKey.equals(c.tip.key) || plan.setupVersion == null
+                || plan.setupVersion == c.tip.setupVersion) {
+            return null;
+        }
+        try {
+            List<String> l = TipSetups.corrections(db.tipSetupVersion(c.tip.key, plan.setupVersion),
+                    db.tipSetupVersion(c.tip.key, c.tip.setupVersion));
+            return l.isEmpty() ? null : String.join(", ", l);
+        }
+        catch (SQLException e) {
+            return null;
+        }
+    }
+
+    /** When the mounted setup was mounted (its newest mount or reconcile row), else its needle change; or null. */
+    private Long mountedAtMs(DispenseConfig c) {
+        try {
+            for (TipSetups.Mount m : db.tipMounts(20)) {
+                if (m.setupKey.equals(c.tip.key) && (TipSetups.Mount.MOUNT.equals(m.kind)
+                        || TipSetups.Mount.UNDO.equals(m.kind))) {
+                    return m.createdAtMs;
+                }
+            }
+        }
+        catch (SQLException e) {
+            // the needle change's time below
+        }
+        return c.needleChangedAtMs;
+    }
+
+    /** The test dot's place next to the waste (the API keeps it derived from the waste place). */
+    public static final String WASTE_TEST_DOT = "waste-test-dot";
+
+    /** A scope that dispenses only at the waste place or its test-dot spot (prime, the test dot), §22.3. */
+    static boolean onlyAtTheWaste(DispenseConfig c, Interlocks.Scope sc) {
+        if (sc.referencePlaces.isEmpty() || sc.surfaceName != null || !sc.moreSurfaces.isEmpty() || sc.touchOffWaiver) {
+            return false;
+        }
+        for (String p : sc.referencePlaces) {
+            if (!p.equals(c.wasteLocationName) && !p.equals(WASTE_TEST_DOT)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Where the needle lands as the engine moves every target (tip setups design §22.3): the mounted setup's landing
+     * when it was set under N2's head offset now (else none: a landing check then searches around 0, 0), plus the
+     * trim. The landing check's expected landing E is this landing.
+     */
+    public double[] landingInEffect() {
+        return landingInEffect(cfg);
+    }
+
+    private double[] landingInEffect(DispenseConfig c) {
+        DispenseConfig.NeedleLanding l = c.needleLanding;
+        if (l == null || !sameHeadOffset(l.headOffsetXMm, l.headOffsetYMm)) {
+            return new double[] {0, 0};
+        }
+        return new double[] {l.dxMm, l.dyMm};
+    }
+
+    /** The mounted tip's landing + trim and R7's paste per step for a program built from {@code c}. */
+    GcodeStreamBuilder.TipXy tipXy(DispenseConfig c) {
+        GcodeStreamBuilder.TipXy x = new GcodeStreamBuilder.TipXy();
+        double[] l = landingInEffect(c);
+        x.dxMm = l[0] + c.needleXyTrim.dxMm;
+        x.dyMm = l[1] + c.needleXyTrim.dyMm;
+        try {
+            x.feedMgPerStep = DoseBlocks.feedMgPerStep(c, mountedTip());
+        }
+        catch (SQLException e) {
+            x.feedMgPerStep = DoseBlocks.feedMgPerStep(c, PadInstances.specTip(c.tip));
+        }
+        return x;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1065,8 +2439,9 @@ public final class DispenseService {
                 return s.refuse(r.interlocks.toString());
             }
             List<GcodeStreamBuilder.DotSpec> purge = purgeSpecs(c, plan);
+            GcodeStreamBuilder.TipXy xy = tipXy(c);
             GcodeProgram estimate = GcodeStreamBuilder.forPlan(c, s.mapper, plan, purge, bZeroed.get(), s.keepalive,
-                    0L);
+                    0L, xy);
             Interlocks.Inputs withEstimate = interlockInputs(c, plan, estimate.estimatedPressurisedSeconds,
                     boardScope(c, plan), false, false);
             withEstimate.programBlocks = estimate.blocks; // I6-feed: every block's paste demand
@@ -1089,7 +2464,7 @@ public final class DispenseService {
                             + "Count): the start angle of a partial-turn dose cannot be set. Nothing was sent.",
                             null);
                 }
-                return GcodeStreamBuilder.forPlan(c, s.mapper, plan, purge, bZeroed.get(), s.keepalive, count);
+                return GcodeStreamBuilder.forPlan(c, s.mapper, plan, purge, bZeroed.get(), s.keepalive, count, xy);
             }, "dispensing", () -> reservePurgeSpots(purge.size(), r.runId));
             r.purgeDots = p.purgeDotCount;
             r.bCountAtStart = p.bCountAtStart;
@@ -1115,6 +2490,105 @@ public final class DispenseService {
             r.cleanCheck = rep;
             r.status = RunResult.Status.OK;
             r.message = rep.ok ? "all " + rep.pads.size() + " targets clean" : rep.refusal();
+        });
+    }
+
+    /**
+     * A picture of the mounted tip from below (tip setups design §22.4), an engine task of kind {@code tip-picture}:
+     * N2 to the bottom camera's X/Y at the balanced travel height (refused when that is outside N2's safe Z zone,
+     * unhomed, under the pressure hold, after a STOP, or for a setup that is not mounted), a lit capture, then the
+     * photo stored (kind tip) and linked to the request's records unless the needle was changed meanwhile.
+     */
+    public Future<TipPictureResult> takeTipPicture(TipPictureRequest req) throws Exception {
+        requireAvailable();
+        TipCamera cam = tipCamera();
+        if (cam == null || !cam.isAvailable()) {
+            throw new EngineRefusal(409, "refused", "No bottom camera: OpenPnP has no camera looking up.");
+        }
+        String setup = req.setupKey != null ? req.setupKey : cfg.tip.key;
+        if (!setup.equals(cfg.tip.key)) {
+            throw new EngineRefusal(409, "refused", "Only the mounted tip can be photographed: mount the "
+                    + nameOf(setup) + " first.");
+        }
+        if (pressureHoldActive.getAsBoolean()) {
+            throw new EngineRefusal(409, "refused", "Switch the pressure off first: the head moves to the bottom camera.");
+        }
+        RunResult r = newRun("tip-picture", null, "tip picture", 0, 0);
+        TipPictureResult res = new TipPictureResult();
+        res.run = r;
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> {
+            DispenseConfig c = cfg;
+            r.startedAtMs = System.currentTimeMillis();
+            activeRun = r;
+            refuseIfStoppedSince(req.stopEpoch);
+            if (pressureHoldActive.getAsBoolean()) {
+                throw refused("Switch the pressure off first: the head moves to the bottom camera.");
+            }
+            Machine m = configuration.getMachine();
+            if (!m.isHomed()) {
+                throw refused("Home first: the head moves to the bottom camera.");
+            }
+            ReferenceMachine rm = (ReferenceMachine) m;
+            OpenPnpRawMapper mapper = new OpenPnpRawMapper(rm, nozzle, c.bAxisName);
+            double[] at = cam.locationMm();
+            double[] zone = mapper.zSafeZoneRaw();
+            double raw = mapper.toRaw(at[0], at[1], c.travelSafeZMm).z;
+            if (zone != null && (!Double.isNaN(zone[0]) && raw < zone[0] - 1e-6
+                    || !Double.isNaN(zone[1]) && raw > zone[1] + 1e-6)) {
+                throw refused(String.format(Locale.ROOT, "N2's safe Z zone (%s–%s mm) does not hold the balanced "
+                        + "travel height %.1f mm: the picture would move N1 down.", Double.isNaN(zone[0]) ? "-"
+                                : String.format(Locale.ROOT, "%.1f", zone[0]), Double.isNaN(zone[1]) ? "-"
+                                        : String.format(Locale.ROOT, "%.1f", zone[1]), c.travelSafeZMm));
+            }
+            phase(r, "tip picture: moving to the bottom camera");
+            Location here = nozzle.getLocation().convertToUnits(LengthUnit.Millimeters);
+            org.openpnp.util.MovableUtils.moveToLocationAtSafeZ(nozzle, new Location(LengthUnit.Millimeters, at[0],
+                    at[1], c.travelSafeZMm, here.getRotation()));
+            m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+            if (cameraTourAbort) {
+                throw new DispenseExecutor.AbortedException("STOP during the move to the bottom camera");
+            }
+            refuseIfStoppedSince(req.stopEpoch);
+            phase(r, "tip picture: capture");
+            DotImager.Frame f = cam.capture();
+            refuseIfStoppedSince(req.stopEpoch);
+            if (cameraTourAbort) {
+                throw new DispenseExecutor.AbortedException("STOP during the tip picture");
+            }
+            DispenseConfig now = cfg;
+            if (!now.tip.key.equals(setup) || !java.util.Objects.equals(now.needleChangedAtMs, req.needleSinceMs)) {
+                res.ok = false;
+                res.message = "The needle was changed during the picture: it was not stored.";
+                r.status = RunResult.Status.REFUSED;
+                r.message = res.message;
+                return;
+            }
+            if (f == null || f.image == null) {
+                throw refused("the bottom camera gave no frame");
+            }
+            PhotoStore.Input in = new PhotoStore.Input();
+            in.image = f.image;
+            in.kind = Photo.KIND_TIP;
+            in.source = Photo.SOURCE_BOTTOM_CAMERA;
+            in.setupKey = setup;
+            in.needleSinceMs = req.needleSinceMs;
+            in.mmPerPx = f.mmPerPxX > 0 ? f.mmPerPxX : null;
+            in.caption = "From below at " + ZCheck.clock(System.currentTimeMillis()) + ", at travel height (may be "
+                    + "soft): the " + now.tip.name;
+            in.calibrationIds = req.calibrationIds == null ? new ArrayList<>() : req.calibrationIds;
+            in.simulated = isSimulatorConfirmed();
+            in.operator = req.operator;
+            res.photo = storePhoto(in);
+            res.ok = true;
+            res.message = "picture " + res.photo.id + " of the " + now.tip.name;
+            db.event(r.runId, "INFO", TIP_EVENT, "picture " + res.photo.id + " of the " + now.tip.name);
+            r.status = RunResult.Status.OK;
+            r.message = res.message;
+        }, () -> {
+            if (r.status != RunResult.Status.OK && res.message == null) {
+                res.message = r.message;
+            }
         });
     }
 
@@ -1261,8 +2735,8 @@ public final class DispenseService {
             for (int i = 0; i < count; i++) {
                 specs.add(new GcodeStreamBuilder.DotSpec(loc.x, loc.y, z, z + c.hopHeightMm, rotationDeg, i, "shot"));
             }
-            GcodeProgram p = GcodeStreamBuilder.forDots(c, s.mapper, specs, bZeroed.get(), s.keepalive, false,
-                    "shots x" + count + " @" + locationName);
+            GcodeProgram p = GcodeStreamBuilder.forDots(c, s.mapper, specs, bZeroed.get(), s.keepalive, false, 0,
+                    "shots x" + count + " @" + locationName, tipXy(c));
             if (!s.preflight(scope, p.estimatedPressurisedSeconds)) {
                 return r;
             }
@@ -1292,7 +2766,7 @@ public final class DispenseService {
                 return;
             }
             GcodeProgram p = GcodeStreamBuilder.forDots(c, s.mapper, specs, bZeroed.get(), s.keepalive,
-                    req.primeAtWaste, "dot ladder");
+                    req.primeAtWaste, 0, "dot ladder", tipXy(c));
             if (!s.preflight(scope, p.estimatedPressurisedSeconds)) {
                 return;
             }
@@ -1311,6 +2785,8 @@ public final class DispenseService {
         public Double newOffsetMm;
         public boolean applied;
         public RunResult run;
+        /** Tip setups (§22.3): the frame question when the offset moved from the setup's previous one, else null. */
+        public String frameQuestion;
     }
 
     /**
@@ -1348,7 +2824,7 @@ public final class DispenseService {
             }
             double primeExtra = c.isNeedleTouchedOff() ? 0 : c.touchOffPrimeExtraClearanceMm;
             GcodeProgram p = GcodeStreamBuilder.forDots(c, s.mapper, specs, bZeroed.get(), s.keepalive,
-                    req.primeAtWaste, primeExtra, "needle touch-off");
+                    req.primeAtWaste, primeExtra, "needle touch-off", tipXy(c));
             if (!s.preflight(scope, p.estimatedPressurisedSeconds)) {
                 return;
             }
@@ -1367,7 +2843,10 @@ public final class DispenseService {
             if (res.analysis.found()) {
                 res.newOffsetMm = c.needleZOffsetMm + res.analysis.contactGapMm;
                 if (apply) {
-                    setNeedleZOffset(res.newOffsetMm, "dot-ladder-touch-off", details);
+                    // under the needle the touch-off started with: a needle change meanwhile refuses it (§22.3)
+                    NeedleFrameResult fr = setNeedleZOffset(res.newOffsetMm, "dot-ladder-touch-off", details,
+                            c.needleChangedAtMs);
+                    res.frameQuestion = fr.question;
                     res.applied = true;
                 }
                 else {
@@ -1520,6 +2999,20 @@ public final class DispenseService {
         return sc;
     }
 
+    /**
+     * The top camera's frame {width, height} (mm), or null without one: the landing check lays out the frames that
+     * cover its band with it (tip setups design §22.3).
+     */
+    public double[] topCameraFovMm() {
+        DotImager im = imager();
+        try {
+            return im == null || !im.isAvailable() ? null : im.fieldOfViewMm();
+        }
+        catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     /** A top camera (or a test imager) for the fiducials and the looks before N1 touches. */
     public boolean hasTopCamera() {
         DotImager im = imager();
@@ -1528,8 +3021,9 @@ public final class DispenseService {
 
     /** The pad types, package mappings and package options now (BoardFeatures, plans). */
     public PadTypeResolver padTypeResolver() throws SQLException {
-        return new PadTypeResolver(db.currentPadTypes(), db.packageMappings())
-                .withPastePartial(db.pastePartialPackages());
+        DispenseConfig c = cfg;
+        return new PadTypeResolver(TipSetups.typesFor(db, c.tip.key), db.packageMappings())
+                .withPastePartial(db.pastePartialPackages()).withSetup(c.tip.key, c.tip.setupVersion);
     }
 
     /**
@@ -2046,7 +3540,7 @@ public final class DispenseService {
         t.stage = "fiducials";
         Board board = req.nominal.getBoard();
         boolean job = req.boardKey != null && req.boardKey.startsWith("job:");
-        BoardFeatures f = BoardFeatures.of(board, new PadTypeResolver(db.currentPadTypes(), db.packageMappings()),
+        BoardFeatures f = BoardFeatures.of(board, padTypeResolver(),
                 req.fiducialHints);
         String few = fewFiducials(f, c.fiducialCheck.minFiducials);
         // probe only (F10) is for a board without a single fiducial: one that has some is fitted by them, or refused
@@ -2810,10 +4304,14 @@ public final class DispenseService {
 
     private void doseBlocks(DoseBlocksRequest req, DoseBlocksResult res, Task t) throws Exception {
         RunResult r = t.r;
+        hook("dose-blocks");
         DispenseConfig c = cfg;
         if (stopEpoch.get() != req.stopEpoch) {
             throw refused(STOPPED_SINCE_QUEUED);
         }
+        refuseOtherTip(req, c);
+        res.setupKey = c.tip.key;
+        res.needleSinceMs = c.needleChangedAtMs;
         if (req.blocks.isEmpty() || req.dots() == 0) {
             throw refused("PCAL: nothing to dispense");
         }
@@ -2890,7 +4388,8 @@ public final class DispenseService {
             runs.add(new DoseBlocks.Run(b.netSteps, w, dots.size()));
             w += dots.size();
         }
-        int need = DoseBlocks.purgeSpotsNeeded(runs, c, flush);
+        // the landing check purges in its own band (§22.3): explicit spots, no purge-row spot is used
+        int need = req.purgeXy != null ? 0 : DoseBlocks.purgeSpotsNeeded(runs, c, flush);
         boolean partial = DoseBlocks.anyPartial(runs, c);
         DispenseConfig.PurgeRow row = c.purgeRow;
         if (need > 0 && row.isDefined()) {
@@ -2899,6 +4398,18 @@ public final class DispenseService {
                 spots.add(row.spot(row.usedSpots + i));
             }
             scope.moreSurfaces.computeIfAbsent(row.surfaceName, n -> new ArrayList<>()).addAll(spots);
+        }
+        if (req.purgeXy != null && !req.purgeXy.isEmpty()) {
+            String surface = req.blocks.get(0).surfaceName;
+            if (surface.equals(scope.surfaceName)) {
+                scope.surfaceTargets.addAll(req.purgeXy);
+            }
+            else {
+                scope.moreSurfaces.computeIfAbsent(surface, n -> new ArrayList<>()).addAll(req.purgeXy);
+            }
+        }
+        if (req.landingCheck) {
+            scope.landingWaiver = Interlocks.Scope.LANDING_CHECK;
         }
         t.stage = "z check";
         res.zCheck = zCheckIfNeeded(s, null, scope, t::aborted);
@@ -2913,9 +4424,10 @@ public final class DispenseService {
         if (!r.interlocks.ok()) {
             throw refused(r.interlocks.toString());
         }
-        List<GcodeStreamBuilder.DotSpec> purge = purgeSpecs(c, need);
+        List<GcodeStreamBuilder.DotSpec> purge = req.purgeXy != null ? bandPurge(c, req) : purgeSpecs(c, need);
+        GcodeStreamBuilder.TipXy tipXy = tipXy(c);
         GcodeProgram estimate = GcodeStreamBuilder.forBlocks(c, s.mapper, specs, purge, flush, bZeroed.get(),
-                s.keepalive, 0L, null);
+                s.keepalive, 0L, null, tipXy);
         r.interlocks = Interlocks.check(blockInputs(c, scope, estimate.estimatedPressurisedSeconds, need, partial,
                 estimate.blocks));
         if (!r.interlocks.ok()) {
@@ -2926,8 +4438,9 @@ public final class DispenseService {
         if (req.image && (im == null || !im.isAvailable())) {
             throw refused(NO_CAMERA_PCAL);
         }
-        List<PadLadder.Tile> tiles = req.image ? PadLadder.tiles(all, im.fieldOfViewMm(), PadLadder.TILE_INSET_MM)
-                : new ArrayList<>();
+        List<PadLadder.Tile> tiles = !req.image ? new ArrayList<>() : req.lookXy != null
+                ? lookTiles(req.lookXy, all, im.fieldOfViewMm())
+                : PadLadder.tiles(all, im.fieldOfViewMm(), PadLadder.TILE_INSET_MM);
         int[] tileOf = new int[all.size()];
         List<DotImager.Frame> before = new ArrayList<>();
         if (req.image) {
@@ -2946,7 +4459,7 @@ public final class DispenseService {
                     double[] xy = all.get(i);
                     int steps = req.blocks.get(blockOf.get(i)).netSteps;
                     BareSpotCheck.Result b = PadLadder.bareAt(f, xy[0], xy[1],
-                            PadLadder.spotSettings(DoseModel.dHiMm(steps)));
+                            PadLadder.spotSettings(dotUpperMm(steps)));
                     if (b == null || !b.bare) {
                         res.refusedSpots.add(String.format(Locale.ROOT, "%.2f,%.2f: %s", xy[0], xy[1],
                                 b == null ? "the spot is not inside the camera frame" : b.reason));
@@ -2967,6 +4480,7 @@ public final class DispenseService {
         if (stopEpoch.get() != req.stopEpoch) {
             throw refused(STOPPED_SINCE_QUEUED);
         }
+        refuseOtherTip(req, cfg);
         // the stream, block by block on the progress
         t.stage = "dispensing";
         int[] lastBlock = {-1};
@@ -3000,9 +4514,9 @@ public final class DispenseService {
                             + "start angle of a partial-turn dose cannot be set. Nothing was sent.", null);
                 }
                 return GcodeStreamBuilder.forBlocks(c, s.mapper, specs, purge, flush, bZeroed.get(), s.keepalive, count,
-                        null);
+                        null, tipXy);
             }, "pad calibration: dispensing", () -> {
-                reservePurgeSpots(purge.size(), r.runId);
+                reservePurgeSpots(req.purgeXy != null ? 0 : purge.size(), r.runId);
                 reserveArea(req.areaReserveMm, r.runId);
             });
         }
@@ -3080,7 +4594,7 @@ public final class DispenseService {
         OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) configuration.getMachine(), nozzle,
                 c.bAxisName);
         return GcodeStreamBuilder.forBlocks(c, mapper, specs, purgeSpecs(c, need), c.padCalibration.flushDots,
-                bZeroed.get(), false, 0L, null);
+                bZeroed.get(), false, 0L, null, tipXy(c));
     }
 
     /** The Interlocks of a block program: I4 by the scope, I9 for its purge spots, I11 for a partial turn, I6-feed. */
@@ -3165,10 +4679,14 @@ public final class DispenseService {
             List<Dot> found = im.inspectAll(before.get(k), after);
             for (Dot d : found) {
                 at.add(new double[] {tile.cx + d.xMm, tile.cy + d.yMm});
+                if (req.landingCheck) {
+                    newBlob(res, tile.cx + d.xMm, tile.cy + d.yMm, d);
+                }
             }
             blobs.add(at);
             blobDots.add(found);
         }
+        blockPhotos(req, res, tiles, tileOf, pairs);
         // the nearest new blob within the block's radius; the blob a dot was matched to (two dots, one blob: a thread)
         int[] blobOf = new int[all.size()];
         int w = 0;
@@ -3201,7 +4719,7 @@ public final class DispenseService {
         w = 0;
         for (int k = 0; k < res.blocks.size(); k++) {
             DoseBlocksResult.BlockOut o = res.blocks.get(k);
-            double model = DoseModel.dHiMm(o.netSteps) / 2;
+            double model = dotUpperMm(o.netSteps) / 2;
             for (int i = 0; i < o.dots.size(); i++) {
                 DoseBlocksResult.DotOut a = o.dots.get(i);
                 if (i + 1 < o.dots.size()) {
@@ -3226,6 +4744,142 @@ public final class DispenseService {
                 w++;
             }
             crops(res, k, o, pairs, tileOf, w - o.dots.size());
+        }
+    }
+
+    /**
+     * The machine thread's refusal of a step of a job that started under another tip setup or needle (tip setups
+     * design §22.3): nothing is sent.
+     */
+    private void refuseOtherTip(DoseBlocksRequest req, DispenseConfig c) throws RunRefusedException {
+        if (req.forTip != null && !req.forTip.equals(c.tip.key)) {
+            throw refused("The tip changed after this calibration started (the " + c.tip.name + " was mounted"
+                    + atWords(mountedAtMs(c)) + "): nothing was sent.");
+        }
+        if (req.needleSinceMs != null && !req.needleSinceMs.equals(c.needleChangedAtMs)) {
+            throw refused("The needle was changed" + atWords(c.needleChangedAtMs) + " after this calibration started: "
+                    + "nothing was sent.");
+        }
+    }
+
+    /**
+     * A dose's upper dot size for the looks and the threads (§22.2): the mounted tip's when it knows it, else the
+     * bench model's, at least the tip's OD + 0.4 mm (a tip whose dots were never measured).
+     */
+    private double dotUpperMm(int steps) {
+        try {
+            Tip tip = mountedTip();
+            if (tip.knowsSize(steps)) {
+                return tip.dHiMm(steps);
+            }
+            return Math.max(DoseModel.dHiMm(steps), tip.odMm + 0.4);
+        }
+        catch (SQLException e) {
+            return DoseModel.dHiMm(steps);
+        }
+    }
+
+    /** The landing check's purge dots (§22.3): at the request's spots in its band, on the first block's surface. */
+    private static List<GcodeStreamBuilder.DotSpec> bandPurge(DispenseConfig c, DoseBlocksRequest req) {
+        List<GcodeStreamBuilder.DotSpec> l = new ArrayList<>();
+        SurfacePlane plane = planeOf(c, req.blocks.get(0).surfaceName);
+        for (int i = 0; plane != null && i < req.purgeXy.size(); i++) {
+            double[] xy = req.purgeXy.get(i);
+            double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
+            l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm, c.profile.netDeg(c),
+                    GcodeStreamBuilder.PURGE_INDEX, "purge#band" + i));
+        }
+        return l;
+    }
+
+    /**
+     * Camera frames centred on the request's spots (the landing check's band, §22.3): every dot in the frame that
+     * holds it farthest inside (else the nearest frame).
+     */
+    static List<PadLadder.Tile> lookTiles(List<double[]> looks, List<double[]> dots, double[] fov) {
+        List<PadLadder.Tile> tiles = new ArrayList<>();
+        for (double[] l : looks) {
+            PadLadder.Tile t = new PadLadder.Tile();
+            t.cx = l[0];
+            t.cy = l[1];
+            tiles.add(t);
+        }
+        for (int i = 0; i < dots.size(); i++) {
+            double[] d = dots.get(i);
+            int best = 0;
+            double margin = Double.NEGATIVE_INFINITY;
+            for (int k = 0; k < tiles.size(); k++) {
+                PadLadder.Tile t = tiles.get(k);
+                double m = fov == null ? -Math.hypot(d[0] - t.cx, d[1] - t.cy)
+                        : Math.min(fov[0] / 2 - Math.abs(d[0] - t.cx), fov[1] / 2 - Math.abs(d[1] - t.cy));
+                if (m > margin) {
+                    margin = m;
+                    best = k;
+                }
+            }
+            if (!tiles.isEmpty()) {
+                tiles.get(best).dots.add(i);
+            }
+        }
+        return tiles;
+    }
+
+    /** A new blob of the landing check's frames (machine mm), once: overlapping frames see it twice. */
+    private static void newBlob(DoseBlocksResult res, double x, double y, Dot d) {
+        for (DoseBlocksResult.Blob b : res.newBlobs) {
+            if (Math.hypot(b.x - x, b.y - y) <= org.openpnp.instancelabs.padprofile.LandingFit.MATCH_MM) {
+                return;
+            }
+        }
+        DoseBlocksResult.Blob b = new DoseBlocksResult.Blob();
+        b.x = x;
+        b.y = y;
+        b.diameterMm = d.diameterMm;
+        b.areaMm2 = d.areaMm2;
+        b.circularity = d.circularity;
+        res.newBlobs.add(b);
+    }
+
+    /**
+     * One result photo per block (§22.4): the after frame of its first dot's tile, at most
+     * {@link PhotoStore#RESULT_MAX_WIDTH_PX} wide, as JPEG bytes (never the image: the jobs keep their results).
+     */
+    private static void blockPhotos(DoseBlocksRequest req, DoseBlocksResult res, List<PadLadder.Tile> tiles,
+            int[] tileOf, List<PadLadder.FramePair> pairs) {
+        int w = 0;
+        for (int k = 0; k < req.blocks.size(); k++) {
+            DoseBlocksRequest.Block b = req.blocks.get(k);
+            int first = w;
+            w += b.xy.size();
+            if (b.xy.isEmpty() || first >= tileOf.length || tileOf[first] >= pairs.size()) {
+                continue;
+            }
+            DotImager.Frame f = pairs.get(tileOf[first]).after;
+            if (f == null || f.image == null) {
+                continue;
+            }
+            try {
+                java.awt.image.BufferedImage img = f.image;
+                double scale = img.getWidth() > PhotoStore.RESULT_MAX_WIDTH_PX
+                        ? (double) PhotoStore.RESULT_MAX_WIDTH_PX / img.getWidth() : 1;
+                java.awt.image.BufferedImage out = PhotoStore.rgb(PhotoStore.scaleTo(img,
+                        (int) Math.round(Math.max(img.getWidth(), img.getHeight()) * scale)));
+                DoseBlocksResult.BlockPhoto p = new DoseBlocksResult.BlockPhoto();
+                p.block = k;
+                p.doseSteps = b.netSteps;
+                p.couponPlace = b.couponPlace;
+                PadLadder.Tile tile = tiles.get(tileOf[first]);
+                p.xMm = tile.cx;
+                p.yMm = tile.cy;
+                p.mmPerPx = f.mmPerPxX * img.getWidth() / (double) out.getWidth();
+                p.widthPx = out.getWidth();
+                p.heightPx = out.getHeight();
+                p.jpeg = PhotoStore.jpeg(out);
+                res.photos.add(p);
+            }
+            catch (IOException | RuntimeException e) {
+                Logger.warn(e, "dispense: no result photo of block {}", k + 1);
+            }
         }
     }
 
@@ -3307,9 +4961,27 @@ public final class DispenseService {
      * calibration wrote one, and the {@code pad_calibrations} row. The engine-side rule: a
      * {@code characterized} version needs a record whose every check passed; a calibration never
      * writes {@code validated} (that stays the user's decision after a test board).
+     *
+     * <p>Tip setups (§22.3, §22.5): the record carries the setup and needle token the job started with; a version
+     * written for another setup mounted since (409 {@code tip-changed}) or after a needle change since (409
+     * {@code needle-changed}) saves nothing. A record that writes no version (a stopped or failed job) is history: it
+     * is kept with the setup and token it names. Without the bench model, {@code characterized} needs fresh evidence of
+     * the dose (409 {@code status-evidence}). The record gets its automatic "calibrated for" label, the job's result
+     * photos of its dose and the setup's main picture.</p>
      */
     public synchronized PadCalibrationRecord applyPadCalibration(PadCalibrationRecord rec, PadType version)
             throws SQLException {
+        DispenseConfig c = cfg;
+        boolean other = rec.setupKey != null && !rec.setupKey.equals(c.tip.key);
+        if (version != null && other) {
+            throw new EngineRefusal(409, "tip-changed", "The tip changed during the calibration (the " + c.tip.name
+                    + " was mounted" + atWords(mountedAtMs(c)) + "): nothing was saved.");
+        }
+        if (version != null && rec.setupKey != null && !java.util.Objects.equals(rec.needleSinceMs,
+                c.needleChangedAtMs)) {
+            throw new EngineRefusal(409, "needle-changed", "The needle was changed" + atWords(c.needleChangedAtMs)
+                    + " during the calibration: nothing was saved.");
+        }
         if (version != null) {
             if (!version.typeKey.equals(rec.typeKey)) {
                 throw new IllegalArgumentException("the version is of pad type '" + version.typeKey + "', the "
@@ -3328,14 +5000,229 @@ public final class DispenseService {
                 && (version == null || version.status != PadTypeStatus.CHARACTERIZED)) {
             throw new IllegalArgumentException("a characterized calibration writes the characterized version");
         }
+        if (version != null && version.status == PadTypeStatus.CHARACTERIZED) {
+            requireEvidence(c, version);
+        }
+        if (rec.setupKey == null) {
+            // a record that names no setup is the mounted one's (the tests' and old callers' records)
+            rec.setupKey = c.tip.key;
+            rec.needleSinceMs = c.needleChangedAtMs;
+        }
+        if (rec.method == null) {
+            rec.method = PadCalibrationRecord.METHOD_AUTO;
+        }
+        PadType stored = null;
         if (version != null) {
-            PadType stored = savePadType(version);
+            stored = savePadType(version, c.tip.key, null);
             rec.versionTo = stored.version;
         }
-        PadCalibrationRecord stored = db.insertPadCalibration(rec);
+        PadCalibrationRecord out = db.insertPadCalibration(rec);
+        try {
+            PadType type = stored != null ? stored : db.currentPadType(rec.typeKey, rec.setupKey);
+            labelAndLink(out, type, null, rec.operator);
+            if (rec.steps != null) {
+                for (Photo ph : db.photos(rec.setupKey, null, rec.jobId, Photo.KIND_RESULT, false, 50)) {
+                    if (rec.steps.equals(ph.doseSteps)) {
+                        linkQuietly(ph.id, out.id, Photo.ROLE_RESULT, rec.operator);
+                    }
+                }
+            }
+        }
+        catch (SQLException | RuntimeException e) {
+            Logger.warn(e, "dispense: the label or the photos of calibration {} were not written", out.id);
+        }
         db.event(null, PadCalibrationRecord.CHARACTERIZED.equals(rec.outcome) ? "INFO" : "WARN", "PCAL",
-                new Gson().toJson(stored));
-        return stored;
+                new Gson().toJson(out));
+        return out;
+    }
+
+    /** " at 14:07", or "" for an unknown time. */
+    private static String atWords(Long ms) {
+        return ms == null ? "" : " at " + ZCheck.clock(ms);
+    }
+
+    /**
+     * §22.2: characterized without the bench model needs fresh optical and mass evidence of the version's dose, the
+     * profile's dose included (409 {@code status-evidence}, the text of the pad-type editor's rule).
+     */
+    private void requireEvidence(DispenseConfig c, PadType v) throws SQLException {
+        Tip tip = mountedTip();
+        if (tip.benchModel) {
+            return;
+        }
+        int steps = v.dotSteps != null ? v.dotSteps : c.profile.netStepsPerDot;
+        long now = System.currentTimeMillis();
+        org.openpnp.instancelabs.padprofile.DoseEvidence e = DoseRecords.evidence(db.doseRecords(null, now
+                - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3)), c, new DoseRecord.Epochs(
+                        getControllerConnectedAtMs(), isSimulatorConfirmed()), now, db.flaggedJobs()).get(steps);
+        boolean optical = e != null && e.opticalFresh && e.opticalPass;
+        boolean mass = e != null && e.massConfirmed;
+        if (!optical || !mass) {
+            String turn = DoseModel.turnName(steps);
+            throw new EngineRefusal(409, "status-evidence", (v.name == null ? v.typeKey : v.name) + " uses " + turn
+                    + " dots, which have " + (!optical ? "no fresh camera check on the blank" : "")
+                    + (!optical && !mass ? " and " : "") + (!mass ? "no confirmed weighing at this recipe" : "")
+                    + ": run the ladder and Weigh dots (Calibrate) first.");
+        }
+    }
+
+    /**
+     * A record's "calibrated for" label (§22.5: the given text, else the automatic one) and its link to the setup's
+     * main picture of this moment (role reference).
+     */
+    private void labelAndLink(PadCalibrationRecord rec, PadType type, String label, String operator)
+            throws SQLException {
+        String auto = autoLabel(rec, type);
+        String text = label == null ? auto : cleanLabel(label);
+        db.insertCalLabel(rec.id, text, label == null || text.equals(auto), operator);
+        Photo main = db.mainPhoto(rec.setupKey);
+        if (main != null) {
+            linkQuietly(main.id, rec.id, Photo.ROLE_REFERENCE, operator);
+        }
+    }
+
+    /**
+     * The automatic "calibrated for" label of a record (§22.5): the type as Profile names it, the record's setup and
+     * dispenser, the profile's pressure and the loaded paste.
+     */
+    public String autoLabel(PadCalibrationRecord rec, PadType type) throws SQLException {
+        DispenseConfig c = cfg;
+        TipSetup s = db.currentTipSetup(rec.setupKey == null ? c.tip.key : rec.setupKey);
+        String setupName = s == null ? c.tip.name : s.name;
+        String dispenser = s == null ? c.tip.dispenser : s.dispenser;
+        // the recipe of the record's setup: a record of a job a mount stopped names the setup that came off, whose
+        // recipe is parked now (not the incoming setup's)
+        DispenseConfig.ParkedTip parked = rec.setupKey == null || rec.setupKey.equals(c.tip.key) ? null
+                : c.parkedTips.get(rec.setupKey);
+        double psi = parked != null && parked.profile != null ? parked.profile.pressurePsi : c.profile.pressurePsi;
+        return Texts.calLabel(type == null ? null : type.family, type == null ? rec.typeKey : type.name, setupName,
+                dispenser, psi, c.paste.name, c.paste.lot);
+    }
+
+    /** A label as typed: control characters removed, spaces joined, 1-160 characters (else 400). */
+    public static String cleanLabel(String label) {
+        String t = label == null ? "" : label.replaceAll("\\p{Cntrl}", " ").replaceAll("\\s+", " ").trim();
+        if (t.isEmpty() || t.length() > Texts.MAX_LABEL) {
+            throw new EngineRefusal(400, "label", "The label must be 1 to " + Texts.MAX_LABEL + " characters.");
+        }
+        return t;
+    }
+
+    /** A link written when the photo and the record agree; nothing (a log line) when they do not. */
+    private void linkQuietly(long photoId, long calibrationId, String role, String operator) {
+        try {
+            Photo p = db.photo(photoId);
+            PhotoStore.checkLink(db, p.setupKey, p.source, p.needleSinceMs, calibrationId);
+            db.insertPhotoLink(photoId, calibrationId, role, operator);
+        }
+        catch (SQLException | RuntimeException e) {
+            Logger.info("dispense: picture {} not linked to calibration {}: {}", photoId, calibrationId, e.getMessage());
+        }
+    }
+
+    /** The picture store (§22.4): files, removal, restore, the main picture and the start sweep. */
+    public PhotoStore getPhotoStore() {
+        return photoStore;
+    }
+
+    /**
+     * Stores a picture (an upload, the tip picture task's frame) with its row and links (§22.4): a link to another
+     * setup's record (409 {@code setup-mismatch}) and the store's limits refuse as {@link EngineRefusal}. Uploads are
+     * checked for an idle engine by the API before (the tip picture task stores while it runs).
+     */
+    public Photo storePhoto(PhotoStore.Input in) throws IOException, SQLException {
+        if (in.setupKey == null) {
+            in.setupKey = cfg.tip.key;
+        }
+        Photo p = photoStore.store(in);
+        db.event(null, "INFO", TIP_EVENT, "picture " + p.id + " (" + p.kind + ", " + p.source + ") of the "
+                + nameOf(p.setupKey));
+        return p;
+    }
+
+    private String nameOf(String setupKey) {
+        try {
+            TipSetup s = db.currentTipSetup(setupKey);
+            return s == null ? setupKey : s.name;
+        }
+        catch (SQLException e) {
+            return setupKey;
+        }
+    }
+
+    /**
+     * Stores a dose-blocks step's result photos when the step ends (§22.4): kind result, source top-camera, the job,
+     * dose and coupon place, captioned "Top camera {HH:MM}: {n} {turn} test dots on the blank" (or "on {coupon}"),
+     * of the setup and needle the step ran with (a mount since does not move them to the new setup).
+     */
+    public List<Photo> storeResultPhotos(String jobId, DoseBlocksResult result) throws IOException, SQLException {
+        List<Photo> l = new ArrayList<>();
+        DispenseConfig c = cfg;
+        boolean ran = result.setupKey != null;
+        for (DoseBlocksResult.BlockPhoto bp : result.photos) {
+            if (bp.jpeg == null) {
+                continue;
+            }
+            int n = bp.block >= 0 && bp.block < result.blocks.size() ? result.blocks.get(bp.block).dots.size() : 0;
+            PhotoStore.Input in = new PhotoStore.Input();
+            in.bytes = bp.jpeg;
+            in.kind = Photo.KIND_RESULT;
+            in.source = Photo.SOURCE_TOP_CAMERA;
+            in.setupKey = ran ? result.setupKey : c.tip.key;
+            in.needleSinceMs = ran ? result.needleSinceMs : c.needleChangedAtMs;
+            in.jobId = jobId;
+            in.doseSteps = bp.doseSteps;
+            in.couponPlace = bp.couponPlace;
+            in.mmPerPx = bp.mmPerPx;
+            in.xMm = bp.xMm;
+            in.yMm = bp.yMm;
+            in.caption = "Top camera " + ZCheck.clock(System.currentTimeMillis()) + ": " + n + " "
+                    + DoseModel.turnName(bp.doseSteps) + " test " + (n == 1 ? "dot" : "dots") + " on "
+                    + (bp.couponPlace == null ? "the blank" : bp.couponPlace);
+            in.simulated = isSimulatorConfirmed();
+            l.add(photoStore.store(in));
+            bp.jpeg = null; // §22.4: the bytes leave with the step
+        }
+        return l;
+    }
+
+    /**
+     * Links photos to calibration records with a role (result | tip | reference, §22.4): only a photo of the record's
+     * setup (409 {@code setup-mismatch}), a bottom-camera picture only to records of its needle (409
+     * {@code needle-changed}). Returns the links written.
+     */
+    public List<Photo.Link> linkPhotos(List<Long> photoIds, List<Long> calibrationIds, String role)
+            throws SQLException {
+        String r = role == null ? Photo.ROLE_TIP : role;
+        if (!Photo.ROLE_RESULT.equals(r) && !Photo.ROLE_TIP.equals(r) && !Photo.ROLE_REFERENCE.equals(r)) {
+            throw new IllegalArgumentException("role must be result, tip or reference");
+        }
+        List<Photo> photos = new ArrayList<>();
+        for (Long id : photoIds) {
+            Photo p = db.photo(id);
+            if (p == null) {
+                throw new EngineRefusal(404, "not-found", "There is no picture " + id + ".");
+            }
+            for (Long cal : calibrationIds) {
+                PhotoStore.checkLink(db, p.setupKey, p.source, p.needleSinceMs, cal);
+            }
+            photos.add(p);
+        }
+        for (Long cal : calibrationIds) {
+            // the cap of tip pictures per record holds for links as for uploads (§22.4)
+            int adding = 0;
+            for (Photo p : photos) {
+                adding += Photo.KIND_TIP.equals(p.kind) && !p.links.contains(cal) ? 1 : 0;
+            }
+            PhotoStore.checkTipCount(db, cal, adding);
+        }
+        List<Photo.Link> links = new ArrayList<>();
+        for (Photo p : photos) {
+            for (Long cal : calibrationIds) {
+                links.add(db.insertPhotoLink(p.id, cal, r, p.operator));
+            }
+        }
+        return links;
     }
 
     /** Sets (true, now) or clears the engine's new-seat flag (§3.6); returns it. */
@@ -3594,6 +5481,7 @@ public final class DispenseService {
         r.boardName = board;
         r.calibrationId = calibrationId;
         r.dotsPlanned = dots;
+        r.setupKey = cfg.tip.key;
         return r;
     }
 
@@ -3601,6 +5489,7 @@ public final class DispenseService {
         if (!busy.compareAndSet(false, true)) {
             throw new IllegalStateException("a dispense task is already running");
         }
+        tasksStarted.incrementAndGet();
         long epoch = stopEpoch.get();
         Queued q = new Queued(r);
         queued = q;
@@ -3650,6 +5539,7 @@ public final class DispenseService {
         if (!busy.compareAndSet(false, true)) {
             throw new IllegalStateException("a dispense task is already running");
         }
+        tasksStarted.incrementAndGet();
         long epoch = stopEpoch.get();
         Queued q = new Queued(r);
         queued = q;
@@ -3968,7 +5858,7 @@ public final class DispenseService {
                 before.add(im.capture(d.x, d.y));
             }
             runSegment(() -> GcodeStreamBuilder.forDots(c, mapper, specs, bZeroed.get(), keepalive, primeAtWaste,
-                    primeExtra, "calibration dots"), "dispensing calibration dots");
+                    primeExtra, "calibration dots", tipXy(c)), "dispensing calibration dots");
             phase(r, "after images");
             List<T> found = new ArrayList<>();
             for (int i = 0; i < specs.size(); i++) {

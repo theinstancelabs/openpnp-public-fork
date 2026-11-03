@@ -14,7 +14,11 @@ public final class CheckInputs {
     public Map<String, TypeInfo> types = new HashMap<>();
     /** Lowest status allowed on a board (D/DispenseConfig.minPadTypeStatus). */
     public String gate = TypeInfo.CHARACTERIZED;
-    public Tip tip = Tip.g22();
+    /**
+     * The mounted tip setup with its dot table (tip setups design §22.2: D/DispenseService.mountedTip); required, the
+     * check refuses to run without it (IllegalArgumentException).
+     */
+    public Tip tip;
     /** The profile's dose (D/DispenseProfile.netStepsPerDot). */
     public int profileSteps = DoseModel.HALF;
     public int stepsPerRev = DoseModel.STEPS_PER_REV;
@@ -27,6 +31,11 @@ public final class CheckInputs {
      * pad; the chip family falls back to {@link Anchor#BENCH}.
      */
     public Map<String, Anchor> anchors = new HashMap<>();
+    /**
+     * Anchors of the other tip setups' validated, weighed versions (§22.2: the amount a joint needs is
+     * the paste's and the pad's, so they anchor every setup), each with its {@link Anchor#setupName}.
+     */
+    public List<Anchor> moreAnchors = new ArrayList<>();
     /** Current DispenseProfile.doseFingerprint() (§1.7). */
     public String doseFingerprint;
     /** Dots present (a plan). */

@@ -69,6 +69,8 @@ public final class ProfileCheck {
     public static final String FLAG_STATUS_BELOW_MIN = "STATUS_BELOW_MIN";
     /** Decision 11: the flag the planner sets on pads whose dots may bridge (dot gap below 0.20 mm). */
     public static final String FLAG_MAY_BRIDGE = "MAY_BRIDGE";
+    /** Tip setups (§22.2): the flag the planner sets on pads whose dose the mounted setup does not know. */
+    public static final String FLAG_DOSE_UNKNOWN = "DOSE_UNKNOWN";
 
     private ProfileCheck() {
     }
@@ -115,6 +117,11 @@ public final class ProfileCheck {
         public double odMm;
         public int minDotSteps;
         public double[] minDotMm;
+        /** Tip setups (§22.6): the setup's version and dispenser, and where its dot sizes come from. */
+        public int setupVersion;
+        public String dispenser;
+        /** bench | measured | none. */
+        public String dots;
     }
 
     public static final class Aperture {
@@ -182,6 +189,8 @@ public final class ProfileCheck {
         transient boolean dotsFromSuggestion;
         /** The package's undispensable pads in a few words ("0.80 mm apart", "0.61 mm wide"). */
         transient String otherPads;
+        /** §22.2: the type passes the gate but the setup does not know its dose (reason below-gate). */
+        transient boolean doseUnknown;
     }
 
     /** Everything the suggester and the decider share. */
@@ -199,9 +208,18 @@ public final class ProfileCheck {
         final Set<Integer> tipFails = new HashSet<>();
         final double dTip;
         final String typesFingerprint;
+        /**
+         * Tip setups (§22.2): the mounted setup's dot sizes and paste per turn are known (the bench model, or its
+         * measured smallest dose and a weighing). An unmeasured setup cannot say which pads it can dispense: no tip
+         * test, no plan, and every group with a gate reason gets {@link Suggestion#MEASURE_TIP}.
+         */
+        final boolean tipMeasured;
 
         Ctx(CheckInputs in) {
             this.in = in;
+            if (in.tip == null) {
+                throw new IllegalArgumentException("the profile check needs the mounted tip");
+            }
             List<PadInstance> geo = new ArrayList<>();
             for (PadInstance p : in.pads) {
                 if (p.hasGeometry()) {
@@ -212,21 +230,28 @@ public final class ProfileCheck {
             }
             nb = new Neighbours(geo);
             for (int s : DoseModel.ALLOWED_STEPS) {
-                views.put(s, Suggester.view(in.evidence, s));
+                views.put(s, Suggester.view(in.evidence, s, in.tip));
             }
-            views.computeIfAbsent(in.profileSteps, s -> Suggester.view(in.evidence, s));
-            Suggester.DoseView tipView = views.computeIfAbsent(tip().minDotSteps, s -> Suggester.view(in.evidence, s));
-            dTip = tipView.dGap;
+            views.computeIfAbsent(in.profileSteps, s -> Suggester.view(in.evidence, s, in.tip));
+            Suggester.DoseView tipView = views.computeIfAbsent(tip().minDotSteps, s -> Suggester.view(in.evidence, s,
+                    in.tip));
+            tipMeasured = (in.tip.benchModel || in.tip.isMeasured()) && tipView.known;
+            dTip = tipMeasured ? tipView.dGap : Double.NaN;
             typesFingerprint = fingerprint(in.types);
             collectAnchors();
         }
 
         Tip tip() {
-            return in.tip != null ? in.tip : Tip.g22();
+            return in.tip;
         }
 
         Suggester.DoseView view(int steps) {
-            return views.computeIfAbsent(steps, s -> Suggester.view(in.evidence, s));
+            return views.computeIfAbsent(steps, s -> Suggester.view(in.evidence, s, in.tip));
+        }
+
+        /** The tip knows the size and mass of the type's dose (its own, else the profile's), §22.2. */
+        boolean knowsDose(TypeInfo t) {
+            return view(t.dotSteps != null ? t.dotSteps : in.profileSteps).known;
         }
 
         /** Validated k = 1 types with a weighed mass per pad (§1.3), in key order (ties in anchorFor). */
@@ -240,6 +265,14 @@ public final class ProfileCheck {
             }
             for (Map.Entry<String, Anchor> e : new TreeMap<>(in.anchors).entrySet()) {
                 anchors.computeIfAbsent(e.getKey(), f -> new ArrayList<>()).add(e.getValue());
+            }
+            // §22.2: the amount a joint needs is the paste's and the pad's: other setups' validated pads anchor too
+            if (in.moreAnchors != null) {
+                for (Anchor a : in.moreAnchors) {
+                    if (a != null && a.family != null && a.areaMm2 > 0) {
+                        anchors.computeIfAbsent(a.family, f -> new ArrayList<>()).add(a);
+                    }
+                }
             }
             anchors.computeIfAbsent(Family.CHIP, f -> new ArrayList<>());
             if (anchors.get(Family.CHIP).isEmpty()) {
@@ -262,8 +295,9 @@ public final class ProfileCheck {
             return t != null && !t.retired && TypeInfo.rank(t.status) >= TypeInfo.rank(in.gate) && !otherTip(t);
         }
 
+        /** Decision 5 through the setups (§22.1): a version without a tip key is the seeded setup's. */
         boolean otherTip(TypeInfo t) {
-            return t != null && t.tipKey != null && !t.tipKey.equals(tip().key);
+            return t != null && !Tip.setupOf(t.tipKey).equals(tip().key);
         }
     }
 
@@ -278,8 +312,11 @@ public final class ProfileCheck {
         r.tip.name = tip.name;
         r.tip.odMm = tip.odMm;
         r.tip.minDotSteps = tip.minDotSteps;
-        r.tip.minDotMm = new double[] {Suggester.r3(DoseModel.dLoMm(tip.minDotSteps)),
-                Suggester.r3(DoseModel.dHiMm(tip.minDotSteps))};
+        r.tip.minDotMm = tip.knowsSize(tip.minDotSteps) ? new double[] {Suggester.r3(tip.dLoMm(tip.minDotSteps)),
+            Suggester.r3(tip.dHiMm(tip.minDotSteps))} : null;
+        r.tip.setupVersion = tip.setupVersion;
+        r.tip.dispenser = tip.dispenser;
+        r.tip.dots = tip.dotsSource();
         Map<String, Anchor> used = new LinkedHashMap<>();
         for (Group g : c.groups) {
             if (g.reason == null) {
@@ -343,6 +380,13 @@ public final class ProfileCheck {
         Ctx c = new Ctx(in);
         buildGroups(c);
         Tip tip = c.tip();
+        if (!c.tipMeasured) {
+            // §22.2: an unmeasured setup knows no dot size: no tip test, no plan; the reasons come from the types
+            for (Group g : c.groups) {
+                reason(c, g, tip);
+            }
+            return c;
+        }
         // §4.1 tip test: a centre dot of the tip's smallest dose on every opening of the board
         for (int i = 0; i < c.nb.size(); i++) {
             c.nb.setCentreDot(i, c.dTip / 2);
@@ -375,7 +419,9 @@ public final class ProfileCheck {
                 for (int i : g.idx) {
                     PadInstance p = c.nb.pads.get(i);
                     int s = p.dotSteps != null ? p.dotSteps : in.profileSteps;
-                    c.nb.setDots(i, p.dots, c.view(s).dGap / 2);
+                    if (c.view(s).known) {
+                        c.nb.setDots(i, p.dots, c.view(s).dGap / 2);
+                    }
                 }
             }
             else if (g.usableType) {
@@ -491,8 +537,9 @@ public final class ProfileCheck {
         }
         for (int at : rest.idx) {
             PadInstance p = c.nb.pads.get(at);
-            if (c.in.planned && p.dots != null && !p.dots.isEmpty()) {
-                c.nb.setDots(at, p.dots, c.view(p.dotSteps != null ? p.dotSteps : c.in.profileSteps).dGap / 2);
+            Suggester.DoseView pv = c.view(p.dotSteps != null ? p.dotSteps : c.in.profileSteps);
+            if (c.in.planned && p.dots != null && !p.dots.isEmpty() && pv.known) {
+                c.nb.setDots(at, p.dots, pv.dGap / 2);
             }
             else if (dots != null) {
                 c.nb.setDots(at, c.nb.toBoard(at, dots.local.get(at)), dots.view.dGap / 2);
@@ -674,7 +721,8 @@ public final class ProfileCheck {
                 g.typeStatus = g.type.status;
             }
         }
-        g.usableType = c.usable(g.type) && !(g.typeStatus != null && TypeInfo.rank(g.typeStatus) < TypeInfo.rank(c.in.gate));
+        g.usableType = c.usable(g.type) && !(g.typeStatus != null && TypeInfo.rank(g.typeStatus) < TypeInfo.rank(c.in.gate))
+                && c.tipMeasured && c.knowsDose(g.type);
         g.aperture = new Aperture();
         g.aperture.wMm = first.wMm;
         g.aperture.hMm = first.hMm;
@@ -723,6 +771,9 @@ public final class ProfileCheck {
         boolean noType = g.type == null || has(g, FLAG_NO_PAD_TYPE);
         boolean belowGate = !noType && (has(g, FLAG_STATUS_BELOW_MIN) || TypeInfo.rank(g.typeStatus) < TypeInfo.rank(c.in.gate)
                 || g.type.retired || c.otherTip(g.type));
+        // §22.2: a type at the gate whose dose the setup does not know is held back like one below it
+        g.doseUnknown = !noType && !belowGate && (!c.tipMeasured || !c.knowsDose(g.type) || has(g, FLAG_DOSE_UNKNOWN));
+        belowGate |= g.doseUnknown;
         boolean optIn = c.in.pastePartialPackages != null && c.in.pastePartialPackages.contains(g.packageIds.get(0));
         if (g.tipKind != null) {
             g.reason = TIP;
@@ -839,11 +890,16 @@ public final class ProfileCheck {
             case BELOW_GATE:
                 if (c.otherTip(t)) {
                     g.shortText = "calibrated for another tip";
-                    g.reasonText = Texts.belowGateTip(typeName, t.tipKey, tip.name);
+                    g.reasonText = Texts.belowGateTip(typeName, Tip.setupOf(t.tipKey), tip.name);
+                }
+                else if (g.doseUnknown) {
+                    g.shortText = "dots not measured for this tip";
+                    g.reasonText = Texts.doseUnknown(typeName, t.dotSteps != null ? t.dotSteps : c.in.profileSteps,
+                            tip.name);
                 }
                 else {
                     g.shortText = "not calibrated yet";
-                    g.reasonText = Texts.belowGate(typeName, g.typeStatus, c.in.gate);
+                    g.reasonText = Texts.belowGate(typeName, g.typeStatus, c.in.gate, tip.name, t.others);
                 }
                 break;
             case BRIDGE:

@@ -12,7 +12,8 @@
   const { isNum } = IL;
   const TABS = [['boards', 'Boards'], ['activity', 'Activity'], ['calibrations', 'Calibrations'], ['touch-offs', 'Touch-offs']];
   const R = { tab: 'boards', sel: null, panelKey: undefined, kind: 'boards', evFilter: 'all', events: null, evErr: null, evTimer: null,
-    last: null, lastLoading: null, plans: {}, planLoading: {}, ladders: {}, escOff: null };
+    last: null, lastLoading: null, plans: {}, planLoading: {}, ladders: {}, escOff: null,
+    pcals: null, pcalsErr: null, pcalsLoading: null, pcalsAt: 0, pcalsTip: 'all' };
   const serverToClient = IL.toClient;
 
   // ================================================================================== run helpers
@@ -30,6 +31,8 @@
       // the pad calibration's engine steps (PROFILE_CALIBRATION_DESIGN.md §13.5)
       case 'pad-ladder': return 'Pad calibration · blank';
       case 'pad-weigh': return 'Pad calibration · coupons';
+      // tip setups (PROFILE_CALIBRATION_DESIGN.md §22.4): the picture of the tip from below
+      case 'tip-picture': return 'Tip picture';
       default: return IL.cap(r.kind || 'Task');
     }
   }
@@ -121,7 +124,8 @@
       el('div', { class: 'rec-tools' }, el('div', { class: 'seg', role: 'group', 'aria-label': 'Which runs', id: 'rec-kind' }, segB, segA),
         el('span', { class: 'rec-sum', id: 'rec-runs-sum' }), el('span', { class: 'spacer' }), refresh),
       el('div', { class: 'rec-wrap' }, el('table', { class: 'tbl rec-tbl', id: 'rec-runs-t' },
-        el('thead', {}, el('tr', {}, [['When'], ['Board or task'], ['Status'], ['Outcome'], ['Dots', 'r'], ['DPH', 'r', 'Dots per hour: dots only (first to last dot) · overall (whole program)'], ['Profile']]
+        el('thead', {}, el('tr', {}, [['When'], ['Board or task'], ['Status'], ['Outcome'], ['Dots', 'r'], ['DPH', 'r', 'Dots per hour: dots only (first to last dot) · overall (whole program)'], ['Profile'],
+          ['Tip', null, 'The tip setup on the dispenser (— before tip setups were recorded)']]
           .map(([h, c, t]) => el('th', { text: h, class: c || null, title: t || null, scope: 'col' })))),
         el('tbody'))));
   }
@@ -135,14 +139,114 @@
         el('thead', {}, el('tr', {}, [['Time'], [''], ['Code'], ['What happened'], ['From']].map(([h]) => el('th', { text: h, scope: 'col' })))),
         el('tbody'))));
   }
+  /**
+   * Calibrations (PROFILE_CALIBRATION_DESIGN.md §22.7): the pad calibrations with their "calibrated for" label, tip,
+   * how, outcome and pictures (table#rec-pcals-t, GET /api/pad-calibrations, filtered per tip); the volume-model records
+   * of before (table#rec-cals-t) under "Older calibration records".
+   */
   function calsTab() {
+    const refresh = el('button', { type: 'button', class: 'btn btn--sm btn--quiet' }, IL.icon('i-refresh'), 'Refresh');
+    refresh.addEventListener('click', () => IL.act(refresh, () => loadPcals(true)));
     return el('section', { class: 'card rec-card', id: 'records-cals', 'data-tab-panel': 'calibrations', hidden: true },
-      el('div', { class: 'rec-tools' }, el('span', { class: 'rec-sum', id: 'rec-cals-sum' }), el('span', { class: 'spacer' }),
+      el('div', { class: 'rec-tools' }, el('div', { class: 'seg', role: 'group', 'aria-label': 'Which tips', id: 'rec-pcals-tips' }),
+        el('span', { class: 'rec-sum', id: 'rec-pcals-sum' }), el('span', { class: 'spacer' }), refresh,
         el('button', { type: 'button', class: 'btn btn--sm btn--quiet', onclick: () => IL.go('#calibrate/records') }, 'Calibrate', IL.icon('i-chev'))),
-      el('div', { class: 'rec-wrap' }, el('table', { class: 'tbl rec-tbl', id: 'rec-cals-t' },
-        el('thead', {}, el('tr', {}, [['#'], ['Saved'], ['Method'], ['Status'], ['q', 'r', 'mm³ per screw turn'], ['CV', 'r'], ['n', 'r'], ['Set psi', 'r'], ['Tip']]
+      el('div', { class: 'rec-wrap' }, el('table', { class: 'tbl rec-tbl rec-pcals', id: 'rec-pcals-t' },
+        el('thead', {}, el('tr', {}, [['When'], ['Calibrated for'], ['Tip'], ['How'], ['Outcome'], ['Pictures']]
           .map(([h, c, t]) => el('th', { text: h, class: c || null, title: t || null, scope: 'col' })))),
-        el('tbody'))));
+        el('tbody'))),
+      el('details', { class: 'disclose rec-cals-old', id: 'rec-cals-old' }, el('summary', {}, 'Older calibration records (volume model, records only)', el('span', { class: 'rec-sum', id: 'rec-cals-sum' })),
+        el('div', { class: 'rec-wrap' }, el('table', { class: 'tbl rec-tbl', id: 'rec-cals-t' },
+          el('thead', {}, el('tr', {}, [['#'], ['Saved'], ['Method'], ['Status'], ['q', 'r', 'mm³ per screw turn'], ['CV', 'r'], ['n', 'r'], ['Set psi', 'r'], ['Tip']]
+            .map(([h, c, t]) => el('th', { text: h, class: c || null, title: t || null, scope: 'col' })))),
+          el('tbody')))));
+  }
+  // ---------------------------------------------------------------- pad calibrations (§22.7)
+  const tipsList = () => { const d = IL.tips && IL.tips.data(); return d ? d.setups || [] : []; };
+  const tipsSig = () => tipsList().map((x) => x.key + ':' + x.name).join('|');
+  function tipNameOf(key) { const x = tipsList().find((t) => t.key === key); return x ? x.name : key; }
+  /** GET /api/pad-calibrations (the tip filter: ?setup=): every 10 s at most while shown, and when asked. */
+  function loadPcals(force) {
+    if (R.pcalsLoading) return R.pcalsLoading;
+    if (!force && R.pcals && R.pcalsFor === R.pcalsTip && Date.now() - R.pcalsAt < 10000) return Promise.resolve(R.pcals);
+    const tip = R.pcalsTip;
+    R.pcalsLoading = IL.api('GET', '/api/pad-calibrations?limit=100' + (tip !== 'all' ? '&setup=' + encodeURIComponent(tip) : ''))
+      .then((l) => { R.pcals = Array.isArray(l) ? l : []; R.pcalsErr = null; R.pcalsFor = tip; }, (e) => { R.pcalsErr = IL.errorText(e); })
+      .then(() => { R.pcalsLoading = null; R.pcalsAt = Date.now(); IL.render(); return R.pcals; });
+    return R.pcalsLoading;
+  }
+  IL.on('photos', () => { if (IL.active() === 'records') loadPcals(true); });
+  IL.on('taskend', () => { R.pcalsAt = 0; });
+  /** The pad type's display name ("Chip 0603") from Profile's list when it is read, else its key. */
+  function typeWords(key) {
+    const d = pcr.padTypes && pcr.padTypes();
+    const t = d ? d.families.flatMap((f) => f.types).find((x) => x.typeKey === key) : null;
+    if (!t) return key;
+    const fam = String(t.family || '').replace(/\s*\([^)]*\)\s*/g, ' ').trim();
+    return (/^\S+$/.test(fam) && !/^custom$/i.test(fam) && !String(t.name || '').includes(' · ') ? fam + ' ' : '') + t.name;
+  }
+  /** A record's check in words (its stored text is short: "ok", "132 dots"). */
+  const CHECK = {
+    optical: (k) => 'Camera checks on the blank: ' + (k.measured || k.text || '—'),
+    mass: (k) => 'Weighed ' + (k.measured || '—') + (k.predicted ? ' (predicted ' + k.predicted + ')' : '') + (k.limit ? '; ' + k.limit : ''),
+    amount: (k) => 'Amount ' + (k.measured || '—') + (k.predicted ? ' (target ' + k.predicted + (k.limit ? ', ' + k.limit : '') + ')' : ''),
+    r6: (k) => (k.measured || k.text || '') + (k.limit ? ' (' + k.limit + ')' : ''),
+    geometry: (k) => (k.measured || 'Geometry') + (k.limit ? ' (limits ' + k.limit + ')' : ''),
+    control: (k) => (k.pass ? 'The control dot matched' : 'The control dot did not match') + (k.text && k.text !== 'ok' ? ': ' + k.text : ''),
+    tip: (k, x) => (k.pass ? 'Made with the ' : 'Not made with the ') + (x.setupName || 'mounted tip'),
+    regulator: (k) => (k.pass ? 'The regulator read at the profile’s pressure' : 'The regulator: ' + k.text),
+    validated: (k) => (k.pass ? 'No validated pad type was changed' : k.text),
+  };
+  const checkWords = (k, x) => (CHECK[k.key] ? CHECK[k.key](k, x) : k.text || [k.key, k.measured, k.limit].filter(Boolean).join(': '));
+  const OUTCOME_KIND = { characterized: 'ok', validated: 'ok', measured: 'ok', partly: 'need', provisional: 'need', failed: 'block', stopped: 'block', cancelled: 'off' };
+  function outcomeBadge(x) {
+    if ((x.flags || []).includes('wrong-tip')) return el('span', { class: 'badge badge--block', title: 'Made with another tip: its versions were restored' }, IL.glyph('block', 'xs'), el('span', { text: 'wrong tip' }));
+    if (pcr.STATUS[x.outcome]) return pcr.badge(x.outcome);
+    const k = OUTCOME_KIND[x.outcome] || 'off';
+    return el('span', { class: 'badge badge--' + k }, IL.glyph(k, 'xs'), el('span', { text: x.outcome || '—' }));
+  }
+  /** span.rec-thumbs: three thumbnail buttons, then "+n" (removed pictures are not shown here). */
+  function thumbs(x) {
+    const live = (x.photos || []).filter((p) => !p.removedAtMs);
+    if (!live.length) return el('span', { class: 'dim', text: '—' });
+    const out = live.slice(0, 3).map((p) => {
+      const b = el('button', { type: 'button', class: 'photo-thumb rec-thumb', 'data-photo': p.id, title: (p.caption || 'Picture') + ': open' },
+        el('img', { src: p.thumbUrl, alt: p.caption || 'Picture ' + p.id, width: '40', height: '30', loading: 'lazy' }));
+      b.addEventListener('click', (ev) => { ev.stopPropagation(); IL.photos.view(p, { list: live, from: b }); });
+      return b;
+    });
+    if (live.length > 3) {
+      const more = el('button', { type: 'button', class: 'photo-thumb rec-thumb rec-thumb--more', title: 'All ' + live.length + ' pictures' }, '+' + (live.length - 3));
+      more.addEventListener('click', (ev) => { ev.stopPropagation(); IL.go('#records/calibrations/p' + x.id); });
+      out.push(more);
+    }
+    return el('span', { class: 'rec-thumbs' }, out);
+  }
+  function renderPcals() {
+    const tips = tipsList().filter((x) => !x.retired || x.key === R.pcalsTip);
+    IL.keyed($('rec-pcals-tips'), JSON.stringify([tips.map((x) => [x.key, x.name]), R.pcalsTip]), () => [['all', 'All tips']].concat(tips.map((x) => [x.key, x.name])).map(([k, t]) => {
+      const b = el('button', { type: 'button', 'data-tip': k, 'aria-pressed': String(k === R.pcalsTip) }, t);
+      b.addEventListener('click', () => { R.pcalsTip = k; loadPcals(true); IL.render(); });
+      return b;
+    }));
+    if (!R.pcals || R.pcalsFor !== R.pcalsTip || Date.now() - R.pcalsAt > 10000) loadPcals();
+    const list = R.pcals && R.pcalsFor === R.pcalsTip ? R.pcals : null;
+    const sel = R.tab === 'calibrations' ? R.sel : null;
+    IL.setText($('rec-pcals-sum'), R.pcalsErr ? 'Could not load the pad calibrations: ' + R.pcalsErr : !list ? 'Loading…' : IL.plural(list.length, 'pad calibration'));
+    const key = JSON.stringify([list ? list.map((x) => [x.id, x.label, x.flags, (x.photos || []).map((p) => [p.id, p.removedAtMs])]) : null, sel, R.pcalsErr, !!(pcr.padTypes && pcr.padTypes())]);
+    IL.keyed($('rec-pcals-t').tBodies[0], key, () => {
+      if (!list) return el('tr', {}, el('td', { colspan: '6', class: 'muted rec-empty', text: R.pcalsErr ? 'Could not load the pad calibrations: ' + R.pcalsErr : 'Loading the pad calibrations…' }));
+      if (!list.length) return el('tr', {}, el('td', { colspan: '6', class: 'muted rec-empty', id: 'rec-pcals-empty', text: R.pcalsTip === 'all' ? 'No pad calibrations yet: Profile › Needs a profile › Calibrate automatically.'
+        : 'No pad calibrations with the ' + tipNameOf(R.pcalsTip) + ' yet.' }));
+      return list.map((x) => clickRow('#records/calibrations/p' + x.id, 'pcal:' + x.id, sel === 'p' + x.id,
+        el('span', { title: IL.fmtAgo(serverToClient(x.createdAtMs), Date.now()) }, IL.fmtDateTime(serverToClient(x.createdAtMs))),
+        [el('td', { class: 'rec-label' }, el('div', { class: 'rec-label__t', text: x.label || '—' }),
+          el('div', { class: 'rec-label__s', text: typeWords(x.typeKey) + (isNum(x.versionTo) ? ' · v' + x.versionTo : '') })),
+        el('td', { class: 'rec-name', text: x.setupName || x.setupKey || '—' }),
+        el('td', { class: 'nowrap', text: x.method === 'by-hand' ? 'by hand' : 'automatic' }),
+        el('td', {}, outcomeBadge(x)),
+        el('td', {}, thumbs(x))], (x.flags || []).includes('wrong-tip') ? 'is-bad' : ''));
+    });
   }
   function touchTab() {
     return el('section', { class: 'card rec-card', id: 'records-touchoffs', 'data-tab-panel': 'touch-offs', hidden: true },
@@ -174,13 +278,14 @@
     IL.setClass($('rec-runs-sum'), 'rec-sum' + (lerr ? ' reason--block' : ''));
     const sel = R.tab === 'boards' ? R.sel : null;
     const lr = S.status && S.status.lastRun;
-    const key = JSON.stringify([list.map((r) => [r.id, r.status, r.dots_done]), R.kind, sel, Object.keys(R.plans).length, (R.planList || []).length, lr ? lr.runId : '', S.plan ? S.plan.planId : '', lerr ? lerr.text : '']);
+    const key = JSON.stringify([list.map((r) => [r.id, r.status, r.dots_done]), R.kind, sel, Object.keys(R.plans).length, (R.planList || []).length, lr ? lr.runId : '', S.plan ? S.plan.planId : '', lerr ? lerr.text : '',
+      tipsSig()]);
     IL.keyed($('rec-runs-t').tBodies[0], key, () => {
       if (!list.length && lerr) {
-        return el('tr', {}, el('td', { colspan: '7', class: 'rec-empty' }, el('div', { class: 'notebox notebox--block' }, 'Could not load the runs: ' + lerr.text + ' ',
+        return el('tr', {}, el('td', { colspan: '8', class: 'rec-empty' }, el('div', { class: 'notebox notebox--block' }, 'Could not load the runs: ' + lerr.text + ' ',
           el('button', { type: 'button', class: 'btn btn--sm', onclick: () => IL.loadRuns() }, IL.icon('i-refresh'), 'Retry'))));
       }
-      if (!list.length) return el('tr', {}, el('td', { colspan: '7', class: 'muted rec-empty', text: S.runs === null ? 'Loading the runs…' : R.kind === 'boards' ? 'No board runs yet. Board runs appear here when they end; choose All tasks for prime, test dots and calibration runs.' : 'No runs yet.' }));
+      if (!list.length) return el('tr', {}, el('td', { colspan: '8', class: 'muted rec-empty', text: S.runs === null ? 'Loading the runs…' : R.kind === 'boards' ? 'No board runs yet. Board runs appear here when they end; choose All tasks for prime, test dots and calibration runs.' : 'No runs yet.' }));
       return list.map((r) => {
         const start = serverToClient(r.started_at);
         const prof = profileOf(r);
@@ -194,7 +299,8 @@
             el('td', { class: 'r nowrap', title: dph ? 'dots only ' + IL.fmtInt(r.dph_motion) + ' · overall ' + IL.fmtInt(r.dph_overall) : null },
               dph ? [el('b', { text: IL.fmtInt(r.dph_motion) }), el('span', { class: 'dim', text: ' · ' + IL.fmtInt(r.dph_overall) })] : el('span', { class: 'dim', text: '—' })),
             el('td', { class: 'rec-prof', title: prof ? IL.profileText(prof) : r.kind !== 'board' ? null : 'The profile is stored with the plan; OpenPnP keeps only the last 20 plans in memory' },
-              prof ? prof.name : el('span', { class: 'dim', text: r.kind === 'board' && R.planListLoading ? '…' : '—' }))],
+              prof ? prof.name : el('span', { class: 'dim', text: r.kind === 'board' && R.planListLoading ? '…' : '—' })),
+            el('td', { class: 'rec-name', text: r.setup_key ? tipNameOf(r.setup_key) : '—', title: r.setup_key ? r.setup_key : 'before tip setups were recorded' })],
           r.status === 'ABORTED' || r.status === 'ERROR' ? 'is-bad' : '');
       });
     });
@@ -415,6 +521,93 @@
       el('p', { class: 'panel__lead', text: 'A record only: boards use the dispense profile.' })];
     });
   }
+  /**
+   * A pad calibration (#records/calibrations/p<id>, §22.7): its label (editable), tip, type and versions, checks, the
+   * pictures full width with Add a photo… (upload only: Records stays motion-free) and the evidence; Open the result
+   * while the job is one of the 5 kept in memory; Made with another tip….
+   */
+  function pcalDetail(p, s, id) {
+    const x = (R.pcals || []).find((k) => String(k.id) === String(id));
+    if (!x && !R.pcalsLoading && R.pcalsTip !== 'all') { R.pcalsTip = 'all'; loadPcals(true); }
+    const live = x ? (x.photos || []).filter((ph) => !ph.removedAtMs) : [];
+    const gone = x ? (x.photos || []).filter((ph) => ph.removedAtMs) : [];
+    const flagged = !!x && (x.flags || []).includes('wrong-tip');
+    const key = JSON.stringify([id, !!x, x ? [x.labelAuto, live.map((ph) => ph.id), gone.length, flagged, x.jobInMemory, x.outcome] : null]);
+    const built = IL.keyed(p.body, key, () => {
+      if (!x) return el('p', { class: 'panel__lead', text: R.pcalsLoading || !R.pcals ? 'Loading…' : 'No pad calibration #' + id + ' among the last 100.' });
+      const lab = el('textarea', { class: 'input rec-label__in', id: 'rec-label', rows: '2', maxlength: '160', 'aria-label': 'Calibrated for (1 to 160 characters)' });
+      lab.value = x.label || '';
+      const save = el('button', { type: 'button', class: 'btn btn--sm', id: 'btn-rec-label' }, 'Save the label');
+      save.addEventListener('click', () => IL.act(save, async () => {
+        const text = String(lab.value).replace(/\s+/g, ' ').trim();
+        if (!text || text.length > 160) throw new IL.ApiError(400, { error: 'label', reason: 'The label must be 1 to 160 characters.' }, 'The label must be 1 to 160 characters.');
+        const r = await IL.api('PUT', '/api/pad-calibrations/' + x.id + '/label', { label: text });
+        R.labelDirty = false;
+        await loadPcals(true);
+        return r;
+      }, { ok: 'Label saved.' }));
+      lab.addEventListener('input', () => { R.labelDirty = lab.value !== (x.label || ''); lab.classList.toggle('input--dirty', R.labelDirty); });
+      lab.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); save.click(); } });
+      const auto = el('button', { type: 'button', class: 'link', 'data-action': 'label-auto', hidden: x.labelAuto !== false }, 'Use the automatic label');
+      auto.addEventListener('click', () => IL.act(auto, async () => { const r = await IL.api('PUT', '/api/pad-calibrations/' + x.id + '/label', { auto: true }); R.labelDirty = false; await loadPcals(true); return r; },
+        { ok: 'The automatic label is back.' }));
+      const ch = IL.photos.chooser({ id: 'btn-rec-upload', inputId: 'rec-file', label: 'Add a photo…', cls: 'btn btn--sm', onFile: (f) => recUpload(f, x, ch.btn) });
+      R.recUploadBtn = ch.btn;
+      const open = el('button', { type: 'button', class: 'btn btn--sm', id: 'btn-rec-open' }, 'Open the result', IL.icon('i-chev'));
+      open.addEventListener('click', () => IL.go('#records/calibrations/p' + x.id + '?panel=pad-cal&job=' + encodeURIComponent(x.jobId)));
+      const wrong = el('button', { type: 'button', class: 'btn btn--sm btn--quiet', id: 'btn-rec-wrongtip' }, 'Made with another tip…');
+      IL.press2(wrong, 'made with another tip', async () => {
+        const r = await IL.api('POST', '/api/pad-calibrations/' + x.id + '/wrong-tip', {});
+        await loadPcals(true);
+        if (pcr.loadPadTypes) pcr.loadPadTypes();
+        IL.planRefreshSoon();
+        if (IL.tips) IL.tips.openChange({});
+        return r;
+      }, { ok: (r) => (r && r.text) || 'Flagged: made with another tip.' });
+      const checks = Array.isArray(x.checks) ? x.checks : [];
+      const ev = Array.isArray(x.evidence) ? x.evidence : [];
+      return [
+        el('div', { class: 'rec-ph' }, el('div', { class: 'eyebrow', text: 'Pad calibration #' + x.id + ' · ' + (x.method === 'by-hand' ? 'by hand' : 'automatic') }),
+          el('h2', { class: 'rec-ph__n', text: typeWords(x.typeKey) + (isNum(x.versionTo) ? ' · v' + x.versionTo : '') }),
+          el('div', { class: 'rec-ph__s' }, outcomeBadge(x), el('span', { text: IL.fmtDateTime(serverToClient(x.createdAtMs)) }))),
+        x.message ? el('div', { class: 'notebox', text: x.message }) : null,
+        el('div', { class: 'rec-label-ed', 'data-refusals': '', 'data-enter-submits': 'btn-rec-label' },
+          el('label', { class: 'field__l', for: 'rec-label' }, el('span', { text: OUTCOME_KIND[x.outcome] === 'ok' ? 'Calibrated for' : 'Calibration for' }), el('span', { class: 'unit', text: '1 to 160 characters' })),
+          lab, el('div', { class: 'btn-row' }, save, auto)),
+        el('dl', { class: 'kv kv--wrap kv--cols' }, [
+          ['Tip', (x.setupName || x.setupKey || '—')], ['Pad type', x.typeKey + ' · ' + (isNum(x.versionFrom) ? 'v' + x.versionFrom + ' → ' : '') + (isNum(x.versionTo) ? 'v' + x.versionTo : 'no new version')],
+          ['Dose', isNum(x.steps) ? (x.dotsPerPad || '—') + ' × ' + IL.turnLabel(x.steps) + (isNum(x.massPerPadMg) ? ' · ' + IL.fmt(x.massPerPadMg, 2) + ' mg per pad' : '') : '—'],
+          ['Job', x.jobId || '—'], ['Evidence', ev.length ? IL.plural(ev.length, 'dose record') + ': ' + ev.join(', ') : '—'],
+        ].flatMap(([a, b]) => [el('dt', { text: a }), el('dd', { text: IL.nb(String(b)) })])),
+        checks.length ? el('ul', { class: 'pcal__checks' }, checks.map((k) => el('li', { class: k.pass === false ? 'bad' : null }, IL.glyph(k.pass === false ? 'block' : 'ok', 'xs'),
+          el('span', { text: checkWords(k, x) })))) : null,
+        IL.sectionK('Pictures', live.length || null),
+        live.length ? el('div', { class: 'rec-photos' }, live.map((ph) => {
+          const b = el('button', { type: 'button', class: 'photo-thumb rec-photo__b', 'data-photo': ph.id, title: (ph.caption || 'Picture') + ': open' },
+            el('img', { src: ph.thumbUrl, alt: ph.caption || 'Picture ' + ph.id, loading: 'lazy' }));
+          b.addEventListener('click', () => IL.photos.view(ph, { list: live, from: b, onChange: () => loadPcals(true) }));
+          return el('figure', { class: 'rec-photo' }, b, el('figcaption', { text: (ph.caption || 'Picture') + ' · ' + IL.fmtDateTime(serverToClient(ph.atMs)) }));
+        })) : el('p', { class: 'muted', id: 'rec-photos-none', text: 'No picture with this calibration yet.' }),
+        gone.length ? el('p', { class: 'panel__lead rec-photos-gone', text: gone.map((ph) => '1 picture removed ' + IL.fmtDateTime(serverToClient(ph.removedAtMs)) + (ph.removedWhy ? ' (' + ph.removedWhy + ')' : '')).join(' · ') }) : null,
+        el('div', { class: 'rec-upload', 'data-refusals': '' }, el('div', { class: 'btn-row' }, ch.btn, ch.input), el('div', { class: 'reason', id: 'rec-upload-why', hidden: true }),
+          IL.photos.dropZone({ id: 'rec-drop', onFile: (f) => recUpload(f, x, null) })),
+        el('div', { class: 'btn-row rec-pcal-acts', 'data-refusals': '' }, x.jobInMemory ? open : null, flagged ? null : wrong),
+        x.jobInMemory ? null : el('p', { class: 'panel__lead', text: 'Its result card is no longer in OpenPnP’s memory (it keeps the last 5 calibrations since its start).' })];
+    });
+    if (x && !built) {
+      const lab = $('rec-label');
+      if (lab && document.activeElement !== lab && !R.labelDirty && lab.value !== (x.label || '')) lab.value = x.label || '';
+    }
+    if (R.recUploadBtn) IL.gate(R.recUploadBtn, IL.tips ? IL.tips.chooserLock(s) : null, $('rec-upload-why'));
+  }
+  /** A picture for a calibration from Records: uploaded as the record's tip's (kind tip), linked to it. */
+  function recUpload(file, x, btn) {
+    return IL.act(btn, async () => {
+      const ph = await IL.photos.send(file, { kind: 'tip', setup: x.setupKey, calibrations: [x.id], caption: 'Picture of the ' + (x.setupName || 'tip') + ' (uploaded)' });
+      await loadPcals(true);
+      return ph;
+    }, { ok: 'Picture added to calibration #' + x.id + '.', refusalIn: document.querySelector('#panel .rec-upload') });
+  }
   function touchDetail(p, s, id) {
     const d = pcr.calibrations && pcr.calibrations();
     const t = d && (d.touchOffs || []).find((x) => String(x.id) === String(id));
@@ -450,7 +643,7 @@
         mini('Best DPH', best ? IL.fmtInt(best.dph_motion) : '—', best ? 'dots only · overall ' + IL.fmtInt(best.dph_overall) : 'dots only')),
       last ? el('div', {}, IL.sectionK('Last board'), el('button', { type: 'button', class: 'rec-last', onclick: () => IL.go('#records/boards/' + last.run_uuid) },
         statusCell(last.status), el('div', { class: 'rec-last__t' }, el('b', { text: last.board || 'Board' }), el('span', { text: outcome(last) + ' · ' + IL.fmtDateTime(serverToClient(last.started_at)) })), IL.icon('i-chev'))) : null,
-      el('p', { class: 'panel__lead', text: { boards: 'Choose a run to see its timings, the done-dot map and, for a stopped board, how to finish it.', activity: 'OpenPnP’s dispense log and what this page did, newest first.', calibrations: 'Choose a calibration to see its record and dot ladder.', 'touch-offs': 'Choose a row to see the gaps and dots of a touch-off.' }[R.tab] }),
+      el('p', { class: 'panel__lead', text: { boards: 'Choose a run to see its timings, the done-dot map and, for a stopped board, how to finish it.', activity: 'OpenPnP’s dispense log and what this page did, newest first.', calibrations: 'Choose a pad calibration to see what it was calibrated for, its pictures and checks.', 'touch-offs': 'Choose a row to see the gaps and dots of a touch-off.' }[R.tab] }),
     ]);
   }
   function renderPanel(p, s, first) {
@@ -460,7 +653,7 @@
       const r = runs().find((x) => x.run_uuid === R.sel);
       if (!r) { IL.keyed(p.body, 'missing' + R.sel + (S.runs ? 1 : 0), () => el('div', { class: 'notebox notebox--need', text: S.runs ? 'This run is not among the last 50.' : 'Loading…' })); return; }
       runDetail(p, s, r);
-    } else if (R.tab === 'calibrations') calDetail(p, s, R.sel);
+    } else if (R.tab === 'calibrations') { if (/^p\d+$/.test(R.sel)) pcalDetail(p, s, R.sel.slice(1)); else calDetail(p, s, R.sel); }
     else if (R.tab === 'touch-offs') touchDetail(p, s, R.sel);
     else summary(p, s);
   }
@@ -493,6 +686,7 @@
     },
     show() {
       IL.loadRuns();
+      loadPcals();
       if (pcr.loadCalibrations) pcr.loadCalibrations();
       if (R.tab === 'activity') startEvents();
     },
@@ -511,11 +705,11 @@
       const all = runs(), d = pcr.calibrations && pcr.calibrations();
       IL.setText($('rec-n-boards'), S.runs ? String(all.filter((r) => r.kind === 'board').length) : '');
       IL.setText($('rec-n-activity'), '');
-      IL.setText($('rec-n-calibrations'), d ? String(d.calibrations.length) : '');
+      IL.setText($('rec-n-calibrations'), R.pcals && R.pcalsFor === 'all' ? String(R.pcals.length) : '');
       IL.setText($('rec-n-touch-offs'), d ? String((d.touchOffs || []).length) : '');
       if (R.tab === 'boards') renderRuns();
       else if (R.tab === 'activity') renderEvents();
-      else if (R.tab === 'calibrations') renderCals();
+      else if (R.tab === 'calibrations') { renderPcals(); renderCals(); }
       else renderTouchOffs();
     },
     panel(p, s, first) { renderPanel(p, s, first); },

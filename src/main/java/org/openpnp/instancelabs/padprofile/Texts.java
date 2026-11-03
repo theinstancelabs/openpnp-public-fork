@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -204,9 +205,94 @@ public final class Texts {
                 + "until a pad type is chosen.";
     }
 
-    public static String belowGate(String typeName, String status, String gate) {
-        return typeName + " is not calibrated yet (status: " + statusWord(status) + "). Boards need pad types that are "
-                + "at least " + statusWord(gate) + ": calibrate it automatically or by hand.";
+    /**
+     * Tip setups (§22.2): the below-gate text of a type for the mounted setup, with the other setups' statuses:
+     * "{type} is not calibrated for the {S} yet (status: {status}; {other status} for the {other setup}). Boards need
+     * pad types that are at least {gate}: calibrate it for this tip automatically or by hand."
+     */
+    public static String belowGate(String typeName, String status, String gate, String setupName,
+            List<TypeInfo.Other> others) {
+        StringBuilder b = new StringBuilder(typeName).append(" is not calibrated for the ").append(setupName)
+                .append(" yet (status: ").append(statusWord(status));
+        if (others != null) {
+            for (TypeInfo.Other o : others) {
+                b.append("; ").append(statusWord(o.status)).append(" for the ").append(o.setupName);
+            }
+        }
+        return b.append("). Boards need pad types that are at least ").append(statusWord(gate))
+                .append(": calibrate it for this tip automatically or by hand.").toString();
+    }
+
+    /**
+     * The "calibrated for" label of a calibration record (§22.5): "{type} · {setup} · {dispenser} · {psi} psi ·
+     * {paste}{ lot {lot}}", the type as Profile names it (family word and name; a name holding "·" in brackets);
+     * over 160 characters the paste, then the type, is cut with "…". E.g. "Chip 0603 · 22G bent taper · Vieweg
+     * DV-5005 · 18 psi · Loctite GC50 SAC305 T5".
+     */
+    public static String calLabel(String family, String typeName, String setupName, String dispenser,
+            double pressurePsi, String pasteName, String pasteLot) {
+        String type = typeWords(family, typeName);
+        String middle = " · " + setupName + " · " + dispenser + " · "
+                + BigDecimal.valueOf(pressurePsi).stripTrailingZeros().toPlainString() + " psi · ";
+        String paste = (pasteName == null ? "" : pasteName)
+                + (pasteLot == null || pasteLot.trim().isEmpty() ? "" : " lot " + pasteLot.trim());
+        String label = type + middle + paste;
+        if (label.length() <= MAX_LABEL) {
+            return label;
+        }
+        // the paste first, then the type, cut with "…"
+        int room = MAX_LABEL - type.length() - middle.length();
+        if (room >= 2) {
+            return type + middle + cut(paste, room);
+        }
+        String noPaste = middle + cut(paste, 2);
+        return cut(type, MAX_LABEL - noPaste.length()) + noPaste;
+    }
+
+    /** The longest "calibrated for" label (§22.5). */
+    public static final int MAX_LABEL = 160;
+
+    /**
+     * A pad type as Profile names it (W/padprofile.js typeLabel): the family's word (its note in brackets dropped)
+     * before the name when it is one word and not Custom, "Chip 0603"; a name holding "·" keeps its first part and
+     * the rest in brackets, "SOT-23 (1.48 × 0.60 mm)".
+     */
+    public static String typeWords(String family, String typeName) {
+        String name = typeName == null ? "" : typeName.trim();
+        if (name.contains("·")) {
+            String[] parts = name.split("\\s*·\\s*");
+            StringBuilder rest = new StringBuilder();
+            for (int i = 1; i < parts.length; i++) {
+                if (!parts[i].isEmpty()) {
+                    rest.append(rest.length() == 0 ? "" : ", ").append(parts[i]);
+                }
+            }
+            name = parts[0] + (rest.length() == 0 ? "" : " (" + rest + ")");
+        }
+        String fam = family == null ? "" : family.replaceAll("\\s*\\([^)]*\\)\\s*", " ").replaceAll("\\s+", " ")
+                .trim();
+        return fam.matches("\\S+") && !"custom".equalsIgnoreCase(fam) && !(typeName != null && typeName.contains("·"))
+                ? fam + " " + name : name;
+    }
+
+    /** s cut to at most n characters, the last of them "…". */
+    private static String cut(String s, int n) {
+        return s.length() <= n ? s : n <= 1 ? "…" : s.substring(0, n - 1).trim() + "…";
+    }
+
+    /**
+     * Tip setups (§22.2): a type whose dose the mounted setup's dot table does not know at the current recipe and
+     * paste (the planner's DOSE_UNKNOWN).
+     */
+    public static String doseUnknown(String typeName, int steps, String setupName) {
+        return typeName + " uses " + DoseModel.turnName(steps) + " dots, which the " + setupName + " never measured at "
+                + "this recipe and paste: measure its dots (Setup › Dispenser & tip).";
+    }
+
+    /** §22.2: the measure-tip suggestion of an unmeasured setup. */
+    public static String measureTip(String setupName) {
+        return "Measure the " + setupName + "'s dots first (Setup › Dispenser & tip › Measure its dots, ≈ 8 min and two "
+                + "coupons to weigh): suggestions need its dot sizes and paste per turn.";
     }
 
     /** A type calibrated with another tip blocks like a type below the gate (main-thread decision 5). */

@@ -31,6 +31,7 @@ public class InterlocksTest {
         in.purgeDots = c.profile.purgeDots;
         in.opticalCheckAvailable = true;
         in.controllerConnectedAtMs = 2500L;
+        in.xyChecked = true; // tip setups §22.3: where the needle lands is checked
         return in;
     }
 

@@ -62,7 +62,7 @@ public class ZFrameTest {
         pads.add(new PadGeometry("R24.1", 359.584, 131.569, 0, 0.8, 0.95, boardZ, t));
         pads.add(new PadGeometry("R1.1", 333.581, 157.339, 0, 0.8, 0.95, boardZ, t));
         pads.add(new PadGeometry("D12.1", 318.494, 144.152, 0, 0.8, 0.95, boardZ, t));
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(Collections.singletonList(t), null))
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(Collections.singletonList(t), null))
                 .withSurface(DispenseService.planeOf(c, c.boardSurfaceName)).plan("ftp", pads, 290, 125);
         p.boardRegistration = SEAT;
         return p;
@@ -80,6 +80,7 @@ public class ZFrameTest {
     static InterlockReport check(DispenseConfig c, DispensePlan p, Interlocks.Scope scope, Long home,
             ZCheck.Result z) {
         Interlocks.Inputs in = new Interlocks.Inputs();
+        in.xyChecked = true; // tip setups §22.3: where the needle lands is checked
         in.cfg = c;
         in.machineEnabled = true;
         in.machineHomed = true;
@@ -113,6 +114,7 @@ public class ZFrameTest {
         DispensePlan p = plan(c, 5.5);
         c.surfaces.get("board").simulated = true;
         Interlocks.Inputs in = new Interlocks.Inputs();
+        in.xyChecked = true; // tip setups §22.3: where the needle lands is checked
         in.cfg = c;
         in.machineEnabled = true;
         in.machineHomed = true;
@@ -170,7 +172,9 @@ public class ZFrameTest {
         assertTrue(i4(check(c, plan(c, 5.5))).get(0).contains("needle Z frame is not set"));
         c = cfg();
         c.needleChangedAtMs = 1500L; // after the anchor (1000), before the offset (2000)
-        assertTrue(i4(check(c, plan(c, 5.5))).get(0).contains("changed after the needle Z frame"));
+        // tip setups §22.3: the text names the mounted setup and when it was put on
+        assertEquals("the " + c.tip.name + " was put on at " + ZCheck.clock(1500L) + ": record its needle Z frame (Setup "
+                + "› Needle Z frame)", i4(check(c, plan(c, 5.5))).get(0));
         // the review's offset-0 case: a touch-off cannot reach the -2.59 mm frame offset
         c = cfg();
         c.needleZOffsetMm = 0.0;

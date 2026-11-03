@@ -56,6 +56,7 @@ LAUNCH="$(OPENPNP_IL_API_PORT="$IL_API_PORT" "$UINAV" --session "$SESSION" launc
   --xml-set ".//head@visual-homing-method=None" \
   --xml-set ".//camera[@name='Top']@class=org.openpnp.instancelabs.sim.SimBoardCamera" \
   --xml-set ".//camera[@name='Top']@width=1920" \
+  --xml-set ".//camera[@looking='Up']@class=org.openpnp.instancelabs.sim.SimTipCamera" \
   --xml-set ".//camera[@name='Top']@height=1080")"
 SESSION_CONFIG="$(printf '%s' "$LAUNCH" | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["config_dir"])')"
 
@@ -73,3 +74,4 @@ node "$HERE/webui-sim.playwright.cjs"
 node "$HERE/board-import.playwright.cjs"
 # missing paste profiles and the pad calibration (PROFILE_CALIBRATION_DESIGN.md §14.4): moves the SIM, ≈ 6 min
 SHOTS_DIR="${PP_SHOTS_DIR:-$OUT_DIR/pad-profile-shots}" node "$HERE/pad-profile.playwright.cjs"
+SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.playwright.cjs"

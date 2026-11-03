@@ -211,9 +211,12 @@ kbd {
 .cells--t2 { gap: 5px; }
 .cells--t2 .cell { padding: 0 11px 0 8px; gap: 8px; }
 /* still too long after t2v (IL measures): t3 drops the pressure cell while it is plain "off", t4 the other cells'
-   labels; the verdict keeps its label and value (cells never truncate, §4) */
+   labels, t5 the tip cell while it is ok (Setup, the run confirm and the pad-cal view name the tip; 1024 px after a
+   STOP with the tip cell: PROFILE_CALIBRATION_DESIGN §22.13); the verdict keeps its label and value (cells never
+   truncate, §4) */
 .cells--t3 #pill-pressure.cell--off { display: none; }
 .cells--t4 .cell:not(.cell--verdict) .cell__k { display: none; }
+.cells--t5 #chip-tip.cell--ok { display: none; }
 
 /* ---------- STOP ---------- */
 .stop-bay { order: 99; flex: none; width: calc(var(--stop-w) + 21px); height: calc(100% + 1px); align-self: flex-start; padding-left: 20px; border-left: 1px solid var(--line); background: var(--surface); position: relative; z-index: 2; }

@@ -23,6 +23,9 @@ public class PadTypeResolver {
     /** Per-pad mappings: package id -> pad name -> {type key, the mapping's joined pad names}. */
     private final Map<String, Map<String, String[]>> padMap = new HashMap<>();
     private final Set<String> pastePartial = new TreeSet<>();
+    /** The tip setup the types are composed for and its version (§22.2), or null: the types as stored. */
+    private String setupKey;
+    private Integer setupVersion;
 
     /**
      * @param packageMap {@link DispenseDb#packageMappings()}: the package id (whole package) or
@@ -61,20 +64,34 @@ public class PadTypeResolver {
         return Collections.unmodifiableSet(pastePartial);
     }
 
+    /**
+     * The tip setup the types are composed for and its version (tip setups design §22.2): part of the
+     * {@link #fingerprint()}, so mounting another setup or correcting the mounted one makes plans stale.
+     */
+    public PadTypeResolver withSetup(String key, Integer version) {
+        this.setupKey = key;
+        this.setupVersion = version;
+        return this;
+    }
+
     /** The current pad types this resolver chooses from. */
     public List<PadType> types() {
         return Collections.unmodifiableList(types);
     }
 
     /**
-     * Identity of what this resolver can answer: every pad type with its version (an edit of the pattern or status is a
-     * new version), every package mapping (per-pad ones by their names) and the packages pasted partly. A plan made
-     * with another resolver may resolve its packages differently.
+     * Identity of what this resolver can answer: every pad type with its versions (tip setups design §22.2:
+     * {@code key:padVersion/version@setup}, {@code ~} for a stand-in's version; an edit of the pattern or status is a
+     * new version), every package mapping (per-pad ones by their names), the packages pasted partly and the tip setup
+     * with its version. A plan made with another resolver may resolve its packages differently.
      */
     public String fingerprint() {
         StringBuilder sb = new StringBuilder();
         for (PadType t : types) {
-            sb.append(t.typeKey).append(':').append(t.version).append(';');
+            sb.append(t.typeKey).append(':').append(t.padVersion != null ? t.padVersion : t.version).append('/')
+                    .append(t.standIn ? "~" : Integer.toString(t.version)).append('@')
+                    .append(t.setupKey != null ? t.setupKey : org.openpnp.instancelabs.padprofile.Tip.setupOf(t.tipKey))
+                    .append(';');
         }
         sb.append('|');
         for (Map.Entry<String, String> e : new java.util.TreeMap<>(packageMap).entrySet()) {
@@ -82,6 +99,9 @@ public class PadTypeResolver {
         }
         if (!pastePartial.isEmpty()) {
             sb.append("|partial:").append(String.join(";", pastePartial));
+        }
+        if (setupKey != null) {
+            sb.append("|tip:").append(setupKey).append('@').append(setupVersion);
         }
         return sb.toString();
     }

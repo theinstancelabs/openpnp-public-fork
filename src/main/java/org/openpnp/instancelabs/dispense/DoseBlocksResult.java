@@ -22,6 +22,19 @@ public final class DoseBlocksResult {
     public final List<String> refusedSpots = new ArrayList<>();
     /** Before and after frames taken (camera captures). */
     public int frames;
+    /**
+     * One result photo per block (tip setups design §22.4): the after frame of its first tile, at most 1600 px wide,
+     * as JPEG bytes (never a BufferedImage); the job stores them when the step ends and drops them.
+     */
+    public final List<BlockPhoto> photos = new ArrayList<>();
+    /**
+     * The tip setup and the needle token the step ran with (§22.3, §22.4): its result photos are of that setup and
+     * needle, whatever is mounted when the job stores them; null before the step ran.
+     */
+    public String setupKey;
+    public Long needleSinceMs;
+    /** Every new blob of the after frames in machine mm (the landing check's locator and fit, §22.3). */
+    public final List<Blob> newBlobs = new ArrayList<>();
 
     /** One block as laid and seen. */
     public static final class BlockOut {
@@ -53,6 +66,26 @@ public final class DoseBlocksResult {
         public boolean threadToNext;
         /** Not round (circularity below 0.35): a string. */
         public boolean string;
+    }
+
+    /** The after frame of a block's first tile as a JPEG (§22.4: kind result, source top-camera). */
+    public static final class BlockPhoto {
+        /** Index of the block in the request, its dose and coupon place (weigh blocks). */
+        public int block;
+        public int doseSteps;
+        public String couponPlace;
+        /** Machine X/Y of the frame centre and its scale after scaling (mm, mm/px). */
+        public double xMm, yMm;
+        public double mmPerPx;
+        public int widthPx, heightPx;
+        public transient byte[] jpeg;
+    }
+
+    /** A new blob between a before and an after frame, in machine coordinates. */
+    public static final class Blob {
+        /** Machine X/Y of its centroid (mm). */
+        public double x, y;
+        public double diameterMm, areaMm2, circularity;
     }
 
     /** 3 x 3 mm around a spot, before and after, 96 px PNG (the result card). */

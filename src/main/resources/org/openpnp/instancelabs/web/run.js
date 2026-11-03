@@ -704,9 +704,16 @@
     const prof = p && p.profile;
     const live = s.dispense && s.dispense.profile;
     const changed = !!(p && live && live.fingerprint && p.profileFingerprint && live.fingerprint !== p.profileFingerprint);
-    IL.keyed(n.recipe, prof ? JSON.stringify(IL.recipeParts(prof)) + changed : '', () => (prof ? IL.recipeEl(prof, {
-      changed, changedText: 'changed: plan again', href: '#profile', title: 'Dispense profile this plan was made with (' + prof.name + ')' + (changed ? ': the profile changed since, plan again' : ''),
-    }) : null));
+    // the tip setup the plan was made for (§22.7): " · for the {S}"
+    const forTip = p && p.setupName ? ' · for the ' + p.setupName : '';
+    IL.keyed(n.recipe, prof ? JSON.stringify(IL.recipeParts(prof)) + changed + forTip : '', () => {
+      if (!prof) return null;
+      const e = IL.recipeEl(prof, {
+        changed, changedText: 'changed: plan again', href: '#profile', title: 'Dispense profile this plan was made with (' + prof.name + ')' + (forTip ? forTip : '') + (changed ? ': the profile changed since, plan again' : ''),
+      });
+      if (forTip) e.appendChild(el('span', { class: 'recipe__tip', text: 'for the ' + p.setupName }));
+      return e;
+    });
     IL.show(n.recipe, !!prof && (mode !== 'stopped' || decision(s).cause === 'partial'));
     // stopped: what was interrupted
     let note = null;
@@ -2793,6 +2800,13 @@
     gauge.psi = prof.pressurePsi;   // the psi the label shows: a tick records this one (updateDialog keeps both current)
     const paste = tick('run-tick-paste', 'Paste is within its working life');
     const hands = tick('run-tick-hands', 'Hands and tools are clear of the head');
+    // the tip on the dispenser (§22.7): nothing senses it; the tick lapses at every needle change and mount
+    const tipS = (s.dispense && s.dispense.tip) || {};
+    const tipT = tick('run-tick-tip', 'The ' + (tipS.name || 'mounted tip') + ' is on the dispenser');
+    tipT.lab.id = 'run-confirm-tip';
+    tipT.key = tipS.key;
+    tipT.lab.insertBefore(tipS.thumbUrl ? el('img', { class: 'tip-thumb tip-thumb--sm', src: tipS.thumbUrl, alt: 'The ' + (tipS.name || 'tip') })
+      : el('span', { class: 'tip-thumb tip-thumb--sm tip-thumb--none', title: 'No picture of this tip yet' }, IL.tips ? IL.tips.noPicture() : null), tipT.lab.children[1]);
     // the board already has paste on pads this run lays (the server keeps it, every tab sees it): only after an explicit
     // "I wiped this board", which the run tells the engine (POST /api/run {wiped: true}); finishing the pads left needs none
     const covered = new Set(mode.kind === 'test' ? p.dots.slice(0, mode.maxDots || 0).map((d) => d.padId) : p.pads.map((x) => x.padId));
@@ -2802,6 +2816,7 @@
     const reg = IL.attest.valid('regulator', s);
     gauge.input.checked = !!reg;
     paste.input.checked = !!IL.attest.valid('paste-life', s);
+    tipT.input.checked = !!IL.attest.valid('tip-on', s);
     hands.input.checked = false;
     gauge.input.addEventListener('change', () => {
       if (gauge.input.checked) IL.attest.set('regulator', gauge.psi); else IL.attest.clear('regulator');
@@ -2809,6 +2824,7 @@
     });
     paste.input.addEventListener('change', () => { if (paste.input.checked) IL.attest.set('paste-life', true); else IL.attest.clear('paste-life'); updateDialog(S.status); });
     hands.input.addEventListener('change', () => updateDialog(S.status));
+    tipT.input.addEventListener('change', () => { if (tipT.input.checked) IL.attest.set('tip-on', tipT.key); else IL.attest.clear('tip-on'); updateDialog(S.status); });
     if (wipe) wipe.input.addEventListener('change', () => updateDialog(S.status));
     const pon = el('button', { type: 'button', class: 'btn', id: 'run-confirm-pressure', title: 'Pressure on to read the gauge (press twice unless the needle is over the waste)' }, IL.icon('i-gauge'), 'Pressure on to adjust');
     pon.addEventListener('click', (ev) => IL.runFix('pressure-on', pon, null, ev));
@@ -2829,17 +2845,17 @@
       IL.sectionK('The machine checked'), sensed,
       IL.sectionK('You confirm (nothing senses these)'),
       wipe ? el('div', { class: 'run-confirm-wiped', id: 'run-confirm-wiped' }, wipe.lab) : null,
-      el('div', { class: 'grid2' }, paste.lab, hands.lab),
+      el('div', { class: 'grid2' }, tipT.lab, paste.lab, hands.lab),
       refusals,
     ];
     const sum = el('div', { class: 'dialog__sum', id: 'run-confirm-sum' });
     const cancel = el('button', { type: 'button', class: 'btn btn--lg', id: 'btn-run-cancel' }, 'Cancel');
     const go = el('button', { type: 'button', class: 'btn btn--primary btn--lg', id: 'btn-run-go' });
-    const first = [gauge.input, paste.input].concat(wipe ? [wipe.input] : []).concat([hands.input]).find((i) => !i.checked) || hands.input;
+    const first = [gauge.input, tipT.input, paste.input].concat(wipe ? [wipe.input] : []).concat([hands.input]).find((i) => !i.checked) || hands.input;
     const h = IL.dialog.open({ id: 'dlg-run', eyebrow: 'Run board · ' + p.boardName + ' · plan ' + shortId(p), title: mode.title, keys: true,
       body, foot: [sum, cancel, go], initialFocus: first, onClose: () => { if (R.dlg === h) R.dlg = null; } });
     h.mode = mode;
-    h.n = { gauge, paste, hands, wipe, pon, held, sensed, sum, go, refusals, blockBox, homeBox };
+    h.n = { gauge, paste, hands, tip: tipT, wipe, pon, held, sensed, sum, go, refusals, blockBox, homeBox };
     h.runId = s.run ? s.run.runId : null;   // the last task this tab knew of when the confirm opened
     R.dlg = h;
     cancel.addEventListener('click', () => h.close('cancel'));
@@ -2898,8 +2914,14 @@
     const pl = IL.attest.valid('paste-life', s);
     IL.setText(n.paste.who, pl ? 'you, ' + IL.fmtTime(pl.atMs) : 'every 8 h');
     IL.setText(n.hands.who, 'every run');
+    // the tip tick: another tip mounted or the needle changed while open → unticked, named again
+    const tipS = (s.dispense && s.dispense.tip) || {};
+    if (n.tip.key !== tipS.key) { n.tip.key = tipS.key; IL.setText(n.tip.lab.querySelector('.tick__t'), 'The ' + (tipS.name || 'mounted tip') + ' is on the dispenser'); }
+    const to = IL.attest.valid('tip-on', s);
+    if (n.tip.input.checked && !to) n.tip.input.checked = false;
+    IL.setText(n.tip.who, to ? 'you, ' + IL.fmtTime(to.atMs) : 'after every needle change');
     if (n.wipe) IL.setText(n.wipe.who, 'this run');
-    for (const t of [n.gauge, n.paste, n.hands, n.wipe].filter(Boolean)) t.lab.classList.toggle('on', t.input.checked);
+    for (const t of [n.gauge, n.tip, n.paste, n.hands, n.wipe].filter(Boolean)) t.lab.classList.toggle('on', t.input.checked);
     IL.setText($('run-confirm-psi'), 'Set the regulator to ' + psi + ' psi (profile ' + (prof.name || '') + ')');
     // a pressure hold for reading the gauge must be off again before the run
     const pr = s.pressure || {};
@@ -2946,7 +2968,7 @@
     IL.keyed(n.sensed, JSON.stringify(cards), () => cards.map(([st, t, d]) => el('div', { class: 'tick' }, IL.glyph(st === 'checking' || st === 'wait' ? 'off' : st),
       el('div', {}, el('div', { class: 'tick__t', text: t }), el('div', { class: 'tick__d', text: d })))));
     // blocked now (another task, machine down, plan stale ...): say why, keep the dialog
-    const ticksLeft = [n.gauge.input, n.paste.input, n.hands.input].concat(n.wipe ? [n.wipe.input] : []).filter((i) => !i.checked).length;
+    const ticksLeft = [n.gauge.input, n.tip.input, n.paste.input, n.hands.input].concat(n.wipe ? [n.wipe.input] : []).filter((i) => !i.checked).length;
     let why = S.online === false ? IL.lockReason(s) : S.planPending ? 'Re-reading the plan (checking…)' : !r.canRun ? r.runReason : null;
     if (!why && holding) why = 'Pressure is held: switch it off first';
     const showWhy = why && (!holding || S.online === false) && !S.planPending;

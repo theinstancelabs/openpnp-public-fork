@@ -576,13 +576,19 @@
 
   // ================================================================================== attestations (§9.4)
   const ATTEST_KEY = 'il.attest';
-  /** Operator ticks that no sensor can make: regulator (psi), paste-life, prime-seen, test-dot-seen. Browser-local. */
+  /**
+   * Operator ticks that no sensor can make: regulator (psi), paste-life, prime-seen, test-dot-seen, tip-on (the run
+   * confirm's "the {S} is on the dispenser": value the setup key). Browser-local. Each tick keeps the needle token it was
+   * made under (status dispense.needle.changedAtMs, `tok`): the needle ticks lapse at every needle change and mount
+   * (tokens compared by equality, never by clock time).
+   */
   IL.attest = {
     all() { return lsJson(ATTEST_KEY, {}) || {}; },
     get(key) { return IL.attest.all()[key] || null; },
     set(key, value) {
       const a = IL.attest.all();
-      a[key] = { key, value: value === undefined ? true : value, atMs: Date.now() };
+      const nd = S.status && S.status.dispense && S.status.dispense.needle;
+      a[key] = { key, value: value === undefined ? true : value, atMs: Date.now(), tok: nd && isNum(nd.changedAtMs) ? Number(nd.changedAtMs) : null };
       lsSet(ATTEST_KEY, JSON.stringify(a));
       attestVersion++;
       IL.emit('attest', key, a[key]);
@@ -602,14 +608,20 @@
       return attestValid(IL.attest.all()[key], key, status, nowMs || Date.now());
     },
   };
+  /** Ticks that lapse at a needle change (§22.3: the regulator, prime and test-dot ticks and the run confirm's tip tick). */
+  const NEEDLE_TICKS = new Set(['regulator', 'prime-seen', 'test-dot-seen', 'tip-on']);
   function attestValid(a, key, status, now) {
     if (!a || !a.atMs || now - a.atMs > L.attestMs) return null;
+    const d = (status && status.dispense) || {};
     if (key === 'regulator') {
-      const d = (status && status.dispense) || {};
       const psi = d.profile && d.profile.pressurePsi;
       if (!isNum(psi) || Number(a.value) !== Number(psi)) return null;
-      const changed = d.needle && d.needle.changedAtMs;
-      if (changed && changed > a.atMs + S.skewMs) return null;   // client stamp → server time: + skew
+    }
+    if (key === 'tip-on' && (!a.value || !d.tip || a.value !== d.tip.key)) return null;
+    if (NEEDLE_TICKS.has(key) && d.needle) {
+      const changed = isNum(d.needle.changedAtMs) ? Number(d.needle.changedAtMs) : null;
+      if ('tok' in a) { if ((a.tok === undefined ? null : a.tok) !== changed) return null; }
+      else if (key === 'tip-on' || (changed && changed > a.atMs + S.skewMs)) return null;   // a tick from before the tokens: client stamp → server time
     }
     return a;
   }
@@ -956,6 +968,10 @@
     const t = String(msg || '').toLowerCase();
     // Z after a home (AUTO_REGISTER_DESIGN.md §2.4): not checked yet, no point left to check it on, or it moved
     if (/were measured before the home|must be checked after the home|^(i4:\s*)?z moved\b/.test(t)) return 'zcheck';
+    // tip setups (PROFILE_CALIBRATION_DESIGN.md §22.3): where the needle lands (the Needle item says it, with its fix-its)
+    // and a needle frame too close to N1's (Settings): neither is about the board surface
+    if (/where it lands|head offset changed in openpnp/.test(t)) return 'landing';
+    if (/cannot tell a height taken with the needle/.test(t)) return 'frame';
     if (/needle z frame|needle was changed|needle z offset/.test(t)) return 'needle';
     if (/^place '/.test(t)) return 'place';
     if (/the plan was made/.test(t)) return 'plan';
@@ -1104,16 +1120,19 @@
         detail: 'Screw start angle ' + angle + ', set or confirmed ' + IL.fmtTime(prof.startAngleSetAtMs) + ' for this controller power-up.' });
     }
 
-    // 3 Needle offset (I4 needle)
+    // 3 Needle offset (I4 needle); after a needle change it names the tip put on and when (PROFILE_CALIBRATION_DESIGN.md
+    // §22.7), and once the offset holds, where the needle lands (the landing rule)
     const drift = isNum(nd.zOffsetMm) && isNum(nd.anchorOffsetMm) ? nd.zOffsetMm - nd.anchorOffsetMm : 0;
+    const tipN = (d.tip && d.tip.name) || 'needle';
+    const putOn = isNum(nd.changedAtMs) ? 'The ' + tipN + ' was put on at ' + IL.fmtTime(IL.toClient(nd.changedAtMs)) : null;
     if (!d.running) {
       add({ key: 'needle', code: 'I4', title: 'Needle', state: 'wait', value: '—', short: 'needle', detail: 'The dispenser engine is not running.' });
     } else if (!nd.anchor) {
-      add({ key: 'needle', code: 'I4', title: 'Needle', state: 'block', value: 'no frame', short: 'needle Z frame',
-        detail: 'The needle Z frame is not set.', fixes: [{ href: '#setup/needle', label: 'Open Needle Z frame' }] });
+      add({ key: 'needle', code: 'I4', title: 'Needle', state: 'block', value: putOn ? 'changed' : 'no frame', short: 'needle Z frame',
+        detail: putOn ? putOn + ': record its needle Z frame.' : 'The needle Z frame is not set.', fixes: [{ href: '#setup/needle', label: 'Open Needle Z frame' }] });
     } else if (!nd.anchored) {
       add({ key: 'needle', code: 'I4', title: 'Needle', state: 'block', value: 'changed', short: 'needle Z frame',
-        detail: 'The needle was changed after the needle Z frame was recorded.', fixes: [{ href: '#setup/needle', label: 'Open Needle Z frame' }] });
+        detail: (putOn || 'The needle was changed') + ': record its needle Z frame.', fixes: [{ href: '#setup/needle', label: 'Open Needle Z frame' }] });
     } else if (!nd.touchedOff) {
       add({ key: 'needle', code: 'I4', title: 'Needle', state: 'need', value: 'confirm', short: 'needle offset',
         detail: 'Needle offset not confirmed since the last needle change or frame.',
@@ -1124,6 +1143,12 @@
         detail: 'Needle offset ' + IL.fmt(nd.zOffsetMm, 3) + ' mm is ' + IL.fmt(Math.abs(drift), 3) + ' mm from the frame (limit '
           + IL.fmt(L.needleDriftMm, 2) + ' mm).',
         fixes: [{ href: '#setup/needle', label: 'Record the frame again' }, { href: '#calibrate/touch-off', label: 'Touch off again' }] });
+    } else if (nd.xyChecked === false) {
+      const keep = !!(nd.landing && nd.landing.keepable);
+      add({ key: 'needle', code: 'I4', title: 'Needle', state: 'block', value: 'landing', short: 'where it lands',
+        detail: nd.headOffsetChanged ? 'N2’s head offset changed in OpenPnP since the ' + tipN + '’s landing was checked: set it back, or check where it lands.'
+          : (putOn || 'The ' + tipN + ' is on') + ': where it lands has not been checked.',
+        fixes: [{ fix: 'landing-check', label: 'Check where it lands…' }].concat(keep ? [{ fix: 'landing-keep', label: 'Keep where it lands' }] : []) });
     } else {
       add({ key: 'needle', code: 'I4', title: 'Needle', state: 'ok', value: IL.fmt(nd.zOffsetMm, 3) + ' mm', short: 'needle',
         detail: 'Needle Z offset ' + IL.fmt(nd.zOffsetMm, 3) + ' mm (frame ' + IL.fmt(nd.anchorOffsetMm, 3) + ' mm).' });
@@ -1265,9 +1290,12 @@
         at.push(nd.setAtMs ? nd.setAtMs - S.skewMs : null);
       }
       if (i4.some((x) => x.kind === 'plan')) { why.push('the board surface'); at.push(sf && sf.setAtMs ? sf.setAtMs - S.skewMs : null); }
-      // the engine re-checks the pad types of the plan against the gate and the pad types now
+      // the engine re-checks the pad types of the plan against the gate and the pad types now, and the tip setup it was
+      // made for (§22.3: "the tip changed after planning", "the 25G straight changed after planning (OD …)"); each once
       for (const v of viol.filter((x) => x.code === 'PLAN' && /after planning/i.test(x.message))) {
-        why.push(/gate/i.test(v.message) ? 'the pad-type gate' : 'the pad types');
+        const w = /the tip changed after planning|changed after planning \(/i.test(v.message) ? 'the tip' : /gate/i.test(v.message) ? 'the pad-type gate' : 'the pad types';
+        if (why.includes(w)) continue;
+        why.push(w);
         at.push(null);
       }
       if (why.length) {
@@ -1389,7 +1417,12 @@
     };
     const zRule = !!ilk.I4 && i4Kind(ilk.I4.text, bsName) === 'zcheck';
     if (zRule && ilk.I4.state === 'blocked' && zBlocks(ilk.I4.text)) zExtra(ilk.I4.text);
-    if (ilk.I4 && ilk.I4.state === 'blocked' && items[2].ready && !zRule) addExtra({ key: 'I4', code: 'I4', title: 'Place heights', state: 'block', short: 'place heights', detail: sentence(ilk.I4.text), fixes: [{ href: '#setup/places', label: 'Open Places' }] });
+    // I4 blocked while the needle item is ready: a place height, or a needle frame too close to N1's (tip setups §22.3)
+    const i4k = ilk.I4 ? i4Kind(ilk.I4.text, bsName) : null;
+    if (ilk.I4 && ilk.I4.state === 'blocked' && items[2].ready && !zRule && i4k !== 'landing') {
+      addExtra(i4k === 'frame' ? { key: 'I4-frame', code: 'I4', title: 'Needle Z frame', state: 'block', short: 'needle frame', detail: sentence(ilk.I4.text), fixes: IL.fixesForCode('I4', s, ilk.I4.text) }
+        : { key: 'I4', code: 'I4', title: 'Place heights', state: 'block', short: 'place heights', detail: sentence(ilk.I4.text), fixes: [{ href: '#setup/places', label: 'Open Places' }] });
+    }
     for (const v of viol) {
       if (['MACHINE', 'I9', 'I10', 'I11', 'PLAN'].includes(v.code)) continue;
       if (v.code === 'I4') {
@@ -1397,6 +1430,7 @@
         if (k === 'zcheck' && zBlocks(v.message)) zExtra(v.message);
         else if (k === 'place') addExtra({ key: 'I4-place', code: 'I4', title: 'Place height', state: 'block', short: 'place Z', detail: sentence(v.message), fixes: [{ href: '#setup/places', label: 'Retake Z with N1' }] });
         else if (k === 'other-surface') addExtra({ key: 'I4-surface', code: 'I4', title: 'Surface', state: 'block', short: 'blank surface', detail: sentence(v.message), fixes: [{ href: '#setup/surfaces', label: 'Open Probed surfaces' }] });
+        else if (k === 'frame') addExtra({ key: 'I4-frame', code: 'I4', title: 'Needle Z frame', state: 'block', short: 'needle frame', detail: sentence(v.message), fixes: IL.fixesForCode('I4', s, v.message) });
         continue;
       }
       addExtra(extraFor(v.code, v.message, 'block'));
@@ -1494,7 +1528,7 @@
   // ================================================================================== verdict (strip "Board run")
   const TASK_WORD = { prime: 'Prime', 'test dot': 'Test dot', 'needle touch-off': 'Touch-off', 'dot ladder': 'Dot ladder',
     'scale shots': 'Shots', 'clean-pad check': 'Pad check', board: 'Board', 'board registration': 'Register', 'blank probe': 'Blank probe',
-    'z check': 'Z check', 'pad calibration': 'Pad calibration' };
+    'z check': 'Z check', 'pad calibration': 'Pad calibration', 'tip picture': 'Tip picture' };
   IL.TASK_WORD = TASK_WORD;
   const VENT_S = 1;
   /**
@@ -1538,6 +1572,7 @@
       return ['0/' + run.dotsPlanned, ' · starting'];
     }
     if (run.label === 'pad calibration' && IL.padProfile) return IL.padProfile.taskParts(run);
+    if (run.label === 'tip picture') return ['Tip picture', ' · moving to the bottom camera'];
     if (run.label === 'board registration' || run.label === 'blank probe') {
       const g = IL.regProgress(run);
       return [word + ' · ' + g.part, g.left !== null ? ' · ≈ ' + IL.fmtClock(g.left) + ' left' : ''];
@@ -2035,7 +2070,7 @@
       const limit = cells.getBoundingClientRect().right - parseFloat(getComputedStyle(cells).paddingRight || '0');
       return last.getBoundingClientRect().right > limit + 0.5;
     };
-    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2v', 'cells--t3', 'cells--t4');
+    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2v', 'cells--t3', 'cells--t4', 'cells--t5');
     cells.classList.add('cells--fit');   // the verdict at its full width while measuring
     if (over()) {
       // the other cells' long parts first: the verdict keeps its own ("Stopped 14:19", a task's progress) while it fits
@@ -2043,9 +2078,11 @@
       if (over()) cells.classList.replace('cells--t1', 'cells--t2');
       if (over()) cells.classList.add('cells--t2v');
       // still too long (1024 px after a STOP, the widest state): the verdict is never cut (UI_DESIGN §4), so the
-      // pressure cell goes while it reads a plain "Off" (Recovery says "Pressure vented"), then the other cells' labels
+      // pressure cell goes while it reads a plain "Off" (Recovery says "Pressure vented"), then the other cells' labels,
+      // then the tip cell while it is ok (the tip is named on Setup, the run confirm and the pad-cal view)
       if (over()) cells.classList.add('cells--t3');
       if (over()) cells.classList.add('cells--t4');
+      if (over()) cells.classList.add('cells--t5');
     }
     cells.classList.remove('cells--fit');
   }
@@ -2159,6 +2196,12 @@
       else if (row.spots < need) setCell(uc, 'block', [row.spotsLeft + ' of ' + row.spots, ' · too short'], 'The row has ' + row.spots + ' spots; a board purges ' + IL.purgeNeedText(row, need) + ': give it more spots (Setup) or purge fewer dots (Profile) (I9)');
       else if (row.spotsLeft < need) setCell(uc, 'need', [row.spotsLeft + ' of ' + row.spots, ' · wipe'], row.spotsLeft + ' spots left, ' + IL.purgeNeedText(row, need) + ' needed per board: wipe the row and reset it (I9)');
       else setCell(uc, 'ok', row.spotsLeft + ' of ' + row.spots, row.spotsLeft + ' spots free, ' + IL.purgeNeedText(row, need) + ' per board (I9)');
+    }
+    // the mounted tip setup (PROFILE_CALIBRATION_DESIGN.md §22.7): its name, "· frame and landing to do" after a change
+    const tc = $('chip-tip');
+    if (tc) {
+      if (!s || off || !IL.tips) setCell(tc, 'off', off ? 'Unknown' : '…', off ? cap(since) : null);
+      else { const tv = IL.tips.cellView(s); setCell(tc, tv.kind, tv.v, tv.t); }
     }
     const v = IL.verdict();
     const ve = $('pill-engine');
@@ -2401,7 +2444,10 @@
   };
   IL.hashFor = function (r) {
     const path = [r.ws || 'run', r.section, r.id].filter((x) => x !== null && x !== undefined && x !== '').map((x) => encodeURIComponent(x)).join('/');
-    return '#' + path + (r.panel ? '?panel=' + encodeURIComponent(r.panel) : '');
+    // a pushed view keeps its own parameters (the pad-cal view of a job opened from Records: ?panel=pad-cal&job=<id>)
+    let more = '';
+    if (r.panel && r.params && typeof r.params.forEach === 'function') r.params.forEach((v, k) => { if (k !== 'panel' && r.panel === 'pad-cal' && k === 'job') more += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(v); });
+    return '#' + path + (r.panel ? '?panel=' + encodeURIComponent(r.panel) + more : '');
   };
   /**
    * Navigates: IL.go('#setup/purge'), IL.go({section: 'checks'}) (same workspace), opts.replace. Workspace changes push
@@ -2648,6 +2694,12 @@
       el('div', { class: 'refusal__t', text: head + (o.what ? ' · ' + o.what : '') + ': '
         + (viol.length ? (e.data.reason || 'refused by the interlocks').split(':')[0] : line) }));
     const lines = viol.length ? viol : codeFromMessage(e && e.message);
+    // a form filled before a mount or a needle change (409 tip-changed / needle-changed, §22.3): its values are another
+    // tip's or needle's; Reload reads the page again (the values are taken again from the mounted tip)
+    if (e && (e.code === 'tip-changed' || e.code === 'needle-changed'
+      || /^(The tip changed while this was open|The needle was changed at \d\d:\d\d (while this was open|after these values were taken))/.test(String(e.message || '')))) {
+      box.appendChild(el('div', { class: 'btn-row' }, IL.fixButton({ fix: 'reload-page', label: 'Reload' }, { cls: 'btn--sm' })));
+    }
     if (lines.length) {
       box.appendChild(el('ul', {}, lines.map((v) => el('li', {},
         el('abbr', { class: 'icode', title: 'Interlock ' + v.code, text: v.code }), el('span', { text: v.message }),
@@ -2754,7 +2806,15 @@
         : [{ fix: 'purge-reset', label: 'Wiped: reset row', icon: 'i-wipe' }];
       case 'I10': return [{ fix: 'clean-check', label: 'Wiped: check again' }];
       case 'I4': {
+        // tip setups (§22.3): a needle put on whose landing is not checked yet ("where it lands has not been checked"), or
+        // N2's head offset changed since it was checked; one whose frame is not recorded yet
         const k = i4Kind(msg, d.boardSurfaceName || 'board');
+        if (k === 'landing') {
+          const keep = d.needle && d.needle.landing && d.needle.landing.keepable;
+          return [{ fix: 'landing-check', label: 'Check where it lands…' }].concat(keep ? [{ fix: 'landing-keep', label: 'Keep where it lands' }] : []);
+        }
+        if (k === 'frame') return [{ href: '#setup/settings', label: 'Settings' }, { href: '#setup/needle', label: 'Open Needle Z frame' }];
+        if (/never measured at this recipe|measure its dots/i.test(msg)) return [{ fix: 'measure-tip', label: 'Measure its dots…' }];
         if (k === 'place') {
           const pm = /^place '([^']+)'/i.exec(msg);
           return [{ href: '#setup/places' + (pm ? '/' + encodeURIComponent(pm[1]) : ''), label: 'Retake Z with N1' + (pm ? ' (' + pm[1] + ')' : '') }];
@@ -2791,13 +2851,17 @@
         return out;
       }
       case 'I7': return [{ href: '#setup/settings', label: 'Settings' }, { fix: 'run-fewer', label: 'Run fewer dots' }];
-      case 'PLAN': return [{ href: '#profile', label: 'Pad types' }];
+      case 'PLAN':
+        if (/measure its dots/i.test(msg)) return [{ fix: 'measure-tip', label: 'Measure its dots…' }];
+        if (/the tip changed after planning|changed after planning \(/i.test(msg)) return [{ fix: 'plan-again', label: 'Plan again' }];
+        return [{ href: '#profile', label: 'Pad types' }];
       case 'CONFIG': return [{ href: '#setup/settings', label: 'Open Settings' }];
       default: return [];
     }
   };
 
   // core fix-its
+  IL.fix('reload-page', { run: async () => { location.reload(); } });
   IL.fix('connect', { run: () => IL.api('POST', '/api/machine/enable'), ok: 'Connecting to the controller…',
     gate: (s) => (S.online === false ? IL.lockReason(s) : null) });
   // the home's own answer (wait): a home that fails says why (`homing failed: …`, the pressure hold, a STOP before it
@@ -2815,7 +2879,8 @@
     run: async () => {
       const n = S.status && S.status.dispense && S.status.dispense.needle;
       if (!n || !isNum(n.anchorOffsetMm)) throw new Error('The needle Z frame is not set.');
-      const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(n.anchorOffsetMm.toFixed(3)), note: 'confirmed frame offset (web UI)' });
+      const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(n.anchorOffsetMm.toFixed(3)), note: 'confirmed frame offset (web UI)',
+        needleChangedAtMs: isNum(n.changedAtMs) ? Number(n.changedAtMs) : null });
       IL.planRefreshSoon();
       return r;
     },
@@ -3327,6 +3392,8 @@
       if (IL.padProfile && IL.padProfile.jobActive(s) && !IL.recoveryActive()) { IL.openView('pad-cal', { keep: true }); return; }
       IL.go(IL.recoveryActive() ? '#run' : s && s.run && s.run.running ? '#run/run' : '#run/checks');
     });
+    const tipCell = $('chip-tip');
+    if (tipCell) tipCell.addEventListener('click', () => IL.go('#setup/tip'));
     $('btn-start').addEventListener('click', (ev) => IL.runFix('connect', ev.currentTarget, null, ev));
     $('btn-home').dataset.twoPress = 'home';
     $('btn-home').addEventListener('click', (ev) => IL.runFix('home', ev.currentTarget, null, ev));

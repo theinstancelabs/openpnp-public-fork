@@ -118,7 +118,7 @@ public class BoardFrameReferenceTest {
         bl.setLocation(new Location(LengthUnit.Millimeters, 296, 114.5, 4.5, 0));
         DispenseConfig c = cfg(-1.0);
         List<PadType> types = new ArrayList<>(BoardFeaturesTest.types);
-        DispensePlan p = new DispensePlanner(c, new PadTypeResolver(types, null)).planBoard(bl, 290, 125);
+        DispensePlan p = TestTips.planner(c, new PadTypeResolver(types, null)).planBoard(bl, 290, 125);
         assertEquals(Double.valueOf(4.5), p.boardZMm);
         assertEquals(Double.valueOf(4.5), GcodeStreamBuilder.forPlan(c, new ToyMapper(290, 125, 31.5, 0), p,
                 Collections.emptyList(), false, false, 0L).floorReferenceZMm);

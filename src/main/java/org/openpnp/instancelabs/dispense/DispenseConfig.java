@@ -31,12 +31,15 @@ public class DispenseConfig {
      * Version of this file's schema. 2: the pneumatic and watchdog G-code strings were removed (they
      * are constants in ControllerCommands). 3: the dose and per-dot motion moved into
      * {@link #profile}; prime + test dot + optical test-dot split replaced by the purge row; the
-     * volumetric q model removed (bench 2026-10-28). Older files load, the removed keys are ignored,
-     * and {@link #migrate()} brings the motion values to the bench recipe.
+     * volumetric q model removed (bench 2026-10-28). 4: tip setups (§22.1): {@code tip} is the mounted setup's view,
+     * {@code parkedTips} what the others keep, {@code needleLanding} where the mounted needle lands. Older files load,
+     * the removed keys are ignored, and {@link #migrate()} brings the motion values to the bench recipe.
      */
-    public static final int SCHEMA_VERSION = 3;
+    public static final int SCHEMA_VERSION = 4;
     /** Largest I4 frame tolerance: below half the needle's 2.59 mm offset from N1 (bench, new mount). */
     public static final double MAX_FRAME_TOLERANCE_MM = 1.2;
+    /** Largest {@link #needleLanding} per axis (mm): where a tip lands, measured by a landing check (§22.1). */
+    public static final double MAX_LANDING_MM = 15;
     public int schemaVersion = SCHEMA_VERSION;
 
     // --- identity of the dispenser in the OpenPnP machine -----------------------------------
@@ -91,6 +94,12 @@ public class DispenseConfig {
      * here, not into machine.xml. Every dispensed target is moved by minus this.
      */
     public NeedleXyTrim needleXyTrim = new NeedleXyTrim();
+    /**
+     * Where the mounted needle lands relative to camera + N2 head offset (tip setups design §22.1,
+     * §22.3), each axis within {@link #MAX_LANDING_MM}; null = not known. Set only by a landing check
+     * or "Keep where it lands"; every dispensed target moves by minus (landing + trim).
+     */
+    public NeedleLanding needleLanding = null;
     /**
      * I4 Z frame: one surface touched by N1 and by the needle (review finding: nothing tied the
      * surface Z to the frame of the needle offset). Set only by POST /api/needle/anchor.
@@ -201,6 +210,12 @@ public class DispenseConfig {
     // --- pad calibration (profile calibration design §5.4) ---------------------------------------
     /** The needle: pad types and dose records name it; its OD sets the same-pad dot pitch. */
     public TipSpec tip = new TipSpec();
+    /**
+     * Engine-stamped (tip setups design §22.1): what every tip setup that is not mounted keeps, by
+     * setup key: its dispense profile, needle frame, offset, trim and landing. A setup gets its entry
+     * when it is added; a mount parks the outgoing setup here and brings the incoming one in.
+     */
+    public Map<String, ParkedTip> parkedTips = new LinkedHashMap<>();
     /** The paste in the syringe; "New paste loaded" stamps it. */
     public PasteSpec paste = new PasteSpec();
     /** Where on the blank the pad calibration lays its test dots (default: 40 x 20 mm at the blank place). */
@@ -217,6 +232,43 @@ public class DispenseConfig {
         public double dxMm, dyMm;
         public Long setAtMs;
         public String note;
+        /** N2's head offset in OpenPnP when the trim was set (§22.3: a change of it stales the trim); null = unknown. */
+        public Double headOffsetXMm, headOffsetYMm;
+    }
+
+    /**
+     * Where a needle lands, found - commanded, relative to camera + N2 head offset (tip setups design
+     * §22.1, §22.3): set by a landing check (its job and result photo) or kept, under the head offset
+     * it records.
+     */
+    public static class NeedleLanding {
+        public double dxMm, dyMm;
+        public Long setAtMs;
+        /** The landing check that measured it, and its result photo; null when kept from before the update. */
+        public String jobId;
+        public Long photoId;
+        /** N2's head offset in OpenPnP when it was set (mm). */
+        public Double headOffsetXMm, headOffsetYMm;
+        public String note;
+    }
+
+    /**
+     * What a tip setup that is not mounted keeps (tip setups design §22.1): its profile, needle frame,
+     * offset with its two times, trim and landing. A new setup's entry has no frame, the mounted offset
+     * as a placeholder (both times null), a zero trim noted "new tip" and no landing.
+     */
+    public static class ParkedTip {
+        public DispenseProfile profile;
+        public NeedleAnchor needleAnchor;
+        public double needleZOffsetMm;
+        public Long needleZOffsetSetAtMs;
+        public Long needleZOffsetHomeAtMs;
+        public NeedleXyTrim needleXyTrim;
+        public NeedleLanding needleLanding;
+        /** When it was parked (null for a setup never mounted). */
+        public Long parkedAtMs;
+        /** The setup key its profile was first copied from, or "default". */
+        public String profileFrom;
     }
 
     /**
@@ -584,6 +636,18 @@ public class DispenseConfig {
         if (c.tip == null) {
             c.tip = new TipSpec();
         }
+        if (c.parkedTips == null) {
+            c.parkedTips = new LinkedHashMap<>();
+        }
+        c.parkedTips.values().removeIf(java.util.Objects::isNull);
+        for (ParkedTip e : c.parkedTips.values()) {
+            if (e.profile == null) {
+                e.profile = new DispenseProfile();
+            }
+            if (e.needleXyTrim == null) {
+                e.needleXyTrim = new NeedleXyTrim();
+            }
+        }
         if (c.paste == null) {
             c.paste = new PasteSpec();
         }
@@ -604,25 +668,34 @@ public class DispenseConfig {
     }
 
     /**
-     * Schema 1/2 -> 3: the per-dot motion becomes the bench recipe (XY and Z at 2000 mm/s², lift
-     * at 50 mm/s, B limit 400 rpm) and the I4 tolerances follow the new needle frame (offset
-     * -2.59 mm, so the frame tolerance must stay below it). The removed keys were dropped on load.
+     * Step by step from the file's schema, each step only for the files older than it (tip setups design §22.1: a
+     * step never runs again on a newer file, so it cannot reset tuned values). Schema 1/2 -> 3: the per-dot motion
+     * becomes the bench recipe (XY and Z at 2000 mm/s², lift at 50 mm/s, B limit 400 rpm) and the I4 tolerances
+     * follow the new needle frame (offset -2.59 mm, so the frame tolerance must stay below it). The removed keys were
+     * dropped on load. Schema 3 -> 4 changes no value: the tip setups' fields come with their defaults
+     * ({@link #fromJson}); a file written before them (told by the missing {@code parkedTips}, which also catches a
+     * file an older jar saved over) is kept as a backup at its first save ({@link #save}) and reconciled at the start.
      */
     void migrate() {
-        if (schemaVersion >= SCHEMA_VERSION) {
-            return;
+        if (schemaVersion < 3) {
+            travelAccelMmS2 = 2000;
+            zLiftAccelMmS2 = 2000;
+            zLiftFeedMmS = Math.max(zLiftFeedMmS, 50);
+            bMaxFeedDegS = Math.max(bMaxFeedDegS, 2400);
+            surfaceMaxResidualMm = Math.min(surfaceMaxResidualMm, 0.04);
+            surfaceMarginMm = Math.max(surfaceMarginMm, 3.5);
+            zFrameToleranceMm = Math.min(zFrameToleranceMm, MAX_FRAME_TOLERANCE_MM);
+            if (Math.abs(primeRotationDeg - 360) < 1e-9) {
+                primeRotationDeg = 360.36;
+            }
         }
-        travelAccelMmS2 = 2000;
-        zLiftAccelMmS2 = 2000;
-        zLiftFeedMmS = Math.max(zLiftFeedMmS, 50);
-        bMaxFeedDegS = Math.max(bMaxFeedDegS, 2400);
-        surfaceMaxResidualMm = Math.min(surfaceMaxResidualMm, 0.04);
-        surfaceMarginMm = Math.max(surfaceMarginMm, 3.5);
-        zFrameToleranceMm = Math.min(zFrameToleranceMm, MAX_FRAME_TOLERANCE_MM);
-        if (Math.abs(primeRotationDeg - 360) < 1e-9) {
-            primeRotationDeg = 360.36;
+        if (schemaVersion < 4) {
+            // tip setups: nothing to change (above); the start's reconcile makes the setups agree with the file
+            schemaVersion = 4;
         }
-        schemaVersion = SCHEMA_VERSION;
+        if (schemaVersion < SCHEMA_VERSION) {
+            schemaVersion = SCHEMA_VERSION;
+        }
     }
 
     public DispenseConfig copy() {
@@ -642,10 +715,46 @@ public class DispenseConfig {
         return fromJson(new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
     }
 
-    /** Atomically writes the config (temp file + rename). */
+    /**
+     * Whether a saved file was written before the tip setups (tip setups design §22.1): it has no
+     * {@code parkedTips} (every file this version writes has the key, Gson writes every field). An older jar loads a
+     * newer file and drops the key, with {@code needleLanding}, at its first save, so a file without it is from before.
+     */
+    public static boolean isBeforeTipSetups(String json) {
+        try {
+            com.google.gson.JsonElement e = new com.google.gson.JsonParser().parse(json);
+            return e.isJsonObject() && !e.getAsJsonObject().has("parkedTips");
+        }
+        catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * The first save over a file written before the tip setups first copies it to
+     * {@code dispense-config.json.v3-<yyyyMMdd-HHmmss>.bak} (§22.1: an older jar, when the machine is bisected, drops
+     * {@code parkedTips} and {@code needleLanding} at its first save). Returns the backup, or null when none was needed.
+     */
+    static File backupIfBeforeTipSetups(File f) throws IOException {
+        if (!f.isFile() || !isBeforeTipSetups(new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8))) {
+            return null;
+        }
+        String stamp = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern(
+                "yyyyMMdd-HHmmss"));
+        String base = FILE_NAME + ".v3-" + stamp;
+        File b = new File(f.getParentFile(), base + ".bak");
+        for (int i = 2; b.exists(); i++) {
+            b = new File(f.getParentFile(), base + "-" + i + ".bak");
+        }
+        Files.copy(f.toPath(), b.toPath(), StandardCopyOption.COPY_ATTRIBUTES);
+        return b;
+    }
+
+    /** Atomically writes the config (temp file + rename); a file from before the tip setups is kept first. */
     public void save(File configDir) throws IOException {
         File f = fileFor(configDir);
         f.getParentFile().mkdirs();
+        backupIfBeforeTipSetups(f);
         File tmp = new File(f.getParentFile(), FILE_NAME + ".tmp");
         Files.write(tmp.toPath(), toJson().getBytes(StandardCharsets.UTF_8));
         Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING,
@@ -715,6 +824,24 @@ public class DispenseConfig {
         }
         if (!(Math.abs(needleXyTrim.dxMm) <= 1 && Math.abs(needleXyTrim.dyMm) <= 1)) {
             p.add("needleXyTrim must be within +-1 mm (larger: fix the N2 head offset in OpenPnP)");
+        }
+        if (needleLanding != null && !(Math.abs(needleLanding.dxMm) <= MAX_LANDING_MM
+                && Math.abs(needleLanding.dyMm) <= MAX_LANDING_MM)) {
+            p.add("needleLanding must be within +-" + (int) MAX_LANDING_MM + " mm on each axis (a landing check measures "
+                    + "it)");
+        }
+        for (Map.Entry<String, ParkedTip> e : parkedTips.entrySet()) {
+            ParkedTip t = e.getValue();
+            if (e.getKey() == null || !TipSpec.KEY.matcher(e.getKey()).matches() || t.profile == null
+                    || t.needleXyTrim == null) {
+                p.add("parkedTips['" + e.getKey() + "'] needs a tip key, its profile and its trim");
+            }
+            else if (!(Math.abs(t.needleXyTrim.dxMm) <= 1 && Math.abs(t.needleXyTrim.dyMm) <= 1)
+                    || t.needleLanding != null && !(Math.abs(t.needleLanding.dxMm) <= MAX_LANDING_MM
+                            && Math.abs(t.needleLanding.dyMm) <= MAX_LANDING_MM)) {
+                p.add("parkedTips['" + e.getKey() + "']: its trim must be within +-1 mm and its landing within +-"
+                        + (int) MAX_LANDING_MM + " mm");
+            }
         }
         if (keepaliveIntervalMs < 100) {
             p.add("keepaliveIntervalMs must be >= 100");

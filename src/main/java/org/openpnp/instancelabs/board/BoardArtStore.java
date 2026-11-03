@@ -309,7 +309,7 @@ public final class BoardArtStore {
             return null;
         }
         try {
-            return new PadTypeResolver(db.currentPadTypes(), db.packageMappings());
+            return svc.padTypeResolver(); // the mounted tip setup's view (§22.2)
         }
         catch (SQLException e) {
             Logger.warn("pad types cannot be read for the board drawing: {}", e.getMessage());

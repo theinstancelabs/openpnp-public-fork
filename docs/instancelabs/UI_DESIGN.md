@@ -126,8 +126,9 @@ in tiers until the verdict fits whole, the other cells first: t1 drops their lev
 ` · vented`, ` · wipe`), t2 all their long parts (` · set 18 psi`), t2v the verdict's own (` · homes first
 (≈ 25 s)`, a task's progress, the stopped verdict's time: `Stopped`; final gate: before, t2 dropped them with the
 others', so at 1440 px a running pad calibration read `Pad calibration` beside 300 px of free strip), t3 the pressure
-cell while it reads a plain `Off`, t4 the other cells' keys; the stopped state is checked at 1440, 1280 and 1024 (at
-1440 it keeps its time), a running pad calibration at 1440 (it keeps its step).
+cell while it reads a plain `Off`, t4 the other cells' keys, *tips:* t5 the Tip cell while it is ok (1024 px after a
+STOP); the stopped state is checked at 1440, 1280 and 1024 (at 1440 it keeps its time), a running pad calibration at
+1440 (it keeps its step).
 The cells container is `aria-live="polite"`; safety changes (STOP result, vent_failed, offline) are announced
 by `role="alert"` regions instead.
 
@@ -137,6 +138,7 @@ by `role="alert"` regions instead.
 | Machine (`#pill-conn` + `#pill-homed` spans inside) | MACHINE | `Connected · Homed` ok · `Connected · Not homed` needs-you + inline **Home** (`#btn-home`) · `Homing…` energised (from `machine.busy` after a Home) · `Not connected` blocked + inline **Connect** (`#btn-start`); `#pill-homed` is kept in the DOM (visually hidden) reading `Not homed` | Machine panel |
 | Pressure (`#pill-pressure`) | PRESSURE · SET 18 PSI (profile psi) | `Off · vented` off (grey, never green) · `Switching on…` / `Switching off…` energised · `ON 1:15 · auto-off 10:00` energised (hold or run; on-time ticks each second, limit = `maxContinuousOnTimeS`) · `NOT off` blocked (vent_failed) | Pressure panel (opens by itself on vent_failed) |
 | Start angle (`#chip-angle`) | START ANGLE | `298.0°` ok · `Confirm` needs-you (I11 reconnect) · `Not set` blocked · `Whole turns` off (I11 off) | Start-angle question in place (§8.1 popover) |
+| Tip (`#chip-tip`) | TIP | *Tips (§8.6):* the mounted tip setup's name (`22G bent taper`) ok · `25G straight · frame and landing to do` blocked after a needle change until both are done · `Incomplete` blocked. The words after the gauge are a level-2 long part | Setup › Dispenser & tip |
 | Purge row (`#chip-purge`) | PURGE ROW | Always spots **free of total**: `9 of 15` ok when `spotsLeft ≥ perBoard`; `7 of 15 · wipe` needs-you when fewer than one board's purge dots are free; `Not set` blocked | Purge panel (strip map + two-press reset) |
 | Board run verdict (`#pill-engine`) | BOARD RUN | Idle: `Ready to run` ok · `8 of 9 · wipe 2 pads` needs-you (count + the NEXT item, short) · `Blocked · start angle` blocked. Task running: `96/160 · 0:44 left` energised, `Pad check 57/160` energised, `Prime` / `Test dot` / `Touch-off` energised. After STOP/ABORTED/ERROR: `Stopped 14:19` blocked. Engine down: `Dispenser unavailable` blocked | Run › Checks (or Recovery / Run step) |
 | Inline actions | — | `Connect` (`#btn-start`) only when not connected; `Home` (`#btn-home`) only when connected and not homed, and never while a task runs or pressure is held. They appear right after the Machine cell | — |
@@ -250,8 +252,8 @@ Hero card:
   it (nothing moves).
   **As built (board import):** the board's drawing lies under the dots in a second SVG (`g.pv-l-art`: substrate,
   copper, mask, exposed copper, silkscreen, holes, drawn once per art id) with the picture control `#pv-picture`
-  (`Full` · `Quiet` (default, remembered in `localStorage['il.pv.picture']`: pads, holes and the outline, so the dots
-  stand out) · `Off` (the drawing without art)). A click on a pad or a part opens the **pad inspector** (panel view
+  (`Full` (default since 10-31: the whole PCB; the choice is remembered in `localStorage['il.pv.picture']`) · `Quiet`
+  (pads, holes and the outline, so the dots stand out) · `Off` (the drawing without art)). A click on a pad or a part opens the **pad inspector** (panel view
   `pad`) instead of the camera; `#btn-pad-inspect` opens the first pad in path order. The **path preview**
   (`#pv-play`) expands the row `#run-preview` (`#pv-scrub`, `#pv-speed` 1× · 4× · 16×, `#pv-readout`, `#pv-reset`):
   a ghost needle moves dot to dot on the plan's clock (`dots[i].ta / te`) and the dots appear as they would be
@@ -710,6 +712,151 @@ own pads, and the run confirm drops any pad this tab saw pasted) · **Activity**
 **As built:** the done-dot map draws the plan's board drawing under it (Quiet); the new task kinds read
 `Registration · <board>`, `Surface probe · <name>` and `Z check`.
 
+### 8.6 Tip setups (`PROFILE_CALIBRATION_DESIGN.md` §22.7, as built on `il/tip-setups`)
+
+Module `tipsetup.js` + `tipsetup.css` (`IL.tips`, `IL.photos`; `DEV_NOTES.md` §5 › Tip setups). The mounted tip
+setup is named wherever the operator commits: the strip, Setup, the needle card, Profile, Needs a profile, the pad-cal
+view's first line, the run confirm and the plan's recipe. Nothing here moves the machine but **Take a picture from
+below** (two presses, verb `move to the camera`); **Mount** (verb `mount`) and **Undo** (verb `undo: the {old} never
+left the dispenser`) are two-press words of the operator; the landing check and Measure its dots start from the
+pad-cal view like every calibration.
+
+- **The strip** (§4): the cell `button.cell#chip-tip` after the purge row, key `Tip`, value the mounted setup's name
+  (`22G bent taper`, ok), `25G straight · frame and landing to do` (block) after a change until the frame and where it
+  lands are done, `Incomplete` (block); it opens `#setup/tip`. The words after the gauge are a `span.long` (level 2):
+  at 1440 px and below the cell reads `22G` / `25G` (§22.7 kept the whole name; the strip's tiers drop it with the
+  other cells' long parts so the board-run verdict fits), at 1024 px `Start angle` shortens to `Angle`, and at 1024 px
+  after a STOP (the widest state) the cell goes while it is ok (tier t5: the verdict is never cut).
+- **Setup › Dispenser & tip** (`section.card#card-tip`, first in the grid; bring-up step `Dispenser & tip` after
+  Settings): `#tip-state` `22G bent taper` (ok) · `Changed 14:05: frame and landing to do` (block) · `Dots not
+  measured` (need) · `Incomplete` (block); the picture `button.photo-thumb#tip-photo` (opens `#photo-view`) with
+  `#tip-photo-cap`, or `#tip-photo-none` (an outline icon, `No picture of this tip yet.`), the other pictures as a
+  thumbnail strip, `Add a photo…` (`#btn-tip-upload` + hidden `input#tip-file`, gated), `Take a picture from below`
+  (`#btn-tip-picture`, gated with its reason in `#tip-photo-why`) and the drop zone `#tip-drop`; `h3#tip-name` and
+  `dl#tip-kv`: Dispenser · Tip (`ADL AD22TTA-B · 22G · bent 30° · tapered plastic`) · Bend (`points toward −Y`, or `not
+  recorded: which way does it point?` with four small buttons in `#tip-bend`) · Bore (`ID 0.41 mm · OD 0.72 mm (from
+  the chart)`) · Smallest dot · Dots (`from the bench tests (2026-10-27/28)`, `measured {date}: half 0.80, one turn 1.05
+  mm; 1.59 mg per turn`, `not measured yet`) · Pad types · Recipe · Lands (`+2.40, −0.40 mm, checked 10-30 22:31`, `not
+  checked since the change`) · On since (`before the update` until the first change); after a change `ol#tip-next`
+  (`After the needle change · 2 of 7 done`: the frame, the offset, `Set the regulator to 18 psi and read it`, `Prime
+  until paste comes out`, `Check where it lands`, `Touch off`, `Measure its dots` for a tip whose dot table does not
+  know its doses), one `li` per step with its glyph and fix, done steps ticked; the foot: the first open step as the
+  primary (`#tip-primary`), else `#btn-tip-change` `Change tip…`; `details.menu#tip-more` `More` with `Add a tip…`
+  (`#btn-tip-add`), `Edit…` (`#btn-tip-edit`), `Retire…` (`#btn-tip-retire`, opens Change tip with the retire
+  actions). After a change the bring-up step shows the card's first open step (`Dispenser & tip: landing to do — Next:
+  Set the regulator to 18 psi and read it`), not `Measure its dots…`, until the frame, offset and landing are done.
+- **Needle Z frame card**: `I changed the needle` opens Change tip with the mounted tip's `again (a new needle)` row
+  checked (the one way in). K (`#anchor-k`) is prefilled only from the mounted setup's own frame (caption
+  `#anchor-k-cap` `recorded for the 22G bent taper on 10-27`; the seed without a frame: its bench value; a tip that was
+  never on: empty, `K of the 25G straight: not known yet`, Both tips touch preselected and `#anchor-lead` `A tip that
+  was never on: touch the same spot with N1 and with the needle (jog in OpenPnP). Another tip’s K does not fit: lengths
+  differ by up to 10 mm.`). *Since the rc1 merge* the engine refuses K after every needle change (and after a failed Z
+  check of this home): From K is locked and `#anchor-k-why` says why (`K was measured with the needle before the change
+  at 14:05: record the needle frame with both tips touching the same spot.`), so a remounted tip is framed with both
+  tips too. Every post carries the needle token of the moment the heights were captured; the frame question (`The …’s
+  tip touches 1.20 mm higher than when it was on on 10-29: is the … on the dispenser?`) shows in `#anchor-question`
+  with the tip's picture and `Change tip…`. The trim panel saves through `POST /api/needle/xy-trim`; the trim step of
+  the bring-up is `Where the needle lands` (`not checked since the change`, fix `Check where it lands…`, and `Keep
+  where it lands` only when the engine allows it).
+- **Change tip** (panel view `tip-change`, `?panel=tip-change`): `ol#tip-swap` (`Switch the pressure off` live: `it is
+  off` ✓ or `#btn-tip-pressure-off`; `Unscrew the needle and screw on the one you are putting on`, for a bent one
+  `point its bend toward −Y, as in its picture` with the picture; `Pick it below and mount it`); `fieldset#tip-list`
+  (legend `Which tip is on the dispenser now?`, `label.tip-opt > input[type=radio][name=tip]`: first `The 22G bent
+  taper again (a new needle)`, then the others with thumbnail, name, summary and calibrated types, `incomplete` on
+  placeholders; `#tip-only` `Only the 22G bent taper is set up. Add the tip you are putting on: Add a tip…` (with
+  `#btn-tip-add2`); `details.disclose#tip-retired` `Show retired tips (n)` with `Bring back`); `#tip-change-what` (the
+  engine's mount preview) and `#tip-change-why`; `#btn-tip-mount` `Mount the 25G straight` / `This is a new needle`,
+  two presses, locked while a task or a job runs (`… a needle cannot come off while the head moves: press STOP
+  first`), while the pressure is on, and while the Profile card or the pad-type editor has unsaved edits (`Save or
+  discard the 22G bent taper’s recipe changes first.`). After a mount of another tip the band `25G straight mounted.
+  Undo` (`#btn-tip-undo`, two presses, 2 min). The selected tip's `Edit…` and `Retire…` (`#btn-tip-sel-edit`,
+  `#btn-tip-sel-retire`) sit under the list.
+- **Add a tip / Edit** (`#dlg-tip-add`, `IL.dialog.open`): `#ta-preset` (fills the form and the name: the needles on
+  hand, chart values, OD `from the chart`; `Other…` leaves it blank), name, dispenser, model, gauge, ID, OD and its
+  source, form + bend + which way, taper, length, `#ta-mindot` (the smallest dot it takes reliably), `Start its
+  dispense profile from` (the setups' recipes or the defaults), notes, the picture (`#ta-photo`, gated, + `#ta-drop`,
+  `img#ta-photo-img`), the key under More; foot `#ta-save` `Add the tip` and `#ta-save-mount` `Add and mount` (two
+  presses). The picture is uploaded after the setup exists (`The tip was added without its picture: …` when that
+  fails). Edit opens it with the key read-only; for a setup with records the identity fields are disabled (`A
+  different needle is a new tip: Add a tip…`) and a changed correction field turns Save into the two-press `Correct
+  the details` with the note `Correcting the 25G straight’s details? A different needle is a new tip: Add a tip…`.
+- **Pictures**: thumbnails are `button.photo-thumb > img[alt={caption}]`; `#photo-view` is `IL.dialog.open({size:
+  'lg'})` (`.dialog--lg`, the scrim under the strip, STOP live, Esc closes, focus back to the thumbnail; the image
+  fits the dialog) with the caption and meta, previous / next, `Use as the tip's picture` (`#btn-photo-main`) and
+  `Remove this picture` (`#btn-photo-remove`, two presses; never on a result photo), then `Undo` (`#btn-photo-undo`).
+  Every button that opens a file chooser is gated with `IL.lockReason` (an open OS chooser blocks F9 and STOP: `Locked
+  while the board runs: add the photo when it has finished`); drop zones (`div.photo-drop`, hint `A phone picture:
+  copy it to this computer first (cable, cloud or mail).`) stay open and the engine refuses an upload during a run. The
+  browser draws each picture itself (`createImageBitmap`, the phone's orientation, at most 2048 px, JPEG 0.85, no
+  metadata); a HEIC it cannot read: `This picture cannot be read here (iPhone HEIC?): share it as JPEG ("Most
+  Compatible") or send a screenshot.`
+- **Profile** per mounted tip: `#pf-h1-sub` with the tip's thumbnail, ` · for the 25G straight` and `Change tip…`; the
+  card's sub `{recipe} · the recipe of the 25G straight: every dot on a board and on the purge row`; a stand-in's badge
+  `not started` with `Not calibrated for the 25G straight yet`; with more than one tip a `+2 tips` button in the name
+  cell (the side panel's `#pt-side-tips` `Other tips`: per tip its version, status, label, result-photo thumbnail and
+  `Copy its dots to start from` while the mounted tip's version is below characterized), and the third filter `By tip`
+  (`#pt-by-tip`: one column per tip, the mounted one first, each cell a status badge button with its label's type-free
+  part); the editor's eyebrow `Pad type · chip-0603 · for the 25G straight`, its note `Saves version 8 for the 25G
+  straight; the 22G bent taper keeps version 7. Size, pattern, name, k and t are shared by every tip.`, `Save version
+  8`, `Retire for every tip…`, and `fieldset#pt-calfor` `Calibrated for` (the label, the photos, `Add a photo…`) when
+  the status rises to characterized or validated; History has a Tip column and `This tip / All tips`
+  (`#history-all`; at 1024 px the All-tips table scrolls sideways inside the dialog). The plan list gives the name its
+  own row and the pad count the line under it.
+- **Needs a profile**: `Needs a profile` + `span#pt-needs-for` ` for the 25G straight`; with an unmeasured tip
+  `div.notebox#pt-needs-measure` (`Measure the 25G straight’s dots first (Setup › Dispenser & tip › Measure its dots, ≈
+  8 min and two coupons to weigh): suggestions need its dot sizes and paste per turn.`) and `#btn-needs-measure`
+  `Measure its dots… · ≈ 8 min`; `#pt-needs-other` when another tip covers the board's typed pads (`The 22G bent taper
+  has all 5 pad types of this board; 3 packages have no pad type yet.` with `Change tip…`: as built it also counts the
+  packages without a pad type, which no tip change gives one); Run's Pad types item says the same.
+- **The pad-cal view per mode**: the title `Calibrate automatically` / `Check where the 25G straight lands` / `Measure
+  the 25G straight’s dots`; the first line `#pcal-tipline` `For the 25G straight (on since 10-30 22:24)` with the
+  thumbnail; the before-start sentence (`Lays one dot, then 8 purge dots and 8 dots in a row on the blank (X …, Y …),
+  looks at them, and saves where the needle lands. Uses 20 mm of the calibration area (39.0 left). Searches ±6 mm.`);
+  the start `Check where it lands · ≈ 1:00` (verb `lay 17 dots`) / `Measure the dots · ≈ 8:00` (verb `measure`); the pad
+  sizes, Calibrate again and by hand hidden in the two measure modes. Results: the landing's `#pcal-landing` (`Saved:
+  …`; the question with `#btn-pcal-landing-save` `Save it: the 22G bent taper is on` (one press) and `Another tip is on:
+  Change tip…`; not found with `Search ±9 mm…` (`#btn-pcal-landing-wide`)); Measure its dots' `table#pcal-tipdots` (Turn
+  · Found · Mean · d95 · Threads · Spread, each turn with its pass mark; `Dot sizes of the tip (mm)`) and `{mg} mg per
+  turn`, amber when the tip is still not measured (`Not measured yet: the 25G straight’s smallest dot, the quarter turn,
+  did not pass. If this tip cannot lay quarter-turn dots reliably, set its smallest dot to the half turn (Edit…). …`);
+  the result's next step as the primary (`#btn-pcal-next`: the next `#tip-next` step, or `Calibrate the 5 pad types of
+  padcal for the 25G straight…`).
+- **The result card** (calibrate): under the verdict `div#pcal-tip` `The tip` (the record's reference picture, the
+  pictures taken for it in `#pcal-tip-pics`, `Add a photo…` `#btn-pcal-upload` + `input#pcal-file`, `Take a picture
+  from below` `#btn-pcal-picture` (two presses), the drop zone; without a picture `No picture of this tip yet: add one,
+  it shows later which needle this was calibrated for.`); per group in its `li` the label (`Calibrated for` with the
+  outcome badge, `Calibration for` below characterized), `Edit` → `textarea#pcal-label-{id}` with `Unsaved: Save ·
+  Discard` (`#btn-pcal-label-save-{id}`), `Use the automatic label` when it differs; one result photo per dose
+  (`figure.pcal-photo`), or `No result photo: the top camera gave no frame.` / `No result photo: this calibration laid
+  no dots of its own (it used the dots measured before).`; the foot's `Made with another tip…` (`#btn-pcal-wrongtip`,
+  two presses; it also finds the record of a job whose control failed, by its job id). A label edited and not saved
+  stops `Checks ›` once.
+- **Records › Calibrations**: `table#rec-pcals-t` When · Calibrated for (the label, and `Chip 0603 · v7` under it) · Tip
+  · How (`automatic` / `by hand`) · Outcome (`wrong tip` when flagged) · Pictures (`span.rec-thumbs`: three, then `+n`),
+  the seg `#rec-pcals-tips` `All tips / {tip}`; a row opens `#records/calibrations/p{id}`: the label (`#rec-label`,
+  `#btn-rec-label`), setup, type and versions, checks, the photos full width (`figure.rec-photo`), `Add a photo…`
+  (`#btn-rec-upload`, upload only: Records stays motion-free), evidence, `Open the result` (`#btn-rec-open`) while the
+  job is in memory, `Made with another tip…` (`#btn-rec-wrongtip`); `No pad calibrations yet: Profile › Needs a profile
+  › Calibrate automatically.`; the volume-model table under `details.disclose#rec-cals-old` `Older calibration records
+  (volume model, records only)`; Boards gains a Tip column (`—` before the update).
+- **Run**: the run confirm's tick `label.check#run-confirm-tip` (`input#run-tick-tip`) `The 22G bent taper is on the
+  dispenser` with its thumbnail, on a row of its own (attestation `tip-on`: the setup key, lapsing at every needle
+  change and mount; Go needs it like the paste tick; `after every needle change` until ticked); the plan hero's recipe
+  token adds ` · for the 25G straight`. Run › Checks: the Needle item after a change `The 25G straight was put on at
+  14:05: record its needle Z frame.`, then `… where it lands has not been checked.` (value `landing`, fixes `Check
+  where it lands…` and, when allowed, `Keep where it lands`), or the head-offset text; the I4 refusals for the landing
+  and for a frame too close to N1's are Needle items (`Check where it lands…`; Settings), never Surface items; a stale
+  plan reads `stale: tip, pad types changed`.
+- **Calibrate**: the touch-off shows the tip read-only, the ladder guide shows its result photo (`img.guide-photo`),
+  the scale shots' tip field is the mounted tip's name, read-only.
+
+*Left open (UI check, minor):* the Tip cell shows only the gauge at 1440 px and below; the plan's `for the 25G straight`
+chip is clipped at 1440 px; the Add dialog's `Start its dispense profile from` select cuts its longest option; the
+landing check's start card does not show the band's problem before the ticks; Calibrate's `Before it runs` lists do
+not list where the needle lands; the landing result says `Saved` in the verdict and again in `#pcal-landing`; `Save
+it: the … is on` takes one press; Change tip keeps the previous selection after `Made with another tip…`; the run
+confirm's tip tick sits below the fold at 1024 × 768.
+
 ---
 
 ## 9. Readiness model (one pure function)
@@ -724,7 +871,7 @@ the Run button state and the tab title. Nothing else may compute "ready". Unit-t
 |---|---|---|---|
 | 1 | Machine | `machine.enabled && homed && !busy` | not connected → blocked: `Connect`; not homed → needs-you: `Home` (two-press); homing → energised. **As built:** when Run homes first (`machine.home.policy`), a note that counts ready (`homes first`, `homes first, checks Z`; verdict `Ready to run · homes first (≈ 25 s)`); needs-you only when a STOP left N1 low. Homed with Z data from before the home: `checks Z`, fix-it `Check Z` (two-press) |
 | 2 | Start angle (I11) | I11 `ok` or `off` | reconnect → needs-you: the two answers in place; never set → blocked: `Measure the angle` |
-| 3 | Needle offset (I4 needle) | frame set, touched off or confirmed, drift ≤ 1.0 mm | not touched off but frame set → needs-you: `Confirm frame offset −2.590 mm`; frame missing / needle changed → blocked: `Open Needle Z frame` |
+| 3 | Needle offset (I4 needle) | frame set, touched off or confirmed, drift ≤ 1.0 mm; *tips:* and where the needle lands checked | not touched off but frame set → needs-you: `Confirm frame offset −2.590 mm`; frame missing / needle changed → blocked: `Open Needle Z frame`. *Tips (§8.6):* after a change `The 25G straight was put on at 14:05: record its needle Z frame.`; then `… where it lands has not been checked.` (blocked, value `landing`, fixes `Check where it lands…` and `Keep where it lands` when the engine allows it), or `N2’s head offset changed in OpenPnP since the …’s landing was checked: set it back, or check where it lands.` |
 | 4 | Regulator (I6, you) | a valid attestation (§9.4) | needs-you: `Pressure on to read the gauge` + `Reads 18 psi` |
 | 5 | Pad types (PLAN) | no blocked pads | blocked: `3 pads below characterized: chip-0603 ×2, sot-23 ×1` → each opens that type. **As built (pc-web), with the plan's profile check:** groups that need a profile → `Blocked · needs a profile`, `21 pads cannot be dispensed: 12 need a profile, 9 not with the 22G tip (WSON-8…)`, fixes `Use Chip 0603 for TestChip_A · plans again` / `Needs a profile: SW_SPST_3.9x2.9mm` (up to 3), `All 3 in Profile › Needs a profile`, `Lowest pad-type status`; only pads the tip cannot dispense → blocked, `9 pads cannot be dispensed with the 22G tip: WSON-8… (9 pads).`, fixes `Dispense the rest (Setup › Settings › Refuse flagged pads)` and `Why`; with Refuse flagged pads off (`status.dispense.refuseFlaggedPads` false: the engine skips them) → a Note that counts ready, `151/160 · 9 skipped`, `9 pads skipped (Refuse flagged pads is off): WSON-8 (9 pads) not with the 22G tip. The other 151 are dispensed.`, fixes `Refuse flagged pads` and `Why` (or `Needs a profile`), and the run confirm adds `Skips 9 pads that cannot be dispensed` with the pads by package (its title counts only the pads dispensed); only notes → a Note that counts ready (`160/160 · 2 notes`). The Pad types tile goes to `#profile/needs` |
 | 6 | Board surface (I4 board) | tied to this plan's registration, covers every dot, fit ok, and the operator did not answer "new seat" since | needs-you: `Probe this seat` / `Same board, not moved`; fit or coverage problem → blocked with the bad points/dots. **As built:** the fix is `Register board` (`register`, two-press) or `Same seat? Check the fiducials` (`register-check`), with `Do it by hand`, and the item's short name is `register board` (strip `8 of 9 · register board`, nav `Register board`; final gate: it was `probe seat`); texts `No board surface for this seat yet: register the board (fiducials, then N1 touches the board).`, `You said the board was re-seated: register it …`, `The board surface belongs to another seat of this board: register it again.` A board without fiducials (`registrationTargets.probeOnly`, F10): the fix is `Probe only (X/Y as planned)` (`register-probe-only`), the short name `probe board` (blocked: `probe again`), texts `No board surface for this seat yet: probe the board (no fiducials: N1 touches it where it is planned).`, `You said the board was re-seated: probe it …`, `The board surface belongs to another seat of this board: probe it again.` |
@@ -768,8 +915,10 @@ outcome (`all 160 dots`, `61 of 160 dots`, `2 pads not clean`).
 ### 9.4 Attestations (no sensor)
 
 Stored in `localStorage['il.attest']` as `{key, value, atMs}`: `regulator` (psi), `paste-life`, `prime-seen`,
-`test-dot-seen`. Shown as `you, 13:04`. The regulator attestation expires when the profile psi changes (for good:
-setting the psi back does not revive it), after `I changed the needle`, or after 8 h; paste life after 8 h.
+`test-dot-seen`, *tips:* `tip-on` (the mounted setup's key: the run confirm's `The 22G bent taper is on the
+dispenser`). Shown as `you, 13:04`. The regulator attestation expires when the profile psi changes (for good:
+setting the psi back does not revive it), after `I changed the needle`, or after 8 h; paste life after 8 h. *Tips:*
+the regulator, prime, test-dot and tip ticks lapse at every needle change and mount (the needle token moved on).
 `hands-clear` is never stored. The Setup page head says these ticks live in this browser only (all its tabs: a
 tick or a `new seat` answer in one tab counts in the others at once).
 
@@ -1149,6 +1298,29 @@ duplicate id). `#run-live` carries `data-label` and `data-status` mirroring `run
   `wd-pre`, `wd-reason`), `btn-wd-run`, `btn-guide-ladder`, `guide-target`, `cal-shots-older`; fix-its `data-fix` =
   `profile-use`, `profile-needs`, `pcal-open`, `pcal-area`, `pcal-wiped`. The board view's suggested dots are
   `g.pv-l-sugg circle.pv-sugg` (never `circle.dot`). Tested by `pad-profile.playwright.cjs` (PC §14.4).
+
+- Tip setups (`il/tip-setups`, `tipsetup.js`, §8.6): the strip's `chip-tip`; Setup `card-tip`, `tip-state`, `tip-photo`,
+  `tip-photo-cap`, `tip-photo-none`, `tip-photo-why`, `tip-thumbs`, `tip-drop`, `tip-file`, `btn-tip-upload`,
+  `btn-tip-picture`, `tip-name`, `tip-kv`, `tip-bend` (`button[data-toward]`), `tip-next`, `tip-next-n`, `tip-primary`,
+  `btn-tip-change`, `tip-more`, `btn-tip-add`, `btn-tip-edit`, `btn-tip-retire`; the needle card's `anchor-k-cap`,
+  `anchor-lead`, `anchor-question`, `anchor-k-why`; Change tip `tip-swap` (`-g1`, `-s1`, `-s2`, `-pic`),
+  `btn-tip-pressure-off`, `tip-list`, `tip-list-opts` (`label.tip-opt`, `#tip-opt-<key>`), `tip-only`, `btn-tip-add2`,
+  `tip-retired` (`-s`, `-l`, `button[data-unretire]`), `tip-change-what`, `tip-change-text`, `tip-change-ref`,
+  `tip-change-why`, `btn-tip-mount`, `tip-mount-l`, `tip-sel-acts`, `btn-tip-sel-edit`, `btn-tip-sel-retire`,
+  `btn-tip-undo`; the dialog `dlg-tip-add` with `ta-*` (`preset`, `name`, `dispenser`, `model`, `gauge`, `id`, `od`,
+  `od-src`, `form`, `bend`, `toward`, `taper`, `length`, `mindot`, `profile-from`, `notes`, `photo`, `photo-img`,
+  `photo-name`, `photo-why`, `drop`, `key`, `more`, `note`, `error`, `sum`, `save`, `save-mount`, `cancel`); the viewer
+  `photo-view` (`-img`, `-cap`, `-meta`), `btn-photo-prev`, `btn-photo-next`, `btn-photo-main`, `btn-photo-remove`,
+  `btn-photo-undo`, `btn-photo-close`; Profile `pt-by-tip`, `pt-side-tips` (`.pt-tip[data-setup]`,
+  `button[data-action=copy-from]`), `pt-calfor`, `pt-label`, `pt-cal-photos`, `btn-pt-upload`, `pt-file`,
+  `history-all`; Needs a profile `pt-needs-for`, `pt-needs-measure`, `btn-needs-measure`, `pt-needs-other`; the pad-cal
+  view `pcal-tipline`, `pcal-landing`, `btn-pcal-landing-save`, `btn-pcal-landing-wide`, `pcal-tipdots` (+`-box`),
+  `btn-pcal-next`, `pcal-tip`, `pcal-tip-pics`, `btn-pcal-upload`, `pcal-file`, `btn-pcal-picture`,
+  `pcal-label-<id>`, `btn-pcal-label-save-<id>`, `btn-pcal-wrongtip`, `pcal-photos-none`; Records `rec-pcals-t`,
+  `rec-pcals-tips` (`button[data-tip]`), `rec-pcals-sum`, `rec-pcals-empty`, `rec-label`, `btn-rec-label`,
+  `btn-rec-upload`, `btn-rec-open`, `btn-rec-wrongtip`, `rec-cals-old`; Run `run-confirm-tip` (`run-tick-tip`).
+  Fix-its `data-fix` = `tip-change`, `tip-again`, `tip-edit`, `tip-add`, `landing-check`, `landing-keep`, `measure-tip`.
+  Tested by `tip-setups.playwright.cjs` (PC §22.8).
 
 **Removed:** `banner`, `banner-text`, `banner-close` (replaced by `msg-area` and inline refusals), `tab-run`,
 `tab-dispense`, `tab-calibrate`, `tab-profiles` containers (replaced by `[data-workspace]` sections with ids

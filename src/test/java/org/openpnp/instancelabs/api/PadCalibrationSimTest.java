@@ -138,12 +138,12 @@ public class PadCalibrationSimTest {
         ok(call("PUT", "/api/locations/blank", "{\"x\":290,\"y\":240,\"z\":5.5}"));
         ok(call("PUT", "/api/locations/coupon1", "{\"x\":350,\"y\":55,\"z\":5.80}"));
         ok(call("PUT", "/api/locations/coupon2", "{\"x\":350,\"y\":90,\"z\":5.80}"));
-        ok(call("POST", "/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
-        ok(call("POST", "/api/needle/offset", "{\"offsetMm\":-2.59}"));
+        ok(call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
+        ok(call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}"));
         ok(call("PUT", "/api/surfaces/blank", "{\"points\":[[272,217,5.5],[343,217,5.5],[272,273,5.5],[343,273,5.5]]}"));
         ok(call("PUT", "/api/config", "{\"purgeRow\":{\"x0Mm\":275,\"y0Mm\":220,\"pitchXMm\":2.0,\"spots\":33},"
                 + "\"vacuumProbe\":{\"vacuumSettleMs\":300,\"readDelayMs\":0},\"cleanPadCheck\":{\"enabled\":false}}"));
-        ok(call("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}"));
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         ok(call("POST", "/api/screw/start-angle", "{}"));
         regulatorAtMs = System.currentTimeMillis();
     }
@@ -634,7 +634,7 @@ public class PadCalibrationSimTest {
         Res again = call("POST", "/api/pad-calibrations", "{\"planId\":\"" + newPlanId + "\",\"groups\":\"all\","
                 + "\"save\":true," + attest() + "}");
         assertEquals(409, again.status, again.toString());
-        assertEquals("Nothing to calibrate: every chosen group cannot be dispensed with the 22G tip.",
+        assertEquals("Nothing to calibrate: every chosen group cannot be dispensed with the 22G bent taper.",
                 str(again.json(), "reason"));
 
         // the by-hand weighing (§8) on a connected SIM balance: the coupons the operator wiped look clean again, the job
@@ -784,6 +784,349 @@ public class PadCalibrationSimTest {
             double mean = e.getValue().stream().mapToDouble(Double::doubleValue).average().orElse(0);
             assertEquals(1.0, mean, 0.10, e.getKey() + ": the pads' mean against the predicted mass " + e.getValue());
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Tip setups (§22.3, §22.8): where a tip lands, its dots, a second setup calibrated, labels and photos
+    // ------------------------------------------------------------------------------------------
+
+    static final String K25 = "25g-straight";
+
+    /** The scene's paste with the tip of {@code key} on the SIM head: its own mass per turn, footprint and landing. */
+    static void byTip(JsonObject scene, String key, double mRevMg, double c, double dx, double dy) {
+        JsonObject p = paste(scene);
+        JsonObject by = p.has("byTip") ? p.getAsJsonObject("byTip") : new JsonObject();
+        JsonObject t = new JsonObject();
+        t.addProperty("mRevMg", mRevMg);
+        JsonObject f = new JsonObject();
+        f.addProperty("c", c);
+        f.addProperty("e", 0.77);
+        t.add("footprint", f);
+        JsonArray b = new JsonArray();
+        b.add(new com.google.gson.JsonPrimitive(dx));
+        b.add(new com.google.gson.JsonPrimitive(dy));
+        t.add("landingBiasMm", b);
+        by.add(key, t);
+        p.add("byTip", by);
+    }
+
+    Long token() throws Exception {
+        JsonElement t = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle").get("changedAtMs");
+        return t == null || t.isJsonNull() ? null : t.getAsLong();
+    }
+
+    /**
+     * The mounted needle's frame (both tips touching, the needle 2.59 mm under N1: K is refused after a needle change)
+     * and its offset, under the needle token now.
+     */
+    void frame() throws Exception {
+        String tk = String.valueOf(token());
+        ok(call("POST", "/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactZ\":2.91,\"needleChangedAtMs\":"
+                + tk + "}"));
+        ok(call("POST", "/api/needle/offset", "{\"offsetMm\":-2.59,\"needleChangedAtMs\":" + tk + "}"));
+    }
+
+    /** Add a tip's 25G straight (its recipe from the 22G's), mounted, its frame recorded. */
+    void mount25() throws Exception {
+        ok(call("POST", "/api/tip-setups", "{\"name\":\"25G straight\",\"gauge\":25,\"idMm\":0.25,\"odMm\":0.51,"
+                + "\"form\":\"straight\",\"taper\":\"straight-steel\",\"lengthMm\":12.7}"));
+        ok(call("POST", "/api/tip-setups/" + K25 + "/mount", "{\"why\":\"test\"}"));
+        frame();
+    }
+
+    /** The blank wiped by the operator: its paste (the SIM's), the calibration area and the purge row free again. */
+    void wipeBlank() throws Exception {
+        ok(call("POST", "/api/sim/paste/wipe", "{\"region\":\"blank\"}"));
+        ok(call("POST", "/api/calibration-area/reset", null));
+        ok(call("POST", "/api/purge-row/reset", null));
+    }
+
+    /** Check where it lands (§22.3), waited for. */
+    JsonObject landingCheck() throws Exception {
+        JsonObject started = ok(call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\"," + attest()
+                + ",\"wait\":true}"));
+        JsonObject job = started.getAsJsonObject("result");
+        assertEquals("done", str(job, "state"), job.toString());
+        assertEquals("landing", str(job, "measure"));
+        return job;
+    }
+
+    static JsonObject landing(JsonObject job) {
+        return result(job).getAsJsonObject("landing");
+    }
+
+    @Test
+    public void theLandingCheckFindsWhereEachTipLandsAndAsksWhenItMoved() throws Exception {
+        start(sc -> {
+            byTip(sc, Tip22.KEY, 2.30, 0.875, 0.4, 0);
+            byTip(sc, K25, 1.6, 0.6, 2.4, -0.4);
+        });
+        // a new 22G that lands 0.4 mm off: everything but prime, the test dot and the landing check waits for it
+        ok(call("POST", "/api/needle/changed", "{\"why\":\"a new 22G\"}"));
+        frame();
+        regulatorAtMs = System.currentTimeMillis();
+        // a by-hand ladder is refused before the landing is checked
+        Res refused = call("POST", "/api/pad-calibrations", "{\"steps\":[\"ladder\"],\"doseSteps\":800,"
+                + "\"typeKeys\":[\"chip-0603\"]," + attest() + "}");
+        assertEquals(409, refused.status, refused.toString());
+        assertTrue(str(refused.json(), "reason").startsWith("I4: the 22G bent taper was put on at "), refused.toString());
+        assertTrue(str(refused.json(), "reason").endsWith("and where it lands has not been checked: check where it "
+                + "lands (Setup › Dispenser & tip)."), refused.toString());
+        JsonObject pv = ok(get("/api/pad-calibrations/preview?measure=landing"));
+        assertEquals(6, pv.getAsJsonObject("landing").get("searchMm").getAsDouble(), 0, "a bent tip, its bend not recorded");
+        assertTrue(str(pv, "sentence").contains("Lays one dot, then 8 purge dots and 8 dots in a row on the blank (X "
+                + "290.0–330.0, Y 240.0–260.0), looks at them, and saves where the needle lands. Uses 20 mm of the "
+                + "calibration area (20.0 left). Searches ±6 mm."), str(pv, "sentence"));
+        JsonObject l22 = landing(landingCheck());
+        assertTrue(l22.get("saved").getAsBoolean(), l22.toString());
+        assertEquals(0.4, l22.get("dxMm").getAsDouble(), 0.08, l22.toString());
+        assertEquals(0.0, l22.get("dyMm").getAsDouble(), 0.08, l22.toString());
+        assertEquals(8, l22.get("n").getAsInt());
+        JsonObject needle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertTrue(needle.get("xyChecked").getAsBoolean(), needle.toString());
+
+        // the 25G straight lands 2.4 mm off: the locator finds it within ±6 mm, the row fits it
+        wipeBlank();
+        mount25();
+        JsonObject job = landingCheck();
+        JsonObject l25 = landing(job);
+        assertTrue(l25.get("saved").getAsBoolean(), l25.toString());
+        assertEquals(2.4, l25.get("dxMm").getAsDouble(), 0.08, l25.toString());
+        assertEquals(-0.4, l25.get("dyMm").getAsDouble(), 0.08, l25.toString());
+        assertTrue(Pattern.compile("The 25G straight lands \\+2\\.\\d\\d, −0\\.\\d\\d mm from the N2 head offset \\(8 dots, "
+                + "scatter 0\\.\\d\\d mm\\)\\. Saved: every dot is corrected by it\\.").matcher(str(result(job), "sentence"))
+                .matches(), str(result(job), "sentence"));
+        assertNotNull(l25.get("photoId"), "the band's after frame is its result photo");
+        assertTrue(result(job).getAsJsonArray("photos").size() > 0);
+        assertEquals(2.4, svc.getConfig().needleLanding.dxMm, 0.08);
+
+        // the 25G now lands 1.5 mm from where it landed: the check asks and saves nothing; the operator's answer saves
+        wipeBlank();
+        JsonObject moved = scene("display");
+        byTip(moved, Tip22.KEY, 2.30, 0.875, 0.4, 0);
+        byTip(moved, K25, 1.6, 0.6, 3.9, -0.4);
+        writeScene(moved);
+        Thread.sleep(400); // the scene file is read again when it changed (250 ms)
+        JsonObject asked = landingCheck();
+        JsonObject q = landing(asked);
+        assertEquals(2, q.get("searchMm").getAsDouble(), 0, "a straight tip with a landing of its own");
+        assertFalse(q.get("saved").getAsBoolean(), q.toString());
+        assertTrue(str(q, "question").startsWith("The 25G straight lands 1.5 mm from where it landed on "), q.toString());
+        assertTrue(str(q, "question").endsWith(": is the 25G straight on the dispenser?"), q.toString());
+        assertEquals("question", str(result(asked), "outcome"));
+        assertEquals(2.4, svc.getConfig().needleLanding.dxMm, 0.08, "nothing saved");
+        JsonObject saved = ok(call("POST", "/api/needle/landing", "{\"jobId\":\"" + str(asked, "id") + "\","
+                + "\"accept\":true,\"needleChangedAtMs\":" + token() + "}"));
+        assertEquals(3.9, saved.getAsJsonObject("needleLanding").get("dxMm").getAsDouble(), 0.08);
+        assertEquals(3.9, svc.getConfig().needleLanding.dxMm, 0.08);
+        assertTrue(landing(ok(get("/api/pad-calibrations/" + str(asked, "id")))).get("saved").getAsBoolean());
+    }
+
+    @Test
+    public void aLandingCheckThatFoundNothingCannotBeSaved() throws Exception {
+        // a new 22G that lands 8 mm off: beyond the ±6 mm a bent tip without its bend recorded is searched
+        start(sc -> byTip(sc, Tip22.KEY, 2.30, 0.875, 8.0, 0));
+        ok(call("POST", "/api/needle/changed", "{\"why\":\"a new 22G\"}"));
+        frame();
+        regulatorAtMs = System.currentTimeMillis();
+        JsonObject job = landingCheck();
+        assertEquals("not-found", str(result(job), "outcome"), result(job).toString());
+        assertTrue(str(result(job), "sentence").startsWith("No dot found within ±6 mm of where the 22G bent taper "
+                + "should land"), str(result(job), "sentence"));
+        assertFalse(landing(job).get("saved").getAsBoolean());
+        // "Save it" is the answer to the question of a fit, not a way around the check
+        Res accept = call("POST", "/api/needle/landing", "{\"jobId\":\"" + str(job, "id") + "\",\"accept\":true,"
+                + "\"needleChangedAtMs\":" + token() + "}");
+        assertEquals(409, accept.status, accept.toString());
+        assertTrue(str(accept.json(), "reason").contains("check where it lands"), accept.toString());
+        JsonObject needle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertFalse(needle.get("xyChecked").getAsBoolean(), needle.toString());
+    }
+
+    /** A small JPEG (a picture of the tip from a phone, as the browser sends it). */
+    static byte[] jpeg() throws Exception {
+        java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(320, 240,
+                java.awt.image.BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = img.createGraphics();
+        g.setColor(new java.awt.Color(90, 120, 150));
+        g.fillRect(0, 0, 320, 240);
+        g.setColor(java.awt.Color.LIGHT_GRAY);
+        g.fillRect(150, 20, 20, 200);
+        g.dispose();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        javax.imageio.ImageIO.write(img, "jpg", out);
+        return out.toByteArray();
+    }
+
+    JsonObject upload(String query) throws Exception {
+        HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + api.getPort()
+                + "/api/photos?" + query)).header("Content-Type", "image/jpeg").POST(HttpRequest.BodyPublishers
+                        .ofByteArray(jpeg())).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(201, r.statusCode(), r.body());
+        return new JsonParser().parse(r.body()).getAsJsonObject().getAsJsonObject("photo");
+    }
+
+    @Test
+    public void aSecondTipIsMeasuredThenCalibratedWithItsOwnLabelsAndPhotos() throws Exception {
+        // the 25G lays smaller dots than the 22G (a footprint of its own) and lands where the 22G does
+        start(sc -> byTip(sc, K25, 2.0, 0.6, 0, 0));
+        mount25();
+        regulatorAtMs = System.currentTimeMillis();
+        assertTrue(landing(landingCheck()).get("saved").getAsBoolean());
+        wipeBlank();
+        JsonObject picture = upload("kind=setup&setup=" + K25 + "&caption=25G%20from%20the%20side");
+        JsonObject pv = ok(get("/api/pad-calibrations/preview?measure=tip&regulatorPsi=18&regulatorAtMs=" + regulatorAtMs
+                + "&pasteLifeAtMs=" + regulatorAtMs));
+        assertNull(str(pv, "refusal"), pv.toString());
+        // spaced for a dot of unknown size, 1.6 mm apart (§22.2): the ladder fits the default 40 x 20 mm area
+        assertTrue(pv.getAsJsonObject("blank").get("usesMm").getAsDouble() <= 20, "the default area holds it: " + pv);
+
+        // Measure its dots: every dose it takes on the blank, the half turn weighed on both coupons; records only
+        JsonObject started = ok(call("POST", "/api/pad-calibrations", "{\"measure\":\"tip\"," + attest() + "}"));
+        JsonObject job = awaitJob("awaiting-reading");
+        assertEquals("awaiting-reading", str(job, "state"), job.toString());
+        JsonObject measured = weighAndType(job);
+        assertEquals("done", str(measured, "state"), measured.toString());
+        assertEquals(str(started, "id"), str(measured, "id"));
+        JsonObject tipDots = result(measured).getAsJsonObject("tipDots");
+        assertEquals(3, tipDots.getAsJsonArray("doses").size(), tipDots.toString());
+        for (JsonElement e : tipDots.getAsJsonArray("doses")) {
+            JsonObject d = e.getAsJsonObject();
+            assertTrue(d.get("pass").getAsBoolean(), d.toString());
+            assertTrue(d.get("d95Mm").getAsDouble() < 1.2, "smaller than the 22G's: " + d);
+        }
+        assertEquals(2.0, tipDots.get("mgPerTurn").getAsDouble(), 0.1, tipDots.toString());
+        assertTrue(tipDots.get("measured").getAsBoolean());
+        assertTrue(str(result(measured), "sentence").startsWith("Measured "), result(measured).toString());
+        assertTrue(str(result(measured), "sentence").contains("the 25G straight's dots: quarter "),
+                str(result(measured), "sentence"));
+        assertTrue(result(measured).getAsJsonArray("photos").size() >= 3, "a result photo per block");
+        assertEquals("measured", str(ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("tip"), "dots"));
+
+        // a status raised by hand is a calibration record of its own, with its label and pictures
+        JsonObject byHand = ok(call("PUT", "/api/pad-types/chip-0805", "{\"forSetup\":\"" + K25 + "\",\"status\":"
+                + "\"characterized\",\"dotSteps\":800,\"dotsPerPad\":2,\"calibration\":{\"label\":\"0805 by hand, "
+                + "25G\",\"photoIds\":[" + picture.get("id").getAsLong() + "]}}"));
+        JsonObject hand = byHand.getAsJsonObject("calibration");
+        assertEquals("0805 by hand, 25G", str(hand, "label"));
+        assertFalse(hand.get("labelAuto").getAsBoolean());
+        assertTrue(hand.getAsJsonArray("photos").size() >= 1, hand.toString());
+        JsonObject handRow = ok2(get("/api/pad-calibrations?typeKey=chip-0805")).get(0).getAsJsonObject();
+        assertEquals("by-hand", str(handRow, "method"));
+        assertEquals(K25, str(handRow, "setupKey"));
+        assertTrue(handRow.get("versionFrom").isJsonNull(), "a stand-in was calibrated from nothing: " + handRow);
+
+        // a reconnect: the camera results go stale (the dot table and the weighings stay), so the calibration lays its
+        // own ladder: chip-0603 calibrated for the 25G, the 22G's version untouched
+        int v22 = typeOf("chip-0603").get("version").getAsInt(); // the 25G's stand-in: version 0
+        assertEquals(0, v22);
+        int own22 = svc.getDb().newestOwnVersion("chip-0603", Tip22.KEY).version;
+        sim.machine.setEnabled(false);
+        sim.enableAndHome();
+        ok(call("POST", "/api/screw/start-angle", "{}"));
+        wipeBlank();
+        JsonObject plan = plan();
+        Map<String, List<JsonObject>> g = groups(plan.getAsJsonObject("profileCheck"));
+        JsonObject r0603 = one(g, "R_0603_1608Metric");
+        assertEquals("calibrate-existing", str(r0603.getAsJsonObject("suggestion"), "kind"), r0603.toString());
+        ok(call("POST", "/api/pad-calibrations", body(str(plan, "planId"), List.of(r0603))));
+        JsonObject cal = awaitJob("awaiting-reading");
+        if ("awaiting-reading".equals(str(cal, "state"))) {
+            cal = weighAndType(cal);
+        }
+        assertEquals("done", str(cal, "state"), cal.toString());
+        JsonObject gr = groupResult(cal, str(r0603, "group"));
+        assertEquals("characterized", str(gr, "outcome"), gr.toString());
+        assertEquals("Chip 0603 · 25G straight · Vieweg DV-5005 · 18 psi · Loctite GC50 SAC305 T5", str(gr,
+                "calibrationLabel"));
+        assertTrue(gr.get("calibrationLabelAuto").getAsBoolean());
+        assertEquals(str(r0603, "label"), str(gr, "label"), "the group keeps its own name (the result card's heading)");
+        boolean result = false;
+        boolean reference = false;
+        for (JsonElement e : gr.getAsJsonArray("photos")) {
+            JsonObject ph = e.getAsJsonObject();
+            result |= "result".equals(str(ph, "kind"));
+            reference |= ph.get("id").getAsLong() == picture.get("id").getAsLong();
+        }
+        assertTrue(result, "the result photo of its dose: " + gr.getAsJsonArray("photos"));
+        assertTrue(reference, "the 25G's main picture as the reference: " + gr.getAsJsonArray("photos"));
+        JsonObject t25 = typeOf("chip-0603");
+        assertEquals("characterized", str(t25, "status"));
+        assertEquals(K25, str(t25, "setupKey"));
+        assertEquals(own22, svc.getDb().newestOwnVersion("chip-0603", Tip22.KEY).version, "the 22G's is untouched");
+        assertEquals("characterized", svc.getDb().newestOwnVersion("chip-0603", Tip22.KEY).status.dbName);
+
+        // the label edit: the operator's words, then the automatic text again
+        long id = gr.get("calibrationId").getAsLong();
+        JsonObject edited = ok(call("PUT", "/api/pad-calibrations/" + id + "/label", "{\"label\":\"  0603, the 25G   "
+                + "on the new jar \"}"));
+        assertEquals("0603, the 25G on the new jar", str(edited, "label"));
+        assertFalse(edited.get("auto").getAsBoolean());
+        JsonObject row = null;
+        for (JsonElement e : ok2(get("/api/pad-calibrations?setup=" + K25))) {
+            if (e.getAsJsonObject().get("id").getAsLong() == id) {
+                row = e.getAsJsonObject();
+            }
+        }
+        assertNotNull(row);
+        assertEquals("0603, the 25G on the new jar", str(row, "label"));
+        assertFalse(row.get("labelAuto").getAsBoolean());
+        assertEquals("25G straight", str(row, "setupName"));
+        assertTrue(row.get("jobInMemory").getAsBoolean());
+        Res empty = call("PUT", "/api/pad-calibrations/" + id + "/label", "{\"label\":\"   \"}");
+        assertEquals(400, empty.status, empty.toString());
+        assertEquals("The label must be 1 to 160 characters.", str(empty.json(), "reason"));
+        assertEquals("Chip 0603 · 25G straight · Vieweg DV-5005 · 18 psi · Loctite GC50 SAC305 T5", str(ok(call("PUT",
+                "/api/pad-calibrations/" + id + "/label", "{\"auto\":true}")), "label"));
+    }
+
+    @Test
+    public void aMountDuringAJobStopsItWithNothingSaved() throws Exception {
+        start(null);
+        ok(call("POST", "/api/tip-setups", "{\"name\":\"25G straight\",\"gauge\":25,\"idMm\":0.25,\"odMm\":0.51,"
+                + "\"form\":\"straight\",\"taper\":\"straight-steel\"}"));
+        int version = typeOf("chip-0603").get("version").getAsInt();
+        ok(call("POST", "/api/pad-calibrations", "{\"steps\":[\"ladder\"],\"doseSteps\":800,\"typeKeys\":"
+                + "[\"chip-0603\"]," + attest() + "}"));
+        long until = System.currentTimeMillis() + 60_000;
+        JsonObject job = null;
+        while (System.currentTimeMillis() < until) {
+            job = ok(get("/api/status")).getAsJsonObject("padCalibration");
+            if ("ladder".equals(str(job, "step"))) {
+                break;
+            }
+            Thread.sleep(20);
+        }
+        assertEquals("running", str(job, "state"), String.valueOf(job));
+        // the needle change is recorded and stops the job; the switch waits until it has ended
+        Res m = call("POST", "/api/tip-setups/" + K25 + "/mount", "{}");
+        assertEquals(409, m.status, m.toString());
+        assertTrue(str(m.json(), "reason").startsWith("A pad calibration is stopping: mount again in a moment."),
+                m.toString());
+        JsonObject end = awaitJob("stopped");
+        assertEquals("stopped", str(end, "state"), end.toString());
+        assertTrue(str(result(end), "sentence").matches("The needle was changed at \\d\\d:\\d\\d during the "
+                + "calibration: nothing was saved\\."), result(end).toString());
+        assertEquals(version, typeOf("chip-0603").get("version").getAsInt(), "nothing written");
+        assertEquals(K25, str(ok(call("POST", "/api/tip-setups/" + K25 + "/mount", "{}")), "mounted"));
+    }
+
+    @Test
+    public void theControlNamesAnotherTipOnTheHead() throws Exception {
+        // the 22G is mounted, the 25G is on the SIM head: its dots are far smaller than the bench's control
+        start(sc -> {
+            byTip(sc, K25, 1.6, 0.6, 0, 0);
+            sc.addProperty("physicalTip", K25);
+        });
+        JsonObject job = ladder(800, "chip-0603");
+        assertEquals("failed", str(job, "state"), job.toString());
+        assertTrue(str(result(job), "sentence").contains("below the bench's 1.06 mm²: check the regulator (18 psi) and "
+                + "the paste before calibrating, or another tip than the 22G bent taper is on"), result(job).toString());
+    }
+
+    /** The seeded setup's key. */
+    static final class Tip22 {
+        static final String KEY = "ad22tta-b";
     }
 
     // ------------------------------------------------------------------------------------------
@@ -979,7 +1322,7 @@ public class PadCalibrationSimTest {
     @Test
     public void aShortDwellWithOneTurnDotsIsRefusedBeforeAnythingMoves() throws Exception {
         start(null);
-        ok(call("PUT", "/api/config", "{\"profile\":{\"dwellMs\":50}}"));
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"dwellMs\":50}}"));
         ok(call("POST", "/api/screw/start-angle", "{}"));
         JsonObject job = ladder(1600, "chip-0805");
         assertEquals("failed", str(job, "state"), job.toString());

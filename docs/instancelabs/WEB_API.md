@@ -8,7 +8,9 @@ Z check (`AUTO_REGISTER_DESIGN.md`, §3.2 below), the KiCad upload and the board
 (§3.4), Calibrate automatically and the by-hand steps with the weigh coupons (§3.5), and their web UI (§5). Written
 from the code on `il/pc-integration` (2026-10-29); where the code and PC §12–§13 differ, this file follows the code
 and says so. **Not in this PR:** the test-board ladder (PC §20 decision 8, slice `pc-ladder`) is a follow-up; until it
-comes, `validated` stays on the existing Validate guide.
+comes, `validated` stays on the existing Validate guide. Updated on `il/tip-setups` (2026-10-30) for tip setups (PC
+§22): the tip-setup library and mounting, needle tokens, where the needle lands, pictures and "calibrated for" labels
+(§3.6), written from the code.
 Spec: `docs/plan-2026-10-27-evidence-backed-roadmap.md` §3.3 (local API inside the OpenPnP process, web UI on
 localhost), §4.4–4.5 (Stop, on/off order), §5.5 (interlocks), §5.7 (Profiles tab), §8 items 7–10.
 
@@ -85,11 +87,11 @@ is on: Pressure off first`).
 | `POST /api/prime` | `{rotationDeg?, wait?}` | Engine `runShots(waste, rotation, 1)`: a complete session (pressurise, prime, vent). Default `primeRotationDeg` (360.36° = one screw revolution of 1600 steps). Full I4. Manual only: board runs purge on the purge row. 409 while OpenPnP is busy (§2). |
 | `POST /api/test-dot` | `{rotationDeg?, wait?}` | Engine `runShots("waste-test-dot", rotation, 1)`; that place is kept = waste + `testDotOffset`. Default rotation = one dot of the dispense profile (`dispense.testDot.defaultRotationDeg`, 180.1802° for half a turn). Full I4. 409 while OpenPnP is busy (§2). |
 | `GET /api/locations` · `PUT /api/locations/{name}` | `{x, y, z}` | Named places: x/y of N2, z = surface Z in OpenPnP's frame (the N1 nozzle Z touching it). `waste-test-dot` is derived and cannot be set. Each place carries `setAtMs` and `homeAtMs` (the Z frame it was set under; null for a place saved before they were kept): after a failed Z check of this home ("Z moved"), a place set before that home is refused (409, I4 `place 'waste' Z 5.500 was taken at 13:40, before the home at 14:02 where Z moved 0.80 mm: take its Z again with N1 touching (Setup › Places)`) by prime, the test dot, shots, the dot ladder's and the touch-off's prime at the waste, a coupon's probe and weigh dots, until it is set again (the same values too). |
-| `POST /api/needle/changed` | | I4: blocks dispensing until the needle Z frame is recorded again and the needle is touched off. |
-| `POST /api/needle/anchor` | `{surfaceZ, needleContactZ, x?, y?}` or `{surfaceZ, needleContactRawSum, x?, y?}` | I4 needle Z frame: N1 contact Z and needle (N2) contact Z on the same surface; offset := difference. Instead of touching the needle, `needleContactRawSum` K uses the bench relation "needle contact raw Z = K − N1 contact Z" (side camera, 2026-10-27: K = 65.59; with OpenPnP's see-saw map z2 = 63 − raw that is N2 contact = N1 contact − 2.59, e.g. 5.5 → 2.91, offset −2.59 mm). Both at once: 400. The anchor records `rawSumMm`. A touch-off (or a confirmed offset) is still needed. K holds only for the home and the needle it was measured with (a sum of raw Z heights: a home that moved the Z zero moves it by about twice the shift, and a frame from an old K gives the old offset whatever N1 touched): while the last Z check of this home failed (`Z moved`), and after `POST /api/needle/changed`, `needleContactRawSum` answers 409 with `K was measured under another home: Z moved 0.80 mm at the home of 14:02, and K moves by about twice that. Record the needle frame with both tips touching the same spot` or `K was measured with the needle before the change at 13:40: record the needle frame with both tips touching the same spot`; `status.dispense.needle.kRefusal` carries that reason (null when K is accepted). |
-| `POST /api/needle/offset` | `{offsetMm, note?}` | Manual needle Z offset (records a `needle_touchoff` row; clears the touched-off part of I4 if within `needleOffsetMaxDriftMm` of the frame). |
+| `POST /api/needle/changed` | `{why?, operator?}` | I4: blocks dispensing until the needle Z frame is recorded again, the needle is touched off and where it lands is checked. *Tips:* never refused; stops a running task, moves the needle token on, skips waiting coupons (§3.6). |
+| `POST /api/needle/anchor` | `{surfaceZ, needleContactZ, x?, y?, needleChangedAtMs}` or `{surfaceZ, needleContactRawSum, x?, y?, needleChangedAtMs}` (*tips:* the needle token, §3.6) | I4 needle Z frame: N1 contact Z and needle (N2) contact Z on the same surface; offset := difference. Instead of touching the needle, `needleContactRawSum` K uses the bench relation "needle contact raw Z = K − N1 contact Z" (side camera, 2026-10-27: K = 65.59; with OpenPnP's see-saw map z2 = 63 − raw that is N2 contact = N1 contact − 2.59, e.g. 5.5 → 2.91, offset −2.59 mm). Both at once: 400. The anchor records `rawSumMm`. A touch-off (or a confirmed offset) is still needed. K holds only for the home and the needle it was measured with (a sum of raw Z heights: a home that moved the Z zero moves it by about twice the shift, and a frame from an old K gives the old offset whatever N1 touched): while the last Z check of this home failed (`Z moved`), and after `POST /api/needle/changed`, `needleContactRawSum` answers 409 with `K was measured under another home: Z moved 0.80 mm at the home of 14:02, and K moves by about twice that. Record the needle frame with both tips touching the same spot` or `K was measured with the needle before the change at 13:40: record the needle frame with both tips touching the same spot`; `status.dispense.needle.kRefusal` carries that reason (null when K is accepted). |
+| `POST /api/needle/offset` | `{offsetMm, note?, needleChangedAtMs}` | Manual needle Z offset (records a `needle_touchoff` row; clears the touched-off part of I4 if within `needleOffsetMaxDriftMm` of the frame). |
 | `GET /api/surfaces` · `PUT /api/surfaces/{name}` · `DELETE /api/surfaces/{name}` | `{points: [{x,y,z}] or [[x,y,z]], note?, planId?}` | Probed surfaces in OpenPnP's frame (N1 contact heights), >= 3 points spanning an area; returns the plane fit (coefficients, slope, residuals, Z range), `boundToBoard` and `simulated` (probed on the simulator: refused by I4 on a machine that is not). The automatic probes are `POST /api/surfaces/{name}/probe` and Register board (§3.2); a board surface saved by hand with a `planId` also clears the engine's new-seat flag. `board`: every dot's Z on a board run. `blank`: purge row, dot ladder and touch-off. A zmap.json `points` list is accepted as is. `planId` ties a board surface to that plan's board registration (X/Y/rotation, side, fiducial transform; not placements or the nominal Z): a plan of a re-seated or moved board is then refused by I4 until the board is probed again (bench F3: one seating was tilted 0.9 mm). Board runs refuse an untied board surface (I4), so the flow is: plan, probe, save with the plan (the web UI sends the planId when the plan shown is for the board selected on the Run tab). Unknown plan: 404. Saving a surface makes plans made on the old one stale (plan again). |
-| `GET /api/config` · `PUT /api/config` | partial `DispenseConfig` | Partial update, validated by the engine (`schemaVersion` 3; older files are migrated on load). Pump/valve/watchdog G-code are fixed (not settings: unknown keys). Removed keys (`needleGapMm`, `primeAndTestDot`, `testDotOpticalCheck`, `bFeedDegS`, `retractDeg`, `dwellMs`, `provisionalQMm3PerRev`, ...) are unknown settings (400). `profile`, `purgeRow`, `cleanPadCheck`, `needleXyTrim`, `fiducialCheck` and `vacuumProbe` (and `tip`, `paste`, `calibrationArea`, `padCalibration`, PC §5.4) are merged **one level deep**: `{"profile":{"dwellMs":300}}` keeps the other profile fields; an unknown nested key is a 400 naming it (`profile.noSuchKnob`). Stamped by the engine, so they must be sent unchanged (or left out): `profile.startAngleSetAtMs` (a changed `profile.startAngleDeg` is stamped with the time it was set), `needleXyTrim.setAtMs` (stamped when dx/dy change), `purgeRow.resetAtMs`, and `purgeRow.usedSpots` (runs reserve spots, `POST /api/purge-row/reset` frees them; a stale full-settings save must not put paste-covered spots back). The needle frame, offset state (incl. `needleZOffsetHomeAtMs`, the home the touch-off was measured under) and surfaces cannot be changed here. `boardRegistrations` and `newSeatAtMs` may only come back unchanged: `'…' is stamped by the engine: Register board and the new-seat answer set it` (400). `calibrationArea.usedMm`, `calibrationArea.resetAtMs` and `paste.loadedAtMs` are stamped too, and off the simulator the shortened calibration statistics are refused, one text per setting (`padCalibration.minHops below 60 is allowed in the simulator only`; floors: `ladderDotsPerPhase` 12, `minLadderDots` 28, `minHops` 60, `weighTargetMg` 50), unless the stored value was already below; a pad calibration then refuses to start off the simulator while one is below (§3.5). `profile.netStepsPerDot` must be 400, 800 or 1600 (400: `profile netStepsPerDot must be 400, 800 or 1600 steps (a quarter, half or whole turn of the 1600 steps of a revolution): the start angle repeats and a purge dot turns at most one revolution`; a stored profile from before the rule refuses runs with the same text as a `CONFIG` interlock until it is set again). Refused while a run is active. |
+| `GET /api/config` · `PUT /api/config` | partial `DispenseConfig` (*tips:* `forTip` with `profile`) | Partial update, validated by the engine (`schemaVersion` 4; older files are migrated on load). *Tips:* applied to the live config under the engine's lock; `profile` needs `forTip` (409 `tip-changed`); `tip`, `parkedTips`, `needleLanding` and `needleXyTrim` are protected (§3.6). Pump/valve/watchdog G-code are fixed (not settings: unknown keys). Removed keys (`needleGapMm`, `primeAndTestDot`, `testDotOpticalCheck`, `bFeedDegS`, `retractDeg`, `dwellMs`, `provisionalQMm3PerRev`, ...) are unknown settings (400). `profile`, `purgeRow`, `cleanPadCheck`, `needleXyTrim`, `fiducialCheck` and `vacuumProbe` (and `tip`, `paste`, `calibrationArea`, `padCalibration`, PC §5.4) are merged **one level deep**: `{"profile":{"dwellMs":300}}` keeps the other profile fields; an unknown nested key is a 400 naming it (`profile.noSuchKnob`). Stamped by the engine, so they must be sent unchanged (or left out): `profile.startAngleSetAtMs` (a changed `profile.startAngleDeg` is stamped with the time it was set), `needleXyTrim.setAtMs` (stamped when dx/dy change), `purgeRow.resetAtMs`, and `purgeRow.usedSpots` (runs reserve spots, `POST /api/purge-row/reset` frees them; a stale full-settings save must not put paste-covered spots back). The needle frame, offset state (incl. `needleZOffsetHomeAtMs`, the home the touch-off was measured under) and surfaces cannot be changed here. `boardRegistrations` and `newSeatAtMs` may only come back unchanged: `'…' is stamped by the engine: Register board and the new-seat answer set it` (400). `calibrationArea.usedMm`, `calibrationArea.resetAtMs` and `paste.loadedAtMs` are stamped too, and off the simulator the shortened calibration statistics are refused, one text per setting (`padCalibration.minHops below 60 is allowed in the simulator only`; floors: `ladderDotsPerPhase` 12, `minLadderDots` 28, `minHops` 60, `weighTargetMg` 50), unless the stored value was already below; a pad calibration then refuses to start off the simulator while one is below (§3.5). `profile.netStepsPerDot` must be 400, 800 or 1600 (400: `profile netStepsPerDot must be 400, 800 or 1600 steps (a quarter, half or whole turn of the 1600 steps of a revolution): the start angle repeats and a purge dot turns at most one revolution`; a stored profile from before the rule refuses runs with the same text as a `CONFIG` interlock until it is set again). Refused while a run is active. |
 | `GET /api/boards` | | `job`: board locations of the job open in OpenPnP's window (position, side, fiducial transform status; empty headless); `files`: OpenPnP's board list (`boards.xml`). Every entry adds `registration` `{id, atMs, nominal}` or null (this board key's stored registration, §3.2) and the drawing fields of §3.3 (`widthMm`, `heightMm`, `fiducials`, `art`, `origin`, `imported`). Read on OpenPnP's thread (an import may be changing the list; 10 s to start). |
 | `GET /api/packages` | | Packages with footprint pads in mm (for "pick from a footprint"). Read on OpenPnP's thread. |
 | `POST /api/plan` | `{source:"job", boardLocationId}` or `{source:"file", file, x, y, z, rotation?}` (z required), plus `registration?`: `"auto"` (default: this board's stored registration when it still applies to the board and its seat), `"none"`, or a registration id (409 `REG: registration 3f2a… is not stored any more …`, `… belongs to another board or position`, `… was made on the simulator: register again`) | Engine `planBoard(bl, reg)`. A board file that is gone: 404 `Board file not found: …`. A board top `z` more than 2.0 mm from the needle-frame surface: 409 `the board top Z 2.910 is 2.59 mm from the needle-frame surface 5.500 (at most 2.0 mm: …). … Set the board Z again.` Returns, besides the fields below, Register board's fields (§3.2), the board drawing fields (§3.3) and the profile check with its per-pad and per-dot dose fields (§3.4). Every dot is one dot of the dispense profile (`rotationDeg` = the profile's net turn). Returns `planId`, `profile` (the profile it was made with) and `profileFingerprint`, `summary` (pads, blocked pads, dots, total rotation, path, `estimatedSeconds` of the whole program (settle, purge row, crossing, dots, vent; moves with acceleration and dwells, no host latency), `estimatedDph` (board dots per hour of that program), `estimatedWorkSeconds` / `estimatedWorkDph` (from the crossing after the purge to the last dot: the bench's DPH window; the UI shows "dots only" and "overall"), `purgeDots`), `purgeSpotsNeeded` (the purge-row spots a run of it lays, as I9 counts them: the profile's `purgeDots`, and the phase and flush dots of each further dot size, e.g. 8 + 5 = 13 for half and quarter turns; also on `GET /api/plan/{planId}`), `pasted` (the board on the plan's seat as the server keeps it, the same for every browser: `{board: its number this session or null before its first dot, nextBoard, sinceMs, dots, pads: {padId: dots laid}}`; a seat is the job board location, or the board file at its X/Y/rotation, so a plan made again for the same seat is the same board; memory only), `pads` (geometry, type, status, stencil-equivalent volume/mass, dots, rotation, flags, blocked), `dots` (order, X/Y, dispense/hop Z, rotation), `warnings`, `interlocks` (pre-flight incl. §5.7 rule, I4 board and purge surfaces, I9–I11), `cleanCheck` / `cleanCheckRunning` (the last clean-pad check of this plan). No `calibration` block: the volumetric q model is gone. The estimate builds the exact program the engine will stream, so soft-limit problems show up here. |
@@ -130,7 +132,8 @@ is on: Pressure off first`).
 | Field | Content |
 |---|---|
 | `available`, `busy`, `nozzle`, `bZeroed` | Engine state; `bZeroed` = I2. |
-| `needle` | `touchedOff`, `zOffsetMm`, `setAtMs`, `changedAtMs`, `gapMm` (the profile's), `anchored`, `anchor` (incl. `rawSumMm`), `anchorOffsetMm`, `xyTrim` `{dxMm, dyMm, setAtMs, note}` (the needle lands at camera + N2 head offset + trim; every dot is moved by minus the trim). |
+| `needle` | `touchedOff`, `zOffsetMm`, `setAtMs`, `changedAtMs` (*tips:* the needle token), `gapMm` (the profile's), `anchored`, `anchor` (incl. `rawSumMm`), `anchorOffsetMm`, `xyTrim` `{dxMm, dyMm, setAtMs, note, headOffsetXMm, headOffsetYMm}`, `kRefusal` (why the frame from K is refused now, or null). *Tips:* `xyChecked`, `landing` `{known, dxMm, dyMm, setAtMs, jobId, photoId, headOffsetXMm, headOffsetYMm, note, keepable, keepWhy}`, `headOffsetNow`, `headOffsetChanged`: the needle lands at camera + N2 head offset + landing + trim; every dot is moved by minus (landing + trim). |
+| `tip` | *Tips:* the mounted tip setup: `{key, name, setupVersion, dispenser, form, bendToward, summary, complete, mountedAtMs, dots: bench \| measured \| none, thumbUrl, undoUntilMs}` (a part that cannot be read: null, with `error`). |
 | `profile` | The dispense profile: `name`, `pressurePsi` (a note: set by hand on the regulator), `netStepsPerDot`, `suckBackDeg`, `startAngleDeg`, `startAngleSetAtMs`, `screwRpm`, `screwAccelDegS2`, `dwellMs`, `gapMm`, `purgeDots`, `notes`; derived: `stepsPerRev`, `stepsPerDeg`, `revolutionsPerDot`, `netDeg` (180.1802 for 800 steps), `forwardDeg` (net + round(suckBackDeg × 4.44) steps: 190.0901), `suckBackSteps` (44), `feedDegPerMin` (rpm × 360: 64800), `partialTurn`, `startAngles` (the angles the dots alternate between, e.g. 297.9 / 117.9 for 298°; null for whole turns), `startAngleNeedsConfirm` (I11), `controllerConnectedAtMs`, `fingerprint`, `problems` (validation, empty if OK). |
 | `purgeRow` | `surfaceName`, `x0Mm`, `y0Mm`, `pitchXMm`, `pitchYMm`, `spots`, `usedSpots`, `spotsLeft`, `defined`, `resetAtMs`, `perBoard` (the profile's purge dots), `boardsLeft`, `surfaceProbed`. |
 | `cleanPadCheck` | `enabled`, `grayLevel`, `minBrightFraction`, `boxWMm`, `boxHMm` (I10). |
@@ -363,6 +366,129 @@ view adds `mode` and `resolutionMg`, the deposits `place` and `string` (a smeare
 per-run "Skip these N pads" (`RunResult.skippedPads` and `runs.skipped_pads` exist, but no route takes a skip list:
 Run › Checks points to Setup › Settings › Refuse flagged pads (`#set-refuseflagged`) instead; with it off the Pad types item is a note that counts ready and the run confirm names the pads skipped).
 
+### 3.6 Tip setups, pictures and "calibrated for" labels (PC §22.6)
+
+Endpoint groups `TipSetupEndpoints` and `PhotoEndpoints` (registered after `PadCalibrationEndpoints`), and changes to
+the needle, config, pad-type and pad-calibration routes. A **tip setup** is a dispenser with a needle (the seed is the
+22G bent taper, key `ad22tta-b`, which uses the bench's paste model); one is mounted (`status.dispense.tip.key`), the
+others are parked with their recipe, needle Z frame, offset, trim and landing (`dispense-config.json` `parkedTips`).
+Pad types share their pad fields across setups and keep their dose plan per setup (`DISPENSE_API.md` §9). Every value
+measured for a needle names the needle change it was taken after (`needleChangedAtMs`, the **needle token**:
+`status.dispense.needle.changedAtMs`, null when none is recorded); pad-type writes name the setup they were made for
+(`forSetup`), a profile patch too (`forTip`). The engine refuses a value of another needle or setup (409
+`needle-changed`, `tip-changed`, `pad-changed`), so a form opened before a mount can never save into the new tip.
+
+| Method + path | Body / query | Does |
+|---|---|---|
+| `GET /api/tip-setups` | `retired?` (`true`: retired ones too) | `{mounted, mountedAtMs, needleChangedAtMs, undoUntilMs, setups: [setup view]}`. `mountedAtMs` null: on since before the update. |
+| `POST /api/tip-setups` | `name, dispenser?, tipModel?, gauge?, idMm?, odMm?, odSource?, form, bendDeg?, bendToward?, taper, lengthMm?, minDotSteps?, notes?`, `key?`, `profileFrom?` (a setup key or `default`; default the mounted one), `mount?`, `why?`, `operator?` | Version 1 and its parked entry: its recipe a copy named `{recipe} · {name}` (nothing measured with it), no needle frame, a trim of 0, no landing. The key defaults to gauge and form (`25g-straight`, `27g-bent45`, `22g-taper`), made unique with `-2`, `-3`; `undo-mount` is reserved. An OD without a source is `assumed` (shown `from the chart`). 201 `{setup, mount, note: "Added. It has no pad profiles yet."}`; with `mount: true` the mount response below, or, when the switch is refused, `{refused: true, status, error, reason, needleChange}` (the setup stays added). 400 a field's text (`TipSetup.problems`: ID 0.05–2.0 mm, OD above the ID and at most 3.0 mm, a bend 1–90° only when bent, length 3–60 mm, `minDotSteps` 400, 800 or 1600, name 1–40 characters, …; `'model' is the engine's`); 409 `exists` (`A tip with the key '…' exists already …`, `A tip named '…' exists already: give this one another name.`). |
+| `PUT /api/tip-setups/{key}` | the fields to change, `correction?`, `operator?` | A new version. Dispenser, gauge, form and taper of a setup with a pad type version, a dose record or a mount: 409 `another-needle` (`This makes it another needle: add a tip instead (Add a tip…, starting from this one).`); tip model, ID (within 0.03 mm), bend angle and length need `correction: true` (409 `correction` without it: the UI's second press) and log `TIP corrected the …: OD 0.72 → 0.80 mm`; OD, its source, which way the bend points, the name, the smallest dot and the notes are plain edits. For the mounted setup it also refreshes the engine's view (`cfg.tip`; 409 while a task runs, the version stays saved) and plans go stale (`the 25G straight changed after planning (OD 0.51 → 0.55 mm): plan again`). Retire and bring back have their own routes. |
+| `POST /api/tip-setups/{key}/retire` · `/unretire` | `{operator?}` | The setup view; a retired setup cannot be mounted. 409 `The mounted tip cannot be retired.` |
+| `GET /api/tip-setups/{key}/mount-preview` | | The change panel's text: `{key, same, text, consequences, warnings, refusal}` (`Nothing dispenses until you record the 25G straight's needle Z frame (Both tips touch, or touch off) and check where it lands.`, `The 22G bent taper keeps its 9 calibrated pad types; the 25G straight has none yet.`, the recipe, `Plans made before go stale.`, the coupons whose dots no longer count; for the same tip `A new needle: record its needle Z frame and check where it lands; its pad types and recipe stay.`), N2's head-offset warning, and what the switch would refuse now. |
+| `POST /api/tip-setups/{key}/mount` | `{why?, operator?}` | "This tip is on the dispenser now": (a) the needle change, always and first (as `POST /api/needle/changed`), then (b) the switch when another setup is mounted: the mounted one parked, the incoming one's recipe, frame, offset, trim and landing brought in (its recipe takes the live start angle and its time: the angle belongs to the screw), `cfg.tip` the incoming setup, one config write, a `tip_mounts` row and a `TIP` event. 200 `{mounted, mountedName, from, fromName, atMs, needleChangedAtMs, profile: {name, pressurePsi, netStepsPerDot, fingerprint}, voided: {coupons, job, task}, needleChange, stale: ["needle Z frame", "needle Z offset", "where it lands", "plans", …], headOffset: {now, landingWas}, next: [{key, label, href \| fix, done}], undoUntilMs, warnings, text}`, text `25G straight mounted at 14:07. Next: record its needle Z frame (Setup › Needle Z frame).` (plus `N2's head offset is (…) now; the 25G straight's landing was checked with (…): set it back in OpenPnP, or check where it lands.` when it moved). A mount of the mounted setup is (a) alone: `{…, same: true, undoUntilMs: null, text: "A new 22G bent taper at 14:07. Next: record its needle Z frame (Setup › Needle Z frame), then check where it lands."}`. 409 `refused` (first match: an engine task runs, `A pad calibration is stopping: mount again in a moment.`, `Switch the pressure off first: a needle comes off with the pressure off.`, `The … is retired: bring it back first (Change tip › Show retired tips).`, `The … has no ID yet: fill it in first (Edit…).`), each ending `The needle change is recorded: nothing dispenses until the … is mounted and its needle Z frame recorded.` and carrying `needleChange`. Nothing moves; the switch runs on the jobs' monitor holding the engine's busy flag, so no job or task starts between its checks and its write. |
+| `POST /api/tip-setups/undo-mount` | `{operator?}` | Within 2 min of a mount of another setup, when no engine task ran and nothing was measured since, on the operator's word that the old tip never left the dispenser: the previous mount exactly (setup, recipe, frame, offset, trim, landing and needle token), a `tip_mounts` row `undo`. The mount response of the restored setup; 409 `too-late` (`Too late to undo: something ran \| the frame was recorded \| 2 min have passed. Mount the … again instead.`, `Nothing to undo: no other tip was mounted in the last 2 min.`). |
+| `POST /api/tip-setups/{key}/picture` | `{calibrationIds?, wait?, operator?}` | **Take a picture from below** (an engine task, run kind `tip-picture`, label `tip picture`): N2 to the bottom camera's X/Y at the balanced travel height (`travelSafeZMm` 31.5, never lower; refused when N2's safe Z zone does not hold it), one lit frame (`CameraCapture.captureLit`), stored as kind `tip`, source `bottom-camera`, caption `From below at 14:07, at travel height (may be soft): the 25G straight`, linked to the records named. Refused before anything moves (409): the engine or a pad calibration busy, the pressure held (`Switch the pressure off first: the head moves to the bottom camera.`), OpenPnP busy, another than the mounted setup (`Only the mounted tip can be photographed: mount the … first.`), a record of another setup or of the needle before a change (`setup-mismatch`, `needle-changed`), a record with 6 tip pictures (`too-many`); in the task: no up-looking camera, not homed (`Home first: the head moves to the bottom camera.`), a STOP, a needle change meanwhile (no picture stored). 202 `{kind: "tip picture", setupKey, started}`; with `wait` `{finished, result: {ok, message, run, photo}}`. About 5 s. |
+| `POST /api/needle/changed` | `{why?, operator?}` | "I changed the needle": a fact the engine records and **never refuses** (a refusal would leave the old needle's frame valid). A running engine task is stopped first, the needle token moves on (strictly increasing), every coupon waiting for its readings gets a skip row (`the needle was changed at 14:07`), a pad calibration waiting for its readings ends `stopped`, a `tip_mounts` row `needle`. `{needleChanged: true, needleChange: {atMs, setupKey, setupName, why, operator, voided: {coupons, job, task}, text}, text, next}`. The needle Z frame, the offset and where it lands are to do again; the web UI's regulator, prime, test-dot and tip ticks lapse. |
+| `POST /api/needle/xy-trim` | `{dxMm, dyMm, note?, needleChangedAtMs}` | The hand fine-tune on top of where the needle lands (±1 mm per axis, 400 beyond, recorded with N2's head offset now): `{needleXyTrim}`. 409 while a task runs or a pad calibration is between its steps, `needle-changed`. |
+| `POST /api/needle/landing` | `{keep: true, needleChangedAtMs}` or `{jobId, accept: true, needleChangedAtMs}` | **Keep where it lands** (a straight setup whose landing a landing check set, or kept from before the update, under today's head offset; never at a setup's first mount): `setAtMs` stamped, note `kept after the needle change at 14:07`; 409 `A bent tip lands where its bend points: check where it lands.`, `The … has no landing of its own yet: check where it lands.`, `N2's head offset changed since the …'s landing was checked: check where it lands.` **Save it** answers a landing check's question (below): 404 for a job not in this session; 409 `The landing check … has no landing to save: check where it lands again.` (no locator dot, no fit, already saved). `{needleLanding, xyChecked}`; 409 `needle-changed`; refused while the engine is busy. |
+| `POST /api/photos` | query `kind` (`tip` \| `setup`), `setup`, `calibrations?` (ids, comma-separated), `job?`, `caption?`, `operator?`; body the picture | A picture copied to this computer (no LAN route): JPEG or PNG by its bytes, re-encoded by the engine (JPEG 0.85, at most 2048 px on the long side, no metadata, a 320 px thumbnail), stored content-addressed in `<configDir>/instancelabs/photos/<yyyy-MM>/`. One upload at a time. 201 `{photo}`. 400 `not-an-image` (`This file is not a JPEG or PNG picture.`), the size in pixels (`The picture is … px: at least 64 and at most 12,000 px a side.`, 40 Mpx), `caption` (≤ 200 characters), a missing `kind`, `setup` or body; 404 the setup; 409 `busy` (`Another picture is being stored: try again in a moment.`), the engine busy, `setup-mismatch` (`This picture is of the 25G straight; calibration 41 was made with the 22G bent taper.`), `too-many` (6 tip pictures per record, 20 unlinked pictures per setup), `disk` (2 GB of removable pictures); 413 `The picture is larger than 8 MB: send a smaller one (phones can share a reduced size).` |
+| `GET /api/photos` | `setup?, calibration?, job?, kind?, removed?, limit?` (1–1000, default 100) | `[photo view]`, newest first. |
+| `GET /api/photos/{id}.jpg` · `/api/photos/{id}/thumb.jpg` | `If-None-Match?` | `image/jpeg`, `ETag` = the SHA-256 (`-thumb` for the thumbnail), `Cache-Control: private, no-cache`; 304; 404; 410 `removed` (with `removedAtMs`, `why`) or `file-missing`. |
+| `DELETE /api/photos/{id}` | `{why?, operator?}` | A tip or setup picture: `{removed: true, id, restoreUntilMs, photo}`; the file stays 7 days. 409 `result-photo` (`A result photo is the calibration's evidence: it stays.`). |
+| `POST /api/photos/{id}/restore` · `/main` | `{operator?}` | The toast's Undo (410 `gone` when the file is gone); `Use as the tip's picture` (409 `result-photo` for a result photo). The photo view. |
+| `POST /api/photos/{id}/links` | `{calibrationIds}` | Shows the picture with those records (a result photo as their result, any other as a picture of the tip): `{links, photo}`; 409 `setup-mismatch`, `needle-changed` (a bottom-camera picture links only to records of the same needle). |
+| `PUT /api/pad-calibrations/{id}/label` | `{label}` or `{auto: true}` | The record's "calibrated for" label (a new `cal_labels` row; never part of a fingerprint): `{id, label, auto, atMs}`. 1–160 characters after trimming and joining spaces, control characters removed (400 `The label must be 1 to 160 characters.`); 404. |
+| `POST /api/pad-calibrations/{id}/wrong-tip` | `{operator?}` | **Made with another tip**: the record's job is flagged (a by-hand record: the jobs of its evidence), its dose records leave the setup's evidence and dot table, its waiting coupons get skip rows, and every version it wrote that is still its setup's newest gives way to the setup's previous own version (or the cleared plan of a stand-in). `{flagged: jobId, restored: [{typeKey, version, status}], text}`; 409 while the engine is busy or the job has not ended. |
+| `POST /api/pad-types/{key}/copy` | `{fromSetup, forSetup}` | `Copy its dots to start from`: a version for the mounted setup with the source's dot plan, status `provisional`, origin `copied`, no recipe or weighed mass, notes `Copied from the … (v6, characterized) as a starting point: nothing was measured with the 25G straight.` `{padType, copiedFrom: {setupKey, setupName, version, status}}`; 400 the dose rules; 409 `tip-changed`, a source with no plan of its own, a copy over a characterized or validated version (`… is characterized for the … already: a copy would make it provisional.`). |
+
+Changed routes:
+
+- `POST /api/needle/anchor` and `/api/needle/offset` require `needleChangedAtMs` (400 without; 409 `needle-changed`
+  `The needle was changed at 14:07 after these values were taken: take them again.`) and answer `question` (a frame or
+  offset more than `needleOffsetMaxDriftMm` from the setup's previous one: `The 25G straight's tip touches 1.20 mm
+  higher than when it was on on 10-29: is the 25G straight on the dispenser?`; the value is saved: it measures what is
+  on) and `warning` (the I4 offset rule: `The …'s tip is 1.50 mm from N1's: I4 cannot tell a height taken with the
+  needle; lower zFrameToleranceMm below 0.70 mm (Settings).`). The frame from K stays refused after a needle change
+  (§3 table): a tip mounted again is framed with both tips touching.
+- `PUT /api/config`: a patch with `profile` must carry `forTip` (400 without; 409 `tip-changed` `The tip changed while
+  this was open (the 25G straight was mounted at 14:07): reload.`); `tip`, `parkedTips`, `needleLanding` and
+  `needleXyTrim` are protected (400 `The tip is the mounted tip setup: change it in Setup › Dispenser & tip.`, `Where
+  the needle lands is set by Check where it lands and the trim panel (POST /api/needle/landing, /api/needle/xy-trim).`;
+  an unchanged round trip is accepted); the patch is merged into the live config under the engine's lock
+  (`updateConfigAtomically`), so nothing a mount, a needle change or a run's reservation wrote meanwhile is put back.
+- `GET /api/pad-types`: `forSetup: {key, name}`; the mounted setup's composed rows (the pad fields of the type's newest
+  version of any setup, the dose fields of the mounted setup's) with `setupKey`, `standIn` (no version of its own:
+  `not-started`, notes `Not calibrated for the 25G straight yet.`), `padVersion`, `version` (0 for a stand-in),
+  `nextVersion`, `label` and `others: [{setupKey, setupName, version, status, label, atMs, calibrationId, thumbUrl}]`;
+  `versions`, `lastValidatedAtMs` and `lastCalibration` count the mounted setup only. `GET /api/pad-types/{key}`:
+  `current` (composed), `history` (every setup's versions with `setupKey`, `setupName`, `label`) and `bySetup`.
+- `POST`/`PUT /api/pad-types`, `DELETE /api/pad-types/{key}`: `forSetup` is required (400 without; 409 `tip-changed`);
+  a pad edit sends the `padVersion` it showed (409 `pad-changed` `chip-0603 was changed meanwhile (version 7, with the
+  22G bent taper): reload.`; left out: the version read now); a status raised to characterized or validated is a
+  by-hand calibration record (method `by-hand`, its label from `calibration.label` or the automatic one, its pictures
+  `calibration.photoIds`, the main picture and its evidence's result photos linked): the answer adds `calibration:
+  {id, label, labelAuto, photos}`. `characterized` without the bench model needs the setup's own evidence for every
+  dose (409 `status-evidence`). Retire writes a pad field, so it retires the type for every tip.
+- `GET /api/pad-calibrations` takes `setup?` and adds per row `setupKey`, `setupName`, `method` (`auto` | `by-hand`),
+  `needleSinceMs`, `label`, `labelAuto` (records from before schema 3 get their label computed when read), `photos`
+  (the photo views, removed ones included), `flags` (`wrong-tip`) and `jobInMemory` (its result card can open).
+- `POST /api/pad-calibrations` and its preview take `measure` (`landing` | `tip`) and `wide`: records-only jobs on the
+  by-hand path (no pad type changes). **Check where it lands** (`measure: "landing"`, about 1:00, `lay 17 dots`): the
+  regulator and paste checks, I4 (frame and offset since the change) and a band of the calibration area 2R + 8 mm tall
+  (R = 2 mm for a straight setup, or a bent one with `bendToward`, that has a landing of its own; 6 mm otherwise; 9 mm
+  with `wide`; `The calibration area has 14.5 mm left; the landing check needs 20 mm: wipe the blank (Calibrate › Pad
+  calibration › Blank wiped).`); a locator dot at the band's centre, then the profile's purge dots and a row of 8 dots
+  at uneven gaps, fitted (`P/LandingFit`). The preview adds `landing: {searchMm, wide, expected, bandMm, band: {x0, x1,
+  y0, y1}, frames, problem}` and the sentence `Lays one dot, then 8 purge dots and 8 dots in a row on the blank (X
+  290.0–330.0, Y 240.0–260.0), looks at them, and saves where the needle lands. Uses 20 mm of the calibration area
+  (20.0 left). Searches ±6 mm.` **Measure its dots** (`measure: "tip"`, about 8 min): every dose the tip takes at or
+  above its smallest dot on the blank, spaced for a dot of unknown size (max(1.6 mm, OD + 0.4 mm)), and the profile's
+  dose weighed on both coupons; it fills the setup's dot table (dose records only).
+- The job view adds `measure`, `forTip`, and in `result`: `outcome` `measured` | `question` | `not-found` for a
+  landing check; `landing: {jobId, setupKey, needleSinceMs, dxMm, dyMm, sdMm, n, found, searchMm, expected, coarse,
+  residual, pairs, photoId, headOffset, saved, question, text}` (`The 25G straight lands +2.32, −0.41 mm from the N2
+  head offset (8 dots, scatter 0.05 mm). Saved: every dot is corrected by it.`; more than 1.0 mm from the setup's own
+  landing nothing is saved and `question` asks `The … lands 1.5 mm from where it landed on 10-29: is the … on the
+  dispenser?`); `tipDots: {doses: [{steps, turn, dots, found, dMeanMm, d95Mm, threads, hops, spread, pass,
+  failures}], mgPerTurn, confirmed, measured, dots}` (`Measured 14:20: the 25G straight's dots: half 0.93, one turn
+  1.12 mm; 1.57 mg per turn.`); `photos` (the result photos: the after frame of each block, at most 1600 px);
+  `landingWarnings` (`The dots land 0.21, −0.05 mm off their spots: check where the … lands.`); per group
+  `calibrationId`, `calibrationLabel`, `calibrationLabelAuto` and `photos` (`label` stays the group's own name). The
+  control's failure text adds `, or another tip than the 22G bent taper is on`. A mount or needle change during a job
+  stops it (`The tip changed during the calibration (the 25G straight was mounted at 14:07): nothing was saved.`,
+  `The needle was changed at 14:07 during the calibration: nothing was saved.`).
+- The landing rule (I4): until where the needle lands is checked (`status.dispense.needle.xyChecked`), only prime, the
+  test dot and the landing check dispense; board runs, pad calibrations, Measure its dots, the touch-off, the dot ladder
+  and shots answer `I4: the 25G straight was put on at 14:07 and where it lands has not been checked: check where it
+  lands (Setup › Dispenser & tip).` (or `N2's head offset changed in OpenPnP since the …'s landing was checked: set it
+  back, or check where it lands`). Every dispensed target is moved by minus (landing + trim).
+- Plans carry `setupKey`, `setupName`, `setupVersion`: a plan of another setup is stale (`PLAN: the tip changed after
+  planning (the 25G straight was mounted at 14:07): plan again`). The profile check's `tip` adds `setupVersion`,
+  `dispenser` and `dots` (`bench` | `measured` | `none`; `minDotMm` null when its smallest dose is not known), and
+  the check gains `otherTips: [{key, name, covers, of}]` (setups not retired whose versions of every typed pad of the
+  plan are at or above the gate). A setup that is not measured gets the suggestion `measure-tip` (`Measure the 25G
+  straight's dots first (Setup › Dispenser & tip › Measure its dots, ≈ 8 min and two coupons to weigh): suggestions
+  need its dot sizes and paste per turn.`).
+
+**The setup view**: `{key, version, name, dispenser, tipModel, gauge, idMm, odMm, odSource, form, bendDeg,
+bendToward, taper, lengthMm, minDotSteps, model, notes, createdAtMs, complete, retired, mounted, mountedAtMs,
+editable: {identity, correction}, summary, profile: {name, pressurePsi, netStepsPerDot, parked, from}, landing: {dxMm,
+dyMm, setAtMs, checked, note, jobId, photoId}, padTypes: {validated, characterized, provisional, names}, dots:
+{source: bench | measured | none, atMs, mgPerTurn, doses: [{steps, diameterMm: [mean, d95], source, recordId, atMs}]},
+mainPhoto, photos}` (`photos`: the setup's live tip and setup pictures; result photos are the records'). **The photo
+view**: `{id, kind (tip | setup | result), source (bottom-camera | top-camera | upload), atMs, url, thumbUrl, caption,
+widthPx, heightPx, links, removable, setupKey, needleSinceMs, jobId, doseSteps, couponPlace, mmPerPx, xMm, yMm, bytes,
+simulated, operator, removedAtMs, removedWhy, restoreUntilMs}`.
+
+**Where the code differs from PC §22.6** (the code is right): the mount response adds `mountedName`, `fromName` and
+`warnings`, and a mount of the mounted setup answers its own shape (`same: true`, no `MountResult`); `POST
+/api/needle/changed` answers `needleChanged` and `next` too; the picture route's 202 adds `setupKey`; a photo file
+that is missing is 410 `file-missing`; a restore of a gone file is 410 `gone`; removing or choosing a result photo is
+409 `result-photo`; a refused undo is 409 `too-late`; `needleChangedAtMs` is required on the needle routes, `forSetup`
+on every pad-type write and `forTip` with a profile patch (400 without), while a pad edit without `padVersion` uses the
+version read now; a group of the job view keeps its own `label` and carries the record's as `calibrationLabel`;
+`otherTips` counts the typed pads only (a pad without a pad type is no tip's).
+
 ## 4. Pressure hold (Dispense tab)
 
 The engine pressurises inside each run. The hold is the manual "pressure on" for reading the regulator gauge:
@@ -449,6 +575,14 @@ Added on `il/bench-sync-autoreg` and its web branches (`UI_DESIGN.md` §8.1.2–
   `NEEDS_PROFILE` warning; the pad inspector shows one profile notebox and the planned amount. While a job runs the
   strip reads `Pad calibration · test dots 14/48 · ≈ 2:50 left` (`Waiting for you · weigh` at the readings) and every
   other task is locked.
+- **Tip setups** (`tipsetup.js` + `tipsetup.css`, PC §22.7; `UI_DESIGN.md` §8.6, `DEV_NOTES.md` §5 › Tip setups): the
+  strip's Tip cell; Setup › Dispenser & tip (the mounted tip with its picture, facts and, after a needle change, the
+  steps in order); Change tip (the swap, which tip is on, what a mount does, Mount and its 2-minute Undo); Add a tip and
+  Edit (presets of the needles on hand); pictures (drop zones, gated file choosers, `#photo-view`); Profile per mounted
+  tip (stand-ins, By tip, Other tips, Copy its dots, the editor's `Calibrated for`, History by tip); Needs a profile for
+  the tip (Measure its dots first, the other tip that has the board's types); the pad-cal view per mode (Check where it
+  lands, Measure its dots) and the result card's label and pictures; Records › Calibrations by tip; the run confirm's
+  tip tick.
 - **The final fix round** (`il/rc1`): after "Z moved" the Z check blocker offers the remedy's next step under the same
   home (`Open Needle Z frame`, then `Probe the blank…`, then `Run a touch-off` or `Confirm frame offset …`, then
   `Register board`; `IL.zMoved`), and the touch-off and dot ladder cards say when the frame or the blank comes first;
@@ -471,16 +605,21 @@ Jargon is explained in tooltips (`title`/`abbr`).
   Register board, the blank probe, the home at run, the Z check and probe only for a board without fiducials end to end
   on the SIM vacuum and the SIM camera (`SceneImager`); `BoardImportSimTest` uploads, saves and attaches the KiCad
   fixtures and plans them; `CameraSnapshotEncodingTest` (2) the PNG fallback of the camera snapshot. Missing paste
-  profiles:
-  `PadProfileApiSimTest` (8: the check, apply, mappings, the upload preview), `PadCalibrationJobTest` (14: the job's
-  states, readings, cancel, STOP, refusals in order, on fake engine steps), `PadCalibrationSimTest` (13: PC §14.3 end
-  to end on the SIM paste, camera and balance, every negative control of §11.7, the SIM balance after a reconnect, the
-  look before a ladder's dots and the control's tolerance in a job),
-  `PadProfileUiSimTest` (3: the files are served and loaded).
-  Board runs there use the bench geometry (N1 contact 5.5, K 65.59 → needle 2.91, offset −2.59), a purge row on the
-  blank, a confirmed start angle and the clean-pad check off, or a fake `DotImager` (`DispenseService.setDotImager`)
-  for the I10 tests. The whole suite on `il/rc1` 5aba4636e (fix round 2 merged): 1133 tests, 847 of them in
-  `org.openpnp.instancelabs` (dispense 349, api 102, sim 87, kicad 79, padprofile 71, vision 70, board 62, serial 27).
+  profiles: `PadProfileApiSimTest` (8: the check, apply, mappings, the upload preview), `PadCalibrationJobTest` (14: the
+  job's states, readings, cancel, STOP, refusals in order, on fake engine steps), `PadCalibrationSimTest` (13: PC §14.3
+  end to end on the SIM paste, camera and balance, every negative control of §11.7, the SIM balance after a reconnect,
+  the look before a ladder's dots and the control's tolerance in a job), `PadProfileUiSimTest` (3: the files are served
+  and loaded). Board runs there use the bench geometry (N1 contact 5.5, K 65.59 → needle 2.91, offset −2.59), a purge
+  row on the blank, a confirmed start angle and the clean-pad check off, or a fake `DotImager`
+  (`DispenseService.setDotImager`) for the I10 tests. The whole suite on `il/rc1` 5aba4636e (fix round 2 merged): 1133
+  tests, 847 of them in `org.openpnp.instancelabs` (dispense 349, api 102, sim 87, kicad 79, padprofile 71, vision 70,
+  board 62, serial 27). Tip setups (PC §22.8): `TipSetupApiSimTest` (4), `TipSetupEdgeSimTest` (10), `PhotoApiSimTest`
+  (4), `MountJobRaceTest` (4) and `TipSetupUiSimTest` (4), the cases added to `PadCalibrationSimTest` (18 in all) and
+  the engine's (`DispenseDbMigrationV3Test`, `TipSetupsTest`, `PadDefinitionSharedTest`, `MountTest`, `MountRaceTest`,
+  `PhotoStoreTest`, `TipPictureTaskTest`, `InterlocksXyTest`, `DotTableTest`, `PlannerMeasuredTipTest`,
+  `LandingFitTest`, `SuggesterSetupTest`). The whole suite on `il/tip-setups` ec82c8019: 1259 tests, 973 of them in
+  `org.openpnp.instancelabs` (dispense 419, api 135, sim 91, padprofile 90, kicad 79, vision 70, board 62, serial 27),
+  in 13:23 min with checkstyle.
 - `src/test/web/run-webui-sim-test.sh`: Playwright (headless Chromium) against this jar running in OpenPnP **sim**
   through openpnp-uinav (config copy, simulated controller and cameras, Xvfb, device stubs). Needs the jar
   (`mvn -q -T1 -DskipTests package`), openpnp-uinav built, and Playwright in `$PLAYWRIGHT_DIR`
@@ -499,7 +638,13 @@ Jargon is explained in tooltips (`title`/`abbr`).
   Run › Checks, Needs a profile, the suggestion card, Use, the pad inspector, Calibrate automatically through the
   readings (the test is the operator at the SIM balance) to the result, the by-hand guide, Calibrate › Pad
   calibration, STOP at the readings, a test run that lays whole pads, a coupon weighed and one skipped; one filled
-  button per screen; screenshots at 1440 and 1280 px, light and dark).
+  button per screen; screenshots at 1440 and 1280 px, light and dark). `tip-setups.playwright.cjs` runs fourth (68
+  checks, PC §22.8 steps 0–12: Setup › Dispenser & tip, a 25G added and mounted from Change tip with a dropped picture,
+  what goes stale, Profile per tip, Needs a profile, its frame and where it lands, Measure its dots, a calibration's
+  label and pictures, Records, the 22G mounted back with From K locked, the wrong tip, the picture viewer; screenshots
+  at 1024 × 768 and 1920 × 1080, light and dark; `TS_SHOTS=0` skips them); the session installs the SIM bottom camera
+  (`SimTipCamera`). On `il/tip-setups` ec82c8019 one SIM session ran webui-sim 244/244, board-import 62/62,
+  pad-profile 71/71 and tip-setups 68/68; `run-boardview-test.sh` 67/67.
 - `python3 -I src/test/sim/il_sim_acceptance.py padcal --prefix P --api-port N` (also in `all`): PC §14.5 in three
   uinav SIM sessions on this jar. **main**: `padcal.kicad_pcb` uploaded (NEEDS_PROFILE, a reason per package), saved
   and planned; the check's groups (SW_SPST new 2 × ½ turn, Test_Strip new 2 × ¼ turn, TestChip_A Use 0603, the WSON's
@@ -513,10 +658,34 @@ Jargon is explained in tooltips (`title`/`abbr`).
   partial), Calibrate automatically for its two groups (SW_SPST characterized; LED_0805 stays provisional: one turn is
   47 % over its amount in the SIM, 33 % on the machine), its next plan run (the switch's 4 dots). **controls**: every
   other negative control of §11.7 ends with its reason. About 27 min (main 8, nano 6, controls 14).
+- `python3 -I src/test/sim/il_sim_acceptance.py tips --prefix P --api-port N [--api-ports 1]` (also in `all`): PC §22
+  in one uinav SIM session with the SIM bottom camera (`SimTipCamera`), at the machine's statistics floors, on
+  `padcal.kicad_pcb` with the padcal scene's blank grown to 50 mm and a SIM 25G straight (its own SIM paste: 1.6 mg per
+  turn, smaller dots, lands 2.4, −0.4 mm off). **seed**: the 22G bent taper mounted, the bench model. **add**: the 25G
+  added (`DSKIT1 25G`, smallest dot a half turn), its recipe a copy, a PNG uploaded as its picture (its main picture).
+  **mount**: the preview's text, the mount (its text, `stale`, `undoUntilMs`), Undo (the 22G back with its frame and
+  needle token), mounted again; the plan made with the 22G refused (`PLAN: the tip changed after planning (the 25G
+  straight was mounted at …)`), chip-0603 a stand-in. **frame**: a height taken before the change refused
+  (`needle-changed`), both tips touch. **prime**: a ladder refused by the landing rule, prime OK. **landing**: the
+  preview searches ±6 mm, the check finds and saves 2.4, −0.4 mm (within 0.15 mm) with its result photo. **measure**:
+  Measure its dots (half and one turn on the wiped blank, the profile's dose weighed on both coupons, the readings typed
+  at the SIM balance): both doses pass, 1.6 mg per turn (within 10 %), the tip `measured`. **calibrate**: the board
+  planned for the 25G, its SW group calibrated (`characterized`, the automatic label `SW_SPST… · 25G straight · Vieweg
+  DV-5005 · 18 psi · …`, the 25G's picture linked as the reference), the 22G's chip-0603 untouched. **picture**: Take a
+  picture from below (the bottom camera's JPEG, `ETag`, 304) linked to the record, and a phone picture uploaded to it.
+  **label**: edited (spaces joined), automatic again, edited again, an empty one refused. **records**: the record
+  under the 25G (its label, `auto`, its pictures), not under the 22G. **mount_back**: the 22G's pad types its own again,
+  the SW type a stand-in with the 25G's version under `others`, K refused after the change, both tips. **wrong_tip**:
+  the 25G on the head with the 22G mounted: the landing check asks `… is the 22G bent taper on the dispenser?` (nothing
+  saved), Save it, then the SW group's calibration fails its control (`… or another tip than the 22G bent taper is
+  on`) and `Made with another tip` flags its record. About 11 min.
 - `src/test/sim/il_ui_session.py start --jar … --name …`: a seeded SIM session for UI work (machine homed, needle
   frame, blank surface and purge row, start angle, a planned board with its surface tied); `--padcal` adds the SIM
   paste, coupons and balance, the calibration area and coupon places, and plans `padcal.kicad_pcb` (Needs a profile
-  lists its groups); `src/test/web/devproxy.py` serves the web files from disk against it (no jar rebuild).
+  lists its groups); `--tip-camera` installs the SIM bottom camera (Take a picture from below draws the tip on the
+  head); `--physical-tip KEY` names the tip on the head and, with `--padcal`, `--paste-by-tip KEY:mRevMg=…,c=…,landing=
+  DX:DY` gives a tip its own SIM paste; `src/test/web/devproxy.py` serves the web files from disk against it (no jar
+  rebuild).
 
 ## 7. Known limits
 
@@ -529,6 +698,12 @@ Jargon is explained in tooltips (`title`/`abbr`).
   is only exercised, not physical; with the scene's SIM paste (`il_sim_scene.py --paste`) it reports Marlin's count
   and lays paste by its own model (2.30 mg per turn, its own dot-size law, ripple, noise, threads), which the pad
   calibration has to measure.
+- Tip setups in the SIM: the up-looking camera is `SimTipCamera`, which draws the tip on the head end-on (a disc of
+  its OD with its bore, a ring for a tapered tip, a capsule towards the hub for a bent one) when N2 is over it, else an
+  empty frame; the SIM paste lays the dots of the tip on the head (scene `physicalTip`, default the mounted setup):
+  its own `byTip` entry (mass per turn, footprint, landing bias) over the scene's paste, or the scene's paste itself
+  for a tip without an entry (the seed's in the tests). Pictures are records, never measurements: no vision runs on
+  them (PC §22, D7).
 - Pad calibrations: one job at a time; a job lives in memory (OpenPnP's restart forgets it; its coupons keep their
   dots and are weighed through `/api/coupons/{id}/reading`); crops of the last 5 jobs. The SIM paste models the needle
   Z only as the gap to the surface. There is no balance driver: readings are typed (the SIM balance is for tests).

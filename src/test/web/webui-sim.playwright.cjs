@@ -147,7 +147,7 @@ async function runFirstDots(page, n) {
   await page.waitForSelector('#dlg-run', { timeout: 10000 });
   const shown = { psi: await textOf(page, 'run-confirm-psi'), test: await textOf(page, 'run-test-line'),
     goBefore: await textOf(page, 'btn-run-go'), goDisabled: await page.isDisabled('#btn-run-go') };
-  for (const t of ['#run-tick-gauge', '#run-tick-paste', '#run-tick-hands']) if (!(await page.isChecked(t))) await page.check(t);
+  for (const t of ['#run-tick-gauge', '#run-tick-tip', '#run-tick-paste', '#run-tick-hands']) if (!(await page.isChecked(t))) await page.check(t);
   await page.waitForSelector('#btn-run-go:enabled', { timeout: 10000 });
   shown.go = await textOf(page, 'btn-run-go');
   await page.click('#btn-run-go');
@@ -381,10 +381,12 @@ async function runFirstDots(page, n) {
     {
       const regState = () => page.evaluate(() => IL.ready().items.find((x) => x.key === 'regulator').state);
       const psi0 = await page.evaluate(() => IL.S.status.dispense.profile.pressurePsi);
+      // a profile write names the mounted tip setup it was made for (PROFILE_CALIBRATION_DESIGN.md §22.2)
+      const tipKey = () => page.evaluate(() => IL.S.status.dispense.tip.key);
       await page.evaluate(() => IL.attest.set('regulator', IL.S.status.dispense.profile.pressurePsi));
       check('regulator: the gauge tick counts (you)', (await regState()) === 'you', await regState());
       for (const v of [psi0 - 1, psi0]) {
-        const r = await page.request.put(BASE + 'api/config', { data: { profile: { pressurePsi: v } } });
+        const r = await page.request.put(BASE + 'api/config', { data: { profile: { pressurePsi: v }, forTip: await tipKey() } });
         check('regulator: profile saved at ' + v + ' psi', r.ok(), r.status());
         await page.waitForFunction((x) => IL.S.status.dispense.profile.pressurePsi === x, v, { timeout: 10000 });
       }
@@ -393,7 +395,7 @@ async function runFirstDots(page, n) {
       // a tick already at the new psi (another tab read the gauge before this one saw the change) stays
       for (const v of [psi0 - 1, psi0]) {
         await page.evaluate((x) => IL.attest.set('regulator', x), v);
-        await page.request.put(BASE + 'api/config', { data: { profile: { pressurePsi: v } } });
+        await page.request.put(BASE + 'api/config', { data: { profile: { pressurePsi: v }, forTip: await tipKey() } });
         await page.waitForFunction((x) => IL.S.status.dispense.profile.pressurePsi === x, v, { timeout: 10000 });
         check('regulator: a tick made at the new ' + v + ' psi before this tab saw the change stays', (await regState()) === 'you', await regState());
       }
@@ -802,7 +804,7 @@ async function runFirstDots(page, n) {
     await page.click('#btn-run');
     await page.waitForSelector('#dlg-run', { timeout: 10000 });
     check('Finish 140 pads left: the confirm names them', /Dispense the 140 pads left\?/.test(await textOf(page, 'dlg-run-t')), await textOf(page, 'dlg-run-t'));
-    for (const t of ['#run-tick-gauge', '#run-tick-paste', '#run-tick-hands']) if (!(await page.isChecked(t))) await page.check(t);
+    for (const t of ['#run-tick-gauge', '#run-tick-tip', '#run-tick-paste', '#run-tick-hands']) if (!(await page.isChecked(t))) await page.check(t);
     await page.waitForSelector('#btn-run-go:enabled', { timeout: 10000 });
     await page.click('#btn-run-go');
     await page.waitForSelector('#dlg-run', { state: 'detached', timeout: 15000 });
@@ -1277,7 +1279,7 @@ async function runFirstDots(page, n) {
         /^Homes first/.test(hf) && /2 N1 touches .*check Z/.test(hf), hf);
       await page.screenshot({ path: path.join(OUT, 'run-confirm-home-first.png') });
       g1 = gcodeNext();
-      for (const t of ['#run-tick-gauge', '#run-tick-paste', '#run-tick-hands']) if (!(await page.isChecked(t))) await page.check(t);
+      for (const t of ['#run-tick-gauge', '#run-tick-tip', '#run-tick-paste', '#run-tick-hands']) if (!(await page.isChecked(t))) await page.check(t);
       await page.waitForSelector('#btn-run-go:enabled', { timeout: 10000 });
       await page.click('#btn-run-go');
       await page.waitForSelector('#dlg-run', { state: 'detached', timeout: 15000 });
@@ -1321,7 +1323,7 @@ async function runFirstDots(page, n) {
         await tab.click(theirs.all ? '#run-all-link' : '#btn-run');
         await tab.waitForSelector('#dlg-run', { timeout: 10000 }).catch(() => {});
         await tab.evaluate(() => { IL.attest.set('regulator', IL.S.status.dispense.profile.pressurePsi); IL.attest.set('paste-life', true); });
-        for (const t of ['#run-tick-gauge', '#run-tick-paste', '#run-tick-hands']) if (!(await tab.isChecked(t).catch(() => true))) await tab.check(t).catch(() => {});
+        for (const t of ['#run-tick-gauge', '#run-tick-tip', '#run-tick-paste', '#run-tick-hands']) if (!(await tab.isChecked(t).catch(() => true))) await tab.check(t).catch(() => {});
         await tab.waitForTimeout(400);
         const cf = await tab.evaluate(() => { const w = document.getElementById('run-tick-wiped'); const go = document.getElementById('btn-run-go');
           return { wipe: w ? w.closest('label').textContent : null, go: go ? go.textContent : null, locked: !!go && go.disabled }; });

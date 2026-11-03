@@ -45,8 +45,8 @@ public class DoseBlocksCouponFrameTest {
                 c.purgeRow.spots = 16;
                 svc.updateConfig(c);
                 // home 1: the needle frame, the touch-off and the blank (the purge row's surface)
-                svc.setNeedleAnchor(5.5, 2.91, null, null);
-                svc.setNeedleZOffset(-2.59, "manual", "test");
+                svc.setNeedleAnchor(5.5, 2.91, null, null, null, svc.getConfig().needleChangedAtMs);
+                svc.setNeedleZOffset(-2.59, "manual", "test", svc.getConfig().needleChangedAtMs);
                 svc.setSurface("blank", pts(new double[][] {{85, 35, 5.45}, {130, 35, 5.45}, {85, 50, 5.45},
                     {130, 50, 5.45}}), "test");
                 // home 2: the coupon step (it homes first under "always") touches coupon1
@@ -123,8 +123,8 @@ public class DoseBlocksCouponFrameTest {
                 c.purgeRow.y0Mm = 45.0;
                 c.purgeRow.spots = 16;
                 svc.updateConfig(c);
-                svc.setNeedleAnchor(5.5, 2.91, null, null);
-                svc.setNeedleZOffset(-2.59, "manual", "test");
+                svc.setNeedleAnchor(5.5, 2.91, null, null, null, svc.getConfig().needleChangedAtMs);
+                svc.setNeedleZOffset(-2.59, "manual", "test", svc.getConfig().needleChangedAtMs);
                 svc.setStartAngle(null, "confirmed after power-up");
                 svc.setSurface("blank", pts(new double[][] {{85, 35, 5.45}, {130, 35, 5.45}, {85, 50, 5.45},
                     {130, 50, 5.45}}), "test");

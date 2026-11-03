@@ -21,6 +21,11 @@ public final class Anchor {
     public boolean bench;
     /** Plain words for the check's anchor list (§3.5). */
     public String text;
+    /**
+     * The tip setup whose validated version this is, when not the mounted one (§22.2: the amount a pad needs is
+     * shared by every setup); null = the mounted setup's or the bench.
+     */
+    public String setupName;
 
     public Anchor() {
     }
@@ -52,6 +57,7 @@ public final class Anchor {
         a.mgPerMm2 = mgPerMm2;
         a.bench = bench;
         a.text = text;
+        a.setupName = setupName;
         return a;
     }
 }

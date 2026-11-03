@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.instancelabs.board.EdtRunner;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
@@ -84,6 +85,8 @@ public class PadCalibrationJobTest {
         volatile String aborted;
         /** The camera misses the first this many weigh dots of each coupon. */
         volatile int missWeighDots;
+        /** The dose-blocks steps as the job queued them (their setup and needle token, §22.3). */
+        final List<DoseBlocksRequest> requests = new CopyOnWriteArrayList<>();
 
         private <T> Future<T> step(String what, java.util.function.Function<RunResult, T> result) {
             calls.add(what);
@@ -128,6 +131,7 @@ public class PadCalibrationJobTest {
 
         @Override
         public Future<DoseBlocksResult> runDoseBlocks(DoseBlocksRequest req) {
+            requests.add(req);
             return step(req.kind, r -> {
                 DoseBlocksResult res = new DoseBlocksResult();
                 res.run = r;
@@ -199,8 +203,8 @@ public class PadCalibrationJobTest {
         ok(call("PUT", "/api/locations/blank", "{\"x\":290,\"y\":240,\"z\":5.5}"));
         ok(call("PUT", "/api/locations/coupon1", "{\"x\":350,\"y\":55,\"z\":5.80}"));
         ok(call("PUT", "/api/locations/coupon2", "{\"x\":350,\"y\":90,\"z\":5.80}"));
-        ok(call("POST", "/api/needle/anchor", "{\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
-        ok(call("POST", "/api/needle/offset", "{\"offsetMm\":-2.59}"));
+        ok(call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}"));
+        ok(call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}"));
         ok(call("PUT", "/api/surfaces/blank", "{\"points\":[[272,217,5.5],[343,217,5.5],[272,273,5.5],[343,273,5.5]]}"));
         ok(call("PUT", "/api/config", "{\"purgeRow\":{\"x0Mm\":275,\"y0Mm\":220,\"pitchXMm\":2.0,\"spots\":33},"
                 + "\"vacuumProbe\":{\"vacuumSettleMs\":300,\"readDelayMs\":0}}"));
@@ -434,6 +438,52 @@ public class PadCalibrationJobTest {
         assertNotNull(type.getAsJsonObject("lastCalibration"), type.toString());
     }
 
+    /**
+     * Tip setups (§22.3, §22.5): the job belongs to the setup and needle token of its start: every dose-blocks step
+     * carries them, and so does its record, with its method and its automatic "calibrated for" label.
+     */
+    @Test
+    public void everyStepAndRecordCarriesTheSetupAndTheNeedleOfTheStart() throws Exception {
+        ok(call("POST", "/api/needle/changed", "{\"why\":\"a new needle\"}"));
+        Long token = svc.getConfig().needleChangedAtMs;
+        // after a needle change K is refused (it holds for the needle it was measured with): both tips touch
+        ok(call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":" + token + ",\"surfaceZ\":5.5,"
+                + "\"needleContactZ\":2.91}"));
+        ok(call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":" + token + ",\"offsetMm\":-2.59}"));
+        // where it lands, kept for the 22G: a test without the landing check (its job is PadCalibrationSimTest's)
+        org.openpnp.instancelabs.dispense.LandingResult l = new org.openpnp.instancelabs.dispense.LandingResult();
+        l.setupKey = Tip.SEED_KEY;
+        l.needleSinceMs = token;
+        l.n = 8;
+        svc.setLanding(l, true, token);
+        attestAtMs = System.currentTimeMillis();
+        plan();
+        String id = str(ok(call("POST", "/api/pad-calibrations", body(group, attest()))), "id");
+        JsonObject waiting = awaitState("awaiting-reading");
+        assertEquals(Tip.SEED_KEY, str(waiting, "forTip"));
+        assertEquals(token.longValue(), waiting.get("needleSinceMs").getAsLong());
+        assertEquals(2, engine.requests.size(), "the ladder and the weighing");
+        for (DoseBlocksRequest r : engine.requests) {
+            assertEquals(Tip.SEED_KEY, r.forTip, r.kind);
+            assertEquals(token, r.needleSinceMs, r.kind);
+        }
+        JsonObject done = ok(call("POST", "/api/pad-calibrations/" + id + "/answer", readings("4.172", "4.100", "4.132",
+                "4.060") + ",\"confirm\":true,\"wait\":true}"));
+        JsonObject g = done.getAsJsonObject("result").getAsJsonArray("groups").get(0).getAsJsonObject();
+        assertEquals("characterized", str(g, "outcome"), g.toString());
+        String label = str(g, "calibrationLabel");
+        assertTrue(label.startsWith("SW_SPST_3.9x2.9mm"), g.toString());
+        assertTrue(label.endsWith(" · " + Tip.SEED_NAME + " · Vieweg DV-5005 · 18 psi · Loctite GC50 SAC305 T5"),
+                label);
+        assertTrue(g.get("calibrationLabelAuto").getAsBoolean());
+        assertFalse(label.equals(str(g, "label")), "the group's own name stays its label: " + g);
+        org.openpnp.instancelabs.dispense.PadCalibrationRecord rec = svc.getDb().padCalibration(g.get("calibrationId")
+                .getAsLong());
+        assertEquals(Tip.SEED_KEY, rec.setupKey);
+        assertEquals(token, rec.needleSinceMs);
+        assertEquals("auto", rec.method);
+    }
+
     @Test
     public void skipLeavesTheTypeProvisional() throws Exception {
         plan();
@@ -633,7 +683,7 @@ public class PadCalibrationJobTest {
 
     @Test
     public void theEngineWritesCharacterizedOnlyWithEveryCheckAndNeverValidated() throws Exception {
-        org.openpnp.instancelabs.dispense.PadType t = svc.getDb().currentPadType("chip-0805").copy();
+        org.openpnp.instancelabs.dispense.PadType t = svc.getDb().currentPadType("chip-0805", Tip.SEED_KEY).copy();
         t.status = org.openpnp.instancelabs.dispense.PadTypeStatus.CHARACTERIZED;
         org.openpnp.instancelabs.dispense.PadCalibrationRecord rec = new org.openpnp.instancelabs.dispense
                 .PadCalibrationRecord();
@@ -642,7 +692,7 @@ public class PadCalibrationJobTest {
         rec.outcome = org.openpnp.instancelabs.dispense.PadCalibrationRecord.CHARACTERIZED;
         rec.checks.add(new org.openpnp.instancelabs.dispense.PadCalibrationRecord.Check("optical", true, "ok"));
         rec.checks.add(new org.openpnp.instancelabs.dispense.PadCalibrationRecord.Check("mass", false, "weighed once"));
-        int before = svc.getDb().currentPadType("chip-0805").version;
+        int before = svc.getDb().currentPadType("chip-0805", Tip.SEED_KEY).version;
         try {
             svc.applyPadCalibration(rec, t);
             throw new AssertionError("a failed check cannot write characterized");
@@ -659,11 +709,11 @@ public class PadCalibrationJobTest {
         catch (IllegalArgumentException e) {
             assertTrue(e.getMessage().startsWith("a pad calibration never writes validated"), e.getMessage());
         }
-        assertEquals(before, svc.getDb().currentPadType("chip-0805").version, "nothing was written");
+        assertEquals(before, svc.getDb().currentPadType("chip-0805", Tip.SEED_KEY).version, "nothing was written");
         t.status = org.openpnp.instancelabs.dispense.PadTypeStatus.CHARACTERIZED;
         org.openpnp.instancelabs.dispense.PadCalibrationRecord stored = svc.applyPadCalibration(rec, t);
         assertEquals(Integer.valueOf(before + 1), stored.versionTo);
-        assertEquals("characterized", svc.getDb().currentPadType("chip-0805").status.dbName);
+        assertEquals("characterized", svc.getDb().currentPadType("chip-0805", Tip.SEED_KEY).status.dbName);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -676,7 +726,7 @@ public class PadCalibrationJobTest {
         Map<String, java.util.List<JsonObject>> groups = PadCalibrationSimTest.groups(ok(get("/api/pad-profile/check"
                 + "?planId=" + planId)));
         JsonObject tip = groups.get("WSON-8-1EP_2x2mm_P0.5mm_EP0.9x1.6mm").get(0);
-        assertEquals("Nothing to calibrate: every chosen group cannot be dispensed with the 22G tip.",
+        assertEquals("Nothing to calibrate: every chosen group cannot be dispensed with the 22G bent taper.",
                 refused(call("POST", "/api/pad-calibrations", body(tip, attest())), "refused"));
         // the suggestion ids are checked before the attestations
         String stale = body(group, "").replace(str(group.getAsJsonObject("suggestion"), "id"), "s000000000000");

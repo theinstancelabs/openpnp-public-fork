@@ -48,6 +48,7 @@ public class ZCheckTest {
     static InterlockReport check(DispenseConfig c, Long home, ZCheck.Result z, boolean zCheckFirst) {
         DispensePlan p = ZFrameTest.plan(c, 5.5);
         Interlocks.Inputs in = new Interlocks.Inputs();
+        in.xyChecked = true; // tip setups §22.3: where the needle lands is checked
         in.cfg = c;
         in.machineEnabled = true;
         in.machineHomed = true;
@@ -170,6 +171,7 @@ public class ZCheckTest {
                 + ": checks Z first (one N1 touch)"), r.notes.toString());
         // a run that will home makes every Z datum stale: it checks Z after its home
         Interlocks.Inputs in = new Interlocks.Inputs();
+        in.xyChecked = true; // tip setups §22.3: where the needle lands is checked
         DispenseConfig c = cfg();
         DispensePlan p = ZFrameTest.plan(c, 5.5);
         in.cfg = c;
@@ -189,6 +191,7 @@ public class ZCheckTest {
     @Test
     public void scopesWithoutNeedleMotionHaveNoRule() {
         Interlocks.Inputs in = new Interlocks.Inputs();
+        in.xyChecked = true; // tip setups §22.3: where the needle lands is checked
         in.cfg = cfg();
         in.machineEnabled = true;
         in.machineHomed = true;

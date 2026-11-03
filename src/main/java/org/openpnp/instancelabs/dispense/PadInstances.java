@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
+import org.openpnp.instancelabs.padprofile.Anchor;
 import org.openpnp.instancelabs.padprofile.CheckInputs;
 import org.openpnp.instancelabs.padprofile.DoseEvidence;
 import org.openpnp.instancelabs.padprofile.DotGeometry;
@@ -122,12 +123,17 @@ public final class PadInstances {
         i.k = t.k;
         i.dotSteps = t.dotSteps;
         i.dotsPerPad = t.dotsPerPad;
-        i.tipKey = t.tipKey;
+        i.tipKey = Tip.setupOf(t.tipKey); // §22.1: a version without a tip key is the seeded setup's
         i.doseFp = t.doseFp;
         i.calAreaMm2 = t.calAreaMm2;
         i.massPerPadMg = t.massPerPadMg;
         i.origin = t.origin;
         i.retired = RETIRED_FAMILY.equals(t.family);
+        i.standIn = t.standIn;
+        if (PadType.ORIGIN_COPIED.equals(t.origin) && t.notes != null) {
+            java.util.regex.Matcher m = COPIED_FROM.matcher(t.notes);
+            i.copiedFrom = m.find() ? m.group(1) : null;
+        }
         if (rule != null) {
             i.largestSingleDotPadMm2 = rule.largestSingleDotPadMm2;
             i.maxDots = rule.maxDots;
@@ -135,17 +141,34 @@ public final class PadInstances {
         return i;
     }
 
-    public static Tip tip(TipSpec t) {
-        return new Tip(t.key, t.name, t.idMm, t.odMm, t.minDotSteps);
+    /** The notes of a copied version (TipSetups.copyOf): "Copied from the {source} (v{n}, ...". */
+    private static final java.util.regex.Pattern COPIED_FROM = java.util.regex.Pattern.compile(
+            "^Copied from the (.+?) \\(v\\d+");
+
+    /**
+     * The tip as the configuration names it, without its dot table: the bench model for the seeded setup
+     * ({@link TipSpec#model}), nothing measured otherwise. The mounted setup with its dot table is
+     * {@link DispenseService#mountedTip()}.
+     */
+    static Tip specTip(TipSpec t) {
+        Tip x = new Tip(t.key, t.name, t.idMm, t.odMm, t.minDotSteps);
+        x.setupVersion = t.setupVersion;
+        x.dispenser = t.dispenser;
+        x.benchModel = TipSetup.MODEL_BENCH.equals(t.model);
+        return x;
     }
 
     /**
-     * The check's inputs around these pads: the current pad types with their rules, the gate, the
-     * mounted tip, the profile's dose and recipe, the packages pasted partly. Dose evidence and
-     * anchors other than the validated types' are the caller's (none here).
+     * The check's inputs around these pads: the current pad types with their rules, the gate, the mounted tip, the
+     * profile's dose and recipe, the packages pasted partly. Dose evidence and anchors other than the validated types'
+     * are the caller's (none here). The tip is the mounted setup with its dot table ({@link DispenseService#mountedTip},
+     * tip setups design §22.2), not {@code cfg.tip}.
      */
     public static CheckInputs inputs(List<PadInstance> pads, Collection<PadType> types, Map<String, PadRule> rules,
-            DispenseConfig cfg, Collection<String> pastePartial, boolean planned) {
+            DispenseConfig cfg, Collection<String> pastePartial, boolean planned, Tip tip) {
+        if (tip == null) {
+            throw new IllegalArgumentException("the profile check needs the mounted tip");
+        }
         CheckInputs in = new CheckInputs();
         in.pads = new ArrayList<>(pads);
         for (PadType t : types) {
@@ -157,7 +180,10 @@ public final class PadInstances {
         catch (IllegalArgumentException e) {
             in.gate = cfg.minPadTypeStatus; // an unknown gate is a CONFIG problem; the check reads it as unknown
         }
-        in.tip = tip(cfg.tip);
+        in.tip = tip;
+        for (TypeInfo t : in.types.values()) {
+            t.setupName = tip.name;
+        }
         in.profileSteps = cfg.profile.netStepsPerDot;
         in.stepsPerRev = cfg.bStepsPerRev;
         in.bStepsPerDeg = cfg.bStepsPerDeg;
@@ -171,30 +197,59 @@ public final class PadInstances {
     }
 
     /**
-     * The check's inputs from the engine as it is now (§3.1): the current pad types and their rules, the
-     * configuration, the packages pasted partly and the dose evidence of the fresh records.
+     * The check's inputs from the engine as it is now (§3.1): the mounted tip setup with its dot table
+     * ({@link DispenseService#mountedTip}), its composed pad types and their rules with the other setups' statuses,
+     * the configuration, the packages pasted partly, the dose evidence of the fresh records (jobs flagged wrong-tip
+     * left out) and the other setups' validated, weighed versions as anchors (§22.2).
      */
     public static CheckInputs inputs(DispenseService svc, List<PadInstance> pads, boolean planned)
             throws SQLException {
         DispenseConfig cfg = svc.getConfig();
         DispenseDb db = svc.getDb();
-        CheckInputs in = inputs(pads, db.currentPadTypes(), db.currentPadRules(), cfg, db.pastePartialPackages(),
-                planned);
+        Tip tip = svc.mountedTip();
+        List<PadType> types = svc.getPadTypes();
+        CheckInputs in = inputs(pads, types, db.currentPadRules(), cfg, db.pastePartialPackages(), planned, tip);
         long since = in.nowMs - (long) (cfg.padCalibration.doseRecordMaxAgeH * 3600e3); // older ones are stale
-        in.evidence = evidence(db.doseRecords(null, since), cfg, new DoseRecord.Epochs(
-                svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed()), in.nowMs);
+        in.evidence = DoseRecords.evidence(db.doseRecords(null, since), cfg, new DoseRecord.Epochs(
+                svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed()), in.nowMs, db.flaggedJobs());
+        others(db, tip.key, types, in);
         return in;
     }
 
     /**
-     * The fresh dose records of the current setup (§1.7) per dose, pooled as the pad calibration pools
-     * them ({@link DoseRecords#evidence}): the camera statistics recomputed on every fresh record's dots
-     * (a later pass does not erase an earlier failure) and a mass confirmed by any two fresh readings
-     * that agree (§7.5).
+     * The other setups' versions of the types (§22.2): their statuses on {@link TypeInfo#others} (the below-gate
+     * text) and their validated, weighed versions as anchors ({@link CheckInputs#moreAnchors}).
      */
-    public static Map<Integer, DoseEvidence> evidence(List<DoseRecord> records, DispenseConfig cfg,
-            DoseRecord.Epochs epochs, long nowMs) {
-        return DoseRecords.evidence(records, cfg, epochs, nowMs);
+    static void others(DispenseDb db, String setupKey, List<PadType> types, CheckInputs in) throws SQLException {
+        Map<String, String> names = new HashMap<>();
+        for (TipSetup s : db.currentTipSetups(true)) {
+            names.put(s.key, s.name);
+        }
+        Map<String, PadType> composed = new HashMap<>();
+        for (PadType t : types) {
+            composed.put(t.typeKey, t);
+        }
+        for (PadType o : db.otherSetupVersions(setupKey)) {
+            String setup = Tip.setupOf(o.tipKey);
+            String name = names.getOrDefault(setup, setup);
+            TypeInfo mine = in.types.get(o.typeKey);
+            if (mine != null) {
+                TypeInfo.Other x = new TypeInfo.Other();
+                x.setupKey = setup;
+                x.setupName = name;
+                x.version = o.version;
+                x.status = o.status == null ? null : o.status.dbName;
+                mine.others.add(x);
+            }
+            PadType c = composed.get(o.typeKey);
+            if (o.status == PadTypeStatus.VALIDATED && o.massPerPadMg != null && o.massPerPadMg > 0
+                    && Math.abs(o.k - 1) <= Limits.EPS && c != null && !RETIRED_FAMILY.equals(c.family)) {
+                TypeInfo t = typeInfo(o, null);
+                Anchor a = new Anchor(c.family, o.typeKey, o.version, o.massPerPadMg, t.calArea());
+                a.setupName = name;
+                in.moreAnchors.add(a);
+            }
+        }
     }
 
     /**

@@ -175,3 +175,57 @@ td.bi-pp { font-size: 13.5px; line-height: 1.35; }
   .fgrid--4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pt-families .pt-table col.pt-c-plan { width: 98px; }
 }
+
+/* ---------------------------------------------------------------- tip setups (PROFILE_CALIBRATION_DESIGN.md §22.7) */
+.pt-needs__for { margin-left: 6px; font-weight: 600; color: var(--ink-2); font-size: .82em; }
+.pt-needs__measure, .pt-needs__other { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; }
+.pt-needs__measure[hidden], .pt-needs__other[hidden] { display: none; }
+.pt-needs__measure > span:not(.st) { flex: 1 1 320px; }
+.pt-needs__other > span:not(.st) { flex: 1 1 260px; }
+/* the pad-cal view: whom it is for, the landing, the tip's dots, the tip's pictures, labels, result photos */
+.pcal-tipline { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink-2); line-height: 1.35; }
+.pcal-tipline b { color: var(--ink); }
+.pcal-tipline:empty { display: none; }
+.pcal-landing { display: flex; flex-direction: column; gap: 8px; }
+.pcal-landing[hidden] { display: none; }
+.pcal-landing > .notebox { display: flex; flex-direction: column; gap: 8px; }
+.pcal-landing > .pcal-landing__ok { flex-direction: row; align-items: flex-start; gap: 8px; background: var(--ok-bg); border-color: var(--ok-line); }
+.pcal-landing > .notebox--need:not(.pcal-landing__q) { flex-direction: row; flex-wrap: wrap; align-items: center; }
+/* the tip's dot sizes: each turn with its pass mark (no Pass column, so the table fits the side panel); not measured */
+.pcal-turn { display: inline-flex; align-items: center; gap: 4px; }
+.pcal-tipdots-not { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 10px; margin-top: 8px; }
+.pcal-tipdots-not[hidden] { display: none; }
+.pcal-tipdots-not > span:not(.st) { flex: 1 1 240px; }
+.pcal-tipdots-not > .btn-row { flex-basis: 100%; }
+.pcal-tip { display: flex; flex-direction: column; gap: 8px; }
+.pcal-tip[hidden] { display: none; }
+.pcal-tip__none { margin: 0; font-size: 13.5px; }
+.pcal-label { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 6px; padding: 8px 10px; border-radius: var(--r-md); background: var(--tile); }
+.pcal-label__v { display: flex; align-items: center; gap: 8px; }
+.pcal-label__k { font: 700 11.5px/1 var(--font-ui); letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.pcal-label__t { font: 650 14px/1.35 var(--font-ui); overflow-wrap: anywhere; }
+.pcal-label__e { display: flex; flex-direction: column; gap: 6px; }
+.pcal-label__in { min-height: 60px; resize: vertical; font-size: 14px; }
+.pcal-label__a { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13.5px; }
+.pcal-label__a:empty { display: none; }
+.pcal-label__bar { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.pcal-label__bar[hidden] { display: none; }
+/* the result's next step names the board and the tip ("Calibrate the 4 pad types of {board} for the 25G straight…"):
+   it wraps in a narrow panel instead of running out of the button */
+#btn-pcal-next { height: auto; min-height: 46px; padding-block: 8px; white-space: normal; line-height: 1.3; text-align: center; }
+.pcal__photos { display: flex; flex-wrap: wrap; gap: 10px; }
+.pcal-photo { margin: 0; display: flex; flex-direction: column; gap: 4px; width: 150px; }
+.pcal-photo__b { width: 150px; height: 112px; }
+.pcal-photo figcaption { font-size: 12px; line-height: 1.35; color: var(--ink-2); overflow-wrap: anywhere; }
+/* the editor's Calibrated for */
+.pt-calfor { margin: 0; border: 1px solid var(--line-2); border-radius: var(--r-md); padding: 8px 14px 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.pt-calfor[hidden] { display: none; }
+.pt-calfor > legend { font: 700 14px/1 var(--font-ui); padding: 0 6px; }
+.pt-cal-photos { display: flex; flex-direction: column; gap: 2px; }
+.pt-cal-photo img { width: 56px; height: 42px; object-fit: cover; border-radius: var(--r-xs); border: 1px solid var(--line); }
+.pt-cal-photo__t { font-size: 13px; }
+.pt-sugg__tips { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+/* the by-hand guide's ladder photo */
+.guide-photo__f { margin: 8px 0 0; display: inline-flex; flex-direction: column; gap: 4px; }
+.guide-photo__b { width: 160px; height: 120px; }
+.guide-photo__f figcaption { font-size: 12px; color: var(--ink-2); }

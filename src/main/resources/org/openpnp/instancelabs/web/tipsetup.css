@@ -1,0 +1,198 @@
+/* tipsetup.css: tip setups (tipsetup.js): the Setup card "Dispenser & tip", the Change tip view, the Add a tip dialog,
+   the picture viewer (#photo-view, .dialog--lg), drop zones and thumbnails shared by Profile, the pad-cal view and
+   Records. Tokens and components are app.css's (DEV_NOTES.md §7). */
+
+/* ------------------------------------------------------------------ pictures: thumbnails, drop zones, viewer */
+.photo-thumb { display: inline-grid; place-items: center; padding: 0; border: 1px solid var(--line-2); border-radius: var(--r-sm); background: var(--sunken);
+  overflow: hidden; cursor: pointer; color: var(--ink-2); font: 650 13px/1 var(--font-ui); }
+.photo-thumb:hover { border-color: var(--accent); }
+.photo-thumb:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.photo-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.photo-thumb[hidden] { display: none; }
+.photo-thumb--sm { width: 72px; height: 54px; flex: none; }
+.photo-thumb--more { background: var(--tile); }
+.photo-thumb--gone { cursor: default; border-style: dashed; background: var(--tile); }
+.photo-thumb__gone { font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .06em; }
+.photo-strip__row { display: flex; flex-wrap: wrap; gap: 8px; }
+.photo-strip[hidden] { display: none; }
+.photo-drop { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border: 2px dashed var(--line-2); border-radius: var(--r-md); background: var(--tile);
+  text-align: center; transition: border-color .12s, background .12s; }
+.photo-drop--over { border-color: var(--accent); background: var(--accent-tint); }
+.photo-drop__t { font: 650 14px/1.3 var(--font-ui); color: var(--ink-2); }
+.photo-drop__s { font-size: 12.5px; line-height: 1.35; color: var(--ink-3); }
+.photo-none__ic { width: 34px; height: 34px; fill: none; stroke: currentColor; stroke-width: 1.5; color: var(--ink-3); }
+
+.dialog--lg { width: min(1100px, 100%); }
+.dialog--lg .dialog__body { padding: 12px 16px; align-items: center; }
+.photo-view { margin: 0; width: 100%; display: grid; place-items: center; min-height: 0; }
+.photo-view__img { display: block; max-width: 100%; max-height: calc(100vh - var(--strip-h) - 250px); object-fit: contain; border-radius: var(--r-sm); background: var(--sunken); }
+.dialog--lg .dialog__foot { flex-wrap: wrap; }
+.photo-view__t { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.photo-view__cap { font: 650 14.5px/1.35 var(--font-ui); overflow-wrap: anywhere; }
+.photo-view__meta { font-size: 13px; color: var(--ink-2); }
+.photo-view__ref:empty { display: none; }
+
+/* ------------------------------------------------------------------ Setup › Dispenser & tip (#card-tip) */
+.tip-card .card__body { padding-top: 4px; }
+.tip-grid { display: grid; grid-template-columns: minmax(200px, 240px) minmax(0, 1fr); gap: 18px 22px; align-items: start; }
+.tip-pic { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tip-photo { width: 100%; aspect-ratio: 4 / 3; height: auto; }
+.tip-photo-none { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; aspect-ratio: 4 / 3; border: 1px dashed var(--line-2);
+  border-radius: var(--r-sm); background: var(--tile); color: var(--ink-2); font-size: 13.5px; text-align: center; padding: 10px; }
+.tip-photo-none[hidden] { display: none; }
+.tip-photo-cap { font-size: 12.5px; line-height: 1.35; color: var(--ink-2); overflow-wrap: anywhere; }
+.tip-photo-cap[hidden] { display: none; }
+.tip-pic__acts { gap: 8px; }
+.tip-pic__acts .btn { flex: 1 1 auto; height: auto; min-height: 40px; padding-top: 6px; padding-bottom: 6px; white-space: normal; line-height: 1.2; text-align: left; }
+.tip-pic .reason { margin-top: 0; }
+.tip-facts { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.tip-name { margin: 0; font: 700 19px/1.25 var(--font-ui); }
+.tip-kv { grid-template-columns: minmax(96px, max-content) minmax(0, 1fr); }
+.tip-bend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.tip-bend[hidden] { display: none; }
+.tip-bend__t { font-size: 13.5px; color: var(--ink-2); }
+.tip-next-k[hidden], .tip-next[hidden] { display: none; }
+.tip-next { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.tip-step { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; min-height: 36px; padding: 4px 8px; border-radius: var(--r-sm); }
+.tip-step__t { font-size: 14px; line-height: 1.35; }
+.tip-step--done { min-height: 26px; padding-top: 1px; padding-bottom: 1px; }
+.tip-step--done .tip-step__t { color: var(--ink-3); font-size: 13px; }
+.tip-step--now { background: var(--need-bg); box-shadow: inset 3px 0 0 var(--need); }
+.tip-step--now .tip-step__t { font-weight: 650; }
+.tip-primary:empty { display: none; }
+.tip-card .card__foot { flex-wrap: wrap; row-gap: 8px; }
+
+/* a small menu (More): a details whose list floats under its summary */
+details.menu { position: relative; }
+details.menu > summary { list-style: none; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+details.menu > summary::-webkit-details-marker { display: none; }
+details.menu > summary .ic { width: 16px; height: 16px; transform: rotate(90deg); }
+details.menu[open] > summary .ic { transform: rotate(-90deg); }
+.menu__list { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 20; min-width: 200px; display: flex; flex-direction: column; padding: 6px;
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r-md); box-shadow: var(--e2); }
+.menu__i { text-align: left; min-height: 40px; padding: 0 12px; border: 0; border-radius: var(--r-sm); background: none; color: var(--ink); font: 600 14.5px/1.2 var(--font-ui); cursor: pointer; }
+.menu__i:hover, .menu__i:focus-visible { background: var(--accent-tint); color: var(--accent-ink); outline: none; }
+
+/* ------------------------------------------------------------------ the tip of a setup, small */
+.tip-thumb { display: inline-grid; place-items: center; flex: none; border-radius: var(--r-xs); object-fit: cover; background: var(--sunken); border: 1px solid var(--line); }
+.tip-thumb--xs { width: 32px; height: 24px; }
+.tip-thumb--sm { width: 56px; height: 42px; }
+.tip-thumb--big { width: 96px; height: 72px; }
+.tip-thumb--none { color: var(--ink-3); background: var(--tile); border-style: dashed; }
+.tip-thumb--none .photo-none__ic { width: 22px; height: 22px; }
+.tip-thumb--xs .photo-none__ic { width: 16px; height: 16px; }
+
+/* ------------------------------------------------------------------ Change tip (panel view tip-change) */
+.tip-change { display: flex; flex-direction: column; gap: 14px; }
+.tip-swap { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.tip-swap li { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; padding: 8px 10px; border-radius: var(--r-md); background: var(--tile); border: 1px solid var(--line); }
+.tip-swap__t { display: flex; flex-direction: column; gap: 2px; font-size: 14px; line-height: 1.35; min-width: 0; }
+.tip-swap__s { color: var(--ink-2); font-size: 13px; }
+.tip-swap li .btn[hidden] { display: none; }
+.tip-list { border: 0; margin: 0; padding: 0; min-width: 0; }
+.tip-list > legend { font: 700 15px/1.3 var(--font-ui); padding: 0 0 8px; }
+.tip-list__opts { display: flex; flex-direction: column; gap: 8px; }
+.tip-opt { display: grid; grid-template-columns: 22px 56px minmax(0, 1fr); align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line-2); border-radius: var(--r-md);
+  background: var(--surface); cursor: pointer; }
+.tip-opt:hover { border-color: var(--accent); }
+.tip-opt:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-tint); }
+.tip-opt:has(input:focus-visible) { outline: 3px solid var(--accent); outline-offset: 2px; }
+.tip-opt input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
+.tip-opt__t { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tip-opt__n { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font: 650 14.5px/1.3 var(--font-ui); }
+.tip-opt__s { font-size: 12.5px; line-height: 1.35; color: var(--ink-2); overflow-wrap: anywhere; }
+.tip-only { margin: 0; font-size: 13.5px; color: var(--ink-2); }
+.tip-retired[hidden] { display: none; }
+.tip-retired__l { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.tip-retired__l li { display: flex; align-items: center; gap: 10px; }
+.tip-retired__n { flex: 1; min-width: 0; font-size: 14px; }
+.tip-what[hidden] { display: none; }
+.tip-what { display: flex; flex-direction: column; gap: 6px; }
+.tip-what__t { overflow-wrap: anywhere; }
+.tip-what__w { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; }
+.tip-what__w--block { color: var(--block); font-weight: 600; }
+.tip-sel:empty { display: none; }
+.tip-change__more { margin-top: 8px; }
+
+/* ------------------------------------------------------------------ Add a tip / Edit (#dlg-tip-add) */
+.dialog--tip .dialog__body { gap: 12px; }
+.ta-grid { gap: 12px 16px; }
+.ta-grid > .field[hidden] { display: none; }
+.ta-note[hidden] { display: none; }
+.ta-note { display: flex; gap: 8px; align-items: flex-start; }
+.ta-photo { display: flex; flex-direction: column; gap: 8px; }
+.ta-photo__row { display: flex; gap: 14px; align-items: flex-start; }
+.ta-photo__acts { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+#ta-photo-img { width: 120px; height: 90px; object-fit: cover; border-radius: var(--r-sm); border: 1px solid var(--line); }
+#ta-photo-img[hidden] { display: none; }
+
+/* ------------------------------------------------------------------ narrow (1024 px and the panel under 1100 px) */
+@media (max-width: 1360px) {
+  .tip-grid { grid-template-columns: minmax(170px, 200px) minmax(0, 1fr); gap: 14px 16px; }
+}
+@media (max-width: 1100px) {
+  .tip-grid { grid-template-columns: minmax(150px, 180px) minmax(0, 1fr); }
+}
+
+/* ------------------------------------------------------------------ Profile: the mounted tip, By tip, Other tips */
+#pf-h1-sub { display: inline-flex; align-items: center; gap: 8px; vertical-align: middle; }
+#pf-h1-sub .tip-thumb { align-self: center; }
+.pf-tip-change { font-size: 14px; }
+.pt-tips { margin-left: 8px; height: 22px; padding: 0 8px; border: 1px solid var(--line-2); border-radius: var(--r-pill); background: var(--tile);
+  color: var(--accent-ink); font: 650 12px/1 var(--font-ui); cursor: pointer; vertical-align: 1px; white-space: nowrap; }
+.pt-tips:hover { border-color: var(--accent); }
+.pt-standin { font-size: 12px; color: var(--ink-2); margin-top: 4px; line-height: 1.3; }
+.pt-bytip__wrap { overflow-x: auto; }
+.pt-bytip__t { width: 100%; }
+.pt-bytip__t th, .pt-bytip__t td { vertical-align: top; }
+.pt-bytip__h { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; text-transform: none; letter-spacing: 0; }
+.pt-bytip__hn { font-weight: 700; color: var(--ink); }
+.pt-bytip__none { font-size: 13px; }
+.pt-bt { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 4px 6px; margin: -4px -6px; border: 1px solid transparent; border-radius: var(--r-sm);
+  background: none; cursor: pointer; text-align: left; color: var(--ink); font: inherit; }
+.pt-bt:hover, .pt-bt:focus-visible { border-color: var(--line-2); background: var(--tile); }
+.pt-bt__l { font-size: 12px; color: var(--ink-2); line-height: 1.3; max-width: 260px; }
+.pt-side-tips { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 6px; }
+.pt-side-tips:empty { display: none; }
+.pt-tip { padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md); display: flex; flex-direction: column; gap: 4px; background: var(--surface); }
+.pt-tip__h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pt-tip__l, .pt-tip__p, .pt-tip__note { font-size: 13px; color: var(--ink-2); line-height: 1.35; overflow-wrap: anywhere; }
+.pt-tip__a { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pt-tip__none { margin: 0; font-size: 13.5px; }
+.pt-hist__tools { padding: 0 24px 4px; }
+/* Profile › Pad types in this plan (the narrow side panel): the name has the row's width, the pad count goes under it
+   (a long name squeezed beside the count ran over it) */
+.pt-plan .pt-plan__i { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 10px; row-gap: 1px; }
+.pt-plan .pt-plan__i > :first-child { grid-row: 1 / span 2; }
+.pt-plan .pt-plan__n { grid-column: 2; overflow-wrap: break-word; }
+.pt-plan .pt-plan__v { grid-column: 2; white-space: normal; }
+.pt-plan .pt-plan__i > .ic { grid-column: 3; grid-row: 1 / span 2; }
+/* the history's Tip column made the table wider than 1000 px: a wide screen shows it whole (narrower ones scroll it) */
+#dlg-history { width: min(1360px, calc(100vw - 48px)); }
+.su-frame-q { display: flex; gap: 12px; align-items: flex-start; }
+.su-frame-q[hidden] { display: none; }
+.su-frame-q__t { display: flex; flex-direction: column; gap: 6px; }
+
+/* ------------------------------------------------------------------ Records: pad calibrations */
+.rec-pcals td { vertical-align: top; }
+.rec-label__t { font-weight: 600; overflow-wrap: anywhere; line-height: 1.35; }
+.rec-label__s { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+.rec-thumbs { display: inline-flex; gap: 4px; }
+.rec-thumb { width: 40px; height: 30px; }
+.rec-thumb--more { font-size: 12px; }
+.rec-photos { display: flex; flex-direction: column; gap: 12px; }
+.rec-photo { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.rec-photo__b { width: 100%; height: auto; aspect-ratio: 4 / 3; }
+.rec-photo figcaption { font-size: 12.5px; color: var(--ink-2); }
+.rec-label-ed { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.rec-label__in { min-height: 60px; resize: vertical; }
+.rec-upload { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.rec-pcal-acts:empty { display: none; }
+.rec-cals-old { margin-top: 14px; }
+.rec-cals-old > summary .rec-sum { margin-left: 10px; font-weight: 500; color: var(--ink-3); }
+
+/* ------------------------------------------------------------------ Run: the tip in the run confirm and the recipe token */
+#run-confirm-tip .tip-thumb { flex: none; }
+/* a row of its own: the tip's name, its picture and "after every needle change" (in half the row the name took 5 lines) */
+#dlg-run #run-confirm-tip { grid-column: 1 / -1; }
+.recipe .recipe__tip { color: var(--ink-2); }

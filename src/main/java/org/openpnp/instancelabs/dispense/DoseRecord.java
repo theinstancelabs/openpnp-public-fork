@@ -37,6 +37,8 @@ public class DoseRecord {
     /** Per-phase statistics as JSON (LadderStats). */
     public String phaseJson;
     public Double drift, landingMeanMm, landingSdMm;
+    /** The mean landing per axis, found - commanded (mm; tip setups design §22.1); landingMeanMm is its length. */
+    public Double landingDxMm, landingDyMm;
     /** Per-dot measurements as JSON. */
     public String dotsJson;
     public Boolean pass;

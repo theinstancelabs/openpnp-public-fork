@@ -23,6 +23,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.openpnp.ConfigurationListener;
+import org.openpnp.instancelabs.dispense.EngineRefusal;
 import org.openpnp.model.Configuration;
 import org.pmw.tinylog.Logger;
 
@@ -119,6 +120,8 @@ public final class ApiServer {
         PadProfileEndpoints padProfile = new PadProfileEndpoints(context, dispense);
         padProfile.register(this);
         new PadCalibrationEndpoints(context, dispense, padProfile).register(this);
+        new TipSetupEndpoints(context, dispense).register(this);
+        new PhotoEndpoints(context).register(this);
         new SimEndpoints(context).register(this);
         new BoardImportEndpoints(context, dispense).register(this);
         server.setExecutor(executor);
@@ -381,6 +384,14 @@ public final class ApiServer {
             body.put("reason", a.getMessage());
             body.putAll(a.details);
         }
+        else if (t instanceof EngineRefusal) {
+            // the engine's own codes (tip setups design §22): tip-changed, needle-changed, setup-mismatch, ...
+            EngineRefusal a = (EngineRefusal) t;
+            status = a.status;
+            body.put("error", a.code);
+            body.put("reason", a.getMessage());
+            body.putAll(a.details);
+        }
         else if (t instanceof IllegalArgumentException) {
             status = 400;
             body.put("error", "bad-request");
@@ -528,7 +539,8 @@ public final class ApiServer {
             for (Map.Entry<String, String> h : r.headers.entrySet()) {
                 ex.getResponseHeaders().set(h.getKey(), h.getValue());
             }
-            boolean head = "HEAD".equalsIgnoreCase(ex.getRequestMethod());
+            // a 304 (an unchanged picture) has no body
+            boolean head = "HEAD".equalsIgnoreCase(ex.getRequestMethod()) || r.status == 304;
             ex.sendResponseHeaders(r.status, head ? -1 : r.body.length);
             if (!head) {
                 try (OutputStream os = ex.getResponseBody()) {

@@ -181,7 +181,7 @@ public class PadProfileUiSimTest {
 
     @Test
     public void thePadcalBoardNeedsThreeProfilesAndTheTipHoldsTwoGroups() throws Exception {
-        ok(send("PUT", "/api/pad-types/chip-0603", "{\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
+        ok(send("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}".getBytes(StandardCharsets.UTF_8),
                 "application/json"));
         JsonObject pv = ok(send("POST", "/api/boards/import?file=" + URLEncoder.encode("padcal.kicad_pcb", "UTF-8"),
                 padcal(), "application/octet-stream"));
