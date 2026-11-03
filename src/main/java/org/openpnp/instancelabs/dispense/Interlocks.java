@@ -47,6 +47,8 @@ public final class Interlocks {
          * whose position could not be read (BR-02); null if neither was seen. A reconnect keeps the count.
          */
         public Long controllerResetAtMs;
+        /** When the last controller reset was detected (epoch ms; I11): the count restarted for sure; or null. */
+        public Long controllerResetDetectedAtMs;
         /** BR-02: why the head's position is unknown (a controller reset not homed since), or null when known. */
         public String positionUnknownWhy;
         /**
@@ -661,6 +663,11 @@ public final class Interlocks {
         if (partial) {
             if (prof.startAngleSetAtMs == null) {
                 r.add("I11", "the screw start angle has never been set: set or confirm it (Profiles)");
+            }
+            else if (in.controllerResetDetectedAtMs != null
+                    && prof.startAngleSetAtMs < in.controllerResetDetectedAtMs) {
+                r.add("I11", "the controller was reset after the screw start angle was set; the B step count restarts "
+                        + "at power-up, so the angle is lost: measure it again (Profiles)");
             }
             else if (in.controllerResetAtMs != null && prof.startAngleSetAtMs < in.controllerResetAtMs) {
                 r.add("I11", "the controller was reset (or its position could not be read at a connect) after the "

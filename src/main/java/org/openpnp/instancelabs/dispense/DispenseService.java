@@ -255,6 +255,7 @@ public final class DispenseService {
         this.configuration = configuration;
         this.configDir = configuration.getConfigurationDirectory();
         this.cfg = DispenseConfig.load(configDir);
+        boolean dbExisted = DispenseDb.fileFor(configDir).exists();
         this.db = DispenseDb.open(configDir);
         resolveNozzle();
         try {
@@ -279,9 +280,7 @@ public final class DispenseService {
         Machine machine = configuration.getMachine();
         homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
         controllerReset = new ControllerReset(null, machine != null && machine.isEnabled(),
-                machine != null && machine.isHomed(), resetHistory(),
-                e -> db.event(null, ControllerReset.EVENT_KNOWN.equals(e.code) ? "INFO" : "WARN", e.code, e.message,
-                        e.atMs));
+                machine != null && machine.isHomed(), resetHistory(dbExisted), this::journalReset);
         if (machine != null) {
             machine.addListener(homeTracker);
             machineListener = new MachineListener.Adapter() {
@@ -430,15 +429,40 @@ public final class DispenseService {
         }
     }
 
+    /** BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. */
+    private void journalReset(ControllerReset.Event e) {
+        try {
+            String level = ControllerReset.EVENT_KNOWN.equals(e.code) ? "INFO" : "WARN";
+            db.insertEvent(null, level, e.code, e.message, e.atMs);
+        }
+        catch (SQLException ex) {
+            Logger.error(ex, "dispense: the controller reset journal could not be written ({}): after a restart the "
+                    + "engine will not know about it", e.code);
+        }
+    }
+
     /**
      * BR-02: what earlier engines journaled about controller resets (the newest of each kind), so a restart keeps the
      * screw count's epoch and an unknown position. Unreadable, it counts as an unread connect: unknown until a home.
      */
-    private List<ControllerReset.Event> resetHistory() {
+    private List<ControllerReset.Event> resetHistory(boolean dbExisted) {
         List<ControllerReset.Event> h = new ArrayList<>();
         try {
+            if (db.newestEvents(ControllerReset.EVENT_JOURNAL).isEmpty()) {
+                // the first journaling start: on a database an earlier build used, a power cycle it saw may be
+                // unanswered, so the screw count is dated once (I11); a fresh database has nothing to answer
+                long now = System.currentTimeMillis();
+                if (dbExisted) {
+                    journalReset(new ControllerReset.Event(ControllerReset.EVENT_COUNT_EPOCH, now, "the first start "
+                            + "that journals controller resets, on a database an earlier build used: the controller "
+                            + "may have been switched off before it, so the screw count may have restarted (I11 asks "
+                            + "for the start angle)"));
+                }
+                db.insertEvent(null, "INFO", ControllerReset.EVENT_JOURNAL, "this engine journals controller resets "
+                        + "(BR-02)", now);
+            }
             for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
-                    ControllerReset.EVENT_KNOWN)) {
+                    ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }
@@ -748,6 +772,13 @@ public final class DispenseService {
      * power-up (the B step count restarts at power-up).
      */
     public synchronized DispenseProfile setStartAngle(Double angleDeg, String note) throws IOException {
+        Long reset = controllerReset.detectedAtMs();
+        Long setAt = cfg.profile.startAngleSetAtMs;
+        if (angleDeg == null && reset != null && (setAt == null || setAt < reset)) {
+            // BR-02: the B step count restarted at that reset for sure, so the old angle cannot be confirmed
+            throw new EngineRefusal(409, "refused", "the controller was reset after the screw start angle was set, so "
+                    + "the angle is lost: measure it again and set it (a confirm cannot keep it)");
+        }
         DispenseConfig c = cfg.copy();
         if (angleDeg != null) {
             c.profile.startAngleDeg = angleDeg;
@@ -2397,6 +2428,7 @@ public final class DispenseService {
         in.opticalCheckAvailable = imager() != null && imager().isAvailable();
         in.scope = scope == null ? new Interlocks.Scope() : scope;
         in.controllerResetAtMs = controllerReset.countEpochMs();
+        in.controllerResetDetectedAtMs = controllerReset.detectedAtMs();
         in.positionUnknownWhy = controllerReset.unknownWhy();
         in.boardRun = plan != null;
         in.purgeDots = plan == null ? 0 : DoseBlocks.purgeSpotsNeeded(plan, c);

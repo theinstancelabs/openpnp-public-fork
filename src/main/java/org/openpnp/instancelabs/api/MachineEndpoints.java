@@ -19,7 +19,6 @@ import java.util.concurrent.TimeoutException;
 import javax.imageio.ImageIO;
 
 import org.openpnp.instancelabs.dispense.ControllerCommands;
-import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeReport;
@@ -285,11 +284,7 @@ final class MachineEndpoints {
         DispenseService svc = ctx.svcOrNull();
         if (svc != null) {
             // BR-02: a controller reset seen at a connect; nothing moves until a home the operator confirmed
-            ControllerReset cr = svc.getControllerReset();
-            s.put("positionKnown", cr.isPositionKnown());
-            s.put("positionUnknownWhy", cr.unknownWhy());
-            s.put("powerCycle", Views.map("detected", cr.isDetected(), "atMs", cr.detectedAtMs(), "reported",
-                    cr.reported()));
+            s.putAll(svc.getControllerReset().view());
             Map<String, Object> home = Views.home(svc.homePlan());
             double[] n1 = svc.probeNozzleZ();
             home.put("n1Z", n1 == null ? null : n1[0]);

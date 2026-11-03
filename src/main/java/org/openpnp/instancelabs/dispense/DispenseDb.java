@@ -1333,6 +1333,17 @@ public class DispenseDb implements AutoCloseable {
 
     /** An event at a given time (epoch ms); a failure is logged, not thrown. */
     public synchronized void event(String runId, String level, String code, String message, long ts) {
+        try {
+            insertEvent(runId, level, code, message, ts);
+        }
+        catch (SQLException e) {
+            org.pmw.tinylog.Logger.warn(e, "dispense event not stored: {} {}", code, message);
+        }
+    }
+
+    /** An event at a given time (epoch ms), its failure thrown (a journal that must not be lost silently). */
+    public synchronized void insertEvent(String runId, String level, String code, String message, long ts)
+            throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO events(ts, run_uuid, level, code, message) VALUES (?,?,?,?,?)")) {
             ps.setLong(1, ts);
@@ -1341,9 +1352,6 @@ public class DispenseDb implements AutoCloseable {
             ps.setString(4, code);
             ps.setString(5, message);
             ps.executeUpdate();
-        }
-        catch (SQLException e) {
-            org.pmw.tinylog.Logger.warn(e, "dispense event not stored: {} {}", code, message);
         }
     }
 
