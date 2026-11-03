@@ -1,0 +1,116 @@
+name: SIM environment
+description: >
+  Everything the backend's SIM gates need on a GitHub runner: JDK 17, the tested OpenPnP build (artifact from the
+  build job) in target/, openpnp-uinav (private: read with a secret), Xvfb, Node 22 + Playwright with Chromium, and
+  the lab computer's file layout from infra/fixtures (infra/ci/lab_layout.py). Exports UINAV, UINAV_DIR,
+  PLAYWRIGHT_DIR and PLAYWRIGHT_BROWSERS_PATH.
+inputs:
+  uinav-token:
+    description: read access to theinstancelabs/openpnp-uinav (fine-grained token, contents read)
+    required: false
+    default: ''
+  uinav-ssh-key:
+    description: read-only deploy key of theinstancelabs/openpnp-uinav (private half)
+    required: false
+    default: ''
+  playwright:
+    description: install Node, Playwright and Chromium
+    required: false
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    - name: Set up JDK 17
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: 17
+
+    - name: The tested build (jar + lib)
+      uses: actions/download-artifact@v8
+      with:
+        name: openpnp-build
+        path: target
+
+    - name: Check access to openpnp-uinav
+      shell: bash
+      env:
+        HAS_TOKEN: ${{ inputs.uinav-token != '' }}
+        HAS_KEY: ${{ inputs.uinav-ssh-key != '' }}
+      run: |
+        if [ "$HAS_TOKEN" != true ] && [ "$HAS_KEY" != true ]; then
+          echo "::error::No access to the private repo theinstancelabs/openpnp-uinav: set the Actions secret UINAV_TOKEN (read-only fine-grained token) or UINAV_DEPLOY_KEY. The SIM gates cannot run without it."
+          exit 1
+        fi
+
+    - name: Check out openpnp-uinav (pinned)
+      uses: actions/checkout@v7
+      with:
+        repository: theinstancelabs/openpnp-uinav
+        ref: ${{ env.UINAV_REF }}
+        path: .ci/openpnp-uinav
+        token: ${{ inputs.uinav-token || github.token }}
+        ssh-key: ${{ inputs.uinav-ssh-key }}
+        persist-credentials: false
+
+    - name: Build openpnp-uinav
+      shell: bash
+      run: |
+        cd .ci/openpnp-uinav && ./build.sh
+        echo "UINAV=$GITHUB_WORKSPACE/.ci/openpnp-uinav/bin/uinav" >> "$GITHUB_ENV"
+        echo "UINAV_DIR=$GITHUB_WORKSPACE/.ci/openpnp-uinav" >> "$GITHUB_ENV"
+
+    - name: Xvfb
+      shell: bash
+      run: command -v Xvfb >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q xvfb; }
+
+    - name: Set up Node 22
+      if: inputs.playwright == 'true'
+      uses: actions/setup-node@v7
+      with:
+        node-version: 22
+
+    - name: Playwright browsers cache
+      if: inputs.playwright == 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/pw-browsers
+        key: playwright-${{ env.PLAYWRIGHT_VERSION }}-chromium-${{ runner.os }}
+
+    - name: Playwright ${{ env.PLAYWRIGHT_VERSION }} and Chromium
+      if: inputs.playwright == 'true'
+      shell: bash
+      run: |
+        PW="$RUNNER_TEMP/pw"
+        echo "PLAYWRIGHT_DIR=$PW" >> "$GITHUB_ENV"
+        echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/pw-browsers" >> "$GITHUB_ENV"
+        export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/pw-browsers"
+        npm install --prefix "$PW" --no-audit --no-fund "playwright@$PLAYWRIGHT_VERSION" >/dev/null
+        "$PW/node_modules/.bin/playwright" install --with-deps chromium
+
+    - name: Fonts like the lab computer (system-ui and sans-serif = Noto Sans)
+      # The UI's font stack starts with system-ui; on the lab computer fontconfig resolves it to Noto Sans. A wider
+      # runner default changes how much text fits (the run strip drops its step text at 1440 px, pad-profile (7)).
+      if: inputs.playwright == 'true'
+      shell: bash
+      run: |
+        sudo apt-get install -y -q fonts-noto-core fonts-dejavu-core >/dev/null
+        mkdir -p ~/.config/fontconfig
+        cat > ~/.config/fontconfig/fonts.conf <<'EOF'
+        <?xml version="1.0"?>
+        <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+        <fontconfig>
+          <alias binding="strong"><family>system-ui</family><prefer><family>Noto Sans</family></prefer></alias>
+          <alias binding="strong"><family>sans-serif</family><prefer><family>Noto Sans</family></prefer></alias>
+          <alias binding="strong"><family>monospace</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>
+        </fontconfig>
+        EOF
+        fc-cache -f >/dev/null
+        for f in system-ui sans-serif monospace; do echo "$f -> $(fc-match "$f")"; done
+        [ "$(fc-match -f '%{family}' system-ui)" = "Noto Sans" ] && [ "$(fc-match -f '%{family}' sans-serif)" = "Noto Sans" ]
+
+    - name: Lab layout from infra/fixtures
+      shell: bash
+      run: |
+        sudo install -d -o "$(id -u)" -g "$(id -g)" /home/lumen
+        python3 infra/ci/lab_layout.py

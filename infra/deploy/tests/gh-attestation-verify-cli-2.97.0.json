@@ -1,0 +1,91 @@
+[
+ {
+  "attestation": {
+   "bundle": "(omitted: the Sigstore bundle gh verified)"
+  },
+  "verificationResult": {
+   "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+   "signature": {
+    "certificate": {
+     "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev",
+     "subjectAlternativeName": "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk",
+     "issuer": "https://token.actions.githubusercontent.com",
+     "githubWorkflowTrigger": "workflow_dispatch",
+     "githubWorkflowSHA": "55dbb4dc6b7edb10b48e3d7fc5bccd32318d1b55",
+     "githubWorkflowName": "Deployment",
+     "githubWorkflowRepository": "cli/cli",
+     "githubWorkflowRef": "refs/heads/trunk",
+     "buildSignerURI": "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk",
+     "buildSignerDigest": "55dbb4dc6b7edb10b48e3d7fc5bccd32318d1b55",
+     "runnerEnvironment": "github-hosted",
+     "sourceRepositoryURI": "https://github.com/cli/cli",
+     "sourceRepositoryDigest": "55dbb4dc6b7edb10b48e3d7fc5bccd32318d1b55",
+     "sourceRepositoryRef": "refs/heads/trunk",
+     "sourceRepositoryIdentifier": "212613049",
+     "sourceRepositoryOwnerURI": "https://github.com/cli",
+     "sourceRepositoryOwnerIdentifier": "59704711",
+     "buildConfigURI": "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk",
+     "buildConfigDigest": "55dbb4dc6b7edb10b48e3d7fc5bccd32318d1b55",
+     "buildTrigger": "workflow_dispatch",
+     "runInvocationURI": "https://github.com/cli/cli/actions/runs/30597407850/attempts/1",
+     "sourceRepositoryVisibilityAtSigning": "public"
+    }
+   },
+   "verifiedTimestamps": [
+    {
+     "type": "Tlog",
+     "uri": "https://rekor.sigstore.dev",
+     "timestamp": "2026-07-30T19:02:13-07:00"
+    }
+   ],
+   "statement": {
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [
+     {
+      "name": "gh_2.97.0_linux_amd64.tar.gz",
+      "digest": {
+       "sha256": "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112"
+      }
+     }
+    ],
+    "predicateType": "https://slsa.dev/provenance/v1",
+    "predicate": {
+     "buildDefinition": {
+      "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+      "externalParameters": {
+       "workflow": {
+        "path": ".github/workflows/deployment.yml",
+        "ref": "refs/heads/trunk",
+        "repository": "https://github.com/cli/cli"
+       }
+      },
+      "internalParameters": {
+       "github": {
+        "event_name": "workflow_dispatch",
+        "repository_id": "212613049",
+        "repository_owner_id": "59704711",
+        "runner_environment": "github-hosted"
+       }
+      },
+      "resolvedDependencies": [
+       {
+        "digest": {
+         "gitCommit": "55dbb4dc6b7edb10b48e3d7fc5bccd32318d1b55"
+        },
+        "uri": "git+https://github.com/cli/cli@refs/heads/trunk"
+       }
+      ]
+     },
+     "runDetails": {
+      "builder": {
+       "id": "https://github.com/cli/cli/.github/workflows/deployment.yml@refs/heads/trunk"
+      },
+      "metadata": {
+       "invocationId": "https://github.com/cli/cli/actions/runs/30597407850/attempts/1"
+      }
+     }
+    }
+   }
+  }
+ }
+]
