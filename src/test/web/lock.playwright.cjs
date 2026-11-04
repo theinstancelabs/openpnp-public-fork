@@ -150,10 +150,10 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     const why = await page.evaluate(() => { const w = document.querySelector('#pv-machine-act .fix-why'); return w && !w.hidden ? w.textContent.trim() : null; });
     check('(2) the reason is shown under them, not only in a tooltip', /Process has the machine/.test(why || ''), why);
     // data-only work (BR-72: board import, pad types, the plan, tip definitions) stays the user's while an agent works
-    await page.evaluate(() => IL.go('#designs'));
-    await page.waitForSelector('#btn-design-upload', { timeout: 5000 }).catch(() => null);
-    const up = await page.evaluate(() => { const b = document.getElementById('btn-design-upload'); return b ? { disabled: b.disabled, title: b.title } : null; });
-    check('(2) data-only work stays free: Upload a design is not locked', up && !up.disabled && !/has the machine/.test(up.title), up);
+    await page.evaluate(() => IL.go('#run/board'));
+    await page.waitForSelector('#btn-board-upload', { state: 'attached', timeout: 5000 }).catch(() => null);
+    const up = await page.evaluate(() => { const b = document.getElementById('btn-board-upload'); return b ? { disabled: b.disabled, title: b.title } : null; });
+    check('(2) data-only work stays free: Upload KiCad board is not locked', up && !up.disabled && !/has the machine/.test(up.title), up);
     await page.evaluate(() => IL.go('#run'));
     // idle: no command for 5 minutes
     stub.holder = agent(12, 300);

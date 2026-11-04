@@ -75,5 +75,7 @@ node "$HERE/board-import.playwright.cjs"
 # missing paste profiles and the pad calibration (PROFILE_CALIBRATION_DESIGN.md §14.4): moves the SIM, ≈ 6 min
 SHOTS_DIR="${PP_SHOTS_DIR:-$OUT_DIR/pad-profile-shots}" node "$HERE/pad-profile.playwright.cjs"
 SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.playwright.cjs"
-# who has the machine and Take control (P0, BR-72): last, it presses STOP on the SIM
+# who has the machine and Take control (P0, BR-72): the screens on a stubbed lock (the states a simulator cannot reach;
+# it presses STOP on the SIM), then against the engine's own lock with an agent that really holds it
 node "$HERE/lock.playwright.cjs"
+node "$HERE/lock-real.playwright.cjs"
