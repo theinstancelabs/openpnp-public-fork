@@ -477,7 +477,7 @@
     const ns = needs();
     const clean = ref && /^I10/.test(String(ref.message || '')) ? IL.ready().items.find((x) => x.key === 'clean' && !x.ready) : null;
     if (clean && !ns.includes(clean)) ns.push(clean);
-    IL.keyed(n.cards, JSON.stringify([ref && [ref.runId, ref.message], ns.map((x) => [x.key, x.state, x.title, x.detail, (x.fixes || []).map((f) => f.fix)])]), () => [
+    IL.keyed(n.cards, JSON.stringify([ref && [ref.runId, ref.message], ns.map((x) => [x.key, x.state, x.title, x.detail, (x.fixes || []).map((f) => f.fix || f.href || f.view || f.label)])]), () => [
       ref ? el('div', { class: 'ri ri--block', 'data-key': 'refused' }, IL.glyph('block'), el('div', {}, el('div', { class: 'ri__t', text: 'The last run was refused' }),
         el('div', { class: 'ri__d', text: String(ref.message || 'Refused before anything moved.') }))) : null]
       .concat(ns.map((x, i) => R.flow.needCard(x, !ref && i === 0, s))));
