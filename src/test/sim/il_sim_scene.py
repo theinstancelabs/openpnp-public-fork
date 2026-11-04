@@ -406,16 +406,9 @@ def parse_paste_by_tip(text):
     entry = {}
     if len(named) > 1:
         raise ValueError("--paste-by-tip %r: one preset at most" % text)
-    if named:
-        with open(PASTE_TIPS) as f:
-            tips = json.load(f)["presets"]
-        if named[0] not in tips:
-            raise ValueError("--paste-by-tip %r: no preset %r in %s (%s)" % (text, named[0], PASTE_TIPS,
-                                                                            ", ".join(sorted(tips))))
-        entry = json.loads(json.dumps(tips[named[0]]))  # a copy: the keys below go over it
+    if named:  # the preset's keys first, through the same checks as typed ones; the typed keys go over them
+        items = preset_items(text, named[0]) + [i for i in items if i.partition("=")[0].strip() != "preset"]
     for item in items:
-        if item.partition("=")[0].strip() == "preset":
-            continue
         name, eq, value = item.partition("=")
         name, value = name.strip(), value.strip()
         if eq and name in PASTE_BY_TIP_FLAGS:
@@ -451,6 +444,32 @@ def parse_paste_by_tip(text):
         else:
             entry.setdefault("footprint", {})[name] = v
     return key, entry
+
+
+def preset_items(text, name):
+    """paste-tips.json's preset NAME as KEY=VALUE items (a mistyped key or a wrong value is refused, not dropped)."""
+    try:
+        with open(PASTE_TIPS) as f:
+            tips = dict(json.load(f)["presets"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise ValueError("--paste-by-tip %r: cannot read the presets in %s: %r" % (text, PASTE_TIPS, e)) from None
+    if not isinstance(tips.get(name), dict):
+        raise ValueError("--paste-by-tip %r: no preset %r in %s (%s)" % (text, name, PASTE_TIPS,
+                                                                        ", ".join(sorted(tips))))
+    items = []
+    for k, v in tips[name].items():
+        if k == "footprint" and isinstance(v, dict) and set(v) <= {"c", "e"}:
+            items += ["%s=%r" % kv for kv in v.items()]
+        elif k == "landingBiasMm" and isinstance(v, list) and len(v) == 2:
+            items.append("landing=%r:%r" % tuple(v))
+        elif isinstance(v, bool):
+            items.append("%s=%s" % (k, "true" if v else "false"))
+        elif isinstance(v, (int, float)):
+            items.append("%s=%r" % (k, v))
+        else:
+            raise ValueError("--paste-by-tip %r: preset %r's %s=%r is not a key of the paste block" % (
+                text, name, k, v))
+    return items
 
 
 def paste_by_tip(sc, key, entry):
@@ -562,7 +581,9 @@ def _add_padcal_args(p):
     p.add_argument("--bench-blank", action="store_true", help="the bench blank colour (DotInspector sees the paste)")
     p.add_argument("--variant", choices=sorted(VARIANTS), help="one negative control of §11.7")
     p.add_argument("--paste-by-tip", action="append", default=[], metavar="KEY:mRevMg=M,c=C,e=E,landing=DX:DY",
-                   help="a tip setup's own paste (§22.8; fields left out are the paste's)")
+                   help="a tip setup's own paste (§22.8; fields left out are the paste's): also preset=NAME of "
+                   "paste-tips.json and any key of the paste block, laid over it (cv=0.1). It replaces the tip's "
+                   "entry, in amend too: name the preset again to keep it")
     p.add_argument("--physical-tip", metavar="KEY", help="the tip on the head (default the mounted one; 'mounted' "
                    "removes it)")
 
@@ -627,6 +648,32 @@ def cmd_selftest(a):
             check("paste-by-tip refuses %r" % bad, False)
         except ValueError:
             check("paste-by-tip refuses %r" % bad, True)
+    with open(PASTE_TIPS) as f:
+        names = sorted(json.load(f)["presets"])
+    check("paste-by-tip: every preset of paste-tips.json passes the typed keys' checks (%s)" % ", ".join(names),
+          all(parse_paste_by_tip("k:preset=" + name)[1] for name in names))
+    with tempfile.TemporaryDirectory() as d:
+        bad_tips = {"typo": {"maxGapMM": 0.35}, "flag": {"wholeTurnsOnly": 1}, "nested": {"footprint": {"x": 1}},
+                    "inf": {"cv": float("inf")}, "list": [1]}
+        with open(os.path.join(d, "tips.json"), "w") as f:
+            json.dump({"presets": bad_tips}, f)
+        with open(os.path.join(d, "bare.json"), "w") as f:
+            json.dump({"typo": {}}, f)
+        real = PASTE_TIPS
+        for path, presets in ((os.path.join(d, "tips.json"), sorted(bad_tips)), (os.path.join(d, "none.json"),
+                                                                                   ["typo"]),
+                              (os.path.join(d, "bare.json"), ["typo"])):
+            globals()["PASTE_TIPS"] = path
+            for name in presets:
+                try:
+                    parse_paste_by_tip("k:preset=" + name)
+                    ok = False
+                except ValueError:
+                    ok = True
+                except Exception:  # an OSError or KeyError would end the CLI with a traceback
+                    ok = False
+                check("paste-by-tip refuses preset %r of %s" % (name, os.path.basename(path)), ok)
+        globals()["PASTE_TIPS"] = real
     sc = paste_by_tip(padcal({}), k, e)
     check("paste-by-tip: in paste.byTip, the paste untouched", sc["paste"]["byTip"][k] == e
           and sc["paste"]["mRevMg"] == 2.30 and "byTip" not in PASTE)
