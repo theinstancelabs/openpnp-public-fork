@@ -161,6 +161,16 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
     const lockMove = await parkLock((s) => { s.machine.enabled = true; s.machine.busy = true; });
     check('(3) Park for the swap waits while a task runs or OpenPnP moves, and says why', !!lockTask && lockTask.disabled && /^Locked while/.test(lockTask.title)
       && !!lockMove && lockMove.disabled && /OpenPnP is busy/.test(lockMove.title), { lockTask, lockMove });
+    // an agent holding the machine (BR-72) could move the head under the hands: Park waits for Take control; so it does
+    // while a take-over still stops the agent, and while OpenPnP homes even with the machine reading off (#16 review)
+    const agentLock = () => ({ holder: { kind: 'agent', who: 'process', label: 'Process', what: 'a 27G map', sinceMs: Date.now() - 60000, lastActiveMs: Date.now() - 2000, busy: false },
+      takenFrom: null, handover: false });
+    const lockAgent = await parkLock((s) => { s.lock = agentLock(); });
+    const lockHand = await parkLock((s) => { s.lock = { holder: null, takenFrom: { label: 'Process', who: 'process', atMs: Date.now() }, handover: true }; });
+    const lockHoming = await parkLock((s) => { s.machine.enabled = false; s.machine.homing = true; });
+    check('(3) Park waits while an agent holds the machine ("Take control first") or a take-over still stops it', !!lockAgent && lockAgent.disabled
+      && /^Process has the machine: Take control first/.test(lockAgent.title) && !!lockHand && lockHand.disabled && /still stopping Process.s work/.test(lockHand.title), { lockAgent, lockHand });
+    check('(3) and while OpenPnP homes, even with the machine reading off', !!lockHoming && lockHoming.disabled && /OpenPnP is busy/.test(lockHoming.title), lockHoming);
     // the pressure switching on is not "on": Park still asks for it off, and goes on only when OpenPnP answers off
     let stopAsks = 0;
     await fakeStatus(page, (s) => { s.pressure.state = 'starting'; s.pressure.on = false; });
@@ -177,10 +187,16 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
     await page.evaluate(() => { if (!location.hash.startsWith('#tip/which')) IL.go('#tip/which'); });   // the next steps start from Which tip
     await page.waitForSelector('#btn-tip-park:enabled', { timeout: 5000 }).catch(() => null);
     let stopPosts = 0;
-    await page.route('**/api/pressure/stop', (r) => { stopPosts++; return r.continue(); });
+    const order3 = [];
+    await page.route('**/api/lock/take', (r) => { order3.push('take'); return r.continue(); });
+    await page.route('**/api/pressure/stop', (r) => { stopPosts++; order3.push('stop'); return r.continue(); });
     await page.click('#btn-tip-park');
     await page.waitForFunction(() => location.hash.startsWith('#tip/swap'), null, { timeout: 10000 }).catch(() => null);
     await page.unroute('**/api/pressure/stop');
+    await page.unroute('**/api/lock/take');
+    const hasLock = await page.evaluate(() => !!IL.S.status.lock);
+    check('(3) Park takes the machine first (no agent can take it during the swap), then switches the air off',
+      !hasLock || (order3[0] === 'take' && order3.includes('stop') && (await status(page)).lock.holder.kind === 'user'), { order3, hasLock });
     const pr3 = (await status(page)).pressure || {};
     check('(3) Park for the swap: the pressure off, then Swap', (await page.evaluate(() => location.hash)).startsWith('#tip/swap') && (stopPosts > 0 || !pr3.on),
       { hash: await page.evaluate(() => location.hash), stopPosts, pressure: pr3.state || pr3.on });
@@ -200,6 +216,17 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
     const back4 = await page.evaluate(() => { const h = document.querySelector('#ws-tip [data-view="swap"] .howto'); return !!h && !h.hidden; });
     check('(4) while a task runs, It\'s on waits and the hands-on steps give way to why; they come back after', !!busy4.on && busy4.on.disabled && !busy4.steps
       && /Locked while/.test(busy4.wait || '') && back4, { busy4, back4 });
+    // an agent holding the machine meanwhile (BR-72): the same, the reason says Take control first
+    await fakeStatus(page, (s) => { s.lock = agentLock(); });
+    await page.waitForSelector('#tip-swap-wait:not([hidden])', { timeout: 5000 }).catch(() => null);
+    const agent4 = await page.evaluate(() => {
+      const b = document.getElementById('btn-tip-on'), h = document.querySelector('#ws-tip [data-view="swap"] .howto'), w = document.getElementById('tip-swap-wait');
+      return { on: b ? { disabled: b.disabled, title: b.title } : null, steps: !!h && !h.hidden, wait: w && !w.hidden ? w.textContent.trim() : null };
+    });
+    await page.unroute('**/api/status');
+    await page.waitForSelector('#btn-tip-on:enabled', { timeout: 5000 }).catch(() => null);
+    check('(4) while an agent holds the machine, It\'s on waits and the hands-on steps give way to "Take control first"', !!agent4.on && agent4.on.disabled && !agent4.steps
+      && /Process has the machine: Take control first/.test(agent4.wait || ''), agent4);
     let mountUrl = null;
     await page.route('**/api/tip-setups/*/mount', (r) => { mountUrl = r.request().url(); return r.continue(); });
     const mountResP = page.waitForResponse((r) => /\/api\/tip-setups\/[^/]+\/mount$/.test(r.url()), { timeout: 20000 }).catch(() => null);

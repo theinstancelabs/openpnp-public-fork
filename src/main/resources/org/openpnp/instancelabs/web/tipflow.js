@@ -30,9 +30,19 @@
   }
   function choose(key) { W.sel = key; IL.ssSet(SEL_KEY, key); IL.panel.reset(); IL.render(); }
   const sameKind = () => { const m = mounted(), s = selected(); return !!(m && s && m.key === s.key); };
-  /** Why hands stay off the tip now, or null: a task runs, OpenPnP moves the head, or (pressureOff) the air is not off. */
-  const handsLock = (s, pressureOff) => IL.lockReason(s, { pressureOff })
-    || (s && s.machine && s.machine.enabled && s.machine.busy ? 'OpenPnP is busy (homing or moving): wait for it to finish' : null);
+  /**
+   * Why hands stay off the tip now, or null: an agent holds the machine or a take-over still stops its work (BR-72: its
+   * next move could start under the hands), a task runs, OpenPnP homes or moves the head (homing counts even while the
+   * machine reads off), or (pressureOff) the air is not off.
+   */
+  const handsLock = (s, pressureOff) => {
+    const lk = (s && s.lock) || {};
+    if (lk.handover) return 'Take control is still stopping ' + ((lk.takenFrom && lk.takenFrom.label) || 'the agent') + '’s work: wait for it to finish';
+    const h = lk.holder;
+    if (h && h.kind !== 'user') return (IL.holderName ? IL.holderName(h) : h.label || 'An agent') + ' has the machine: Take control first. Its next move could start while your hands are on the tip.';
+    const m = (s && s.machine) || {};
+    return IL.lockReason(s, { pressureOff }) || (m.homing || (m.enabled && m.busy) ? 'OpenPnP is busy (homing or moving): wait for it to finish' : null);
+  };
 
   /** Every setting of the tip on now, with how and when it was measured and what makes it out of date. */
   function evidence(s) {
@@ -254,9 +264,16 @@
       try {
         const r = await IL.api('POST', '/api/pad-calibrations', body, { timeoutMs: 60000 });
         W.job = r;
-        for (let i = 0; i < 400; i++) {
+        // a read that fails on the way (no answer for a moment) is tried again; ten in a row end the tracking
+        for (let i = 0, misses = 0; i < 400; i++) {
           await new Promise((ok) => setTimeout(ok, 1500));
-          W.job = await IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(r.id));
+          try {
+            W.job = await IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(r.id));
+            misses = 0;
+          } catch (e) {
+            if (++misses >= 10) throw e;
+            continue;
+          }
           IL.render();
           if (W.job.state !== 'running') break;
         }
@@ -310,6 +327,9 @@
       p.body.append(V.pTo, V.pSteps, V.pNote);
       V.pPark = el('button', { type: 'button', class: 'btn btn--primary btn--lg btn--block', id: 'btn-tip-park' }, IL.icon('i-home'), 'Park for the swap');
       V.pPark.addEventListener('click', () => IL.act(V.pPark, async () => {
+        // the machine is the user's first (BR-72): no agent can take it while the hands are on the tip (Park waits while
+        // one holds it, so this never stops an agent's work)
+        if (S.status && S.status.lock) await IL.api('POST', '/api/lock/take', {});
         // asked in every state (switching on is not "on"); the swap waits for OpenPnP's answer "off"
         const r = await IL.api('POST', '/api/pressure/stop');
         if (!r || r.state !== 'off') {
@@ -319,7 +339,8 @@
         W.mountedTok = null;
         IL.go('#tip/swap');
       }, { ok: 'Pressure off. Swap the tip.' }));
-      p.foot.append(V.pPark, el('div', { class: 'cap', style: 'margin:0', text: 'Today it switches the pressure off. Move the needle over the waste in OpenPnP; the machine does it itself once it can (requested, BR-49).' }));
+      p.foot.setAttribute('data-refusals', '');
+      p.foot.append(V.pPark, el('div', { class: 'cap', style: 'margin:0', text: 'Today it takes the machine for you and switches the pressure off. Move the needle over the waste in OpenPnP; the machine does it itself once it can (requested, BR-49).' }));
     }
     const same = sameKind();
     IL.setText(V.pTo, sel ? 'To: ' + (same ? 'a fresh ' : 'the ') + sel.name + '.' : 'Pick a kind.');
@@ -356,7 +377,7 @@
         IL.go('#tip/checks');
       });
       V.pGaugeBox = el('div', { class: 'card', style: 'padding:14px' }, el('div', { class: 'gauge' }, V.pGaugeT = el('div', { class: 'gauge__t' }), V.pGauge), el('div', { class: 'btn-row', style: 'margin-top:10px' }, V.pGaugeBtn));
-      V.pSwapCard = el('div', { class: 'ri ri--need' });
+      V.pSwapCard = el('div', { class: 'ri ri--need', 'data-refusals': '' });
       p.body.append(V.pSwapCard, el('div', { class: 'section-k' }, 'Next · Regulator', el('span', { class: 'rule' })), V.pGaugeBox,
         el('div', { class: 'note-line muted', style: 'font-size:13px', text: 'At It’s on, where the needle lands and its height go out of date. No board runs until the new tip passes.' }));
     }
@@ -381,6 +402,7 @@
       p.body.append(V.pBarrel, V.pList);
       V.pStart = el('button', { type: 'button', class: 'btn btn--primary btn--lg btn--block', id: 'btn-tip-checks-start' }, IL.icon('i-play'), 'Start the checks');
       V.pStart.addEventListener('click', () => startChecks());
+      p.foot.setAttribute('data-refusals', '');
       p.foot.append(V.pStart, el('div', { class: 'cap', style: 'margin:0', text: 'It moves to the bottom camera, then lays dots on the test blank. STOP stops it at once (F9).' }));
     }
     const st = checkStates(s);
