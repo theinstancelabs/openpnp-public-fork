@@ -359,4 +359,23 @@ public class OutputZonesTest {
         assertTrue(z.refusal(100, 52).contains("feeder"), z.refusal(100, 52));
         assertNull(OutputZones.of(c, null).refusal(205, 32), "no bottom camera: the towel there is allowed");
     }
+
+    /**
+     * #12 re-review: the test dot's spot (the waste + its offset) takes paste, so a typo in the offset (20 meant as
+     * 2.0) must not make a sink 20 mm from the waste; and a null forbid list is refused, not a crash.
+     */
+    @Test
+    public void theTestDotOffsetIsBoundedAndTheForbidListMustBeAList() {
+        DispenseConfig c = config();
+        c.testDotOffsetXMm = 15;
+        c.testDotOffsetYMm = -15;
+        assertFalse(c.validate().stream().anyMatch(x -> x.contains("testDotOffset")), c.validate().toString());
+        c.testDotOffsetXMm = 20;
+        assertTrue(c.validate().stream().anyMatch(x -> x.contains("testDotOffset")), c.validate().toString());
+        c.testDotOffsetXMm = Double.NaN;
+        assertTrue(c.validate().stream().anyMatch(x -> x.contains("testDotOffset")), c.validate().toString());
+        c.testDotOffsetXMm = 2;
+        c.outputZones.forbid = null;
+        assertTrue(c.validate().stream().anyMatch(x -> x.contains("outputZones.forbid")), "no crash: refused");
+    }
 }

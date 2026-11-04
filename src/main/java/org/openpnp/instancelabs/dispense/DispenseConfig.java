@@ -946,11 +946,21 @@ public class DispenseConfig {
             if (!(outputZones.marginMm >= 0 && outputZones.marginMm <= 10)) {
                 p.add("outputZones.marginMm must be 0..10 mm");
             }
-            for (ForbidZone f : outputZones.forbid) {
-                if (f == null || !(f.radiusMm > 0 && f.radiusMm <= 100) || !Double.isFinite(f.x) || !Double.isFinite(f.y)) {
-                    p.add("outputZones.forbid: every circle needs a finite x, y and a radius of 0..100 mm");
+            if (outputZones.forbid == null) {
+                p.add("outputZones.forbid must be a list (empty for none)");
+            }
+            else {
+                for (ForbidZone f : outputZones.forbid) {
+                    if (f == null || !(f.radiusMm > 0 && f.radiusMm <= 100) || !Double.isFinite(f.x)
+                            || !Double.isFinite(f.y)) {
+                        p.add("outputZones.forbid: every circle needs a finite x, y and a radius of 0..100 mm");
+                    }
                 }
             }
+        }
+        // BR-03: the test dot's spot takes paste (a sink), so a typo in its offset must not make one far from the waste
+        if (!(Math.abs(testDotOffsetXMm) <= 15 && Math.abs(testDotOffsetYMm) <= 15)) {
+            p.add("testDotOffsetXMm and testDotOffsetYMm must be within 15 mm of the waste");
         }
     }
 
