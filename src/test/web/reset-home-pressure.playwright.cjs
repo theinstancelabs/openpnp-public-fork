@@ -4,8 +4,9 @@
  * route intercepts on the simulator, and the writes this page sends are caught and answered here (nothing moves):
  * (1) a reset left the position unknown: the Machine cell says so with the engine's why; Home asks first, in a dialog,
  * with §7's text (G28 drives X then Y at the tools' height, then Z; nothing under either tool or in the way; level a low
- * tool by hand), Cancel sends nothing, Home sends `clearBelowAttested: true`; no "Home raises N1 first" then; the
- * controls that need the position wait for that home; a MACHINE refusal's Home asks the same;
+ * tool by hand; the see-saw level, N1 and the needle both up), Cancel sends nothing, Home sends `clearBelowAttested:
+ * true`; no "Home raises N1 first" then; the controls that need the position wait for that home; a MACHINE refusal's
+ * Home asks the same;
  * (2) the start angle after a reset: only "measure it again" (a bare confirm is refused then), in the angle view,
  * Calibrate's card and the menu; after a reconnect without a reset the question keeps both answers; (2b) the screw motor
  * switched off after the angle was set (a STOP's M18 B, the idle timeout: an unpowered screw can turn): measure again,
@@ -136,7 +137,11 @@ const visibleFixes = (page, root) => page.evaluate((r) => Array.from(document.qu
     check('(1) the dialog gives the engine\'s why', dlg && dlg.includes(WHY), dlg);
     check('(1) and §7\'s text: X then Y at the tools\' height, then Z; nothing under or in the way; level a low tool by hand',
       dlg && /homing corner \(X, then Y\) at the height the tools are at now, then homes Z there/.test(dlg)
-      && /Nothing is under N1 or the needle or in their way to that corner/.test(dlg) && /levelled them by hand if one was low/.test(dlg), dlg);
+      && /nothing is under them or in their way to that corner/.test(dlg) && /levelled it by hand if one was low/.test(dlg), dlg);
+    // Process (11-04): the see-saw levelled, both tips up, before this home; the button says what the person attests
+    const goTxt = await page.evaluate(() => { const b = document.querySelector('#dlg-home-unknown [data-k="home"]'); return b ? b.textContent.trim() : null; });
+    check('(1) it asks for the see-saw level, N1 and the needle both up, and its Home button says so', dlg && /The see-saw is level: N1 and the needle are both up/.test(dlg)
+      && /^Level and clear: Home$/.test(goTxt || ''), { dlg, goTxt });
     check('(1) no "Home raises N1 first" while the position is unknown', dlg && !/raises N1|lifts it first/.test(dlg), dlg);
     await page.click('#dlg-home-unknown [data-k="cancel"]');
     await sleep(300);

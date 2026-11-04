@@ -3048,11 +3048,12 @@
     return new Promise((resolve) => {
       let answer = false;
       const cancel = el('button', { type: 'button', class: 'btn', 'data-k': 'cancel', text: 'Cancel' });
-      const go = el('button', { type: 'button', class: 'btn btn--primary', 'data-k': 'home', text: 'Nothing is in the way: Home' });
+      const go = el('button', { type: 'button', class: 'btn btn--primary', 'data-k': 'home', text: 'Level and clear: Home' });
       const h = IL.dialog.open({ id: 'dlg-home-unknown', size: 'sm', eyebrow: 'Home after a controller reset', title: 'Is the way to the homing corner clear?',
         body: [el('p', { class: 'notebox notebox--need', text: IL.positionUnknownWhy(S.status).replace(/[.:]\s*$/, '') + '.' }),
-          el('p', { text: 'The home first drives the head to its homing corner (X, then Y) at the height the tools are at now, then homes Z there.' }),
-          el('p', {}, el('b', { text: 'Nothing is under N1 or the needle or in their way to that corner (I levelled them by hand if one was low).' }))],
+          el('p', { text: 'The home first drives the head to its homing corner (X, then Y) at the height the tools are at now, then homes Z there: a low tip would drag across whatever is under it.' }),
+          // Process (11-04): the see-saw (N1 and the needle on one Z) level, both tips up, before this home
+          el('p', {}, el('b', { text: 'The see-saw is level: N1 and the needle are both up (I levelled it by hand if one was low), and nothing is under them or in their way to that corner.' }))],
         foot: [el('span', { class: 'spacer' }), cancel, go], initialFocus: null, onClose: () => resolve(answer) });
       cancel.addEventListener('click', () => h.close('cancel'));
       go.addEventListener('click', () => { answer = true; h.close('home'); });
