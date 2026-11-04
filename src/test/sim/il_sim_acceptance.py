@@ -360,11 +360,25 @@ class Session:
         subprocess.run([UINAV, "--session", self.name, "stop"], capture_output=True, timeout=60)
 
 
+def home(s, timeout=180):
+    """POST /api/machine/home. A controller fresh from power-on (lumen-sim's pty boots in Marlin's power-on state) reads
+    as a reset (BR-02): the home is refused until the operator's word, so home again saying so, as at the machine (the
+    see-saw levelled, both tips up, nothing under them). True when the home was attested."""
+    try:
+        s.api("POST", "/api/machine/home", {"wait": True}, timeout=timeout)
+        return False
+    except RuntimeError as e:
+        if "clearBelowAttested" not in str(e):
+            raise
+    s.api("POST", "/api/machine/home", {"wait": True, "clearBelowAttested": True}, timeout=timeout)
+    return True
+
+
 def setup_machine(s, characterize=True):
     """Enable, home (sim: no visual homing), the engine's board-run prerequisites through the web API."""
     s.api("POST", "/api/machine/enable")
     s.wait_status(lambda st: st["machine"]["enabled"], 30, "enabled")
-    s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
+    home(s)
     st = s.wait_status(lambda st: st["machine"]["homed"], 60, "homed")
     # tip setups (PROFILE_CALIBRATION_DESIGN.md §22.3): needle values name the needle change they were taken after,
     # pad-type writes the tip setup they were made for
@@ -446,7 +460,7 @@ def scenario_load(a):
         res["connect_gcode"] = s.sent_since(n0)
         n1 = s.mark()
         try:
-            s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
+            res["home_attested"] = home(s)
             res["home_result"] = "homed"
         except RuntimeError as e:
             res["home_result"] = str(e)  # the simulated camera sees no homing fiducial
