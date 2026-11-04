@@ -1942,7 +1942,9 @@ def padcal_main(a):
         ok["run"] = res["run"]["ok"]
 
         # §11.7 reconnect (BR-02): STOP and Start with the controller powered all along is not a reset: the position
-        # is known, I11 does not ask for the start angle again and the quarter-turn camera records stay fresh. The
+        # is known and the weighings stay fresh. But the STOP's DISABLE_COMMAND ends with M18 B: the screw motor was
+        # switched off and the screw may have turned, so I11 asks for the start angle to be measured again and the
+        # quarter-turn camera records are stale for that switch-off, never for a reset (the process engineer, 11-03). The
         # reset half (I11 refuses the 400 block, the quarter records stale, the weighings not) needs the simulator's
         # power-cycle fault (docs/infra-requests.md INF-08); PadCalibrationSimTest checks it on the backend's fake
         # controller meanwhile.
@@ -1961,9 +1963,10 @@ def padcal_main(a):
                             "violations": [v["code"] for v in after.get("violations") or []],
                             "power_cycle": "not run: needs the simulator's power-cycle fault (INF-08)"}
         ok["reconnect"] = (mach.get("positionKnown") is True and not (mach.get("powerCycle") or {}).get("detected")
-                           and bool(quarter) and all("reset" not in (r["whyStale"] or "") for r in quarter)
+                           and bool(quarter) and all("switched off" in (r["whyStale"] or "")
+                                                     and "reset" not in (r["whyStale"] or "") for r in quarter)
                            and res["reconnect"]["mass_fresh"] == [True, True]
-                           and "I11" not in res["reconnect"]["violations"])
+                           and "I11" in res["reconnect"]["violations"])
     except Exception:
         res["error"] = traceback.format_exc()
         log("padcal main:", res["error"])
