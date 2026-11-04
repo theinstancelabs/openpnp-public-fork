@@ -4,7 +4,7 @@
     "22g-bent": {
       "mRevMg": 2.11,
       "footprint": {
-        "c": 0.74,
+        "c": 0.911,
         "e": 0.77
       },
       "cv": 0.1,
@@ -36,7 +36,7 @@
   "sources": {
     "22g-bent": {
       "mRevMg": "§1: 169 mg / 160 half turns at ~19 psi (10-28, one weighing)",
-      "footprint": "fit: §2 half-turn mean area 0.747-0.788 mm2 (phase-averaged, Process 11-04 05:0x); e 0.77 is the SIM's law (unverified, §2)",
+      "footprint": "fit: §2 half-turn mean area on a flat blank, no pad, as the SIM blank: 0.94 mm2 (10-31; board 3's 0.788 and p29's 0.747 are pad-capped, Process 11-04), phase-averaged (Process 11-04 05:0x); c 0.911 lays 0.940; e 0.77 is the SIM's law (unverified, §2)",
       "cv": "fit: §2 area CV 7.5 % (board 3) at the balanced phase (7.6 % mean over 100 seeds)",
       "ripple": "fit: §3 A 0.56-0.60 as tools/lumen.py fits it: f(phi) = 1 + A cos(phi - peak) the flow per degree, dot area the dose proxy, consecutive half turns (the tip bead carries paste between them); 1.23 gives A 0.579. Above 1 the flow goes negative over part of a turn, so a sub-turn dot near the trough lays nothing: this preset is for half and whole turns, as the reference",
       "transferRatio": "fit: the swing A depends on it (each dot leaves 1 - 0.75 of its paste on the tip for the next): set here, not taken from the SIM's base paste",
@@ -49,7 +49,7 @@
     },
     "25g-plastic": {
       "mRevMg": "§1: +39 mg / 20 whole turns at 13.7 psi (11-04 02:37, one weighing; repeat pending)",
-      "footprint": "fit: §2 whole turn on bare Cu, both rows as the 22G's: 1.29 (S0a) and 1.58-1.71 (ladder) mm2, ±15 % = 1.40-1.48; c 0.862 lays 1.44 (which row is the reference: Process)",
+      "footprint": "fit: §2 whole turn on flat FR4, no pad, as the SIM blank: ~1.50 mm2 (the 20 weighed dots, 11-04 02:2x; the bare-Cu rows 1.29 and 1.58-1.71 are an edge-fit core and a dot with its tail, Process 11-04); c 0.862 lays 1.44 (-4 %)",
       "cv": "fit: §2 area CV 8.9 % (bare Cu, whole turn): 8.9 % mean over 100 seeds",
       "transferRatio": "fit: the CV depends on it (the tip bead averages successive dots): set here, not taken from the SIM's base paste",
       "landingSdMm": "§7: 0.04-0.06 on the board, 0.02-0.05 on the tile",

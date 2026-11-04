@@ -206,8 +206,8 @@ public class SimPasteReferenceTest {
                 + "landing SD %.4f mm (means over %d seeds)%n", 2 * mean(mg), mean(areas), a, 100 * c, noisy[1],
                 SEEDS);
         within(2 * mean(mg), 2.11, 0.10, "22G paste per whole turn, mg (§1: 169 mg / 160 half turns)");
-        within(mean(areas), 0.788, 0.15, "22G half-turn mean area vs board 3 (§2)");
-        within(mean(areas), 0.747, 0.15, "22G half-turn mean area vs p29 g0 (§2)");
+        // the SIM blank has no pad: §2's flat blank, not board 3's 0.788 or p29's 0.747 (pad-capped, Process 11-04)
+        within(mean(areas), 0.94, 0.15, "22G half-turn mean area on a flat blank, no pad (§2, 10-31)");
         assertTrue(a >= 0.56 && a <= 0.60, "22G area swing A of tools/lumen.py's f(phi) (§3: 0.56-0.60): " + a);
         assertTrue(c >= 0.5 * 0.075 && c <= 1.5 * 0.075, "22G CV at the balanced phase: " + c + " (§2: 7.5 %)");
         within(noisy[1], 0.035, 0.02 / 0.035, "22G landing SD (§7: 0.03-0.04)");
@@ -244,9 +244,8 @@ public class SimPasteReferenceTest {
                 + "landing SD %.4f mm (means over %d seeds)%n", mean(mg), byGap.get(0), byGap, 100 * c, noisy[1],
                 SEEDS);
         within(mean(mg), 1.95, 0.10, "25G paste per whole turn, mg (§1: +39 mg / 20 whole turns)");
-        // §2's two rows on bare Cu, as the 22G's two: 1.29 (S0a) and 1.58-1.71 (the ladder)
-        within(byGap.get(0), 1.29, 0.15, "25G whole-turn mean area vs S0a (§2)");
-        within(byGap.get(0), 1.645, 0.15, "25G whole-turn mean area vs the ladder (§2)");
+        // the SIM blank has no pad: §2's flat FR4, not the bare-Cu rows (an edge-fit core, a tail; Process 11-04)
+        within(byGap.get(0), 1.50, 0.15, "25G whole-turn mean area on flat FR4, no pad (§2, the 20 weighed dots)");
         assertTrue(Collections.max(byGap) / Collections.min(byGap) < 1.10,
                 "25G areas alike over gaps 0.10-0.30 (§6): " + byGap);
         assertTrue(c >= 0.5 * 0.089 && c <= 1.5 * 0.089, "25G CV: " + c + " (§2: 8.9 %)");

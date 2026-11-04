@@ -636,7 +636,7 @@ def cmd_selftest(a):
     check("paste-by-tip: e alone", parse_paste_by_tip("x:e=0.8")[1] == {"footprint": {"e": 0.8}})
     k22, e22 = parse_paste_by_tip("22g:preset=22g-bent,cv=0.2")
     check("paste-by-tip: a preset of paste-tips.json, a key over it (INF-06)", k22 == "22g"
-          and e22["primeTurns"] == 75 and e22["footprint"] == {"c": 0.74, "e": 0.77} and e22["cv"] == 0.2)
+          and e22["primeTurns"] == 75 and e22["footprint"] == {"c": 0.911, "e": 0.77} and e22["cv"] == 0.2)
     check("paste-by-tip: any key of the paste block (INF-06)", parse_paste_by_tip(
         "k:primeTurns=230,wholeTurnsOnly=true,newPhaseOnMotorOff=false,maxGapMm=0.35,emptyDotsAfterPowerCycle=12")[1]
         == {"primeTurns": 230.0, "wholeTurnsOnly": True, "newPhaseOnMotorOff": False, "maxGapMm": 0.35,
