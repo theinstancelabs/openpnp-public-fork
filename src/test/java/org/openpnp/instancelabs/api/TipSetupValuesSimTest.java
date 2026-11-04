@@ -19,6 +19,7 @@ import org.openpnp.instancelabs.dispense.PadTypeStatus;
 import org.openpnp.instancelabs.padprofile.Anchor;
 import org.openpnp.instancelabs.padprofile.Family;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
@@ -89,23 +90,44 @@ public class TipSetupValuesSimTest {
                 "{\"steps\":21}"), 400, "bad-request"), "reason"));
     }
 
-    /** The 25G mounted with a touch-off skip of 3; returns its recipe's PUT /api/config prefix for another skip. */
-    String skip3() throws Exception {
+    /** The 25G mounted with a touch-off skip of {@code skip}; returns its recipe's PUT /api/config prefix. */
+    String skipping(int skip) throws Exception {
         t.add25();
         t.mount(TipSim.K25);
         String recipe = "{\"forTip\":\"" + TipSim.K25 + "\",\"profile\":{\"touchOffSkipDots\":";
-        TipSim.ok(t.call("PUT", "/api/config", recipe + "3}}"));
+        TipSim.ok(t.call("PUT", "/api/config", recipe + skip + "}}"));
         return recipe;
     }
 
-    /** The commanded gaps of a touch-off laid on the SIM machine and waited for (its analysis). */
-    double[] laidGaps(String body) throws Exception {
-        JsonObject r = TipSim.ok(t.post("/api/calibrations/touch-off", body)).getAsJsonObject("result");
+    /** As {@link #skipping}, ready to lay a touch-off: the 25G's frame and landing, and a camera. */
+    String layingWith(int skip) throws Exception {
+        String recipe = skipping(skip);
+        t.frame();
+        // where it lands, kept for the 25G: a test without the landing check (its job is PadCalibrationSimTest's)
+        LandingResult l = new LandingResult();
+        l.setupKey = TipSim.K25;
+        l.needleSinceMs = t.token();
+        l.n = 8;
+        t.svc.setLanding(l, true, t.token());
+        // the SIM scene has no paste: every dot's spot is empty
+        t.svc.setDotImager(new ApiServerSimTest.FakeImager());
+        return recipe;
+    }
+
+    /** A touch-off laid on the SIM machine and waited for: the answer, its run OK. */
+    JsonObject laid(String body) throws Exception {
+        JsonObject res = TipSim.ok(t.post("/api/calibrations/touch-off", body));
+        JsonObject r = res.getAsJsonObject("result");
         assertEquals("OK", TipSim.str(r.getAsJsonObject("run"), "status"), r.toString());
-        JsonObject a = r.getAsJsonObject("analysis");
-        double[] g = new double[a.getAsJsonArray("gapsMm").size()];
+        return res;
+    }
+
+    /** The commanded gaps of a laid touch-off (its analysis). */
+    static double[] gaps(JsonObject laid) {
+        JsonArray a = laid.getAsJsonObject("result").getAsJsonObject("analysis").getAsJsonArray("gapsMm");
+        double[] g = new double[a.size()];
         for (int i = 0; i < g.length; i++) {
-            g[i] = a.getAsJsonArray("gapsMm").get(i).getAsDouble();
+            g[i] = a.get(i).getAsDouble();
         }
         return g;
     }
@@ -113,11 +135,12 @@ public class TipSetupValuesSimTest {
     /**
      * BR-85 follow-up: the skipped dots go above the reference gap. With a skip of 3 a ladder from 0.125 mm in steps of
      * 0.05 would lay its reference pair at -0.025 and -0.075 mm, possibly at contact (a wrong needle frame): refused
-     * before anything moves, with the start gap that keeps the reference where it sits without a skip.
+     * before anything moves, with the start gap that keeps the reference where it sits without a skip; 1 µm under it
+     * is refused too. A step so large that this start gap would pass 2 mm is refused with the largest step instead.
      */
     @Test
     public void aTouchOffWhoseReferenceSitsBelowTheReferenceGapIsRefused() throws Exception {
-        skip3();
+        String recipe = skipping(3);
         // ahead of the lowest gap's own refusal (-0.125 mm here)
         JsonObject low = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"startGapMm\":0.125,\"stepMm\":0.05,"
                 + "\"steps\":6}"), 400, "bad-request");
@@ -132,36 +155,65 @@ public class TipSetupValuesSimTest {
                 + "start gap of 0.125 mm its reference dots would sit at 0.050 mm and 0.025 mm, possibly at contact; "
                 + "start at 0.200 mm or more, so they sit at 0.125 mm and 0.100 mm as without a skip", TipSim.str(form,
                         "reason"));
+        TipSim.ok(t.call("PUT", "/api/config", recipe + "2}}"));
+        JsonObject under = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"startGapMm\":0.174,\"steps\":5}"),
+                400, "bad-request");
+        assertEquals("the 25G straight's recipe skips the first 2 dots after the prime (touchOffSkipDots): with a "
+                + "start gap of 0.174 mm its reference dots would sit at 0.124 mm and 0.099 mm, possibly at contact; "
+                + "start at 0.175 mm or more, so they sit at 0.125 mm and 0.100 mm as without a skip", TipSim.str(under,
+                        "reason"));
+        // (2 - 0.125) / 4 is 0.46875: 0.468 is the largest step to 1 µm
+        TipSim.ok(t.call("PUT", "/api/config", recipe + "4}}"));
+        JsonObject step = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"stepMm\":0.47}"), 400,
+                "bad-request");
+        assertEquals("the 25G straight's recipe skips the first 4 dots after the prime (touchOffSkipDots): in steps of "
+                + "0.470 mm the ladder would start at 2.005 mm to keep its reference pair at 0.125 mm, over the 2 mm a "
+                + "start gap may be; use steps of at most 0.468 mm", TipSim.str(step, "reason"));
     }
 
     /**
      * BR-85 follow-up: without a start gap a ladder with skipped dots starts that many steps above 0.125 mm, so its
-     * reference sits where it does without a skip; a start gap at that minimum runs, and with no skip nothing changes.
+     * reference sits where it does without a skip; a start gap at that minimum runs, and with no skip nothing changes
+     * (a start under 0.125 mm runs). The answer names the start gap the server chose, as the pitch.
      */
     @Test
     public void theTouchOffStartsAboveTheSkippedDots() throws Exception {
-        String recipe = skip3();
-        t.frame();
-        // where it lands, kept for the 25G: a test without the landing check (its job is PadCalibrationSimTest's)
-        LandingResult l = new LandingResult();
-        l.setupKey = TipSim.K25;
-        l.needleSinceMs = t.token();
-        l.n = 8;
-        t.svc.setLanding(l, true, t.token());
-        // the SIM scene has no paste: every dot's spot is empty
-        t.svc.setDotImager(new ApiServerSimTest.FakeImager());
+        String recipe = layingWith(3);
         double[] from = {0.275, 0.225, 0.175, 0.125, 0.075, 0.025};
-        assertArrayEquals(from, laidGaps("{\"startGapMm\":0.275,\"stepMm\":0.05,\"steps\":6,\"wait\":true}"), 1e-9,
-                "the first reference dot at 0.125 mm");
-        assertArrayEquals(from, laidGaps("{\"stepMm\":0.05,\"steps\":6,\"wait\":true}"), 1e-9,
-                "no start gap: 3 steps above 0.125 mm");
+        assertArrayEquals(from, gaps(laid("{\"startGapMm\":0.275,\"stepMm\":0.05,\"steps\":6,\"wait\":true}")),
+                1e-9, "the first reference dot at 0.125 mm");
+        JsonObject chosen = laid("{\"stepMm\":0.05,\"steps\":6,\"wait\":true}");
+        assertArrayEquals(from, gaps(chosen), 1e-9, "no start gap: 3 steps above 0.125 mm");
+        assertTrue(chosen.has("startGapMm"), chosen.toString());
+        assertEquals(0.275, chosen.get("startGapMm").getAsDouble(), 1e-12);
         // 0.175 - 2 x 0.025 is 0.12499999999999999 in doubles: the minimum itself is accepted
         TipSim.ok(t.call("PUT", "/api/config", recipe + "2}}"));
-        assertEquals(0.125, laidGaps("{\"startGapMm\":0.175,\"steps\":5,\"wait\":true}")[2], 1e-12);
+        assertEquals(0.125, gaps(laid("{\"startGapMm\":0.175,\"steps\":5,\"wait\":true}"))[2], 1e-12);
 
         // no skip: as before
         TipSim.ok(t.call("PUT", "/api/config", recipe + "0}}"));
-        assertEquals(0.125, laidGaps("{\"startGapMm\":0.125,\"stepMm\":0.05,\"steps\":5,\"wait\":true}")[0], 1e-12);
+        double[] none = gaps(laid("{\"startGapMm\":0.1,\"wait\":true}"));
+        assertEquals(0.1, none[0], 1e-12);
+        assertEquals(6, none.length);
+    }
+
+    /**
+     * BR-85 review (BR-89's item 1): without a number of steps a ladder that skips dots lays 8 after its reference
+     * pair, down to -0.1 mm in the default steps of 0.025 mm; with a skip of 5 it was refused for too few dots. The
+     * answer names the steps and the start gap the server chose.
+     */
+    @Test
+    public void aLadderThatSkipsDotsLaysEightAfterItsReferencePair() throws Exception {
+        layingWith(5);
+        JsonObject res = laid("{\"wait\":true}");
+        double[] g = gaps(res);
+        assertEquals(15, g.length, "5 skipped, the reference pair and 8 after it");
+        assertEquals(0.25, g[0], 1e-12);
+        assertEquals(0.125, g[5], 1e-12, "the first reference dot");
+        assertEquals(-0.1, g[14], 1e-9, "down to the lowest gap allowed");
+        assertTrue(res.has("steps") && res.has("startGapMm"), res.toString());
+        assertEquals(15, res.get("steps").getAsInt());
+        assertEquals(0.25, res.get("startGapMm").getAsDouble(), 1e-12);
     }
 
     @Test

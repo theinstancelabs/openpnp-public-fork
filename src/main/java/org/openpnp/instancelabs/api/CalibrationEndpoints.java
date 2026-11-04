@@ -209,8 +209,10 @@ final class CalibrationEndpoints {
         int skip = svc.getConfig().profile.touchOffSkipDots;
         req.stepMm = Json.num(b, "stepMm", req.stepMm);
         // BR-85: without a start gap the skipped dots go above the reference gap, the reference sits as without a skip
-        req.startGapMm = Json.num(b, "startGapMm", NeedleTouchOff.REFERENCE_GAP_MM + skip * req.stepMm);
-        req.steps = Json.integer(b, "steps", req.steps);
+        double minStart = NeedleTouchOff.REFERENCE_GAP_MM + skip * req.stepMm;
+        req.startGapMm = Json.num(b, "startGapMm", minStart);
+        // BR-89 (1): with a skip, 8 dots after the reference pair (down to -0.1 mm in the default steps of 0.025)
+        req.steps = Json.integer(b, "steps", skip > 0 ? skip + 10 : req.steps);
         req.rotationDeg = Json.num(b, "rotationDeg", req.rotationDeg);
         req.locationName = Json.str(b, "locationName", null);
         req.primeAtWaste = Json.bool(b, "primeAtWaste", req.primeAtWaste);
@@ -221,6 +223,13 @@ final class CalibrationEndpoints {
         }
         // without a pitch: 1.6 mm, or the smallest that leaves room between larger dots (F14)
         req.pitchMm = Json.num(b, "pitchMm", NeedleTouchOff.defaultPitchMm(req, svc.getConfig()));
+        if (skip > 0 && minStart > 2 + 1e-9) { // no start gap within the 2 mm below would do: name the step that does
+            throw ApiException.badRequest(String.format(java.util.Locale.ROOT, "the %s's recipe skips the first %d "
+                    + "dots after the prime (touchOffSkipDots): in steps of %.3f mm the ladder would start at %.3f mm "
+                    + "to keep its reference pair at %.3f mm, over the 2 mm a start gap may be; use steps of at most "
+                    + "%.3f mm", svc.getConfig().tip.name, skip, req.stepMm, minStart, NeedleTouchOff.REFERENCE_GAP_MM,
+                    Math.floor((2 - NeedleTouchOff.REFERENCE_GAP_MM) / skip * 1000 + 1e-9) / 1000));
+        }
         if (req.steps < 2 || req.steps > 20 || req.stepMm <= 0 || req.stepMm > 0.5 || req.startGapMm > 2
                 || req.pitchMm <= 0 || req.jumpRatio <= 0) {
             throw ApiException.badRequest("steps " + (skip + 3) + " to 20, step 0 to 0.5 mm, start gap at most 2 mm, "
@@ -236,15 +245,9 @@ final class CalibrationEndpoints {
         if (pitch != null) {
             throw ApiException.badRequest(pitch);
         }
-        double reference = req.startGapMm - skip * req.stepMm; // 0.175 - 2 x 0.025 is 0.12499999999999999 in doubles
-        if (skip > 0 && reference < NeedleTouchOff.REFERENCE_GAP_MM - 1e-9) {
-            double min = NeedleTouchOff.REFERENCE_GAP_MM + skip * req.stepMm;
-            throw ApiException.badRequest(String.format(java.util.Locale.ROOT, "the %s's recipe skips the first %d "
-                    + "dots after the prime (touchOffSkipDots): with a start gap of %.3f mm its reference dots would "
-                    + "sit at %.3f mm and %.3f mm, possibly at contact; start at %.3f mm or more, so they sit at "
-                    + "%.3f mm and %.3f mm as without a skip", svc.getConfig().tip.name, skip, req.startGapMm,
-                    reference, reference - req.stepMm, Math.ceil(min * 1000 - 1e-9) / 1000,
-                    NeedleTouchOff.REFERENCE_GAP_MM, NeedleTouchOff.REFERENCE_GAP_MM - req.stepMm));
+        String start = NeedleTouchOff.startGapProblem(req, skip, svc.getConfig().tip.name);
+        if (start != null) {
+            throw ApiException.badRequest(start);
         }
         double lowest = req.startGapMm - (req.steps - 1) * req.stepMm;
         if (lowest < -0.1 - 1e-9) { // F16: 0.30 - 8 x 0.05 is -0.10000000000000003 in doubles
@@ -261,6 +264,6 @@ final class CalibrationEndpoints {
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, res -> Views.map("analysis", res.analysis,
                 "previousOffsetMm", res.previousOffsetMm, "newOffsetMm", res.newOffsetMm, "applied", res.applied, "run",
                 Views.run(res.run, false)), Views.map("kind", "needle touch-off", "apply", apply, "pitchMm",
-                        req.pitchMm));
+                        req.pitchMm, "startGapMm", req.startGapMm, "steps", req.steps));
     }
 }

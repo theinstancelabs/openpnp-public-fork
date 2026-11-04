@@ -48,8 +48,9 @@ public final class NeedleTouchOff {
     /** {@link Analysis#referenceFrom} when the steady dot is the dose model's (the bench 22G's, §1.4). */
     public static final String MODEL_REFERENCE = "the 22G model";
     /**
-     * The default start gap (mm): with no dot skipped the reference pair sits here and one step lower. BR-85: dots a
-     * recipe skips go above it, so the reference sits there as without a skip.
+     * The default start gap (mm): with no dot skipped the reference pair sits here and one step lower. BR-85: with
+     * skipped dots the start gap must be that many steps higher, so the reference still sits here or higher; a ladder
+     * that starts lower is refused ({@link #startGapProblem}), not moved up (the API's default start is that minimum).
      */
     public static final double REFERENCE_GAP_MM = 0.125;
 
@@ -177,6 +178,23 @@ public final class NeedleTouchOff {
                 + "about %.2f mm across, so dots %.2f mm apart touch or string together and cannot be measured; use a "
                 + "pitch of at least %.2f mm (the dot + %.2f mm)", req.pitchMm, DoseModel.turnName(dotSteps(req, c)),
                 d, req.pitchMm, Math.ceil(min * 100 - 1e-9) / 100, PITCH_MARGIN_MM);
+    }
+
+    /**
+     * BR-85: null when the reference pair, the two dots after the {@code skip} left out, starts at
+     * {@link #REFERENCE_GAP_MM} or higher (or nothing is skipped), else the plain refusal: lower, it may be at contact.
+     */
+    public static String startGapProblem(Request req, int skip, String tipName) {
+        double reference = req.startGapMm - skip * req.stepMm; // 0.175 - 2 x 0.025 is 0.12499999999999999 in doubles
+        if (skip <= 0 || reference >= REFERENCE_GAP_MM - 1e-9) {
+            return null;
+        }
+        double min = REFERENCE_GAP_MM + skip * req.stepMm;
+        return String.format(Locale.ROOT, "the %s's recipe skips the first %d dots after the prime (touchOffSkipDots): "
+                + "with a start gap of %.3f mm its reference dots would sit at %.3f mm and %.3f mm, possibly at "
+                + "contact; start at %.3f mm or more, so they sit at %.3f mm and %.3f mm as without a skip", tipName,
+                skip, req.startGapMm, reference, reference - req.stepMm, Math.ceil(min * 1000 - 1e-9) / 1000,
+                REFERENCE_GAP_MM, REFERENCE_GAP_MM - req.stepMm);
     }
 
     /** The disc (mm across) that cuts the strings off dots of the expected diameter. */
