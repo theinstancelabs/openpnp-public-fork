@@ -194,7 +194,7 @@
           el('div', { class: 'fgrid fgrid--3' },
             pcr.field('to-start', 'Start gap', 'mm', pcr.numInput('to-start', '0.125', '0.005'), 'The first, largest gap.'),
             pcr.field('to-step', 'Step', 'mm', pcr.numInput('to-step', '0.025', '0.005', { min: '0' })),
-            pcr.field('to-steps', 'Steps', '2 to 20', pcr.numInput('to-steps', '6', '1', { min: '2', max: '20' }))),
+            pcr.field('to-steps', 'Steps', '3 to 20', pcr.numInput('to-steps', null, '1', { min: '3', max: '20' }))),
           el('div', { class: 'fgrid' },
             pcr.field('to-rot', 'Screw turn per dot', '°', pcr.numInput('to-rot', null, '0.01', { placeholder: 'one profile dot' }),
               'Empty: one profile dot (other partial turns vary with the screw angle and hide the squash).'),
@@ -490,10 +490,22 @@
   // ================================================================================== actions
   /** The dose and pitch a touch-off refusal of the pitch was for: it stands until one of them changes. */
   const pitchKey = (pitch, rot) => JSON.stringify([pitch, rot, ((S.status && S.status.dispense && S.status.dispense.profile) || {}).netStepsPerDot]);
+  /**
+   * BR-85: the dots the mounted tip's recipe does not count after the prime (profile.touchOffSkipDots, 0-5), then the
+   * reference pair, then one dot to show the contact: the engine refuses a shorter ladder (400), so the field says it first
+   * and opens at 6 steps or that minimum.
+   */
+  const skipDots = () => { const k = ((S.status && S.status.dispense && S.status.dispense.profile) || {}).touchOffSkipDots; return Number.isInteger(k) && k > 0 ? k : 0; };
+  function minStepsText(skip) {
+    return 'At least ' + (skip + 3) + (skip ? ': the tip’s recipe does not count the first ' + (skip === 1 ? 'dot' : skip + ' dots') + ' after the prime, the next two set the normal dot size, and one'
+      : ': the first two dots after the prime set the normal dot size, and one') + ' more shows the contact.';
+  }
   function touchOffPlan() {
     const a = pcr.check('to-start', { required: true, max: 2, unit: 'mm' });
     const b = pcr.check('to-step', { required: true, min: 0, minExcl: true, max: 0.5, unit: 'mm' });
-    const n = pcr.check('to-steps', { required: true, int: true, min: 2, max: 20 });
+    const skip = skipDots();
+    const n = pcr.check('to-steps', { required: true, int: true, max: 20 });
+    if (!n.err && n.v < skip + 3) n.err = minStepsText(skip);
     const rot = pcr.check('to-rot', { min: 0, minExcl: true, max: 720, unit: '°' });
     const pitch = pcr.check('to-pitch', { min: 0, minExcl: true, max: 10, unit: 'mm' });
     // the smallest pitch is the engine's (the dot of the dose + 0.4 mm): its refusal shows at the field (F14)
@@ -682,14 +694,19 @@
     if (!C.applyTouched) $('to-apply').checked = !n.touchedOff;
     setState('cal-touch-off', !n.anchored ? 'block' : n.touchedOff ? 'ok' : 'need',
       !n.anchored ? 'No needle frame' : n.touchedOff ? offsetWord(n) + ' ' + (n.setAtMs ? IL.fmtTime(n.setAtMs - S.skewMs) : '') : 'Not touched off');
+    const minSteps = skipDots() + 3;
+    prefill('to-steps', String(Math.max(6, minSteps)));
     const p = touchOffPlan();
     showErrs(p.errs);
+    IL.setText($('to-steps-wrap').querySelector('.unit'), minSteps + ' to 20');
+    IL.setAttr($('to-steps'), 'min', String(minSteps));
     IL.setText($('to-plan'), p.gaps ? IL.plural(p.gaps.length, 'dot') + (place ? ' on “' + place + '”' : '') + ' at gaps ' + p.gaps.map((g) => IL.fmt(g, 3)).join(', ') + ' mm'
       + ' · one profile dot each' + (IL.num('to-rot') ? ' (here ' + IL.fmt(IL.num('to-rot'), 2) + '°)' : '') + ' · ' + pitchLine(s, p.body.pitchMm) : 'Enter the gaps to see the dots.');
     const blockers = renderPrereqs($('to-pre'), prereqs(s, { machine: true, engine: true, frame: true, zmoved: true, place: true, surface: true, pressure: true }, place));
     const first = Object.values(p.errs).find(Boolean);
-    // the engine's long pitch refusal stands at its field: the line under the button points there
-    const own = (first && C.pitchErr && first === C.pitchErr.text ? 'The pitch is too small for these dots: see the Pitch field.' : first) || (!place ? 'Choose the place.' : null);
+    // the long refusals (the engine's pitch, too few steps) stand at their fields: the line under the button points there
+    const own = (first && C.pitchErr && first === C.pitchErr.text ? 'The pitch is too small for these dots: see the Pitch field.'
+      : first && first === minStepsText(skipDots()) ? 'Too few steps: see the Steps field.' : first) || (!place ? 'Choose the place.' : null);
     IL.gate($('btn-to-run'), runReason(s, blockers, own), $('to-reason'));
     renderLive($('to-live'), s, 'needle touch-off', (run) => {
       const g = C.toReq && C.toReq.gaps;
@@ -723,7 +740,8 @@
             el('div', { text: 'offset ' + IL.fmtSigned(v.row.previous_offset_mm, 3) + ' → ' + IL.fmtSigned(v.row.z_offset_mm, 3) + ' mm' + (isNum(v.delta) ? ', Δ ' + IL.fmtSigned(v.delta, 3) : '') }),
             a.reason ? el('div', { class: 'dim', text: a.reason }) : null,
             // what its dots were compared with (BR-85 adds where that number came from: the tip's own dots, or the 22G model)
-            isNum(a.referenceDiameterMm) ? el('div', { class: 'dim', id: 'to-ref', text: 'Normal dot ' + IL.fmt(a.referenceDiameterMm, 2) + ' mm' + (a.referenceFrom ? ', from ' + a.referenceFrom : '') + '.' }) : null,
+            isNum(a.referenceDiameterMm) ? el('div', { class: 'dim', id: 'to-ref', text: 'Normal dot ' + IL.fmt(a.referenceDiameterMm, 2) + ' mm' + (a.referenceFrom ? ', from ' + a.referenceFrom : '') + '.'
+              + (a.skippedDots > 0 ? ' The first ' + (a.skippedDots === 1 ? 'dot after the prime was' : a.skippedDots + ' dots after the prime were') + ' not counted.' : '') }) : null,
             era ? el('div', { class: 'cal-to__old', id: 'to-era' }, IL.glyph('need', 'xs'), ' ' + eraText(era))
               : inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
                 : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
