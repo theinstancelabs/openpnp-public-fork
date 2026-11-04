@@ -2236,13 +2236,19 @@
         }
       } else {
         const p = (s.dispense && s.dispense.profile) || {};
-        setCell(mc, 'ok', undefined, 'Connected' + (p.controllerConnectedAtMs ? ' ' + IL.fmtTime(p.controllerConnectedAtMs - S.skewMs) : '')
+        const zm = IL.zMoved(s);
+        const moved = !!zm && zm.step !== 'done';
+        setCell(mc, moved ? 'need' : 'ok', undefined, moved ? 'Homed, but the heights moved at this home (its Z check): measure them again. Press for the steps.'
+          : 'Connected' + (p.controllerConnectedAtMs ? ' ' + IL.fmtTime(p.controllerConnectedAtMs - S.skewMs) : '')
           + ' · homed' + (S.homedAt ? ' ' + IL.fmtTime(S.homedAt) : ''));
         IL.setText(conn, 'Connected');
-        IL.setText(homed, 'Homed');
+        IL.setText(homed, moved ? 'Heights moved' : 'Homed');
         homedVisible(true);
       }
     }
+    // the cell opens the steps while the heights are measured again after a home, else the machine view
+    const zOpen = s && !off && (s.machine || {}).homed ? IL.zMoved(s) : null;
+    mc.dataset.openView = zOpen && zOpen.step !== 'done' ? 'heights' : 'machine';
     const bs = $('btn-start'), bh = $('btn-home');
     // while an agent holds the machine its controls are not the user's: Take control stands there instead
     const agentHolds = !!s && !off && IL.lockOf(s).agent;
@@ -2916,7 +2922,9 @@
         if (k === 'zcheck') {
           if (/^(I4:\s*)?z moved\b/i.test(msg)) {
             const zm = IL.zMoved(s);
-            return zm && zm.fixes.length ? zm.fixes : [{ href: '#setup/needle', label: 'Open Needle Z frame' }];
+            // the guided sequence first (every step in order, one press each), then the step now's own fix-its
+            return [{ view: 'heights', label: 'Measure the heights again…', primary: true }]
+              .concat(zm && zm.fixes.length ? zm.fixes : [{ href: '#setup/needle', label: 'Open Needle Z frame' }]);
           }
           return /no point measured before/i.test(msg) ? [{ href: '#setup/needle', label: 'Open Needle Z frame' }] : [{ fix: 'check-z', label: 'Check Z' }];
         }

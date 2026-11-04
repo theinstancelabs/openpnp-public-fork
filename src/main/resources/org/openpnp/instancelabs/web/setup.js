@@ -1127,6 +1127,44 @@
     }
     return 'Not saved: ' + stripCode(run.message || run.status).replace(/([^.!?])$/, '$1.');
   }
+  // ================================================================================== heights moved after a home
+  /**
+   * After a home whose Z check failed (IL.zMoved): the heights measured again under the same home, in the remedy's order,
+   * one press per step (the step now's own fix-its). The strip's Machine cell and the Z check card open it. Doing the
+   * automatic steps by itself, in one press, is BR-87.
+   */
+  const HV = {};
+  const HV_STEPS = [
+    ['frame', 'The needle frame', 'both tips touch the same spot on the blank (by hand)'],
+    ['blank', 'Probe the blank', 'N1 touches the blank at a few spots'],
+    ['places', 'The places', 'N1 takes each place\u2019s Z again (by hand)'],
+    ['touch-off', 'Touch-off', 'the needle lays a few dots on the blank'],
+    ['register', 'Register the board', 'its marks and its height'],
+  ];
+  IL.view('heights', {
+    title: 'Heights moved after the home',
+    render(p, s, first) {
+      if (first) {
+        HV.lead = el('p', { class: 'panel__lead', id: 'hv-lead' });
+        HV.steps = el('ol', { class: 'phases', id: 'hv-steps' });
+        HV.acts = el('div', { class: 'btn-row', id: 'hv-actions', 'data-refusals': '' });
+        p.body.append(HV.lead, HV.steps, HV.acts, el('p', { class: 'muted', text: 'Nothing moves until you press a step\u2019s button. Doing them by itself, in one press, is not built yet (BR-87).' }));
+      }
+      const zm = IL.zMoved(s);
+      const zc = (s && s.machine && s.machine.zCheck) || {};
+      const last = zc.last || {};
+      const at = zm ? HV_STEPS.findIndex((x) => x[0] === zm.step) : HV_STEPS.length;   // 'done' (-1) and none: all done
+      const now = at < 0 ? HV_STEPS.length : at;
+      IL.setText(HV.lead, !zm || zm.step === 'done' ? 'The heights are measured again at this home: nothing left to do.'
+        : 'The home\u2019s Z check found the heights moved ' + IL.fmt(Math.abs(Number(last.deltaMm) || 0), 2) + ' mm'
+          + (zc.homeAtMs ? ' (the home of ' + IL.fmtTime(zc.homeAtMs - S.skewMs) + ')' : '') + '. Measure them again, in this order:');
+      const rows = HV_STEPS.map(([k, t, d], i) => [k, i < now ? 'done' : i === now ? 'now' : 'todo', t, d]);
+      IL.keyed(HV.steps, JSON.stringify(rows), () => rows.map(([k, st, t, d]) => el('li', { class: st === 'done' ? '' : st, 'data-k': k, 'data-state': st },
+        IL.glyph(st === 'done' ? 'ok' : st === 'now' ? 'need' : 'wait', 'xs'), el('div', {}, el('div', { class: 'ph__t', text: t }), el('div', { class: 'ph__d', text: d })))));
+      const fixes = zm && zm.step !== 'done' ? zm.fixes : [];
+      IL.keyed(HV.acts, JSON.stringify(fixes), () => fixes.map((f, i) => IL.fixButton(Object.assign({}, f, { primary: i === 0 }))));
+    },
+  });
   IL.view('probe-blank', {
     title: (s) => 'Probe the ' + ((disp(s).purgeRow || {}).surfaceName || 'blank'),
     render(p, s, first) {
