@@ -43,6 +43,7 @@ const fs = require('fs');
 const zlib = require('zlib');
 const { execFileSync } = require('child_process');
 const { chromium } = require(path.join(process.env.PLAYWRIGHT_DIR, 'node_modules', 'playwright'));
+const { setStartAngle } = require(path.join(__dirname, 'start-angle.cjs'));
 
 const BASE = String(process.env.IL_BASE || process.env.IL_API_URL || '').replace(/\/?$/, '/');
 const OUT = process.env.OUT_DIR || '/tmp/il-pad-profile-test-out';
@@ -261,7 +262,8 @@ async function weighCoupon(page, place) {
       await api(page, 'POST', '/api/needle/anchor', { surfaceZ: bzMid, needleContactZ: Number((bzMid - 2.59).toFixed(3)), note: 'pad-profile test (SIM)', needleChangedAtMs: token });
       await api(page, 'POST', '/api/needle/offset', { offsetMm: -2.59, note: 'pad-profile test (SIM)', needleChangedAtMs: token });
     }
-    await api(page, 'POST', '/api/screw/start-angle', { note: 'pad-profile test (SIM)' });
+    // BR-02: after webui-sim's STOPs (M18 B) the angle is measured again, not confirmed: setStartAngle turns the screw first
+    await setStartAngle(page, BASE, 'pad-profile test (SIM)');
     const chip = await api(page, 'GET', '/api/pad-types/chip-0603');
     if (!['characterized', 'validated'].includes(chip.current.status)) await api(page, 'PUT', '/api/pad-types/chip-0603', { status: 'characterized', forSetup: s.dispense.tip.key });
     await page.evaluate(() => { IL.attest.set('regulator', IL.S.status.dispense.profile.pressurePsi); IL.attest.set('paste-life', true); });

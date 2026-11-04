@@ -233,6 +233,7 @@ public class TipSetupEdgeSimTest {
 
     @Test
     public void aNeedleChangeUnderThePressureHoldIsRecordedAndTheSwitchWaits() throws Exception {
+        t.sim.towelUnderNeedle(t.svc); // BR-03: the hold opens the valve only over a place
         t.add25();
         assertEquals("on", TipSim.str(TipSim.ok(t.post("/api/pressure/start", null)), "state"));
         Long before = t.token();

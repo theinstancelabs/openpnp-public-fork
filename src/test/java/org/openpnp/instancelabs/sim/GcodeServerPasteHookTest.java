@@ -29,7 +29,7 @@ import org.openpnp.util.GcodeServer;
  * The paste hook in OpenPnP's simulated controller and in the test RecordingGcodeServer: without a
  * paste block every reply is as before (M114 byte for byte); with one, a dot of the needle (N2: raw
  * head + its offset, the see-saw's Z) lands on the blank and M114 carries Marlin's Count line, which
- * a reconnect restarts.
+ * a power cycle restarts (a reconnect keeps it: BR-02).
  */
 public class GcodeServerPasteHookTest {
     /**
@@ -140,7 +140,7 @@ public class GcodeServerPasteHookTest {
     }
 
     @Test
-    public void recordingServerUsesThePasteCountAndPowerCyclesOnReconnect() throws Exception {
+    public void recordingServerUsesThePasteCountAndOnlyAPowerCycleRestartsIt() throws Exception {
         SimScene s = SimPasteTest.exact();
         s.paste.ripple = 0;
         s.paste.needleZOffsetMm = 0.0;
@@ -157,7 +157,13 @@ public class GcodeServerPasteHookTest {
             rec.setBStepCount(4321);
             assertEquals(4321, p.count(), "the server's power-up history is the paste model's");
             r = talk(rec.getPort(), "M114");
-            assertTrue(r.get(0).get(0).endsWith("B:0"), "a reconnect is a power-up: " + r.get(0));
+            assertTrue(r.get(0).get(0).endsWith("B:4321"), "a reconnect keeps the count: " + r.get(0));
+            assertEquals(c, p.connectionNumber());
+            rec.powerCycle();
+            r = talk(rec.getPort(), "M114");
+            assertTrue(r.get(0).get(0).startsWith("X:0.0000 Y:0.0000 Z:0.0000 A:720.0000 B:720.0000 Count"),
+                    "the boot position: " + r.get(0));
+            assertTrue(r.get(0).get(0).endsWith("B:0"), "a power cycle restarts the count: " + r.get(0));
             assertEquals(c + 1, p.connectionNumber());
             s.paste.reportCount = false;
             r = talk(rec.getPort(), "M114");

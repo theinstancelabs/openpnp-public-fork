@@ -63,6 +63,8 @@ public class DispenseConfig {
     public PurgeRow purgeRow = new PurgeRow();
     /** Clean-pad guard (I10): refuse to dispense on pads that still carry paste. */
     public CleanPadCheck cleanPadCheck = new CleanPadCheck();
+    /** BR-03: where the valve and the screw may switch on ({@link OutputZones}). */
+    public OutputZoneSettings outputZones = new OutputZoneSettings();
 
     // --- named locations (x, y: N2 nozzle coordinates; z: surface Z in OpenPnP's frame, i.e. the
     // N1 nozzle Z touching that surface, the frame of OpenPnP's board Z) -------------------------
@@ -88,6 +90,12 @@ public class DispenseConfig {
     public Long needleZOffsetHomeAtMs = null;
     /** Epoch ms of the last needle change; I4 requires a touch-off after it. */
     public Long needleChangedAtMs = null;
+    /**
+     * BR-02, engine-stamped: the home after a detected controller reset moved the Z frame (K by twice the shift, the
+     * process engineer 11-04): a needle frame and a touch-off from before it are not current (I4) until recorded again
+     * after it. Null: none. Ordinary homes leave it.
+     */
+    public Long zFrameMovedAtMs = null;
     /**
      * Needle XY correction (calibration): the needle lands at camera + N2 head offset + this. The
      * head offset (machine.xml) is the bench's (25.291, -75.926); refinements from landing data go
@@ -151,6 +159,12 @@ public class DispenseConfig {
     public boolean honorBacklash = true;
     /** Timeout for one streamed command acknowledgement. */
     public long commandTimeoutMs = 10000;
+    /**
+     * BR-02: the controller switches the screw's motor off after this long without a move (Marlin's
+     * DEFAULT_STEPPER_DEACTIVE_TIME, 3600 s on the LumenPnP's board), s, at most 3600. Unpowered, the screw may turn, so
+     * a start angle set before then is measured again (I11); the engine counts from the last move it knows of.
+     */
+    public double screwIdleOffS = 3600;
 
     // --- manual prime / test dot at the waste place, calibration prime ---------------------------
     // Board runs purge on the purge row instead (I9), in the same pressure session as the work.
@@ -216,6 +230,12 @@ public class DispenseConfig {
      * when it is added; a mount parks the outgoing setup here and brings the incoming one in.
      */
     public Map<String, ParkedTip> parkedTips = new LinkedHashMap<>();
+    /**
+     * BR-85: the mounted tip's own dose anchor, the paste per pad Calibrate aims for on its pad type only; null (and
+     * every other type) = the shared ones ({@code padprofile.Anchor}: the bench 0603 half turn, or a validated pad
+     * type). Set only by PUT /api/tip-setups/{key}/dose-anchor; parked and brought back with the tip.
+     */
+    public DoseAnchor doseAnchor = null;
     /** The paste in the syringe; "New paste loaded" stamps it. */
     public PasteSpec paste = new PasteSpec();
     /** Where on the blank the pad calibration lays its test dots (default: 40 x 20 mm at the blank place). */
@@ -253,6 +273,31 @@ public class DispenseConfig {
     }
 
     /**
+     * A tip's own dose anchor (BR-85): the weighed paste per pad of a pad type's opening, so Calibrate's amount window
+     * for that pad type follows this tip, not the 22G's half turn.
+     */
+    public static class DoseAnchor {
+        /** The largest paste per pad an anchor may say (mg). */
+        public static final double MAX_MG = 20;
+        public double massPerPadMg;
+        /** The pad type's opening (mm²) and mass / opening (mg per mm²). */
+        public double areaMm2;
+        public double mgPerMm2;
+        /** The pad type's key ({@code /api/pad-types/{key}}) and its family when the anchor was set. */
+        public String padType;
+        public String family;
+        /** Where the number comes from ("weighed by Process"), or null. */
+        public String source;
+        public Long setAtMs;
+
+        /** Whether a stored anchor holds: a mass above 0 and at most {@link #MAX_MG} on a pad type's opening. */
+        boolean holds() {
+            return massPerPadMg > 0 && massPerPadMg <= MAX_MG && areaMm2 > 0 && mgPerMm2 > 0 && padType != null
+                    && family != null;
+        }
+    }
+
+    /**
      * What a tip setup that is not mounted keeps (tip setups design §22.1): its profile, needle frame,
      * offset with its two times, trim and landing. A new setup's entry has no frame, the mounted offset
      * as a placeholder (both times null), a zero trim noted "new tip" and no landing.
@@ -265,6 +310,8 @@ public class DispenseConfig {
         public Long needleZOffsetHomeAtMs;
         public NeedleXyTrim needleXyTrim;
         public NeedleLanding needleLanding;
+        /** BR-85: its own dose anchor, or null. */
+        public DoseAnchor doseAnchor;
         /** When it was parked (null for a setup never mounted). */
         public Long parkedAtMs;
         /** The setup key its profile was first copied from, or "default". */
@@ -311,6 +358,32 @@ public class DispenseConfig {
         public double minBrightFraction = 0.8;
         public double boxWMm = 0.806;
         public double boxHMm = 0.807;
+    }
+
+    /**
+     * BR-03 output zones ({@link OutputZones}): the valve and the screw switch on only with the needle over an allowed
+     * zone (the waste, the towel, a cup, the purge row, the calibration area, a coupon, the probed board or blank
+     * surface) and outside every forbidden one (the bottom camera, the configured circles); with the valve on, the
+     * needle never crosses a forbidden zone.
+     */
+    public static class OutputZoneSettings {
+        /** Radius of the forbidden circle around the bottom camera (mm). */
+        public double forbidRadiusMm = 15;
+        /** Radius of the allowed circle around each sink place: the waste, the towel, a cup (mm). */
+        public double placeRadiusMm = 6;
+        /**
+         * Margin around the purge row, the calibration area and each coupon (mm). A probed surface follows I4's
+         * {@link DispenseConfig#surfaceMarginMm} instead, so I4 and I12 never disagree about a dot.
+         */
+        public double marginMm = 2;
+        /** More forbidden circles (e.g. a feeder, a nozzle tip holder). */
+        public java.util.List<ForbidZone> forbid = new java.util.ArrayList<>();
+    }
+
+    /** A forbidden circle of {@link OutputZoneSettings#forbid}. */
+    public static class ForbidZone {
+        public String name;
+        public double x, y, radiusMm;
     }
 
     /**
@@ -505,17 +578,33 @@ public class DispenseConfig {
         return surfaces == null || name == null ? null : surfaces.get(name);
     }
 
-    /** Needle frame anchored since the last needle change (I4). */
-    public boolean isNeedleAnchored() {
-        return needleAnchor != null && (needleChangedAtMs == null || needleAnchor.setAtMs >= needleChangedAtMs);
+    /**
+     * BR-02: the needle frame is not current because a reset's home moved the Z frame after it was recorded (and no
+     * needle change came after that home: then the change is the reason).
+     */
+    public boolean isZFrameMovedSinceAnchor() {
+        return needleAnchor != null && zFrameMovedAtMs != null && needleAnchor.setAtMs <= zFrameMovedAtMs
+                && (needleChangedAtMs == null || zFrameMovedAtMs >= needleChangedAtMs);
     }
 
-    /** Offset touched off (or entered) since the last needle change and since the last anchor (I4). */
+    /** Needle frame anchored since the last needle change and since a reset's home moved the Z frame (I4). */
+    public boolean isNeedleAnchored() {
+        return needleAnchor != null && (needleChangedAtMs == null || needleAnchor.setAtMs >= needleChangedAtMs)
+                && (zFrameMovedAtMs == null || needleAnchor.setAtMs > zFrameMovedAtMs);
+    }
+
+    /**
+     * Offset touched off (or entered) since the last needle change, since the last anchor and since a reset's home moved
+     * the Z frame (I4).
+     */
     public boolean isNeedleTouchedOff() {
         if (needleZOffsetSetAtMs == null) {
             return false;
         }
         if (needleAnchor != null && needleZOffsetSetAtMs < needleAnchor.setAtMs) {
+            return false;
+        }
+        if (zFrameMovedAtMs != null && needleZOffsetSetAtMs <= zFrameMovedAtMs) {
             return false;
         }
         return needleChangedAtMs == null || needleZOffsetSetAtMs >= needleChangedAtMs;
@@ -659,6 +748,13 @@ public class DispenseConfig {
         if (c.calibrationArea == null) {
             c.calibrationArea = new CalibrationArea();
         }
+        if (c.outputZones == null) {
+            c.outputZones = new OutputZoneSettings();
+        }
+        if (c.outputZones.forbid == null) {
+            c.outputZones.forbid = new java.util.ArrayList<>();
+        }
+        c.outputZones.forbid.removeIf(java.util.Objects::isNull);
         if (c.padCalibration == null) {
             c.padCalibration = new PadCalibrationSettings();
         }
@@ -807,6 +903,10 @@ public class DispenseConfig {
         if (bExtrudeSign != 1 && bExtrudeSign != -1) {
             p.add("bExtrudeSign must be +1 or -1");
         }
+        if (!(screwIdleOffS > 0 && screwIdleOffS <= 3600)) {
+            p.add("screwIdleOffS must be > 0 and <= 3600 s: the controller's idle timeout of the screw's motor (Marlin's "
+                    + "DEFAULT_STEPPER_DEACTIVE_TIME, 3600 s on the LumenPnP; a longer one would miss its switch-off)");
+        }
         if (!(zLiftAccelMmS2 > 0 && zLiftAccelMmS2 <= 5000 && travelAccelMmS2 > 0 && travelAccelMmS2 <= 5000)) {
             p.add("travelAccelMmS2 and zLiftAccelMmS2 must be > 0 and <= 5000 (the screw's acceleration is the "
                     + "profile's)");
@@ -847,6 +947,14 @@ public class DispenseConfig {
                 p.add("parkedTips['" + e.getKey() + "']: its trim must be within +-1 mm and its landing within +-"
                         + (int) MAX_LANDING_MM + " mm");
             }
+            else if (t.doseAnchor != null && !t.doseAnchor.holds()) {
+                p.add("parkedTips['" + e.getKey() + "'].doseAnchor needs a mass per pad above 0 and at most "
+                        + (int) DoseAnchor.MAX_MG + " mg on a pad type's opening");
+            }
+        }
+        if (doseAnchor != null && !doseAnchor.holds()) {
+            p.add("doseAnchor needs a mass per pad above 0 and at most " + (int) DoseAnchor.MAX_MG + " mg on a pad "
+                    + "type's opening");
         }
         if (keepaliveIntervalMs < 100) {
             p.add("keepaliveIntervalMs must be >= 100");
@@ -873,6 +981,33 @@ public class DispenseConfig {
         paste.validate(p);
         padCalibration.validate(p);
         calibrationArea.validate(this, p);
+        if (outputZones != null) {
+            // BR-03: bounded, so a typo can neither forbid nothing around the camera nor allow the whole bed
+            if (!(outputZones.forbidRadiusMm >= 10 && outputZones.forbidRadiusMm <= 60)) {
+                p.add("outputZones.forbidRadiusMm must be 10..60 mm (the bottom camera's forbidden circle)");
+            }
+            if (!(outputZones.placeRadiusMm >= 1 && outputZones.placeRadiusMm <= 15)) {
+                p.add("outputZones.placeRadiusMm must be 1..15 mm");
+            }
+            if (!(outputZones.marginMm >= 0 && outputZones.marginMm <= 10)) {
+                p.add("outputZones.marginMm must be 0..10 mm");
+            }
+            if (outputZones.forbid == null) {
+                p.add("outputZones.forbid must be a list (empty for none)");
+            }
+            else {
+                for (ForbidZone f : outputZones.forbid) {
+                    if (f == null || !(f.radiusMm > 0 && f.radiusMm <= 100) || !Double.isFinite(f.x)
+                            || !Double.isFinite(f.y)) {
+                        p.add("outputZones.forbid: every circle needs a finite x, y and a radius of 0..100 mm");
+                    }
+                }
+            }
+        }
+        // BR-03: the test dot's spot takes paste (a sink), so a typo in its offset must not make one far from the waste
+        if (!(Math.abs(testDotOffsetXMm) <= 15 && Math.abs(testDotOffsetYMm) <= 15)) {
+            p.add("testDotOffsetXMm and testDotOffsetYMm must be within 15 mm of the waste");
+        }
     }
 
     /** Ranges of the registration, probe and homing settings. */

@@ -80,8 +80,9 @@ public class InterlocksBlocksTest {
         assertFalse(Interlocks.check(cal).has("I11"));
         cal.partialTurn = true;
         assertTrue(Interlocks.check(cal).has("I11"));
-        cal.cfg.profile.startAngleSetAtMs = 1000L; // set before the controller connected at 2500
-        assertTrue(Interlocks.check(cal).toString().contains("(re)connected after the screw start angle was set"));
+        cal.cfg.profile.startAngleSetAtMs = 1000L; // set before the controller reset at 2500 (BR-02)
+        assertTrue(Interlocks.check(cal).toString().contains("the controller was reset (or its position could not be "
+                + "read at a connect) after the screw start angle was set"));
     }
 
     /** One-turn dots on a 2 mm grid. */

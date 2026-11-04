@@ -63,6 +63,16 @@ public final class HomeTracker extends MachineListener.Adapter {
         connectedAtMs = clock.getAsLong();
     }
 
+    /**
+     * BR-02: OpenPnP connected before this tracker listened (the engine started on a started machine): that connect is
+     * dated at the start, unless one was seen since.
+     */
+    public void connectedBeforeStart() {
+        if (connectedAtMs == null) {
+            connectedAtMs = serviceStartMs;
+        }
+    }
+
     @Override
     public void machineDisabled(Machine machine, String reason) {
         disabledAtMs = clock.getAsLong();

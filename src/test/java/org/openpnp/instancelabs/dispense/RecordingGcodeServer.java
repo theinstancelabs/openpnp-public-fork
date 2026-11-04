@@ -31,8 +31,10 @@ import org.openpnp.instancelabs.sim.SimVacuum;
  * {@link #setBStepCount}) resets it. M114 reports {@code Count ... B:<round(machine x 4.44)>}.</p>
  *
  * <p>With a {@link #paste} model (whose scene has a paste block) the screw is the model's: the count
- * is its count, reported only when the scene's {@code reportCount} says so, and every new
- * connection is a controller power-up ({@link SimPaste#powerCycle}).</p>
+ * is its count, reported only when the scene's {@code reportCount} says so.</p>
+ *
+ * <p>A reconnect keeps every position and count, as a powered controller does; {@link #powerCycle} is
+ * the controller losing power (BR-02): it boots believing X 0, Y 0, Z 0 and A/B 720.</p>
  */
 public class RecordingGcodeServer implements AutoCloseable {
     private final ServerSocket server;
@@ -71,9 +73,19 @@ public class RecordingGcodeServer implements AutoCloseable {
     private static final Pattern WORD = Pattern.compile("([XYZAB])(-?\\d+(?:\\.\\d+)?)");
     /** Marlin M92 B (steps per degree), for the reported step count. */
     public static final double B_STEPS_PER_DEG = 4.44;
+    /** Where stock Marlin believes A and B are at power-up (J_MAX_POS, no G92 yet). */
+    public static final double BOOT_AB_DEG = 720;
 
     /** The connection being served, or null (dropLink closes it). */
     private volatile Socket client;
+    /** Its output, and the lock of every write to it (a reply and {@link #say} never interleave). */
+    private volatile OutputStream clientOut;
+    private final Object writeLock = new Object();
+    /**
+     * The answer to a bare M990 before its "ok", as the il/safety firmware reports its host watchdog ("echo:Host
+     * watchdog: off tripped"); null = "ok" alone.
+     */
+    public volatile String watchdogReport;
 
     public RecordingGcodeServer() throws Exception {
         server = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
@@ -100,16 +112,29 @@ public class RecordingGcodeServer implements AutoCloseable {
         }
     }
 
+    /**
+     * The controller prints a line of its own, unasked: the il/safety firmware's "Error:host watchdog" when its host
+     * watchdog trips while the host is silent.
+     */
+    public void say(String line) throws Exception {
+        OutputStream o = clientOut;
+        if (o == null) {
+            throw new IllegalStateException("no connection to say '" + line + "' on");
+        }
+        synchronized (writeLock) {
+            o.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            o.flush();
+        }
+    }
+
     private void run() {
         while (!server.isClosed()) {
             try (Socket s = server.accept()) {
+                // dropLink() closes it; a reconnect keeps every position and count (BR-02: powerCycle() resets them)
                 client = s;
-                SimPaste connected = paste;
-                if (connected != null) {
-                    connected.powerCycle(); // a reconnect is a controller power-up
-                }
                 BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
                 OutputStream out = s.getOutputStream();
+                clientOut = out;
                 String line;
                 while ((line = in.readLine()) != null) {
                     line = line.trim();
@@ -146,6 +171,9 @@ public class RecordingGcodeServer implements AutoCloseable {
                             reply.append("Cap:HOST_WATCHDOG:1\n");
                         }
                     }
+                    else if (line.equals("M990") && watchdogReport != null) {
+                        reply.append(watchdogReport).append('\n');
+                    }
                     else if (line.startsWith("M114")) {
                         synchronized (this) {
                             boolean model = p != null && p.isActive();
@@ -171,8 +199,10 @@ public class RecordingGcodeServer implements AutoCloseable {
                         }
                     }
                     reply.append("ok\n");
-                    out.write(reply.toString().getBytes(StandardCharsets.UTF_8));
-                    out.flush();
+                    synchronized (writeLock) {
+                        out.write(reply.toString().getBytes(StandardCharsets.UTF_8));
+                        out.flush();
+                    }
                 }
             }
             catch (Exception e) {
@@ -243,6 +273,32 @@ public class RecordingGcodeServer implements AutoCloseable {
         SimPaste p = paste;
         if (p != null) {
             p.setCount(steps);
+        }
+    }
+
+    /**
+     * The controller loses power and boots (BR-02): stock Marlin believes X 0, Y 0, Z 0 and A/B 720, with no
+     * workspace shift, and the step counts restart (the count is the machine position's, Marlin syncs it at boot;
+     * the paste model's restarts with {@link SimPaste#powerCycle}). Call it while OpenPnP is disconnected.
+     */
+    /**
+     * A line another tool sent while OpenPnP was not connected (a bench script's G92 B0): it acts on the controller's
+     * state as if received, but is not recorded among the lines OpenPnP sent.
+     */
+    public synchronized void lineFromAnotherTool(String line) {
+        track(line);
+    }
+
+    public synchronized void powerCycle() {
+        pos.put('X', 0.0);
+        pos.put('Y', 0.0);
+        pos.put('Z', 0.0);
+        pos.put('A', BOOT_AB_DEG);
+        pos.put('B', BOOT_AB_DEG);
+        bShift = 0;
+        SimPaste p = paste;
+        if (p != null) {
+            p.powerCycle();
         }
     }
 

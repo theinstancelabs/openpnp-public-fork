@@ -230,6 +230,10 @@ final class GcodePassthrough {
                 }
                 log(who, ">", l.text);
                 d.sendCommand(l.text, timeoutMs);
+                DispenseService engine = ctx.svcOrNull();
+                if (engine != null) {
+                    engine.noteControllerLine(l.text); // BR-02: M18 B switches the screw's motor off, G1 B turns it
+                }
                 for (GcodeDriver.Line got : d.receiveResponses(confirm, timeoutMs, r -> r)) {
                     if (!got.getLine().matches(confirm)) {
                         replies.add(got.getLine());

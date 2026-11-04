@@ -25,6 +25,7 @@ import org.openpnp.instancelabs.dispense.GcodeProgram;
 import org.openpnp.instancelabs.dispense.GcodeStreamBuilder;
 import org.openpnp.instancelabs.dispense.HomeTracker;
 import org.openpnp.instancelabs.dispense.InterlockReport;
+import org.openpnp.instancelabs.dispense.OutputZones;
 import org.openpnp.instancelabs.dispense.Interlocks;
 import org.openpnp.instancelabs.dispense.LandingResult;
 import org.openpnp.instancelabs.dispense.NeedleChange;
@@ -33,6 +34,8 @@ import org.openpnp.instancelabs.dispense.PadCleanReport;
 import org.openpnp.instancelabs.dispense.Photo;
 import org.openpnp.instancelabs.dispense.RunResult;
 import org.openpnp.instancelabs.dispense.TipSetup;
+import org.openpnp.instancelabs.padprofile.Anchor;
+import org.openpnp.instancelabs.padprofile.Family;
 import org.openpnp.instancelabs.sim.SimGuard;
 import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.model.Board;
@@ -57,19 +60,20 @@ final class DispenseEndpoints {
     static final String TEST_DOT_LOCATION = "waste-test-dot";
     /**
      * Settings that only their own endpoints may change: the needle's (they record a needle_touchoff row), and since
-     * the tip setups (§22.1) the mounted tip, what the other tips keep, and where the needle lands with its trim.
+     * the tip setups (§22.1) the mounted tip, what the other tips keep, and where the needle lands with its trim; the
+     * mounted tip's dose anchor (BR-85).
      */
     static final java.util.Set<String> PROTECTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "needleZOffsetMm", "needleZOffsetSetAtMs", "needleZOffsetHomeAtMs", "needleChangedAtMs", "needleAnchor",
             "surfaces", "schemaVersion", "boardRegistrations", "newSeatAtMs", "tip", "parkedTips", "needleLanding",
-            "needleXyTrim"));
+            "needleXyTrim", "zFrameMovedAtMs", "doseAnchor"));
     /** Protected settings that Register board and POST /api/board/new-seat stamp (not the needle's). */
     static final java.util.Set<String> REGISTRATION_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "boardRegistrations", "newSeatAtMs"));
     /** Nested settings PUT /api/config merges one level deep (a partial object keeps the other fields). */
     static final java.util.Set<String> NESTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "profile", "purgeRow", "cleanPadCheck", "fiducialCheck", "vacuumProbe", "paste", "calibrationArea",
-            "padCalibration"));
+            "padCalibration", "outputZones"));
     /**
      * Nested fields only the engine or their own endpoints change: the start angle's set time (I11:
      * POST /api/screw/start-angle, or a changed angle), the time of the purge reset,
@@ -97,7 +101,7 @@ final class DispenseEndpoints {
 
     void register(ApiServer s) {
         s.route("GET", "/api/status", r -> status(s));
-        s.route("POST", "/api/pressure/start", r -> pressureStart());
+        s.route("POST", "/api/pressure/start", this::pressureStart);
         s.route("POST", "/api/pressure/stop", r -> ctx.pressure.stop("Pressure off pressed"));
         s.route("POST", "/api/prime", this::prime);
         s.route("POST", "/api/test-dot", this::testDot);
@@ -186,11 +190,11 @@ final class DispenseEndpoints {
                 cfg.needleZOffsetMm, "setAtMs", cfg.needleZOffsetSetAtMs, "changedAtMs", cfg.needleChangedAtMs, "gapMm",
                 cfg.gapMm(), "anchored", cfg.isNeedleAnchored(), "anchor", cfg.needleAnchor,
                 "anchorOffsetMm", cfg.needleAnchor == null ? null : cfg.needleAnchor.offsetMm(), "xyTrim",
-                cfg.needleXyTrim, "kRefusal", svc.needleFrameFromKRefusal());
+                cfg.needleXyTrim, "kRefusal", svc.needleFrameFromKRefusal(), "zFrameMovedAtMs", cfg.zFrameMovedAtMs);
         needle.putAll(landingStatus(svc, cfg));
         d.put("needle", needle);
         d.put("tip", tipStatus(svc, cfg));
-        d.put("profile", Views.profile(cfg, svc.getControllerConnectedAtMs()));
+        d.put("profile", Views.profile(cfg, svc.getControllerConnectedAtMs(), svc.getControllerResetAtMs()));
         d.put("purgeRow", Views.purgeRow(cfg));
         d.put("cleanPadCheck", cfg.cleanPadCheck);
         Map<String, Object> surf = new LinkedHashMap<>();
@@ -286,6 +290,17 @@ final class DispenseEndpoints {
             l.add(Views.map("id", "I11", "name", "Screw start angle", "state", "off", "text",
                     "whole revolutions per dot: the start angle does not matter"));
         }
+        // BR-03: where the needle is, and whether the valve and the screw may switch on there (every program's lines
+        // are checked against the same zones; the pressure hold parks first or refuses)
+        // BR-02: after a controller reset OpenPnP's model is no position
+        String unknown = svc.positionUnknownWhy();
+        double[] at = unknown == null ? svc.needleXY() : null;
+        OutputZones zones = svc.outputZones();
+        String zone = at == null ? null : zones.zoneAt(at[0], at[1]);
+        String out = at != null ? zones.refusal(at[0], at[1])
+                : "the needle's position is unknown" + (unknown == null ? "" : ": " + unknown);
+        l.add(Views.map("id", "I12", "name", "Valve and screw only over a place where paste may go", "state",
+                out == null ? "ok" : "info", "text", out == null ? "the needle is over " + zone : out, "zone", zone));
         return l;
     }
 
@@ -309,15 +324,79 @@ final class DispenseEndpoints {
     // Pressure, prime, test dot
     // ------------------------------------------------------------------------------------------
 
-    Object pressureStart() throws Exception {
+    /**
+     * {@code {mode?: 'hold'|'pump', park?: '<place>'|{x, y}, durationS?}} (BR-03). A hold opens the valve only with
+     * the needle over an allowed output zone (I12): already there, or parked there first at travel height; the pump
+     * alone never sends a valve line and may run anywhere.
+     */
+    Object pressureStart(ApiServer.Request r) throws Exception {
+        JsonObject b = r.json();
         DispenseService svc = ctx.availableSvc();
         ctx.requireEngineIdle(svc);
         ctx.requireNotSwitchingOff(); // the pump and valve never go on after the STOP's valve-off (BR-52)
         if (ctx.pressure.isActive()) {
             throw ApiException.refused("the pressure is already " + ctx.pressure.getState().name().toLowerCase());
         }
+        PressureHold.Options o = pressureOptions(svc.getConfig(), b);
         ApiContext.refuseUnlessOk(ctx.preflight(svc, Interlocks.Scope.noNeedle()), "Pressure on");
-        return ctx.pressure.start(svc);
+        // every start: one queued behind motion (an earlier start's park) would trust OpenPnP's planned position
+        ctx.requireMachineIdle();
+        if (o.park != null) {
+            ctx.requirePositionKnown(svc);
+        }
+        if (!o.pumpOnly) {
+            String out = PressureHold.zoneRefusal(svc, o, o.park != null ? o.park : svc.needleXY());
+            if (out != null) {
+                throw ApiException.refused("I12: " + out);
+            }
+        }
+        return ctx.pressure.start(svc, o);
+    }
+
+    static PressureHold.Options pressureOptions(DispenseConfig cfg, JsonObject b) throws ApiException {
+        PressureHold.Options o = new PressureHold.Options();
+        String mode = Json.str(b, "mode", "hold");
+        if (!"hold".equals(mode) && !"pump".equals(mode)) {
+            throw ApiException.badRequest("mode must be 'hold' or 'pump'");
+        }
+        o.pumpOnly = "pump".equals(mode);
+        if (b != null && b.has("parkAboveMm")) {
+            throw ApiException.badRequest("parkAboveMm is not built yet: the hold parks at travel height");
+        }
+        if (b != null && b.has("park") && !b.get("park").isJsonNull()) {
+            if (o.pumpOnly) {
+                throw ApiException.badRequest("the pump alone does not park: drop 'park' or use mode 'hold'");
+            }
+            com.google.gson.JsonElement p = b.get("park");
+            if (p.isJsonPrimitive()) {
+                String name = p.getAsString();
+                DispenseConfig.NamedLocation l = cfg.location(name);
+                if (l == null) {
+                    throw ApiException.refused("no place '" + name + "' to park over: set it first (Places)");
+                }
+                o.park = new double[] {l.x, l.y};
+                o.parkName = name;
+                o.parkPlace = name;
+            }
+            else if (p.isJsonObject() && p.getAsJsonObject().has("x") && p.getAsJsonObject().has("y")) {
+                double x = p.getAsJsonObject().get("x").getAsDouble(), y = p.getAsJsonObject().get("y").getAsDouble();
+                if (!Double.isFinite(x) || !Double.isFinite(y)) {
+                    throw ApiException.badRequest("park x and y must be numbers");
+                }
+                o.park = new double[] {x, y};
+                o.parkName = String.format(java.util.Locale.ROOT, "(%.1f, %.1f)", x, y);
+            }
+            else {
+                throw ApiException.badRequest("park must be a place name or {x, y}");
+            }
+        }
+        Double d = Json.num(b, "durationS", null);
+        if (d != null && !(d > 0 && d <= cfg.maxContinuousOnTimeS)) {
+            throw ApiException.badRequest("durationS must be more than 0 and at most the on-time limit ("
+                    + cfg.maxContinuousOnTimeS + " s)");
+        }
+        o.durationS = d;
+        return o;
     }
 
     Object prime(ApiServer.Request r) throws Exception {
@@ -361,6 +440,7 @@ final class DispenseEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         ApiContext.refuseUnlessOk(ctx.preflight(svc, scope), what);
     }
 
@@ -583,7 +663,7 @@ final class DispenseEndpoints {
         Map<String, Object> m = Views.map("key", cfg.tip.key, "name", cfg.tip.name, "setupVersion",
                 cfg.tip.setupVersion, "dispenser", cfg.tip.dispenser, "form", cfg.tip.form, "bendToward",
                 cfg.tip.bendToward, "summary", null, "complete", null, "mountedAtMs", null, "dots", null, "thumbUrl",
-                null, "undoUntilMs", null);
+                null, "undoUntilMs", null, "doseAnchor", null);
         try {
             DispenseDb db = svc.getDb();
             TipSetup s = db.currentTipSetup(cfg.tip.key);
@@ -594,6 +674,8 @@ final class DispenseEndpoints {
             Photo main = db.mainPhoto(cfg.tip.key);
             m.put("thumbUrl", main == null ? null : Views.photoUrl(main.id, true));
             m.put("undoUntilMs", svc.undoUntilMs());
+            m.put("doseAnchor", cfg.doseAnchor != null ? Views.doseAnchor(cfg.doseAnchor)
+                    : Views.familyAnchor(svc.familyAnchor(Family.CHIP, Anchor.BENCH.areaMm2)));
         }
         catch (Exception e) {
             m.put("error", MachineEndpoints.rootMessage(e));
@@ -764,6 +846,13 @@ final class DispenseEndpoints {
         if ("parkedTips".equals(key)) {
             return "The tips that are not mounted keep their recipe and needle values here: mounting a tip sets them "
                     + "(Setup › Dispenser & tip).";
+        }
+        if ("zFrameMovedAtMs".equals(key)) {
+            return "'zFrameMovedAtMs' is stamped by the engine at the home after a controller reset (BR-02): record the "
+                    + "needle frame again to clear I4";
+        }
+        if ("doseAnchor".equals(key)) {
+            return "The tip's dose anchor is set with PUT /api/tip-setups/{key}/dose-anchor.";
         }
         if ("needleLanding".equals(key) || "needleXyTrim".equals(key)) {
             return "Where the needle lands is set by Check where it lands and the trim panel (POST /api/needle/landing, "
@@ -1142,6 +1231,7 @@ final class DispenseEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         PlanStore.Entry e = requirePlan(Json.str(b, "planId", null));
         DispenseConfig cfg = svc.getConfig();
         DispensePlan full = e.plan;
@@ -1211,6 +1301,7 @@ final class DispenseEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         PlanStore.Entry e = requirePlan(r.group(1));
         ctx.tracker.expect("clean-pad check");
         Future<PadCleanReport> f = svc.checkCleanPads(e.plan);
@@ -1221,7 +1312,8 @@ final class DispenseEndpoints {
 
     /**
      * I11: set ({"startAngleDeg": a}) or confirm ({} or {"confirm": true}) the screw start angle for
-     * the current controller power-up (the B step count restarts at power-up).
+     * the current controller power-up (the B step count restarts at power-up). {@code measuredAtMs}: when the evidence
+     * of a set angle was made (BR-02: refused when it is from before the screw's motor last went off).
      */
     Object startAngle(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
@@ -1233,8 +1325,10 @@ final class DispenseEndpoints {
         if (a != null && !(a >= 0 && a < 360)) {
             throw ApiException.badRequest("startAngleDeg must be 0 to < 360");
         }
-        svc.setStartAngle(a, Json.str(b, "note", null));
-        return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs());
+        Double measured = Json.num(b, "measuredAtMs", null); // BR-02: when its evidence (the dot pair) was made
+        svc.setStartAngle(a, Json.str(b, "note", null), measured == null ? null : measured.longValue());
+        return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs(),
+                svc.getControllerResetAtMs());
     }
 
     Object purgeReset() throws Exception {

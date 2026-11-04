@@ -142,6 +142,8 @@ public class DispenseDb implements AutoCloseable {
     private final String url;
     /** The database file; null in memory. */
     private final File file;
+    /** Pad type and tip setup rows written since the open (both append-only): the anchors' cache key. */
+    private volatile long typeWrites;
     public static File fileFor(File configDir) {
         return new File(new File(configDir, DispenseConfig.SUBDIR), FILE_NAME);
     }
@@ -607,7 +609,16 @@ public class DispenseDb implements AutoCloseable {
             ps.executeUpdate();
             stored.rowId = generatedKey(ps);
         }
+        typeWrites++;
         return stored;
+    }
+
+    /**
+     * BR-85: the pad type and tip setup rows written since the open, without a query (DispenseService.familyAnchor's
+     * cache key: the anchors are read from those two tables).
+     */
+    public long typeWrites() {
+        return typeWrites;
     }
 
     /**
@@ -1328,22 +1339,45 @@ public class DispenseDb implements AutoCloseable {
     }
 
     public synchronized void event(String runId, String level, String code, String message) {
-        try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO events(ts, run_uuid, level, code, message) VALUES (?,?,?,?,?)")) {
-            ps.setLong(1, System.currentTimeMillis());
-            ps.setString(2, runId);
-            ps.setString(3, level);
-            ps.setString(4, code);
-            ps.setString(5, message);
-            ps.executeUpdate();
+        event(runId, level, code, message, System.currentTimeMillis());
+    }
+
+    /** An event at a given time (epoch ms); a failure is logged, not thrown. */
+    public synchronized void event(String runId, String level, String code, String message, long ts) {
+        try {
+            insertEvent(runId, level, code, message, ts);
         }
         catch (SQLException e) {
             org.pmw.tinylog.Logger.warn(e, "dispense event not stored: {} {}", code, message);
         }
     }
 
+    /** An event at a given time (epoch ms), its failure thrown (a journal that must not be lost silently). */
+    public synchronized void insertEvent(String runId, String level, String code, String message, long ts)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO events(ts, run_uuid, level, code, message) VALUES (?,?,?,?,?)")) {
+            ps.setLong(1, ts);
+            ps.setString(2, runId);
+            ps.setString(3, level);
+            ps.setString(4, code);
+            ps.setString(5, message);
+            ps.executeUpdate();
+        }
+    }
+
     public synchronized List<Map<String, Object>> recentEvents(int limit) throws SQLException {
         return query("SELECT * FROM events ORDER BY id DESC LIMIT " + Math.max(1, limit));
+    }
+
+    /** The newest event of each of the codes, oldest first (rows of ts, code and message; BR-02's journal). */
+    public synchronized List<Map<String, Object>> newestEvents(String... codes) throws SQLException {
+        if (codes.length == 0) {
+            return new ArrayList<>();
+        }
+        String in = String.join(",", Collections.nCopies(codes.length, "?"));
+        return query("SELECT ts, code, message FROM events WHERE id IN (SELECT MAX(id) FROM events WHERE code IN ("
+                + in + ") GROUP BY code) ORDER BY id", (Object[]) codes);
     }
 
     public synchronized long insertTouchOff(String method, double zOffsetMm, Double previousOffsetMm,
@@ -1847,6 +1881,7 @@ public class DispenseDb implements AutoCloseable {
             ps.executeUpdate();
             stored.rowId = generatedKey(ps);
         }
+        typeWrites++;
         return stored;
     }
 

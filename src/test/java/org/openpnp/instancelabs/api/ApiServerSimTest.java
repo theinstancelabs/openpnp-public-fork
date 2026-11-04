@@ -180,6 +180,14 @@ public class ApiServerSimTest {
         sim.machine.home();
     }
 
+    /** The controller loses power and boots (BR-02), OpenPnP connects again, then OpenPnP's own home (G28 first). */
+    void powerCycle() throws Exception {
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.machine.setEnabled(true);
+        sim.machine.home();
+    }
+
     static List<String> bMoves(List<String> l) {
         List<String> b = new ArrayList<>();
         for (String s : l) {
@@ -440,6 +448,7 @@ public class ApiServerSimTest {
 
     @Test
     public void pressureHoldSwitchesPumpThenValveAndVentsValveFirst() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         setPlaces();
         sim.server.mark();
         JsonObject on = ok(post("/api/pressure/start", null));
@@ -474,6 +483,7 @@ public class ApiServerSimTest {
 
     @Test
     public void openPnpsOwnStopVentsTheHold() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         setPlaces();
         ok(post("/api/pressure/start", null));
         sim.server.mark();
@@ -486,6 +496,7 @@ public class ApiServerSimTest {
 
     @Test
     public void holdSwitchesOffAtTheOnTimeLimit() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         setPlaces();
         // I7 counts from the pump: shorter settles than the bench's 1 s + 3 s so the hold reaches ON first
         ok(call("PUT", "/api/config", "{\"maxContinuousOnTimeS\":1,\"pumpToValveSettleMs\":200,\"valveSettleMs\":200}"));
@@ -506,6 +517,7 @@ public class ApiServerSimTest {
 
     @Test
     public void stopVentsTheHoldAndStopsTheMachine() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         setPlaces();
         ok(post("/api/pressure/start", null));
         sim.server.mark();
@@ -564,6 +576,22 @@ public class ApiServerSimTest {
         Res dl = post("/api/calibrations/dot-ladder", "{}");
         assertEquals(409, dl.status);
         assertTrue(dl.body.contains("I4"), dl.toString());
+    }
+
+    /**
+     * F16: the touch-off's lowest gap is checked with a float tolerance, as the web UI checks it. 0.30 in 8 steps of
+     * 0.05 is -0.1 mm (-0.10000000000000003 in doubles) and passes on to the run's checks (here: no blank, 409, nothing
+     * moves); -0.11 is still refused.
+     */
+    @Test
+    public void theTouchOffsLowestGapAllowsTheLaddersOwnRounding() throws Exception {
+        Res exact = post("/api/calibrations/touch-off", "{\"startGapMm\":0.30,\"stepMm\":0.05,\"steps\":9}");
+        assertEquals(409, exact.status, exact.toString());
+        assertFalse(exact.body.contains("lowest gap"), exact.toString());
+        Res deep = post("/api/calibrations/touch-off", "{\"startGapMm\":0.29,\"stepMm\":0.05,\"steps\":9}");
+        assertEquals(400, deep.status, deep.toString());
+        assertTrue(deep.json().get("reason").getAsString().startsWith("the lowest gap would be -0.110 mm"),
+                deep.toString());
     }
 
     File writeBoard() throws Exception {
@@ -773,28 +801,49 @@ public class ApiServerSimTest {
         assertTrue(staleProfile.body.contains("dispense profile"), staleProfile.toString());
     }
 
-    /** I11: the start angle is a calibration of the controller power-up; a reconnect asks for it again. */
+    /**
+     * I11: the start angle is a calibration of the controller power-up. A reconnect keeps the B step count; a reset
+     * (BR-02: the boot position at connect) asks for the angle again.
+     */
     @Test
-    public void boardRunNeedsTheStartAngleOfThisControllerConnection() throws Exception {
+    public void boardRunNeedsTheStartAngleOfThisControllerPowerUp() throws Exception {
         setUpBoardRuns();
         File board = writeBoard();
         ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         reconnect();
         JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
-        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
+        // every connect may have changed the phase (the process engineer, 11-03): a confirm is enough after it
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), "a reconnect asks a confirm: " + p);
         assertFalse(p.get("controllerConnectedAtMs").isJsonNull());
+        assertTrue(p.get("controllerResetAtMs").isJsonNull(), "a reconnect keeps the screw count: " + p);
+        ok(post("/api/screw/start-angle", "{}"));
+        p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
+        powerCycle();
+        p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
+        assertFalse(p.get("controllerResetAtMs").isJsonNull(), p.toString());
         JsonObject plan = planTied(board);
         assertTrue(plan.getAsJsonObject("interlocks").toString().contains("I11"), plan.toString());
         Res run = post("/api/run", "{\"planId\":\"" + plan.get("planId").getAsString() + "\"}");
         assertEquals(409, run.status, run.toString());
         assertTrue(run.body.contains("I11"), run.toString());
 
-        // "still valid": the controller was not power-cycled
+        // a detected reset restarted the count for sure: a confirm cannot keep the old angle (#11 re-review)
+        Res confirm = post("/api/screw/start-angle", "{}");
+        assertEquals(409, confirm.status, confirm.toString());
+        assertTrue(confirm.body.contains("measure it again"), confirm.toString());
+        // measured again (a dot pair turns the screw: no set before it, BR-02), the same angle: the plan stays valid
+        svc.noteControllerLine("G1 B30 F600");
         long t0 = System.currentTimeMillis();
-        JsonObject conf = ok(post("/api/screw/start-angle", "{}"));
-        assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9, "a confirm keeps the angle");
+        JsonObject conf = ok(post("/api/screw/start-angle", "{\"startAngleDeg\":298,\"note\":\"measured again\"}"));
+        assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9);
         assertTrue(conf.get("startAngleSetAtMs").getAsLong() >= t0);
         assertFalse(conf.get("startAngleNeedsConfirm").getAsBoolean());
+        // and the reset's home moved the Z frame (the process engineer, 11-04): the needle frame, both tips touching,
+        // and its touch-off again
+        ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactZ\":2.91}"));
+        ok(post("/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}"));
         assertTrue(ok(get("/api/plan/" + plan.get("planId").getAsString())).getAsJsonObject("interlocks").get("ok")
                 .getAsBoolean());
 
@@ -1046,7 +1095,12 @@ public class ApiServerSimTest {
                     .setPort(proxy.port());
             sim.machine.setEnabled(true);
             sim.machine.home();
-            ok(post("/api/screw/start-angle", "{}"));
+            // BR-02: that Stop's DISABLE_COMMAND switched the screw's motor off (M18 B): the angle is measured again (a dot
+            // pair turns the screw first)
+            svc.noteControllerLine("G1 B30 F600");
+            double angle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile")
+                    .get("startAngleDeg").getAsDouble();
+            ok(post("/api/screw/start-angle", "{\"startAngleDeg\":" + angle + "}"));
             JsonObject plan = planTied(board);
             assertEquals(202, post("/api/run", "{\"planId\":\"" + plan.get("planId").getAsString() + "\"}").status);
             long t0 = System.currentTimeMillis();

@@ -143,7 +143,9 @@ that implement §1, §4 and §7.4 literally; the tests of §14 assert the same v
   - Why the R opening and not the camera's 0.856 mm² pad (PT/todo.md:197) nor the seed's 0.80 × 0.95 roundness 0
     (0.760 mm², D/DispenseDb.java:210): suggestions scale KiCad openings, so the anchor is measured the same way.
   - A family with no anchor of its own uses κ_chip, with confidence low and the reason `no validated {family} pads yet:
-    the amount is scaled from the 0603 half turn`. Where the group's pad pitch is ≤ 1.27 mm, its target is also
+    the amount is scaled from the 0603 half turn` (a validated chip anchor is named instead: `… scaled from 0805
+    validated on a board (2.00 mg on 1.43 mm²)`; a tip's own anchor never, BR-85: it is its pad type's only). Where
+    the group's pad pitch is ≤ 1.27 mm, its target is also
     **capped at a 0.25 mm print** (`m_target ≤ 3.76·A·0.25`): at fine pitch bridging, not wetting, limits the amount;
     0.25 mm is twice the usual 0.125 mm stencil at 1.27 mm pitch (dots do not spread over the whole pad: the sixth at
     0.13 mm equivalent left bare 0603 pad, PT/todo.md:197) and well below the chip anchor's 0.39 mm. Low confidence;

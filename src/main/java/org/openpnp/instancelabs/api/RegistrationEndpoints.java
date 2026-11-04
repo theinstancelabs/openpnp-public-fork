@@ -86,6 +86,7 @@ final class RegistrationEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         PlanStore.Entry e = dispense.requirePlan(r.group(1));
         BoardLocation nominal = seat(e);
         DispenseConfig c = svc.getConfig();
@@ -329,6 +330,7 @@ final class RegistrationEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         DispenseConfig c = svc.getConfig();
         double nominalZ = surfaceZ(c, name, Json.num(b, "z", null));
         List<double[]> explicit = targetsOf(b);
@@ -464,6 +466,7 @@ final class RegistrationEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
         DispenseService.ZCheckPlan zp = svc.zCheckPlan(null, false);
         ctx.tracker.expect("z check");
         Future<RunResult> f = svc.checkZ();

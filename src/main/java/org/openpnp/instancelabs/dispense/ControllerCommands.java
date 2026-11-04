@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -127,6 +128,113 @@ public final class ControllerCommands {
     public static boolean isOutputCommand(String line) {
         String w = word(normalize(line));
         return "M106".equals(w) || "M107".equals(w);
+    }
+
+    /**
+     * BR-02: whether a line switches the screw's motor off: Marlin's M18 or M84 naming the screw's axis {@code letter},
+     * or no axis at all (every motor). An S alone sets Marlin's idle timeout instead; it counts as off all the same, the
+     * safe side: an off missed would keep a start angle the screw may have lost.
+     */
+    public static boolean switchesScrewOff(String line, String letter) {
+        String s = normalize(line);
+        String w = word(s);
+        if (!"M18".equals(w) && !"M84".equals(w)) {
+            return false;
+        }
+        String axes = parameterLetters(s).replace("S", "");
+        return axes.isEmpty() || names(axes, letter);
+    }
+
+    /** BR-02: whether a line turns the screw: a G0 or G1 naming its axis {@code letter}. */
+    public static boolean turnsScrew(String line, String letter) {
+        String s = normalize(line);
+        String w = word(s);
+        return ("G0".equals(w) || "G1".equals(w)) && names(parameterLetters(s), letter);
+    }
+
+    /**
+     * BR-02: whether a line may queue a move: a G0 or G1 naming an axis, or G28 (Marlin restarts its idle clock only
+     * while moves are queued: a feed-only G1 queues none). Whether the named axis changes is the caller's to tell (a
+     * G1 to where the axis is queues none either).
+     */
+    public static boolean isMove(String line) {
+        String w = word(normalize(line));
+        return "G28".equals(w) || ("G0".equals(w) || "G1".equals(w)) && !axisWords(line).isEmpty();
+    }
+
+    /** Marlin's axis letters (the screw is one of them: B on the LumenPnP). */
+    private static final String AXES = "XYZABCUVWIJKE";
+    private static final Pattern AXIS_WORD = Pattern.compile("([A-Z])\\s*(-?(?:\\d+\\.?\\d*|\\.\\d+))");
+
+    /** BR-02: the axis words of a G0, G1 or G92 line, letter to value ({X=10, B=-2.5} for "G1 X10 B-2.5 F600"). */
+    public static Map<Character, Double> axisWords(String line) {
+        Map<Character, Double> p = new java.util.LinkedHashMap<>();
+        String s = normalize(line);
+        String w = word(s);
+        if (!"G0".equals(w) && !"G1".equals(w) && !"G92".equals(w)) {
+            return p;
+        }
+        Matcher m = WORD.matcher(s);
+        if (m.find()) {
+            Matcher a = AXIS_WORD.matcher(s.substring(m.end()));
+            while (a.find()) {
+                if (AXES.indexOf(a.group(1).charAt(0)) >= 0) {
+                    p.put(a.group(1).charAt(0), Double.parseDouble(a.group(2)));
+                }
+            }
+        }
+        return p;
+    }
+
+    /** BR-02: whether a line arms the host watchdog (M990 S with a window): the firmware then forgets a trip. */
+    public static boolean armsWatchdog(String line) {
+        Matcher m = ARM.matcher(normalize(line));
+        return m.matches() && Long.parseLong(m.group(1)) > 0;
+    }
+
+    /** The il/safety firmware's host watchdog tripping (SERIAL_ERROR_MSG "host watchdog"); not its M990 report. */
+    private static final Pattern WATCHDOG_TRIP = Pattern.compile("(?i)\\berror:\\s*host watchdog\\b");
+    /** Its M990 report, "echo:Host watchdog: off|armed S<ms>[ tripped]": tripped until the host arms it again. */
+    private static final Pattern WATCHDOG_TRIPPED = Pattern.compile("(?i)host watchdog:.*\\btripped\\b");
+
+    /**
+     * BR-02: a controller line that says the host watchdog tripped: it quick-stopped, switched the outputs and the
+     * screw's driver off (host_watchdog.cpp).
+     */
+    public static boolean isHostWatchdogTrip(String line) {
+        return line != null && WATCHDOG_TRIP.matcher(line).find();
+    }
+
+    /** BR-02: an M990 reply that reports a trip since the watchdog was last armed. */
+    public static boolean reportsWatchdogTrip(List<String> reply) {
+        if (reply != null) {
+            for (String l : reply) {
+                if (l != null && WATCHDOG_TRIPPED.matcher(l).find()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The parameter letters of a normalized line after its command word ("BF" for "G1 B12.5 F600"). */
+    private static String parameterLetters(String normalized) {
+        Matcher m = WORD.matcher(normalized);
+        if (!m.find()) {
+            return "";
+        }
+        StringBuilder b = new StringBuilder();
+        for (char c : normalized.substring(m.end()).toCharArray()) {
+            if (c >= 'A' && c <= 'Z') {
+                b.append(c);
+            }
+        }
+        return b.toString();
+    }
+
+    private static boolean names(String letters, String letter) {
+        return letter != null && !letter.isEmpty()
+                && letters.indexOf(Character.toUpperCase(letter.charAt(0))) >= 0;
     }
 
     /**

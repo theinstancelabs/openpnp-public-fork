@@ -538,6 +538,10 @@ public final class Suggester {
 
     /** "the half turn you validated on 0603 pads (1.06 mg on 0.73 mm²)". */
     static String anchorShort(ProfileCheck.Ctx c, Anchor a) {
+        if (a.tipName != null) {
+            return "the " + a.tipName + "'s own (" + Texts.mg(a.massPerPadMg) + " mg on " + Texts.mm(a.areaMm2)
+                    + " mm²)";
+        }
         if (a.bench) {
             return "the half turn you validated on 0603 pads (" + Texts.mg(a.massPerPadMg) + " mg on " + Texts.mm(a.areaMm2)
                     + " mm²)";
@@ -652,7 +656,8 @@ public final class Suggester {
             why.add("no fresh camera check of " + DoseModel.turnName(x.steps) + " dots on the blank yet");
         }
         if (!g.ownAnchor) {
-            why.add("no validated " + g.family + " pads yet: the amount is scaled from the 0603 half turn"
+            why.add("no validated " + g.family + " pads yet: the amount is scaled from " + (g.anchor.bench
+                    ? "the 0603 half turn" : anchorShort(c, g.anchor))
                     + (g.capped ? " and capped at a " + Texts.mm(Limits.CAP_PRINT_MM) + " mm print at this "
                             + Texts.mm(g.pitch) + " mm pitch" : ""));
         }
