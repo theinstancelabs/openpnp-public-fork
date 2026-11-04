@@ -514,6 +514,150 @@ public class GcodeStreamTest {
         assertTrue(p.estimatedPressurisedSeconds < p.estimatedSeconds);
     }
 
+    /**
+     * BR-82, the plastic 25G recipe: after every dot's lift the profile's pause at the lift height (pressure on: the
+     * paste thread breaks there), then the X/Y travel. Board, purge row, prime and test dots, calibration blocks alike;
+     * in settle pieces of at most 250 ms. The dot ends on its lift and the pause follows its end marker, so a STOP
+     * during the pause leaves the laid dot counted. 0: no pause, as before.
+     */
+    @Test
+    public void liftPauseAfterEveryLiftBeforeTravel() throws Exception {
+        DispenseConfig c = toyConfig();
+        c.profile.liftPauseMs = 500;
+        GcodeProgram p = board(c, mapper(), toyPlan(c), false, false, 0L);
+        assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(p, c, "B"));
+        List<GcodeProgram.Line> lines = new ArrayList<>();
+        List<String> t = new ArrayList<>();
+        for (GcodeProgram.Line l : p.lines) {
+            if (!l.isComment()) {
+                lines.add(l);
+                t.add(l.text);
+            }
+        }
+        assertEquals(11, pausedLifts(t, 2), "8 purge dots and 3 board dots, the pause in two 250 ms pieces");
+        int ends = 0;
+        for (int i = 0; i < lines.size(); i++) {
+            if (lines.get(i).has(GcodeProgram.Marker.DOT_END)) {
+                ends++;
+                assertTrue(t.get(i).matches("G1 Z-?\\d+\\.\\d{4} F3000"), "the dot ends on its lift: " + t.get(i));
+                assertEquals(java.util.Arrays.asList("G4 P250", "G4 P250"), t.subList(i + 1, i + 3),
+                        "the pause follows the dot's end marker");
+                assertEquals(GcodeProgram.Marker.NONE, lines.get(i + 1).marker);
+            }
+        }
+        assertEquals(11, ends);
+        // in every dot one G4, its dwell, with the pause and without
+        DispenseConfig none = toyConfig();
+        for (GcodeProgram q : java.util.Arrays.asList(p, board(none, mapper(), toyPlan(none), false, false, 0L))) {
+            for (List<GcodeProgram.Line> d : dotLines(q)) {
+                assertEquals(Collections.singletonList("G4 P250"), texts(d).stream().filter(x -> x.startsWith("G4"))
+                        .collect(java.util.stream.Collectors.toList()), texts(d).toString());
+            }
+        }
+        // the prime and a test dot; calibration blocks (17 purge-row dots, 9 work dots)
+        List<GcodeStreamBuilder.DotSpec> specs = Collections.singletonList(new GcodeStreamBuilder.DotSpec(62, 30,
+                2.96, 3.96, 180.1802, 0, "d"));
+        GcodeProgram dots = GcodeStreamBuilder.forDots(c, mapper(), specs, false, false, true, "prime");
+        assertEquals(2, pausedLifts(dots.text(), 2), dots.asString());
+        DispenseConfig b = GcodeBlocksTest.cfg();
+        b.profile.liftPauseMs = 500;
+        GcodeProgram blocks = GcodeStreamBuilder.forBlocks(b, mapper(), GcodeBlocksTest.threeBlocks(),
+                DispenseService.purgeSpecs(b, 17), 4, false, false, 1234L, null);
+        assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(blocks, b, "B"));
+        assertEquals(17 + 9, pausedLifts(blocks.text(), 2));
+        // watchdog armed (ping every 1000 ms): 2500 ms still go out in pieces of 250 (the settle cap)
+        c.profile.liftPauseMs = 2500;
+        GcodeProgram armed = board(c, mapper(), toyPlan(c), false, true, 0L);
+        assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(armed, c, "B"));
+        assertEquals(11, pausedLifts(armed.text(), 10));
+        // a ping interval below the 250 ms cap sets the pieces: every 100 ms, 500 ms are five G4 P100
+        c.profile.liftPauseMs = 500;
+        c.keepaliveIntervalMs = 100;
+        GcodeProgram fast = board(c, mapper(), toyPlan(c), false, true, 0L);
+        assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(fast, c, "B"));
+        assertEquals(11, pausedLifts(fast.text(), 5, "G4 P100"));
+    }
+
+    /** Lifts (G1 Z … F3000) followed by exactly {@code pieces} lines of G4 P250: the dots' pauses. */
+    static int pausedLifts(List<String> t, int pieces) {
+        return pausedLifts(t, pieces, "G4 P250");
+    }
+
+    /** Lifts (G1 Z … F3000) followed by exactly {@code pieces} lines of {@code piece}. */
+    static int pausedLifts(List<String> t, int pieces, String piece) {
+        int n = 0;
+        for (int i = 0; i + pieces < t.size(); i++) {
+            if (!t.get(i).matches("G1 Z-?\\d+\\.\\d{4} F3000")) {
+                continue;
+            }
+            int k = 0;
+            while (i + 1 + k < t.size() && t.get(i + 1 + k).equals(piece)) {
+                k++;
+            }
+            n += k == pieces ? 1 : 0;
+        }
+        return n;
+    }
+
+    /** BR-82: the estimate counts the pause, 0.5 s per dot: the duration, the pressurised time (I7), the dot clock. */
+    @Test
+    public void estimateCountsTheLiftPause() throws Exception {
+        DispenseConfig c = toyConfig();
+        DispensePlan plan = toyPlan(c);
+        GcodeProgram none = board(c, mapper(), plan, false, false, 0L);
+        c.profile.liftPauseMs = 500;
+        GcodeProgram paused = board(c, mapper(), plan, false, false, 0L);
+        int n = paused.purgeDotCount + paused.dotCount;
+        assertEquals(11, n);
+        assertEquals(n * 0.5, paused.estimatedSeconds - none.estimatedSeconds, 1e-9);
+        assertEquals(n * 0.5, paused.estimatedPressurisedSeconds - none.estimatedPressurisedSeconds, 1e-9);
+        assertEquals(3 * 0.5, paused.estimatedWorkSeconds - none.estimatedWorkSeconds, 1e-9);
+        for (int i = 0; i < 3; i++) {
+            assertEquals((8 + i) * 0.5, paused.dotArriveSeconds[i] - none.dotArriveSeconds[i], 1e-9, "dot " + i);
+            assertEquals((8 + i + 1) * 0.5, paused.dotEndSeconds[i] - none.dotEndSeconds[i], 1e-9, "dot " + i);
+        }
+    }
+
+    /**
+     * BR-82 review: the recipe's own lift (the plastic 25G's 3 mm) is every dot's hop: board, purge row, dot ladder and
+     * touch-off dots lift to their dispense Z + it, and the plan records it. Null: the machine's hopHeightMm.
+     */
+    @Test
+    public void dotsHopToTheRecipesOwnLift() throws Exception {
+        DispenseConfig c = toyConfig();
+        c.profile.liftMm = 3.0;
+        DispensePlan plan = toyPlan(c);
+        assertEquals(3.0, plan.hopHeightMm, 0, "the lift the plan was made with");
+        List<double[]> hops = new ArrayList<>(); // {dispense Z, hop Z}
+        for (DispensePlan.PlannedDot d : plan.dots) {
+            hops.add(new double[] {d.dispenseZMm, d.hopZMm});
+        }
+        List<GcodeStreamBuilder.DotSpec> specs = new ArrayList<>(purge(c));
+        DispenseConfig.NamedLocation blank = new DispenseConfig.NamedLocation(60, 40, 5.45);
+        specs.addAll(DotLadderCalibration.layout(new DotLadderCalibration.Request(), blank, c, null));
+        for (GcodeStreamBuilder.DotSpec d : specs) {
+            hops.add(new double[] {d.dispenseZ, d.hopZ});
+        }
+        assertEquals(3 + 8 + 25, hops.size());
+        for (double[] h : hops) {
+            assertEquals(h[0] + 3.0, h[1], 1e-9);
+        }
+        // the touch-off lifts from its highest dot
+        NeedleTouchOff.Request to = new NeedleTouchOff.Request();
+        for (GcodeStreamBuilder.DotSpec d : NeedleTouchOff.layout(to, blank, c, null)) {
+            assertEquals(5.45 + c.needleZOffsetMm + to.startGapMm + 3.0, d.hopZ, 1e-9);
+        }
+        assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(board(c, mapper(), plan, false, false, 0L),
+                c, "B"));
+        // null: the machine's hop height, as before
+        c.profile.liftMm = null;
+        DispensePlan before = toyPlan(c);
+        assertEquals(1.0, before.hopHeightMm, 0);
+        for (DispensePlan.PlannedDot d : before.dots) {
+            assertEquals(d.dispenseZMm + 1.0, d.hopZMm, 1e-9);
+        }
+    }
+
     @Test
     public void calibrationDotsPrimeAtTheWaste() throws Exception {
         DispenseConfig c = toyConfig();

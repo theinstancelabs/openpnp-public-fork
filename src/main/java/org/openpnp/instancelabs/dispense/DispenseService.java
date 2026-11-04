@@ -2904,7 +2904,7 @@ public final class DispenseService {
             int k = row.usedSpots + i;
             double[] xy = row.spot(k);
             double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
-            l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm, c.profile.netDeg(c),
+            l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.liftMm(), c.profile.netDeg(c),
                     GcodeStreamBuilder.PURGE_INDEX, "purge#" + k));
         }
         return l;
@@ -3495,7 +3495,7 @@ public final class DispenseService {
             List<GcodeStreamBuilder.DotSpec> specs = new ArrayList<>();
             double z = loc.z + c.needleZOffsetMm + c.gapMm();
             for (int i = 0; i < count; i++) {
-                specs.add(new GcodeStreamBuilder.DotSpec(loc.x, loc.y, z, z + c.hopHeightMm, rotationDeg, i, "shot"));
+                specs.add(new GcodeStreamBuilder.DotSpec(loc.x, loc.y, z, z + c.liftMm(), rotationDeg, i, "shot"));
             }
             GcodeProgram p = GcodeStreamBuilder.forDots(c, s.mapper, specs, bZeroed.get(), s.keepalive, false, 0,
                     "shots x" + count + " @" + locationName, tipXy(c));
@@ -5161,7 +5161,7 @@ public final class DispenseService {
             for (int i = 0; i < b.xy.size(); i++) {
                 double[] xy = b.xy.get(i);
                 double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
-                dots.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm, b.netSteps / c.bStepsPerDeg,
+                dots.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.liftMm(), b.netSteps / c.bStepsPerDeg,
                         w + i, b.label + "#" + (i + 1)));
                 all.add(xy);
                 blockOf.add(k);
@@ -5367,7 +5367,7 @@ public final class DispenseService {
             List<GcodeStreamBuilder.DotSpec> dots = new ArrayList<>();
             for (double[] xy : b.xy) {
                 double z = (plane != null ? plane.z(xy[0], xy[1]) : fallback) + c.needleZOffsetMm + c.gapMm();
-                dots.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm,
+                dots.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.liftMm(),
                         b.netSteps / c.bStepsPerDeg, w++, b.label));
             }
             GcodeStreamBuilder.BlockSpec bs = new GcodeStreamBuilder.BlockSpec(b.netSteps, dots, b.label);
@@ -5571,7 +5571,7 @@ public final class DispenseService {
         for (int i = 0; plane != null && i < req.purgeXy.size(); i++) {
             double[] xy = req.purgeXy.get(i);
             double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
-            l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm, c.profile.netDeg(c),
+            l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.liftMm(), c.profile.netDeg(c),
                     GcodeStreamBuilder.PURGE_INDEX, "purge#band" + i));
         }
         return l;

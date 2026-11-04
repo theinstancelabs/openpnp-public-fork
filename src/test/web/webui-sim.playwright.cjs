@@ -394,6 +394,70 @@ async function runFirstDots(page, n) {
       await page.waitForSelector('#pf-angle-warn', { state: 'hidden', timeout: 5000 }).then(() => true, () => false));
     await page.screenshot({ path: path.join(OUT, 'profiles-dispense-profile.png'), fullPage: true });
 
+    // ---- BR-82: the recipe's own lift and the pause after it (the 25G's 3 mm + 0.5 s), then back to the defaults -----
+    {
+      const prof = async () => (await (await page.request.get(BASE + 'api/status')).json()).dispense.profile;
+      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked. */
+      const typeIn = async (id, v, refused) => {
+        await page.fill('#' + id, '');
+        await page.locator('#' + id).pressSequentially(v);
+        await page.waitForFunction(([i, r]) => document.getElementById(i + '-err').hidden === !r, [id, refused], { timeout: 5000 }).catch(() => {});
+        return page.evaluate((i) => { const m = document.getElementById(i + '-err'); return { err: m.hidden ? '' : m.textContent, save: document.getElementById('btn-pf-save').disabled }; }, id);
+      };
+      const fp0 = (await prof()).fingerprint;
+      check('profile: “Lift after a dot” comes before “Pause after the lift” (the machine lifts, then pauses)', await page.evaluate(() =>
+        !!(document.getElementById('pf-lift').compareDocumentPosition(document.getElementById('pf-liftpause')) & Node.DOCUMENT_POSITION_FOLLOWING)));
+      let r;
+      for (const v of ['0', '10.1']) {
+        r = await typeIn('pf-lift', v, true);
+        check('profile: a lift of ' + v + ' mm is refused at the field, as the engine refuses it (Save locked)', r.err === 'Must be above 0 and at most 10 mm, or blank.' && r.save, r);
+      }
+      r = await typeIn('pf-lift', '3', false);
+      check('profile: a lift of 3 mm is taken', r.err === '', r);
+      r = await typeIn('pf-liftpause', '5001', true);
+      check('profile: a pause after the lift of 5001 ms is refused at the field, as the engine refuses it (Save locked)', r.err === 'Must be 0 to 5000 ms.' && r.save, r);
+      for (const v of ['5000', '0', '500']) {
+        r = await typeIn('pf-liftpause', v, false);
+        check('profile: a pause after the lift of ' + v + ' ms is taken', r.err === '', r);
+      }
+      r = await typeIn('pf-lift', '', true);
+      check('profile: a pause with a blank lift is refused at the lift, as the engine refuses it (Save locked)',
+        r.err === 'Needed for the pause after the lift: give a lift, or set the pause to 0.' && r.save, r);
+      await page.fill('#pf-lift', '3');
+      await waitText(page, 'pf-diff-t', /lift after a dot/, 5000).catch(() => {});
+      const bar = { parts: await textOf(page, 'pf-diff-t'), cons: await textOf(page, 'pf-diff-c') };
+      check('profile: the unsaved bar names the lift, then the pause; plans become stale',
+        bar.parts.includes('lift after a dot the machine’s hop height → 3.0 mm · pause after the lift 0 → 500 ms') && /plans become stale/.test(bar.cons), bar);
+      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+      await page.click('#btn-pf-save');
+      const p1 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 500 && s.dispense.profile.liftMm === 3, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: the lift and the pause are saved with the recipe (3 mm, 500 ms; the fingerprint gains “ pause=500 lift=3.000”)',
+        !!p1 && p1.fingerprint === fp0 + ' pause=500 lift=3.000' && p1.problems.length === 0, p1 && { fp0, fp: p1.fingerprint, problems: p1.problems });
+      await page.waitForFunction(() => { const t = document.querySelector('#pf-recipe .recipe'); return !!t && /pause 500 ms$/.test(t.getAttribute('aria-label')); }, null, { timeout: 10000 }).catch(() => {});
+      const token = await page.evaluate(() => { const t = document.querySelector('#pf-recipe .recipe'); return t && t.getAttribute('aria-label'); });
+      check('profile: the recipe token ends “· lift 3 mm · pause 500 ms”', / · lift 3 mm · pause 500 ms$/.test(token || ''), token);
+      await page.screenshot({ path: path.join(OUT, 'profiles-lift-pause.png'), fullPage: true });
+      const ev = await page.evaluate((fp) => IL.eventText("instancelabs dispense blocks: d1 profile 'p' " + fp), p1 && p1.fingerprint);
+      check('events: a fingerprint with the pause and the lift is folded away', ev === "instancelabs dispense blocks: d1 profile 'p'", ev);
+      await nav(page, 'setup');
+      await page.waitForFunction(() => /pause 500 ms/.test((document.getElementById('card-angle') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
+      const angleCard = await page.evaluate(() => (document.getElementById('card-angle') || {}).textContent || '');
+      check('setup: the start-angle card lists the recipe’s lift and pause', /purge \d+ · lift 3 mm · pause 500 ms/.test(angleCard), angleCard);
+      await nav(page, 'profile');
+      await page.waitForSelector('#pf-lift', { state: 'visible', timeout: 10000 });
+      await page.fill('#pf-liftpause', '0');
+      r = await typeIn('pf-lift', '3e', true);
+      check('profile: a lift that is not a number (“3e”) is refused, never read as blank (Save would clear the saved 3 mm; Save locked)',
+        r.err === 'Enter a number or leave it blank.' && r.save, r);
+      await page.fill('#pf-lift', '');
+      await waitText(page, 'pf-diff-t', /lift after a dot 3\.0 mm → the machine’s hop height/, 5000).catch(() => {});
+      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+      await page.click('#btn-pf-save');
+      const p2 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 0 && s.dispense.profile.liftMm === null, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: a blank lift is saved as null (the machine’s hop height); the fingerprint is the one before, byte for byte',
+        !!p2 && p2.fingerprint === fp0, { fp0, fp: p2 && p2.fingerprint, liftMm: p2 && p2.liftMm });
+    }
+
     // ---- regulator attestation (§9.4): a psi change expires it for good, also when the psi is set back --------
     {
       const regState = () => page.evaluate(() => IL.ready().items.find((x) => x.key === 'regulator').state);

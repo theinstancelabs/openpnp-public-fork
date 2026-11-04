@@ -1228,8 +1228,8 @@ final class DispenseEndpoints {
         DispenseConfig cfg = svc.getConfig();
         DispensePlan full = e.plan;
         if (!cfg.profile.fingerprint().equals(full.profileFingerprint) || cfg.needleZOffsetMm != full.needleZOffsetMm
-                || cfg.gapMm() != full.needleGapMm || cfg.hopHeightMm != full.hopHeightMm) {
-            throw ApiException.refused("the dispense profile, needle offset, gap or hop height changed since this plan "
+                || cfg.gapMm() != full.needleGapMm || cfg.liftMm() != full.hopHeightMm) {
+            throw ApiException.refused("the dispense profile, needle offset, gap or lift height changed since this plan "
                     + "was made (its dots would be wrong): plan the board again");
         }
         // Review finding: a board moved, re-checked (fiducials) or edited after planning was not detected.

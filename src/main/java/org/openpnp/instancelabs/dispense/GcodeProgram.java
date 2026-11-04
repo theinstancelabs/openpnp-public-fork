@@ -117,7 +117,8 @@ public class GcodeProgram {
     public double estimatedSeconds;
     /**
      * Board programs, by plan dot index: estimated seconds from the program start to the needle
-     * arriving over the dot (after its XY move) and to the end of its lift. Same estimate as above.
+     * arriving over the dot (after its XY move) and to the end of its lift (and its pause after the lift). Same
+     * estimate as above.
      */
     public double[] dotArriveSeconds, dotEndSeconds;
     /** Board programs: estimated seconds from the cross after the purge to the last dot (bench DPH). */

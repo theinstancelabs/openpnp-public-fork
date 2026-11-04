@@ -89,9 +89,10 @@ export IL_API_URL="http://127.0.0.1:$IL_API_PORT/"
 export UINAV UINAV_SESSION="$SESSION"
 export SIM_SCENE="$SESSION_CONFIG/instancelabs/sim-scene.json"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/il-webui-pw-browsers}"
-# The scripts in their order. WEBUI_SCRIPTS="pad-profile tip-setups" runs only the ones named (in this order, whatever
-# the order given): CI runs them as parallel jobs, each in a fresh session, and each passes alone with the same counts as
-# in the full run (Infra's ask, 10-31). A script that needs another's state makes it itself.
+# The scripts in their order. WEBUI_SCRIPTS="lock lock-real" runs only the ones named (in this order, whatever the order
+# given): CI runs them as parallel legs, each in a fresh session (infra/ci/webui_shards.py). pad-profile and tip-setups
+# use the state webui-sim and board-import (and pad-profile) leave in their session, and refuse to start without them:
+# each script gets WEBUI_RAN, the scripts that ran before it in this session (needs-before.cjs).
 # tip-flow: the Tip flow of the agreed mockups (docs/ui-flows/tip-setup-flow.md), after tip-setups, on the tips it set up
 # jog and jog-real: Machine › Control (jog, move to a place, the cameras: BR-49 + BR-53), stubbed, then against the
 # engine's own routes (jog-real skips on an OpenPnP without them; it presses STOP on the SIM at its end)
@@ -99,7 +100,7 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/il-webui-pw-br
 # BR-03: §7 of docs/backend-requests.md; the new status fields stubbed, the writes caught: nothing moves)
 # lock and lock-real: who has the machine and Take control (P0, BR-72), the stubbed states, then the engine's own lock
 # (lock presses STOP on the SIM at its end)
-ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups tip-flow jog jog-real reset-home-pressure lock lock-real tip-values"
+ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups tip-flow jog jog-real reset-home-pressure lock lock-real tip-values clean-pads"
 WEBUI_SCRIPTS="${WEBUI_SCRIPTS:-$ALL_SCRIPTS}"
 for name in $WEBUI_SCRIPTS; do
   case " $ALL_SCRIPTS " in *" $name "*) ;; *) echo "WEBUI_SCRIPTS: unknown script '$name' (known: $ALL_SCRIPTS)" >&2; exit 2 ;; esac
@@ -112,6 +113,7 @@ run_script() {
     *) node "$HERE/$1.playwright.cjs" ;;
   esac
 }
+RAN=""
 for name in $ALL_SCRIPTS; do
-  case " $WEBUI_SCRIPTS " in *" $name "*) run_script "$name" ;; esac
+  case " $WEBUI_SCRIPTS " in *" $name "*) WEBUI_RAN="$RAN" run_script "$name"; RAN="${RAN:+$RAN }$name" ;; esac
 done

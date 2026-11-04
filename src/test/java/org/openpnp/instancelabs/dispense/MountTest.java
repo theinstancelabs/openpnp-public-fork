@@ -231,6 +231,38 @@ public class MountTest {
         }
     }
 
+    /**
+     * BR-82 review: the lift is the recipe's, like its pause. The 25G saved with pause 500 and lift 3, the 22G mounted
+     * and the machine's hop height changed: the 25G mounted again lifts its 3 mm, and the hop height stays as it was.
+     */
+    @Test
+    public void theRecipesLiftComesBackWithItsTip() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            f.mount(K25);
+            svc.updateConfigAtomically(live -> {
+                live.profile.liftPauseMs = 500;
+                live.profile.liftMm = 3.0;
+                return live;
+            });
+            f.mount(Tip.SEED_KEY);
+            assertNull(svc.getConfig().profile.liftMm, "the 22G's recipe has no lift of its own");
+            assertEquals(1.0, svc.getConfig().liftMm(), 0, "the machine's hop height");
+            svc.updateConfigAtomically(live -> {
+                live.hopHeightMm = 1.2;
+                return live;
+            });
+            f.mount(K25);
+            DispenseConfig c = svc.getConfig();
+            assertEquals(500, c.profile.liftPauseMs);
+            assertEquals(3.0, c.profile.liftMm, 0);
+            assertEquals(3.0, c.liftMm(), 0, "its dots lift 3 mm again");
+            assertEquals(1.2, c.hopHeightMm, 0, "the machine's hop height stays as it was");
+            assertTrue(c.profile.doseFingerprint().endsWith(" pause=500 lift=3.000"), c.profile.doseFingerprint());
+        }
+    }
+
     @Test
     public void theLiveStartAngleIsKeptAcrossAMount() throws Exception {
         try (TipFixture f = new TipFixture()) {
