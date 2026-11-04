@@ -37,7 +37,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const WHY = 'The controller was reset at 16:20 (switched off, or its reset button): the head position is unknown';
 // the stub: what the status says (applied to the simulator's own answer), and what this page sent
-const stub = { reset: null, motorOff: null, angleSetAgoMs: null, i12: null, ready: true, homes: [], pressures: [], angles: [], stops: 0, pressureAnswer: null };
+const stub = { reset: null, motorOff: null, angleSetAgoMs: null, i12: null, ready: true, homes: [], pressures: [], angles: [], stops: 0, pressureAnswer: null, linkLost: null };
+// BR-93's words as the engine sends them (Backend 11-04 15:5x): `why` carries the time, `next` is shown as given
+const LOST = { why: 'the link to the controller was lost at 16:21 (the controller left USB: /dev/serial/by-id/usb-STM32 is gone)',
+  next: 'once the board is back on USB: Stop, then Start (or restart il-openpnp), then Home as after a reset' };
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
 function patch(s) {
   const now = s.server && s.server.timeMs ? s.server.timeMs : Date.now();
   const m = s.machine = s.machine || {};
@@ -73,6 +77,11 @@ function patch(s) {
   if (stub.i12) {
     s.interlocks = (s.interlocks || []).filter((i) => i.id !== 'I12').concat([Object.assign({ id: 'I12', text: stub.i12.state === 'ok' ? 'the needle is over the waste' : 'the needle is over the board' }, stub.i12)]);
   } else if (s.interlocks) s.interlocks = s.interlocks.filter((i) => i.id !== 'I12');
+  // BR-93: the link to the controller lost; OpenPnP still reads enabled, except after a failed write or a Stop
+  if (stub.linkLost) {
+    Object.assign(m, { connected: false, homed: false, positionKnown: false, enabled: stub.linkLost.enabled !== false,
+      linkLost: { atMs: now - 60000, why: LOST.why, next: LOST.next } });
+  }
   return s;
 }
 async function stubRoutes(context) {
@@ -299,6 +308,28 @@ const visibleFixes = (page, root) => page.evaluate((r) => Array.from(document.qu
     check('(4) the busy refusal is shown as given', /OpenPnP is busy \(homing or moving\): wait for it to finish/.test(ref || ''), ref);
     stub.pressureAnswer = null;
     await page.screenshot({ path: path.join(OUT, 'rhp-pressure.png') });
+
+    // ---- (5) the link to the controller lost (BR-93): the strip and Machine › Control say so in the engine's words ----------
+    await page.evaluate(() => { IL.panel.close(); IL.go('#machine'); });
+    stub.linkLost = { enabled: true };
+    await page.waitForFunction(() => !!(IL.S.status.machine || {}).linkLost, null, { timeout: 8000 }).catch(() => null);
+    await sleep(1200);
+    const lostNow = () => page.evaluate(() => { const c = document.getElementById('cell-machine'), h = document.getElementById('btn-home'), st = document.getElementById('btn-start');
+      const w = document.getElementById('jog-why'), pad = [...document.querySelectorAll('#jog-pad button[data-axis]')];
+      return { v: c.querySelector('.cell__v').textContent.replace(/\s+/g, ' ').trim(), title: c.title, cls: c.className, home: !!h && !h.hidden, start: !!st && !st.hidden,
+        why: w && !w.hidden ? w.textContent : '', padLocked: pad.length > 0 && pad.every((b) => b.disabled) }; });
+    const said = (t) => t.includes(cap(LOST.why)) && t.includes(cap(LOST.next));
+    const l5 = await lostNow();
+    check('(5) a lost link: the Machine cell says "Controller lost" with the engine\'s why and next step, and offers no Home', /Controller lost/.test(l5.v)
+      && /cell--block/.test(l5.cls) && said(l5.title) && !l5.home && !l5.start, l5);
+    check('(5) Machine › Control: the jog pad waits, in the same words (not "home first")', l5.padLocked && said(l5.why) && !/home first/i.test(l5.why), l5);
+    // Stop (or a failed write) leaves OpenPnP stopped: the cell still says the link was lost, and offers Start (the next step)
+    stub.linkLost = { enabled: false };
+    await sleep(1500);
+    const l5b = await lostNow();
+    check('(5) stopped too: the cell still says the link was lost, and offers Start', /Controller lost/.test(l5b.v) && said(l5b.title) && l5b.start && !l5b.home, l5b);
+    await page.screenshot({ path: path.join(OUT, 'rhp-link-lost.png') });
+    stub.linkLost = null;
 
     check('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
     check('no native dialogs', dialogs.length === 0, dialogs);
