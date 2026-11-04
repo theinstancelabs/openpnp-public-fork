@@ -19,7 +19,7 @@
    Styles: runflow.css. */
 'use strict';
 (function () {
-  const { el, S } = IL;
+  const { el, $, S } = IL;
   const isNum = IL.isNum;
   const R = IL.run;
   /** Readiness items Start settles itself: it plans and it registers (the probe ties the surface). */
@@ -92,7 +92,13 @@
     const ns = needs();
     if (ns.length) return 'First what needs you: ' + ns.map((x) => (x.short || x.title).toLowerCase()).join(', ') + '.';
     const p = planOf(e);
-    if (pastedPads(p) && !F.wiped) return 'This board has paste on ' + IL.plural(pastedPads(p), 'pad') + ': tick "No paste on it", or finish the pads left (Step by step).';
+    // today's Register gate (the needle Z frame, the fiducials, the camera, the probe's reach) once its plan is shown
+    const rw = p && planCurrent(p) ? R.flow.registerWhy(s, R.flow.probeOnlyPlan(p)) : null;
+    if (rw) return rw.text.replace(/\.?$/, '.');
+    if (pastedPads(p) && !F.wiped) {
+      return (R.flow.padsLeft(p).length ? 'This board has paste on ' + IL.plural(pastedPads(p), 'pad') + ': press "It is a new board", tick "I wiped it", or finish the pads left (Step by step).'
+        : 'This board is done: put a new one in and press "It is a new board", or wipe it and tick "I wiped it".');
+    }
     return null;
   }
 
@@ -113,6 +119,8 @@
   }
   async function choose(e, btn) {
     if (!e || F.chain || (e.key === R.form.sel && planOf(e))) return;
+    const lock = IL.lockReason(S.status);
+    if (lock) { IL.toast(lock, 'need'); return; }
     R.flow.selectBoard(e.key);
     const seat = seatOf(e);
     if (!seat) return;   // Load side 1 says where to set it
@@ -122,31 +130,37 @@
   async function start(btn) {
     const e = chosen();
     if (!e || F.chain) return;
-    F.chain = { step: 'plan', pressAt: Date.now() };
+    F.chain = { step: 'plan' };
     IL.render();
+    // the answers and the checks again before each step: an 8 h answer can lapse, another tab can untick it, a new plan
+    // can block pads; the run is posted only for the plan this registration made
+    const gate = () => { const why = startReason(S.status); if (why) throw new Error(why); };
     await IL.act(btn, async () => {
       if (!planCurrent(planOf(e))) {
         const seat = seatOf(e);
         if (!seat) throw new Error('Where does this board sit? Plan it once in Step by step › Board.');
         await R.flow.plan(planBody(e, seat));
       }
+      gate();
       const p = S.plan;
-      Object.assign(F.chain, { step: 'find', planId: p.planId, findAt: Date.now() });
+      const before = (S.status && S.status.run && S.status.run.runId) || null;
+      Object.assign(F.chain, { step: 'find', findAt: Date.now() });
       IL.render();
-      const reg = await R.flow.register('auto');
+      const reg = await R.flow.register(R.flow.probeOnlyPlan(p) ? 'always' : 'auto');
       const waitS = (isNum(reg && reg.estimatedSeconds) ? reg.estimatedSeconds : 120) * 3 + 120;
       const end = await until((st) => {
         const r = st && st.run;
-        return r && r.label === 'board registration' && IL.basePlanId(r.planId) === p.planId && !r.running && r.finishedAtMs
-          && IL.toClient(r.finishedAtMs) >= F.chain.findAt - 1000 ? r : null;
+        return r && r.label === 'board registration' && r.runId && r.runId !== before && IL.basePlanId(r.planId) === p.planId && !r.running ? r : null;
       }, waitS * 1000, 'Find the board');
-      if (end.status !== 'OK') throw new Error('Find the board ended: ' + (end.message || end.status) + ' Nothing was pasted.');
+      if (end.status !== 'OK') throw new Error('Find the board ended (' + String(end.status).toLowerCase() + '): ' + String(end.message || 'no message').replace(/\.?$/, '.') + ' Nothing was pasted.');
+      if (!end.nextPlanId) throw new Error('Find the board did not plan the board again, so nothing was pasted: see Step by step › Register.');
       F.chain.foundS = end.elapsedS;
-      if (end.nextPlanId) await until(() => S.plan && S.plan.planId === end.nextPlanId, 30000, 'The plan of the board found');
+      await until(() => S.plan && S.plan.planId === end.nextPlanId, 30000, 'The plan of the board found');
+      gate();
       F.chain.step = 'paste';
       IL.render();
-      const body = { planId: S.plan.planId };
-      if (F.wiped) body.wiped = true;   // the server forgets this seat's paste first (a new board, or wiped)
+      const body = { planId: end.nextPlanId };
+      if (F.wiped) body.wiped = true;   // ticked "I wiped it": the server forgets this seat's paste first
       return R.flow.run(body, 'full');
     }, { refusalIn: F.n.refusals, what: 'Start', ok: (r) => (r ? 'Pasting started: ' + IL.plural(r.dots, 'dot') + '. You can leave now.' : null) });
     F.chain = null;
@@ -175,6 +189,7 @@
   }
   function mount(root) {
     const n = F.n;
+    n.refusals = el('div', { id: 'rs-refusals', 'data-refusals': '' });
     n.eyebrow = el('div', { class: 'eyebrow', text: 'Make a board' });
     n.title = el('h1', { class: 'tf-h1', id: 'rs-title' });
     n.meta = el('div', { class: 'meta', id: 'rs-meta' });
@@ -239,7 +254,7 @@
       if (!R.boards) return el('p', { class: 'muted', text: 'Reading the boards…' });
       const cards = list.map((x) => {
         const on = x.key === R.form.sel;
-        const b = el('button', { type: 'button', class: 'design', 'data-board': x.key, 'aria-pressed': on ? 'true' : 'false', title: x.x.file || x.name },
+        const b = el('button', { type: 'button', class: 'design', 'data-board': x.key, 'data-focus-key': 'design:' + x.key, 'aria-pressed': on ? 'true' : 'false', title: x.x.file || x.name },
           el('span', { class: 'design__img' }, pic(x.x.art && x.x.art.id, 300, 130)),
           el('span', { class: 'design__t', text: x.name }),
           el('span', { class: 'design__s', text: on && p && p.summary ? 'chosen · ' + IL.plural(p.summary.pads, 'pad') : isNum(x.x.placements) ? IL.plural(x.x.placements, 'part') : x.kind === 'job' ? 'the job in OpenPnP' : '' }));
@@ -272,9 +287,7 @@
       RAIL.map((name, i) => {
         const st = states[i];
         const g = st === 'done' ? 'ok' : st === 'need' ? 'need' : st === 'live' ? 'live' : 'wait';
-        const glyph = el('span', { class: 'st st--sm st--' + g, role: 'img' });
-        if (g === 'ok' || g === 'need') IL.setGlyph(glyph, g, 'sm'); else if (g === 'live') glyph.append(el('span', { class: 'pulse', style: 'width:8px;height:8px' }));
-        else glyph.append(String(i + 1));
+        const glyph = IL.setGlyph(el('span'), g, 'sm', null, g === 'wait' ? String(i + 1) : undefined);
         return el('div', { class: 'step' + (st === 'done' ? ' step--done' : st === 'need' ? ' step--need' : st === 'live' ? ' step--live' : ''), 'data-k': name,
           'aria-current': st === 'need' || st === 'live' ? 'step' : null }, glyph, el('span', { class: 'step__t', text: name }), el('span', { class: 'step__s', text: subs[i] || '' }));
       })));
@@ -339,12 +352,6 @@
     if (first) {
       parts.body.append(el('div', { class: 'panel__title' }, el('h2', { text: v === 'live' ? 'Side 1 · now' : v === 'needs' ? 'Needs you' : 'Done' })));
       n.pBody = el('div', { class: 'rf-pbody', id: 'rv-panel', 'data-refusals': '' });
-      if (v === 'live') {
-        const stop = el('button', { type: 'button', class: 'stop stop--panel', id: 'rv-stop' },
-          el('span', { class: 'stop__word', text: 'STOP' }), el('span', { class: 'stop__sub' }, el('kbd', { text: 'F9' }), ' motion · vent · screw off'));
-        stop.addEventListener('click', () => IL.stop('Run › Live'));
-        parts.body.append(stop);
-      }
       parts.body.append(n.pBody);
     }
     const f = viewFacts(s, v);
@@ -410,18 +417,21 @@
         });
         return { key, input, lab, row: el('label', { class: 'check' }, input, lab) };
       });
-      n.pressure = el('button', { type: 'button', class: 'btn btn--sm', id: 'rs-pressure', title: 'Pressure on to read the gauge (press twice unless the needle is over the waste)' },
-        IL.icon('i-gauge'), 'Pressure on to adjust');
-      n.pressure.addEventListener('click', (ev) => IL.runFix('pressure-on', n.pressure, null, ev));
+      n.pressure = IL.fixButton({ fix: 'pressure-on', label: 'Pressure on to adjust', title: 'Pressure on to read the gauge (press twice unless the needle is over the waste)' });
+      n.pressure.id = 'rs-pressure';
+      F.wiped = false;
       n.wiped = el('input', { type: 'checkbox', id: 'rs-tick-wiped' });
       n.wiped.addEventListener('change', () => { F.wiped = n.wiped.checked; IL.render(); });
       n.wipedLab = el('span');
-      n.wipeRow = el('label', { class: 'check', id: 'rs-wipe-row', hidden: true }, n.wiped, n.wipedLab);
+      n.newBoard = el('button', { type: 'button', class: 'btn btn--sm', id: 'rs-new-board', title: 'Unload the board with paste and load a new one: a new seat, and the board count goes up at its first dot. Nothing moves.' },
+        'It is a new board');
+      n.newBoard.addEventListener('click', () => { R.flow.nextBoard(); IL.render(); });
+      n.wipeRow = el('div', { class: 'rf-wipe', id: 'rs-wipe-row', hidden: true }, el('div', { class: 'rf-cap', id: 'rs-wipe-why' }), n.newBoard,
+        el('label', { class: 'check' }, n.wiped, n.wipedLab));
       n.sess = el('div', { class: 'sess', id: 'rs-session' },
         el('div', { class: 'sess__h' }, n.sessGlyph, el('div', {}, 'Before you start', n.sessSub)),
         n.ticks[0].row, n.ticks[1].row, el('div', { class: 'rf-gauge' }, n.ticks[2].row, n.pressure), n.wipeRow);
       n.cards = el('div', { class: 'rf-cards', id: 'rs-need-cards' });
-      n.refusals = el('div', { id: 'rs-refusals', 'data-refusals': '' });
       n.needs = el('div', { class: 'rf-needs', id: 'rs-needs' }, n.cards, n.refusals);
       n.then = el('ol', { class: 'phases', id: 'rs-then' });
       parts.body.append(n.sess, n.needs, el('div', { class: 'section-k' }, 'Then, by itself', el('span', { class: 'rule' })), n.then);
@@ -445,11 +455,20 @@
     IL.setText(n.sessSub, all ? 'Answered. Kept 8 hours, or until the tip, the paste or the pressure changes.' : 'Three answers only you can give. Kept 8 hours. A new barrel\'s record is not built yet (BR-65).');
     const e = chosen(), p = planOf(e), pasted = pastedPads(p);
     IL.show(n.wipeRow, pasted > 0);
-    if (pasted) IL.setText(n.wipedLab, 'No paste on it now: a new board, or wiped (the server says ' + IL.plural(pasted, 'pad') + ' have paste)');
-    else if (F.wiped) { F.wiped = false; n.wiped.checked = false; }
-    // what needs you first
+    if (!pasted) F.wiped = false;
+    IL.setText($('rs-wipe-why'), pasted ? 'The board on this seat has paste on ' + IL.plural(pasted, 'pad') + ' (the server keeps it).' : '');
+    IL.setText(n.wipedLab, 'I wiped it: no paste on it now');
+    if (n.wiped.checked !== F.wiped) n.wiped.checked = F.wiped;
+    for (const x of [n.wiped, n.newBoard].concat(n.ticks.map((t) => t.input))) x.disabled = !!F.chain;
+    // what needs you first: a run of this plan that was refused (its words), then the checks
+    const ref = R.refused && S.plan && IL.planMatches(R.refused.planId) ? R.refused : null;
     const ns = needs();
-    IL.keyed(n.cards, JSON.stringify(ns.map((x) => [x.key, x.state, x.title, x.detail, (x.fixes || []).map((f) => f.fix)])), () => ns.map((x, i) => R.flow.needCard(x, i === 0, s)));
+    const clean = ref && /^I10/.test(String(ref.message || '')) ? IL.ready().items.find((x) => x.key === 'clean' && !x.ready) : null;
+    if (clean && !ns.includes(clean)) ns.push(clean);
+    IL.keyed(n.cards, JSON.stringify([ref && [ref.runId, ref.message], ns.map((x) => [x.key, x.state, x.title, x.detail, (x.fixes || []).map((f) => f.fix)])]), () => [
+      ref ? el('div', { class: 'ri ri--block', 'data-key': 'refused' }, IL.glyph('block'), el('div', {}, el('div', { class: 'ri__t', text: 'The last run was refused' }),
+        el('div', { class: 'ri__d', text: String(ref.message || 'Refused before anything moved.') }))) : null]
+      .concat(ns.map((x, i) => R.flow.needCard(x, !ref && i === 0, s))));
     // then, by itself
     const c = F.chain, reg = s && s.run && s.run.label === 'board registration' && s.run.running ? s.run : null;
     const regS = regSeconds(p), est = p ? R.flow.estimate(s) : null;
@@ -466,7 +485,7 @@
     const reason = c ? null : startReason(s);
     const total = (est ? est.total : 0) + (regS || 0);
     IL.setText(n.start, c ? (c.step === 'find' ? 'Finding the board…' : c.step === 'paste' ? 'Starting the paste…' : 'Planning…') : 'Start' + (total ? ' · ' + minutes(total) : ''));
-    if (!c) IL.gate(n.start, reason);
+    IL.gate(n.start, c ? 'Start is under way' : reason);
     IL.setText(n.why, reason || '');
     IL.show(n.why, !!reason);
   }

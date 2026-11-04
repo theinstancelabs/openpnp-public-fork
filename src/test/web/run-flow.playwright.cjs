@@ -64,6 +64,26 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     await page.waitForFunction(() => window.IL && IL.S && IL.S.status && IL.runFlow && IL.ready, null, { timeout: 30000 });
     await page.waitForFunction(() => !!document.getElementById('btn-rs-start'), null, { timeout: 15000 }).catch(() => null);
 
+    // ---- (0) the state it needs, from what the main leg leaves: tip-flow mounts a second tip of its own (no pad types):
+    // the setup with the board's pad types goes back on, its needle frame by hand as tip-flow does when the mount lost it
+    const tips0 = ((await page.evaluate(() => IL.api('GET', '/api/tip-setups'))) || {}).setups || [];
+    const typed = tips0.filter((x) => !x.retired && x.padTypes && (x.padTypes.names || []).length);
+    const use = typed.find((x) => x.mounted) || typed[0] || null;
+    if (use && !use.mounted) await page.evaluate((k) => IL.api('POST', '/api/tip-setups/' + encodeURIComponent(k) + '/mount', { why: 'run-flow test: the tip with the board\'s pad types' }), use.key);
+    let st0 = await page.evaluate(() => IL.api('GET', '/api/status'));
+    if (use && !(st0.dispense.needle.anchored && st0.dispense.needle.touchedOff)) {
+      const locs = await page.evaluate(() => IL.api('GET', '/api/locations'));
+      const bz = locs && locs.blank && typeof locs.blank.z === 'number' ? locs.blank.z : null;
+      if (bz !== null) {
+        const fr = await page.evaluate(([z, tk]) => IL.api('POST', '/api/needle/anchor', { surfaceZ: z, needleContactZ: Number((z - 2.59).toFixed(3)), note: 'run-flow test: both tips, by hand', needleChangedAtMs: tk }),
+          [bz, st0.dispense.needle.changedAtMs]);
+        await page.evaluate(([off, tk]) => IL.api('POST', '/api/needle/offset', { offsetMm: off, note: 'run-flow test: the frame offset confirmed', needleChangedAtMs: tk }), [fr.offsetMm, st0.dispense.needle.changedAtMs]);
+      }
+      st0 = await page.evaluate(() => IL.api('GET', '/api/status'));
+    }
+    check('(0) the setup with the board\'s pad types is on, its needle frame recorded', !!use && st0.dispense.tip.key === use.key && st0.dispense.needle.anchored,
+      { use: use && use.key, tip: st0.dispense.tip.key, needle: st0.dispense.needle });
+
     // ---- (1) Run opens Start while nothing runs ---------------------------------------------------------------------
     const s1 = await page.evaluate(() => ({ run: IL.S.status.run, hash: location.hash }));
     check('(1) Run, while nothing runs, opens Start: its own main column and panel, not today\'s board picture', await shown(page, '#run-start')
@@ -82,6 +102,15 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     const planned = await page.evaluate(() => { const s = IL.S.plan && IL.S.plan.source; return s ? (s.source === 'job' ? 'job:' + s.boardLocationId : 'file:' + s.file) : null; });
     check('(2) the planned board is the chosen one', !!planned && cards.filter((c) => c.pressed === 'true').map((c) => c.board).join() === planned, { planned, cards });
     check('(2) New design opens Designs', (await page.getAttribute('#rs-new-design', 'href')) === '#designs');
+    // the SIM scene's board: the one with a stored registration (the runner's board, registered by webui-sim)
+    const simBoard = (boards.files || []).find((b) => b.file && b.registration && b.registration.nominal);
+    const key2 = simBoard ? 'file:' + simBoard.file : null;
+    if (key2) await page.click('#rs-designs .design[data-board="' + key2.replace(/"/g, '\\"') + '"]');
+    const p2 = await page.waitForFunction((f) => IL.S.plan && IL.S.plan.source && IL.S.plan.source.file === f && IL.S.plan, simBoard && simBoard.file, { timeout: 30000 })
+      .then((h) => h.jsonValue(), () => null);
+    const nom = simBoard && simBoard.registration.nominal;
+    check('(2) a click on a design plans it where it sat (its last registration): the card is pressed', !!p2 && !!nom && Math.abs(p2.source.x - nom.x) < 1e-6
+      && Math.abs(p2.source.y - nom.y) < 1e-6 && (await page.getAttribute('#rs-designs .design[aria-pressed="true"]', 'data-board')) === key2, { key2, nom, src: p2 && p2.source });
 
     // ---- (3) Boards this run -----------------------------------------------------------------------------------------
     const b3 = await page.evaluate(() => ({ one: document.getElementById('rs-one').getAttribute('aria-pressed'), tile: document.getElementById('rs-tile').disabled,
@@ -107,6 +136,13 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     check('(5) the three ticks are kept as today\'s answers (8 h) and free Start of them', kept.every(Boolean) && !/tip|paste|gauge/.test(st5b.why), { kept, st5b });
     check('(5) Start says it is also "hands and tools clear", and when you can leave', /hands and tools are clear/.test(await page.textContent('#rs-start-cap'))
       && /you can leave/.test(await page.textContent('#rs-start-cap')));
+    if (await shown(page, '#rs-wipe-row')) {
+      const why5 = await startState(page);
+      await page.click('#rs-new-board');
+      const gone = await page.waitForSelector('#rs-wipe-row', { state: 'hidden', timeout: 15000 }).then(() => true, () => false);
+      check('(5) paste on this seat\'s board: Start waits, and "It is a new board" takes it off (a new seat, nothing moves)', /paste on|is done/.test(why5.why) && gone,
+        { why5, newSeat: await page.evaluate(() => IL.S.newSeatAtMs || (IL.S.status.dispense || {}).newSeatAtMs || null) });
+    }
     await page.screenshot({ path: path.join(OUT, 'run-start.png') });
 
     // ---- (6) a need of the readiness checks ---------------------------------------------------------------------------
@@ -160,7 +196,7 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
       rail: Array.from(document.querySelectorAll('#rv-rail .step')).map((x) => [x.dataset.k, x.className.replace(/^step ?/, '')]),
       heroHere: !!document.querySelector('#rv-slot > #run-hero'), tiles: Array.from(document.querySelectorAll('#rv-tiles .tile')).map((x) => x.dataset.k),
       parts: ((document.querySelector('#rv-tiles .tile[data-k="Parts"] .tile__s') || {}).textContent || ''),
-      stop: !!document.getElementById('rv-stop'), check: ((document.querySelector('#rv-steps li[data-k="check"]') || {}).textContent || '') })), () => null);
+      stop: (() => { const x = document.getElementById('panel-stop'); return !!x && !x.hidden; })(), check: ((document.querySelector('#rv-steps li[data-k="check"]') || {}).textContent || '') })), () => null);
     check('(10) Live: "You can leave now", the rail with Paste live, the board picture in its frame, four tiles, STOP in the panel', !!live && /You can leave now/.test(live.leave)
       && live.rail.some(([k, c]) => k === 'Paste' && /live/.test(c)) && live.heroHere && ['Pads', 'Parts', 'Side 1 left', 'Paste on since'].every((k) => live.tiles.includes(k)) && live.stop, live);
     check('(10) Live: what the machine cannot do yet says so (parts, check the paste)', !!live && /not built yet/.test(live.parts) && /not built yet/.test(live.check), live);

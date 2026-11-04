@@ -3130,7 +3130,8 @@
       R.regLoaded[run.runId] = true;
       if (run.detail) R.regDetail = { runId: run.runId, detail: run.detail };
       adoptRegPlan(run);
-      setRegResult(run.runId);
+      // Start's own registration (runflow.js) goes on to its run: no result card for today's Register step
+      if (!(IL.runFlow && IL.runFlow.chaining())) setRegResult(run.runId);
       R.byHand = false;
       if (IL.active() === 'run' && R.section && R.section !== 'probe') goStep('probe');
       IL.render();
@@ -3153,9 +3154,12 @@
   // the Run menu item opens Start again, also from today's pages (the same #run does not route again)
   const tabRun = $('tab-btn-run');
   if (tabRun) tabRun.addEventListener('click', () => { R.steps = false; if (IL.active() === 'run') IL.render(); });
+  // and its key, Alt+1 (core's handler goes to #run, which does not route again from #run)
+  document.addEventListener('keydown', (e) => { if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'Digit1') R.steps = false; }, true);
   // what Start does through run.js, so both keep one board choice, one plan and one run bookkeeping
   R.flow = {
     selectBoard, loadBoards, needCard, padsDone, padsLeft, remembered, resultRun, boardNumber, openConfirm, nextBoard,
+    registerWhy, probeOnlyPlan,
     stopped: (s) => stopDecision(s) || partialDecision(s),
     estimate: (s) => estimate(s),
     /** Back to Start after Done (the result was seen). */
