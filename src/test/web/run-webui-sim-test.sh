@@ -73,9 +73,10 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/il-webui-pw-br
 # The scripts in their order. WEBUI_SCRIPTS="pad-profile tip-setups" runs only the ones named (in this order, whatever
 # the order given): CI runs them as parallel jobs, each in a fresh session, and each passes alone with the same counts as
 # in the full run (Infra's ask, 10-31). A script that needs another's state makes it itself.
+# tip-flow: the Tip flow of the agreed mockups (docs/ui-flows/tip-setup-flow.md), after tip-setups, on the tips it set up
 # lock and lock-real: who has the machine and Take control (P0, BR-72), the stubbed states, then the engine's own lock
 # (lock presses STOP on the SIM at its end)
-ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups lock lock-real"
+ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups tip-flow lock lock-real"
 WEBUI_SCRIPTS="${WEBUI_SCRIPTS:-$ALL_SCRIPTS}"
 for name in $WEBUI_SCRIPTS; do
   case " $ALL_SCRIPTS " in *" $name "*) ;; *) echo "WEBUI_SCRIPTS: unknown script '$name' (known: $ALL_SCRIPTS)" >&2; exit 2 ;; esac
