@@ -1,24 +1,30 @@
 package org.openpnp.instancelabs.dispense;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * BR-03: where the valve and the screw may switch on, in machine X/Y where the needle's paste lands. Allowed, option (b)
  * of the process engineer's 11-04 decision: the places and surfaces the engine's run settings name as where paste goes.
- * The sink places (the waste by {@code wasteLocationName}, the towel, the cup: a circle of {@code placeRadiusMm}), each
- * coupon's rectangle, the purge row and the calibration area (each with {@code marginMm}), and the probed board and
- * blank surfaces ({@code boardSurfaceName}: plan runs; {@code blankLocationName}: the dot ladder and the touch-off) by
- * I4's own rule ({@link Interlocks#onSurface}: within {@code surfaceMarginMm} of its points), so I4 and I12 never
- * disagree about a dot. Every other place (the park, feeder picks, camera places, the oven) and every other probed
- * surface is outside; a refusal there names it. Forbidden, whatever else covers it: the bottom camera (a circle of
- * {@code forbidRadiusMm}) and the configured circles. With the valve on the needle never crosses a forbidden zone.
- * The pressure hold, which may drool for minutes, opens the valve only over a sink: the waste, the towel, the cup, the
- * purge row, the calibration area or a coupon (never over a board or another surface: #12's final review).
- * The refusals say what to do in their context: the hold where the needle is ({@link #refusal}), its park
- * ({@link #parkRefusal}), a program's line ({@link #lineRefusal}) and move ({@link #crossing}).
+ * The sink places (the waste by {@code wasteLocationName}, the test dot's spot on it, the towel, a cup: a circle of
+ * {@code placeRadiusMm}), each coupon's rectangle, the purge row and the calibration area (the default one at the blank
+ * when unset; each with {@code marginMm}), and the probed board and blank surfaces ({@code boardSurfaceName}: plan
+ * runs; {@code blankLocationName}: the dot ladder and the touch-off) by I4's own rule ({@link Interlocks#onSurface}:
+ * within {@code surfaceMarginMm} of its points), so I4 and I12 never disagree about a dot; a program is also allowed
+ * the surfaces its own I4 scope names (a dot ladder at another place lays its dots on that place's surface). Every
+ * other place (the park, feeder picks, camera places, the oven) and every other probed surface is outside; a refusal
+ * there names it. Forbidden, whatever else covers it: the bottom camera (a circle of {@code forbidRadiusMm}) and the
+ * configured circles. With the valve on the needle never crosses a forbidden zone. The pressure hold, which may drool
+ * for minutes, opens the valve only over a sink: the waste, the towel, a cup, the purge row, the calibration area or a
+ * coupon (never over a board or another surface: #12's final review). The refusals say what to do in their context:
+ * the hold where the needle is ({@link #refusal}), its park ({@link #parkRefusal}), a program's line
+ * ({@link #lineRefusal}) and move ({@link #crossing}).
  */
 public final class OutputZones {
     /** A circle, a box or a probed surface, in machine X/Y (mm). */
@@ -27,7 +33,7 @@ public final class OutputZones {
         public final String name, label;
         public final boolean circle;
         public final double a, b, c, d; // circle: cx, cy, r; box: x0, y0, x1, y1
-        /** Takes the pressure hold's drool: the waste, the towel, the cup, the purge row, the area, a coupon. */
+        /** Takes the pressure hold's drool: the waste, the towel, a cup, the purge row, the area, a coupon. */
         public final boolean sink;
         /** A probed surface's plane and the configuration whose I4 margin applies; null for a circle or a box. */
         private final SurfacePlane plane;
@@ -114,9 +120,20 @@ public final class OutputZones {
     }
 
     /**
+     * The default set: where the needle may hold the pressure and what the status shows (no program).
+     *
      * @param bottomCameraXY the bottom camera's X/Y (mm), or null when the machine has none
      */
     public static OutputZones of(DispenseConfig c, double[] bottomCameraXY) {
+        return of(c, bottomCameraXY, null);
+    }
+
+    /**
+     * The zones a program is validated against: the default set plus the surfaces its own I4 {@code scope} names
+     * ({@code surfaceName}, {@code moreSurfaces}), by I4's rule, so I4 and I12 agree on a run's own surface (the dot
+     * ladder and the touch-off take a {@code locationName}: their dots lie on that place's surface). Null: the default.
+     */
+    public static OutputZones of(DispenseConfig c, double[] bottomCameraXY, Interlocks.Scope scope) {
         OutputZones z = new OutputZones();
         DispenseConfig.OutputZoneSettings s = c.outputZones != null ? c.outputZones
                 : new DispenseConfig.OutputZoneSettings();
@@ -133,11 +150,17 @@ public final class OutputZones {
             }
         }
         for (Map.Entry<String, DispenseConfig.NamedLocation> e : c.locations.entrySet()) {
-            if (e.getValue() != null) {
+            // the test dot's spot is taken from the waste below: its stored copy lags a moved waste until the next one
+            if (e.getValue() != null && !e.getKey().equals(DispenseService.WASTE_TEST_DOT)) {
                 boolean sink = isSinkPlace(c, e.getKey());
                 (sink ? z.allow : z.other).add(Zone.circle(e.getKey(), "the place '" + e.getKey() + "'", sink,
                         e.getValue().x, e.getValue().y, s.placeRadiusMm));
             }
+        }
+        DispenseConfig.NamedLocation waste = c.location(c.wasteLocationName);
+        if (waste != null) {
+            z.allow.add(Zone.circle(DispenseService.WASTE_TEST_DOT, "the place '" + DispenseService.WASTE_TEST_DOT
+                    + "'", true, waste.x + c.testDotOffsetXMm, waste.y + c.testDotOffsetYMm, s.placeRadiusMm));
         }
         if (c.padCalibration != null && c.padCalibration.couponPlaces != null) {
             for (String place : c.padCalibration.couponPlaces) {
@@ -152,50 +175,59 @@ public final class OutputZones {
             double[] first = row.spot(0), last = row.spot(row.spots - 1);
             z.allow.add(Zone.box("purge row", first[0], first[1], last[0], last[1], s.marginMm));
         }
-        CalibrationArea area = c.calibrationArea;
-        if (area != null && area.isDefined()) {
+        // unset, the pad calibration and the landing check use the default area at the blank
+        CalibrationArea area = c.calibrationArea == null ? null : c.calibrationArea.effective(c);
+        if (area != null) {
             z.allow.add(Zone.box("calibration area", area.x0Mm, area.y0Mm, area.x0Mm + area.widthMm,
                     area.y0Mm + area.heightMm, s.marginMm));
+        }
+        // plan runs dispense on the board surface, the dot ladder and the touch-off on the blank, a program on its own
+        Set<String> used = new LinkedHashSet<>(Arrays.asList(c.boardSurfaceName, c.blankLocationName));
+        if (scope != null) {
+            if (scope.surfaceName != null) {
+                used.add(scope.surfaceName);
+            }
+            used.addAll(scope.moreSurfaces.keySet());
         }
         for (Map.Entry<String, DispenseConfig.SurfaceMap> e : c.surfaces.entrySet()) {
             DispenseConfig.SurfaceMap m = e.getValue();
             if (m == null) {
                 continue;
             }
-            // plan runs dispense on the board surface, the dot ladder and the touch-off on the blank
-            boolean used = e.getKey().equals(c.boardSurfaceName) || e.getKey().equals(c.blankLocationName);
             try {
-                (used ? z.allow : z.other).add(Zone.surface(e.getKey(), SurfacePlane.fit(m.points), c));
+                (used.contains(e.getKey()) ? z.allow : z.other).add(Zone.surface(e.getKey(), SurfacePlane.fit(
+                        m.points), c));
             }
             catch (IllegalArgumentException notAPlane) {
                 // fewer than 3 points or all on one line: I4 refuses every dot on it too
             }
         }
-        z.where = "the waste, the towel, the cup, the purge row, the calibration area, a coupon, or the probed '"
-                + c.boardSurfaceName + "' or '" + c.blankLocationName + "' surface";
+        List<String> names = new ArrayList<>();
+        for (String n : used) {
+            names.add("'" + n + "'");
+        }
+        String last = names.remove(names.size() - 1);
+        z.where = "the waste, the towel, a cup, the purge row, the calibration area, a coupon, or the probed "
+                + (names.isEmpty() ? "" : String.join(", ", names) + " or ") + last + " surface";
         return z;
     }
 
-    /**
-     * The places that take the hold's drool: the waste (by its setting), the towel, and a cup: any place named like a
-     * cup or a scale, as the scale shots' picker offers them (calibrate.js).
-     */
+    /** A cup: "cup" or "scale" as a part of a place's name ("cup2", "Scale", "scale-cup", "cup_1"; not "cupboard"). */
+    private static final Pattern CUP = Pattern.compile("(?i)(^|[-_])(cup|scale)([-_0-9]|$)");
+
+    /** The places that take the hold's drool: the waste (by its setting), the towel, and a cup ({@link #CUP}). */
     static boolean isSinkPlace(DispenseConfig c, String name) {
-        if (name == null) {
-            return false;
-        }
-        String n = name.toLowerCase(Locale.ROOT);
-        return name.equalsIgnoreCase(c.wasteLocationName) || n.equals("towel") || n.contains("cup")
-                || n.contains("scale");
+        return name != null && (name.equalsIgnoreCase(c.wasteLocationName) || name.equalsIgnoreCase("towel")
+                || CUP.matcher(name).find());
     }
 
     /** "forbidden: <name>", the name of the allowed zone the point is in, or null when it is in none. */
     public String zoneAt(double x, double y) {
-        Zone f = forbiddenAt(x, y);
+        Zone f = first(forbid, x, y);
         if (f != null) {
             return "forbidden: " + f.name;
         }
-        Zone a = allowedAt(x, y);
+        Zone a = first(allow, x, y);
         return a == null ? null : a.name;
     }
 
@@ -223,12 +255,12 @@ public final class OutputZones {
      */
     public String lineRefusal(String what, double x, double y) {
         String at = String.format(Locale.ROOT, "%s puts paste at (%.1f, %.1f), ", what, x, y);
-        Zone f = forbiddenAt(x, y);
+        Zone f = first(forbid, x, y);
         if (f != null) {
             return at + String.format(Locale.ROOT, "over %s, where the valve and the screw stay off: set that place "
                     + "or surface %.0f mm or more away from it", f.label, f.c);
         }
-        return allowedAt(x, y) != null ? null : at + why(x, y);
+        return first(allow, x, y) != null ? null : at + why(x, y);
     }
 
     /**
@@ -251,10 +283,9 @@ public final class OutputZones {
      * paste on, where paste goes instead; else how far it lies beyond the nearest allowed zone.
      */
     private String why(double x, double y) {
-        for (Zone o : other) {
-            if (o.contains(x, y)) {
-                return "over " + o.label + ", which takes no paste: paste goes only on " + where;
-            }
+        Zone o = first(other, x, y);
+        if (o != null) {
+            return "over " + o.label + ", which takes no paste: paste goes only on " + where;
         }
         Zone near = null;
         for (Zone a : allow) {
@@ -266,9 +297,12 @@ public final class OutputZones {
                 + "surface it dispenses on" : near.outside(x, y);
     }
 
-    /** Why the pressure hold may not open the valve at (x, y), null when it may: only a sink takes its drool. */
+    /**
+     * Why the pressure hold may not open the valve at (x, y), null when it may: only a sink takes its drool. Names the
+     * zone the needle is over, allowed or not, as {@link #why} does.
+     */
     private String whyHold(double x, double y) {
-        Zone f = forbiddenAt(x, y);
+        Zone f = first(forbid, x, y);
         if (f != null) {
             return "over " + f.label + ", where the valve and the screw stay off";
         }
@@ -277,34 +311,19 @@ public final class OutputZones {
                 return null;
             }
         }
-        Zone a = allowedAt(x, y);
-        return (a != null ? "over " + a.label + ", " : "") + "not over a place that takes paste while the pressure is "
-                + "held (the waste, the towel, the cup, the purge row, the calibration area or a coupon)";
+        Zone over = first(allow, x, y);
+        over = over != null ? over : first(other, x, y);
+        return (over != null ? "over " + over.label + ", " : "") + "not over a place that takes paste while the "
+                + "pressure is held (the waste, the towel, a cup, the purge row, the calibration area or a coupon)";
     }
 
-    private Zone forbiddenAt(double x, double y) {
-        for (Zone f : forbid) {
-            if (f.contains(x, y)) {
-                return f;
+    /** The first of the zones that holds (x, y), or null. */
+    private static Zone first(List<Zone> zones, double x, double y) {
+        for (Zone z : zones) {
+            if (z.contains(x, y)) {
+                return z;
             }
         }
         return null;
-    }
-
-    private Zone allowedAt(double x, double y) {
-        for (Zone a : allow) {
-            if (a.contains(x, y)) {
-                return a;
-            }
-        }
-        return null;
-    }
-
-    public List<Zone> allowed() {
-        return new ArrayList<>(allow);
-    }
-
-    public List<Zone> forbidden() {
-        return new ArrayList<>(forbid);
     }
 }

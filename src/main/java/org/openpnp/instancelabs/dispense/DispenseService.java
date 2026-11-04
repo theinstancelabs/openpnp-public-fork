@@ -3194,6 +3194,7 @@ public final class DispenseService {
             if (!r.interlocks.ok()) {
                 return s.refuse(r.interlocks.toString());
             }
+            s.scope = withEstimate.scope;
             if (c.cleanPadCheck.enabled) {
                 phase(r, "I10 clean pads: top camera at every dot (pressure off)");
                 r.cleanCheck = PadCleanReport.of(c.cleanPadCheck);
@@ -5200,6 +5201,7 @@ public final class DispenseService {
         if (!r.interlocks.ok()) {
             throw refused(r.interlocks.toString());
         }
+        s.scope = scope;
         // before frames: camera only, and every spot must be bare
         DotImager im = req.image ? imager() : null;
         if (req.image && (im == null || !im.isAvailable())) {
@@ -6461,6 +6463,8 @@ public final class DispenseService {
         final DispenseExecutor exec;
         final boolean keepalive;
         boolean streamed;
+        /** What the run touches (I4; its last preflight's): I12 allows its programs the surfaces it names. */
+        Interlocks.Scope scope;
 
         Session(DispenseConfig c, RunResult r) throws Exception {
             this.c = c;
@@ -6515,6 +6519,7 @@ public final class DispenseService {
 
         /** Interlocks for calibration/shots runs (no plan rules, no I9-I11; I4 per the scope). */
         boolean preflight(Interlocks.Scope scope, double estimatedPressurisedSeconds) {
+            this.scope = scope;
             r.interlocks = Interlocks.check(interlockInputs(c.copy(), null, estimatedPressurisedSeconds, scope, false,
                     false));
             if (!r.interlocks.ok()) {
@@ -6540,7 +6545,7 @@ public final class DispenseService {
             GcodeProgram p = build.call();
             List<String> problems = GcodeStreamValidator.validate(p, c, mapper.letterB(),
                     GcodeStreamValidator.zWindow(c, mapper, p.floorReferenceZMm),
-                    GcodeStreamValidator.ZoneCheck.of(OutputZones.of(c, bottomCameraXY()), mapper));
+                    GcodeStreamValidator.ZoneCheck.of(OutputZones.of(c, bottomCameraXY(), scope), mapper));
             if (!problems.isEmpty()) {
                 throw new IllegalStateException("generated G-code failed validation: " + problems);
             }

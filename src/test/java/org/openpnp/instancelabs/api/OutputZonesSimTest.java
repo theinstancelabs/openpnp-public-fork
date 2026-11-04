@@ -23,6 +23,7 @@ import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DotImager;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.instancelabs.dispense.TipCamera;
+import org.openpnp.instancelabs.vision.Dot;
 import org.openpnp.machine.reference.camera.SimulatedUpCamera;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.LengthUnit;
@@ -395,6 +396,108 @@ public class OutputZonesSimTest {
         assertTrue(why.contains("valve or screw lines put paste where it may not go; the first: the valve ON at line ")
                 && why.contains("puts paste at (120.0, 60.0), over the place 'park', which takes no paste"), why);
         assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
+    }
+
+    /** A top camera that sees one 0.7 mm dot at the centre of every frame. */
+    static final class SeesADot implements DotImager {
+        @Override
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @Override
+        public DotImager.Frame capture(double x, double y) {
+            return new DotImager.Frame(null, 0.01, 0.01, x, y);
+        }
+
+        @Override
+        public List<Dot> inspect(DotImager.Frame before, DotImager.Frame after) {
+            return java.util.Collections.singletonList(new Dot(0, 0, 0.7, Math.PI * 0.7 * 0.7 / 4, 0.9));
+        }
+    }
+
+    /** A place at (x, y) on the needle frame's surface (Z 5.5), with its own probed surface around it. */
+    void placeWithItsSurface(String name, double x, double y) throws Exception {
+        ok("PUT", "/api/locations/" + name, String.format(java.util.Locale.ROOT, "{\"x\":%.1f,\"y\":%.1f,\"z\":5.5}", x,
+                y));
+        ok("PUT", "/api/surfaces/" + name, String.format(java.util.Locale.ROOT, "{\"points\":[[%.1f,%.1f,5.5],"
+                + "[%.1f,%.1f,5.5],[%.1f,%.1f,5.5]]}", x - 5, y - 5, x + 10, y - 5, x, y + 10));
+    }
+
+    /** The dot ladder's result (it waits for the run). */
+    JsonObject ladderAt(String place) throws Exception {
+        return ok("POST", "/api/calibrations/dot-ladder", "{\"locationName\":\"" + place + "\",\"rotationsDeg\":[30],"
+                + "\"repeats\":2,\"wait\":true}").getAsJsonObject("result").getAsJsonObject("run");
+    }
+
+    /**
+     * Review 11-04 (MAJOR): the dot ladder at a place other than the blank ({@code locationName}, as Calibrate offers
+     * every place) lays its dots on that place's own probed surface, which I4 checks them on: I12 allows them there
+     * too (it refused every dot, after the before images). Shots at that place name no surface and are still refused,
+     * and a ladder over the bottom camera is still refused before a line is sent.
+     */
+    @Test
+    public void aDotLadderAtAnotherPlaceGoesOnItsOwnSurface() throws Exception {
+        ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        ok("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}");
+        landing(0, 0);
+        svc.setDotImager(new SeesADot());
+        placeWithItsSurface("tile", 120, 60);
+        sim.server.mark();
+        JsonObject run = ladderAt("tile");
+        assertEquals("OK", run.get("status").getAsString(), run.toString());
+        assertTrue(sim.server.sinceMark().contains("M106 P3 S255"), "the valve opened");
+
+        sim.server.mark();
+        run = ok("POST", "/api/calibrations/shots-run", "{\"locationName\":\"tile\",\"rotationDeg\":180,\"count\":1,"
+                + "\"wait\":true}").getAsJsonObject("result");
+        String why = run.get("message").getAsString();
+        assertTrue(!"OK".equals(run.get("status").getAsString()) && why.contains("puts paste at (120.0, 60.0), over "
+                + "the place 'tile', which takes no paste"), run.toString());
+        assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
+
+        placeWithItsSurface("lens", CAM_X + 4, CAM_Y);
+        sim.server.mark();
+        run = ladderAt("lens");
+        why = run.get("message").getAsString();
+        assertTrue(!"OK".equals(run.get("status").getAsString()) && why.contains("I12: ") && why.contains(
+                "over the bottom camera, where the valve and the screw stay off"), run.toString());
+        assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
+    }
+
+    /**
+     * Review 11-04 (MINOR): after a controller reset (BR-02) the position is unknown, whatever OpenPnP's model shows:
+     * I12's status says so with the reason (info, no zone), never "over the towel" from the model.
+     */
+    @Test
+    public void theZoneIsUnknownWhileThePositionIs() throws Exception {
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.machine.setEnabled(true);
+        String unknown = svc.positionUnknownWhy();
+        assertTrue(unknown != null && unknown.contains("reset"), String.valueOf(unknown));
+        sim.towelUnderNeedle(svc); // OpenPnP's model has the needle over the towel
+        JsonObject z = i12();
+        assertEquals("info", z.get("state").getAsString(), z.toString());
+        assertTrue(z.get("zone").isJsonNull(), z.toString());
+        assertEquals("the needle's position is unknown: " + unknown, z.get("text").getAsString());
+    }
+
+    /**
+     * Safety, found in the 11-04 review: {@code outputZones} is merged one level deep, so a partial PUT of one of its
+     * fields keeps the forbidden circles (it replaced the whole object, and dropped them).
+     */
+    @Test
+    public void aPartialPutOfTheZoneSettingsKeepsTheForbiddenCircles() throws Exception {
+        ok("PUT", "/api/config", "{\"outputZones\":{\"forbid\":[{\"name\":\"feeder\",\"x\":40,\"y\":200,"
+                + "\"radiusMm\":8}]}}");
+        ok("PUT", "/api/config", "{\"outputZones\":{\"placeRadiusMm\":4}}");
+        JsonObject z = ok("GET", "/api/config", null).getAsJsonObject("outputZones");
+        assertEquals(4, z.get("placeRadiusMm").getAsDouble(), 1e-9, z.toString());
+        assertEquals(1, z.getAsJsonArray("forbid").size(), z.toString());
+        assertEquals("feeder", z.getAsJsonArray("forbid").get(0).getAsJsonObject().get("name").getAsString());
+        call("PUT", "/api/config", "{\"outputZones\":{\"noSuchKnob\":1}}");
+        assertEquals(400, lastStatus, lastBody);
     }
 
     /** The bottom camera as the tip picture sees it: OpenPnP's up-looking camera's X/Y, a plain frame. */

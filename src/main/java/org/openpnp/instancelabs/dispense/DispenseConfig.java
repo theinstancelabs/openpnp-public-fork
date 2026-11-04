@@ -329,14 +329,14 @@ public class DispenseConfig {
 
     /**
      * BR-03 output zones ({@link OutputZones}): the valve and the screw switch on only with the needle over an allowed
-     * zone (the waste, the towel, the cup, the purge row, the calibration area, a coupon, the probed board or blank
+     * zone (the waste, the towel, a cup, the purge row, the calibration area, a coupon, the probed board or blank
      * surface) and outside every forbidden one (the bottom camera, the configured circles); with the valve on, the
      * needle never crosses a forbidden zone.
      */
     public static class OutputZoneSettings {
         /** Radius of the forbidden circle around the bottom camera (mm). */
         public double forbidRadiusMm = 15;
-        /** Radius of the allowed circle around each sink place: the waste, the towel, the cup (mm). */
+        /** Radius of the allowed circle around each sink place: the waste, the towel, a cup (mm). */
         public double placeRadiusMm = 6;
         /**
          * Margin around the purge row, the calibration area and each coupon (mm). A probed surface follows I4's

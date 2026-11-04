@@ -71,13 +71,16 @@ public class OutputZonesTest {
         assertNull(z.zoneAt(40, 200), "the oven");
         assertNull(z.zoneAt(410, 305), "a probed patch no run names");
         assertEquals("dot 'shot' at line 9 puts paste at (60.0, 120.0), over the place 'park', which takes no paste: "
-                + "paste goes only on the waste, the towel, the cup, the purge row, the calibration area, a coupon, or "
+                + "paste goes only on the waste, the towel, a cup, the purge row, the calibration area, a coupon, or "
                 + "the probed 'board' or 'blank' surface", z.lineRefusal("dot 'shot' at line 9", 60, 120));
         String oven = z.lineRefusal("dot 'shot' at line 9", 40, 200);
         assertTrue(oven != null && oven.contains("over the place 'oven', which takes no paste"), oven);
         String patch = z.lineRefusal("the valve ON at line 4", 410, 305);
         assertTrue(patch != null && patch.contains("over the probed 'zref' surface, which takes no paste"), patch);
-        assertNotNull(z.refusal(60, 120), "nor does the hold open the valve there");
+        // nor does the hold open the valve there, and it names the place too (review 11-04)
+        assertEquals("the needle (60.0, 120.0) is over the place 'park', not over a place that takes paste while the "
+                + "pressure is held (the waste, the towel, a cup, the purge row, the calibration area or a coupon): park "
+                + "first (or start it with park: 'waste')", z.refusal(60, 120));
         // the places and areas runs use stay allowed
         assertEquals("waste", z.zoneAt(100, 50));
         assertEquals("towel", z.zoneAt(214, 38));
@@ -122,6 +125,73 @@ public class OutputZonesTest {
     }
 
     /**
+     * Review 11-04 (MAJOR): the dot ladder and the touch-off at another place ({@code locationName}) lay their dots on
+     * that place's own probed surface, which I4 checks them on ({@link DispenseService#blankScope}): the zones their
+     * program is validated against allow it by I4's rule, as they allow a pad calibration's further surfaces
+     * ({@code moreSurfaces}). Shots at the place name no surface and stay refused; the camera still wins; the hold and
+     * the status (no program) keep the default set.
+     */
+    @Test
+    public void aProgramsOwnSurfacesAreAllowedForIt() {
+        DispenseConfig c = config();
+        c.locations.put("tile", new DispenseConfig.NamedLocation(170, 30, 5.5));
+        c.locations.put("park", new DispenseConfig.NamedLocation(60, 120, 31.5));
+        c.surfaces.put("tile", patch(160, 20, 215, 20, 190, 60)); // reaches over the bottom camera at (200, 30)
+        c.surfaces.put("strip", patch(400, 300, 420, 300, 410, 315));
+        OutputZones ladder = OutputZones.of(c, CAMERA, DispenseService.blankScope(c, "tile", true, false, null));
+        assertEquals("surface tile", ladder.zoneAt(176, 32));
+        assertNull(ladder.lineRefusal("dot 'ladder r=30' at line 20", 176, 32));
+        assertEquals("forbidden: bottom camera", ladder.zoneAt(200, 30), "the camera still wins");
+        assertNotNull(ladder.lineRefusal("dot 'ladder r=30' at line 20", 200, 30));
+        assertTrue(ladder.lineRefusal("dot 'shot' at line 9", 60, 120).endsWith("or the probed 'board', 'blank' or "
+                + "'tile' surface"), ladder.lineRefusal("dot 'shot' at line 9", 60, 120));
+        String shot = OutputZones.of(c, CAMERA, DispenseService.shotsScope("tile", false)).lineRefusal(
+                "dot 'shot' at line 9", 170, 30);
+        assertTrue(shot != null && shot.contains("over the place 'tile', which takes no paste"), shot);
+        Interlocks.Scope pads = new Interlocks.Scope();
+        pads.moreSurfaces.put("strip", new ArrayList<>());
+        assertEquals("surface strip", OutputZones.of(c, CAMERA, pads).zoneAt(410, 305));
+        OutputZones none = OutputZones.of(c, CAMERA);
+        assertNull(none.zoneAt(176, 32), "no program: the default set");
+        assertNotNull(none.refusal(176, 32));
+    }
+
+    /**
+     * Review 11-04 (MINOR): the test dot's spot ('waste-test-dot': the waste + {@code testDotOffsetX/YMm}, as the test
+     * dot derives it) is on the waste: a sink, also beyond the waste's circle. It follows the waste; the stored copy a
+     * moved waste leaves behind (until the next test dot) takes no paste.
+     */
+    @Test
+    public void theTestDotsSpotIsASink() {
+        DispenseConfig c = config();
+        c.testDotOffsetXMm = 8; // beyond the waste's 6 mm circle
+        c.locations.put(DispenseService.WASTE_TEST_DOT, new DispenseConfig.NamedLocation(108, 50, 5));
+        OutputZones z = OutputZones.of(c, CAMERA);
+        assertEquals(DispenseService.WASTE_TEST_DOT, z.zoneAt(108, 50));
+        assertNull(z.lineRefusal("dot 'shot' at line 9", 108, 50), "the test dot");
+        assertNull(z.refusal(108, 50), "a hold over it");
+        c.locations.put("waste", new DispenseConfig.NamedLocation(100, 90, 5));
+        z = OutputZones.of(c, CAMERA);
+        assertNull(z.refusal(108, 90), "the spot follows the waste");
+        assertNotNull(z.refusal(108, 50), "the stored spot left behind");
+    }
+
+    /**
+     * Review 11-04 (MINOR): with no calibration area set (the bench configs), the pad calibration and the landing check
+     * lay their dots in the default one, 40 x 20 mm at the blank place ({@link CalibrationArea#effective}): that is
+     * the zone, and a sink.
+     */
+    @Test
+    public void anUnsetCalibrationAreaIsTheDefaultAtTheBlank() {
+        DispenseConfig c = config();
+        c.locations.put("blank", new DispenseConfig.NamedLocation(170, 120, 5.5));
+        OutputZones z = OutputZones.of(c, CAMERA);
+        assertEquals("calibration area", z.zoneAt(205, 135));
+        assertNull(z.refusal(205, 135), "a sink");
+        assertNull(z.zoneAt(215, 135), "beyond its 40 mm and the 2 mm margin");
+    }
+
+    /**
      * #12 final review M1: the hold opens the valve only over a sink (the waste, the towel, the cup, the purge row,
      * the calibration area, a coupon), never over a board or another surface (a finished board would take 18 psi of
      * drool); a program keeps every allowed zone (I4 holds its dots to their surface).
@@ -148,6 +218,11 @@ public class OutputZonesTest {
         assertNull(named.refusal(140, 80), "a second cup");
         assertNull(named.refusal(140, 110), "the scale's cup");
         assertNotNull(named.refusal(110, 110), "the oven spot is no sink");
+        // review 11-04: "cup" or "scale" as a part of the name, not inside a longer word
+        for (String cup : new String[] {"cup", "cup2", "Scale", "scale-cup", "cup_1"}) {
+            assertTrue(OutputZones.isSinkPlace(c, cup), cup);
+        }
+        assertFalse(OutputZones.isSinkPlace(c, "cupboard"));
         assertNull(z.refusal(85, 230), "the purge row");
         assertNull(z.refusal(30, 170), "the calibration area");
         String board = z.refusal(310, 268);
@@ -257,7 +332,7 @@ public class OutputZonesTest {
         assertTrue(why.contains("not over a place that takes paste while the pressure is held"), why);
         assertNull(z.zoneAt(150, 150));
         assertEquals("the valve ON at line 4 puts paste at (150.0, 150.0), and no place where paste may go is set (the "
-                + "waste, the towel, the cup, the purge row, the calibration area, a coupon, or the probed 'board' or "
+                + "waste, the towel, a cup, the purge row, the calibration area, a coupon, or the probed 'board' or "
                 + "'blank' surface): set the place or probe the surface it dispenses on",
                 OutputZones.of(new DispenseConfig(), null).lineRefusal("the valve ON at line 4", 150, 150));
     }

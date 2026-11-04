@@ -70,7 +70,7 @@ final class DispenseEndpoints {
     /** Nested settings PUT /api/config merges one level deep (a partial object keeps the other fields). */
     static final java.util.Set<String> NESTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "profile", "purgeRow", "cleanPadCheck", "fiducialCheck", "vacuumProbe", "paste", "calibrationArea",
-            "padCalibration"));
+            "padCalibration", "outputZones"));
     /**
      * Nested fields only the engine or their own endpoints change: the start angle's set time (I11:
      * POST /api/screw/start-angle, or a changed angle), the time of the purge reset,
@@ -289,10 +289,13 @@ final class DispenseEndpoints {
         }
         // BR-03: where the needle is, and whether the valve and the screw may switch on there (every program's lines
         // are checked against the same zones; the pressure hold parks first or refuses)
-        double[] at = svc.needleXY();
+        // BR-02: after a controller reset OpenPnP's model is no position
+        String unknown = svc.positionUnknownWhy();
+        double[] at = unknown == null ? svc.needleXY() : null;
         OutputZones zones = svc.outputZones();
         String zone = at == null ? null : zones.zoneAt(at[0], at[1]);
-        String out = at == null ? "the needle's position is unknown" : zones.refusal(at[0], at[1]);
+        String out = at != null ? zones.refusal(at[0], at[1])
+                : "the needle's position is unknown" + (unknown == null ? "" : ": " + unknown);
         l.add(Views.map("id", "I12", "name", "Valve and screw only over a place where paste may go", "state",
                 out == null ? "ok" : "info", "text", out == null ? "the needle is over " + zone : out, "zone", zone));
         return l;
