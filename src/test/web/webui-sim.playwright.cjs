@@ -355,6 +355,14 @@ async function runFirstDots(page, n) {
     await page.selectOption('#pf-turn', '800');
     await page.fill('#pf-suck', '10');
     await page.fill('#pf-dwell', '260');
+    // the gap's bound follows the engine's (0.05 to 0.30 mm since #29): 0.31 refused at the field, 0.25 taken
+    await page.fill('#pf-gap', '0.31');
+    await page.waitForFunction(() => !document.getElementById('pf-gap-err').hidden, null, { timeout: 5000 }).catch(() => {});
+    const gapHi = await page.evaluate(() => ({ err: document.getElementById('pf-gap-err').textContent, save: document.getElementById('btn-pf-save').disabled }));
+    check('profile: a gap of 0.31 mm is refused at the field, as the engine refuses it (Save locked)', gapHi.err === 'Must be 0.05 to 0.30 mm.' && gapHi.save, gapHi);
+    await page.fill('#pf-gap', '0.25');
+    await page.waitForFunction(() => document.getElementById('pf-gap-err').hidden, null, { timeout: 5000 }).catch(() => {});
+    check('profile: a gap of 0.25 mm is taken (the 25G 0603 recipe runs at 0.20)', await page.evaluate(() => document.getElementById('pf-gap-err').hidden));
     await page.fill('#pf-gap', '0.10');
     await page.fill('#pf-accel', '20000');
     await page.fill('#pf-purge', '8');

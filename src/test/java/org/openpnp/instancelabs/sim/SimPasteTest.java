@@ -205,6 +205,17 @@ public class SimPasteTest {
         assertEquals(2, d.aMm / d.bMm, 1e-9);
     }
 
+    /** A dot commanded at exactly the reach lands: s + 0.20 - s is 0.20000000000000018 in doubles (Backend, 11-04). */
+    @Test
+    public void aDotAtExactlyTheReachLands() {
+        SimScene s = exact();
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.dotAt(300, 240, BLANK_Z + s.paste.maxGapMm, BLANK_Z + 1.20, 800);
+        assertEquals(1, p.deposits(null).size(), "laid, not held in the air");
+    }
+
     @Test
     public void theScrewCannotPumpFasterThanThePasteFeedsIt() {
         SimScene s = exact();

@@ -159,7 +159,7 @@ that implement §1, §4 and §7.4 literally; the tests of §14 assert the same v
   camera median 0.714 mm², :96), while the reflow-validated boards 2 and 3 showed 6–10 % more pre-reflow dot area
   (0.756 and 0.788 mm², PT/todo.md:197, :213; board 3's tinned pads also "add volume", :203), so the validated mass per
   pad was 1.06–1.16 mg. The anchor's weighing was at gap 0.10 (PT/todo.md:95), boards 2 and 3 at 0.15 (:207); the
-  bench found 0.05–0.15 equivalent (D/DispenseProfile.java:53-54). The anchor is a mass per area that reflow accepted,
+  bench found 0.05–0.15 equivalent (22G, 10-28; the profile allows 0.05–0.30 since 11-04, D/DispenseProfile.java:56-61). The anchor is a mass per area that reflow accepted,
   not a dose record; dose records stay recipe-bound (§1.7).
 - **No silent rescaling.** Every automatic calibration lays the profile dose first as a control (§7.4) and weighs it when
   no confirmed mass at the recipe exists (§7.5); the result reports the validated recipe's drift
@@ -903,7 +903,7 @@ maxDiameterMm 3.0, V/DotInspectorSettings.java:10-21, so strings and big dots ar
 ### 7.5 The weighing
 
 - **Why not shots in the cup.** `runShots` stacks every shot at one XY (D/DispenseService.java:936-940): a half-turn dot
-  is ≈ 0.4 mm tall (PT/todo.md:98) while the needle works 0.05–0.15 mm above the surface (D/DispenseProfile.java:53-54),
+  is ≈ 0.4 mm tall (PT/todo.md:98) while the needle works 0.05–0.30 mm above the surface (D/DispenseProfile.java:56-61),
   so from the second shot on the needle sits in the pile.
 - **Coupons.** Two pieces of blank PCB with the blank's solder mask (so the camera sees the dots and the bare check
   works), at least 40 × 30 mm and 3 g (N1's vacuum touch must not lift one; parts stay on a vented tip,
