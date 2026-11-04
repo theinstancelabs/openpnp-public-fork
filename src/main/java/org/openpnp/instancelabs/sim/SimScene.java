@@ -167,6 +167,10 @@ public final class SimScene {
         public boolean newPhaseOnMotorOff;
         /** Only whole net turns lay paste; other contacts lay nothing, counted (sub-turns not modelled, INF-06). */
         public boolean wholeTurnsOnly;
+        /** Whole turns a newly mounted tip takes before paste comes out (INF-06 §8); 0 = always full. */
+        public double primeTurns;
+        /** Contacts after a power cycle that come out empty (INF-06 §5: the 22G ~12). */
+        public int emptyDotsAfterPowerCycle;
         /**
          * BR-74: the seed of the dose and thread noise on every connection (null: seed + the connection's number, as
          * before), so a scene's paste is the same however often the controller reconnected (a test alone in a fresh
@@ -209,6 +213,8 @@ public final class SimScene {
             p.offsetSteps = offsetSteps;
             p.newPhaseOnMotorOff = newPhaseOnMotorOff;
             p.wholeTurnsOnly = wholeTurnsOnly;
+            p.primeTurns = primeTurns;
+            p.emptyDotsAfterPowerCycle = emptyDotsAfterPowerCycle;
             p.noiseSeed = noiseSeed;
             p.byTip = new LinkedHashMap<>(byTip);
             return p;
@@ -463,9 +469,11 @@ public final class SimScene {
                     + "feedLimitMgS must be > 0, transferRatio in (0, 1]");
         }
         if (p.ripple < 0 || p.cv < 0 || p.oozeFirst < 0 || p.refillDip < 0 || p.refillDip > 1 || p.idleDeadS < 0
+                || p.primeTurns < 0 || p.emptyDotsAfterPowerCycle < 0
                 || p.threadShare < 0 || p.threadShare > 1 || p.threadFullMg < 0
                 || p.threadZeroMg < p.threadFullMg || p.missBelowMg < 0 || p.landingSdMm < 0) {
-            throw new IllegalArgumentException(what + "negative ripple, cv, transient, idle, miss or landing sd, "
+            throw new IllegalArgumentException(what + "negative ripple, cv, transient, idle, prime turns, empty dots, "
+                    + "miss or landing sd, "
                     + "refillDip or threadShare above 1, or threadZeroMg below threadFullMg");
         }
         if (p.landingBiasMm == null || p.landingBiasMm.length != 2 || p.n2OffsetMm == null
@@ -592,6 +600,9 @@ public final class SimScene {
         p.newPhaseOnMotorOff = o.has("newPhaseOnMotorOff") ? o.get("newPhaseOnMotorOff").getAsBoolean()
                 : p.newPhaseOnMotorOff;
         p.wholeTurnsOnly = o.has("wholeTurnsOnly") ? o.get("wholeTurnsOnly").getAsBoolean() : p.wholeTurnsOnly;
+        p.primeTurns = num(o, "primeTurns", p.primeTurns);
+        p.emptyDotsAfterPowerCycle = o.has("emptyDotsAfterPowerCycle") ? o.get("emptyDotsAfterPowerCycle").getAsInt()
+                : p.emptyDotsAfterPowerCycle;
         if (o.has("noiseSeed")) {
             p.noiseSeed = o.get("noiseSeed").isJsonNull() ? null : Long.valueOf(o.get("noiseSeed").getAsLong());
         }

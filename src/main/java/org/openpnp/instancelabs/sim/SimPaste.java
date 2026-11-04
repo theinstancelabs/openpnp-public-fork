@@ -152,6 +152,7 @@ public final class SimPaste {
         /** (time s, mg) of the paste the screw asked for lately, for the feed demand. */
         private final ArrayDeque<double[]> asked = new ArrayDeque<>();
         private int connections;
+        private final Map<String, Double> primedTurns = new HashMap<>(); // per tip key: turns pushed into it so far
         private double timeS = Double.NEGATIVE_INFINITY;
         private Double lastDotS;
         private String balancePlace;
@@ -218,6 +219,19 @@ public final class SimPaste {
         synchronized void add(Deposit d) {
             deposits.add(d);
             VERSION.incrementAndGet();
+        }
+
+        /**
+         * Of {@code turns} of the screw (negative: back) with tip {@code tip} on, the share its fill takes: forward,
+         * what fills it up to {@code primeTurns}; back, all of it (down to empty) while it is not yet full. The fill
+         * follows the net turns.
+         */
+        synchronized double prime(String tip, double primeTurns, double turns) {
+            double had = primedTurns.getOrDefault(tip, 0.0);
+            double took = turns >= 0 ? Math.max(0, Math.min(turns, primeTurns - had))
+                    : had < primeTurns ? Math.max(turns, -had) : 0;
+            primedTurns.put(tip, had + took);
+            return took;
         }
 
         synchronized int connect() {
@@ -299,6 +313,7 @@ public final class SimPaste {
     // Contacts a wholeTurnsOnly tip refused (not modelled), and whether that was said in the log.
     private int unmodelled;
     private boolean unmodelledWarned;
+    private int emptyLeft; // contacts after a power cycle that still lay nothing (emptyDotsAfterPowerCycle)
     private double motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
     private Double lastMotionS;
     // The screw and the pneumatics.
@@ -420,9 +435,9 @@ public final class SimPaste {
         motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
         lastMotionS = null;
         SimScene sc = scenes.get();
-        if (sc != null) {
-            motorOff(sc.pasteFor(physicalTip(sc))); // the motor was unpowered too
-        }
+        SimScene.Paste tipPaste = sc == null ? null : sc.pasteFor(physicalTip(sc));
+        motorOff(tipPaste); // the motor was unpowered too
+        emptyLeft = tipPaste == null ? 0 : tipPaste.emptyDotsAfterPowerCycle;
         logicalB = 0;
         machineB = 0;
         absolute = true;
@@ -618,7 +633,13 @@ public final class SimPaste {
             dotZ = posZ;
         }
         if (pump && valve) {
-            extruded += flowMg(p, c0, c1, offset(p));
+            long from = c0;
+            if (p.primeTurns > 0) { // a fresh tip fills first (INF-06 §8)
+                String tip = physicalTip(sc);
+                from += Math.round(store.prime(tip == null ? "" : tip, p.primeTurns, (c1 - c0) / (double) STEPS_PER_REV)
+                        * STEPS_PER_REV);
+            }
+            extruded += flowMg(p, from, c1, offset(p));
             pressured = true;
         }
         if (c1 < c0 && forwardSeen) {
@@ -649,6 +670,10 @@ public final class SimPaste {
         pressured = false;
         if (p == null || !pr || ex <= 1e-9) {
             return; // net zero, or no pressure: no paste
+        }
+        if (emptyLeft > 0) {
+            emptyLeft--; // INF-06 §5: the first dots after a power cycle come out empty
+            return;
         }
         long net = count() - dotStartCount;
         if (p.wholeTurnsOnly && !wholeTurns(net)) {

@@ -356,6 +356,54 @@ public class SimPasteTest {
         assertEquals(2, p.unmodelledContacts());
     }
 
+    /**
+     * INF-06 §8 (Process: the UI's tip flow and its No flow stop depend on it): a newly mounted tip gives paste only
+     * after its prime turns; once primed it stays so, across a power cycle and a remount.
+     */
+    @Test
+    public void aFreshTipGivesPasteOnlyAfterItsPrimeTurns() {
+        SimScene s = exact();
+        s.paste.ripple = 0;
+        s.paste.primeTurns = 3;
+        s.physicalTip = "a";
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.dot(300, 240, BLANK_Z, 1600);
+        n.dot(303, 240, BLANK_Z, 1600);
+        assertTrue(p.deposits(null).isEmpty(), "2 of its 3 prime turns: nothing yet");
+        n.dot(306, 240, BLANK_Z, 2400);
+        assertEquals(1, p.deposits(null).size());
+        assertEquals(0.5 * 2.30, p.deposits(null).get(0).mg, 1e-6, "1.5 turns: 1 fills the tip, a half comes out");
+        s.physicalTip = "b";
+        n.dot(309, 240, BLANK_Z, 1600);
+        assertEquals(1, p.deposits(null).size(), "another tip: fresh");
+        s.physicalTip = "a";
+        p.powerCycle();
+        n.pressurize();
+        n.dot(312, 240, BLANK_Z, 1600);
+        assertEquals(2, p.deposits(null).size(), "tip a again, after a power cycle: still primed");
+    }
+
+    /** INF-06 §5 (Process): the 22G lays ~12 empty half-turn dots after a power cycle, then normal ones. */
+    @Test
+    public void emptyDotsAfterAPowerCycle() {
+        SimScene s = exact();
+        s.paste.emptyDotsAfterPowerCycle = 2;
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.dot(300, 240, BLANK_Z, 800);
+        assertEquals(1, p.deposits(null).size(), "no power cycle yet: laid");
+        p.powerCycle();
+        n.pressurize();
+        n.dot(303, 240, BLANK_Z, 800);
+        n.dot(306, 240, BLANK_Z, 800);
+        assertEquals(1, p.deposits(null).size(), "the 2 dots after it are empty");
+        n.dot(309, 240, BLANK_Z, 800);
+        assertEquals(2, p.deposits(null).size(), "then normal again");
+    }
+
     @Test
     public void theScrewPhaseIsTheTipsOwn() {
         SimScene s = scene();
