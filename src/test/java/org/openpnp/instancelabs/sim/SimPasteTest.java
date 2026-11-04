@@ -306,6 +306,44 @@ public class SimPasteTest {
         assertEquals(3, again.deposits(null).size());
     }
 
+    /**
+     * BR-74 (Infra 11-03): a scene's paste is the same however often the controller reconnected. With the scene's
+     * noiseSeed the dose and thread noise does not depend on the connection count, so pad-profile and tip-setups pass
+     * alone in fresh sessions, not only after webui-sim's reconnects; without it, Random((seed + connection) ...)
+     * as before.
+     */
+    @Test
+    public void aNoiseSeedMakesThePasteTheSameOnEveryConnection() {
+        assertEquals(rowMasses(42L, 0), rowMasses(42L, 3), "the same paste on connection 0 and on connection 3");
+        assertNotEquals(rowMasses(null, 0), rowMasses(null, 3), "without: Random(seed + connection) as before");
+        // the scene file's key
+        SimScene parsed = SimScene.of(new com.google.gson.JsonParser().parse("{\"version\": 1, \"board\": {\"file\": "
+                + "\"toy.board.xml\", \"seat\": {\"x\": 0, \"y\": 0}}, \"paste\": {\"noiseSeed\": 42}}")
+                .getAsJsonObject());
+        assertEquals(Long.valueOf(42), parsed.paste.noiseSeed);
+    }
+
+    /** The masses of a row of 6 dots on a fresh scene's paste after {@code reconnects} power cycles. */
+    List<Double> rowMasses(Long noiseSeed, int reconnects) {
+        SimScene s = scene();
+        s.paste.offsetSteps = 0; // the phase pinned, as the calibrating scenes
+        s.paste.noiseSeed = noiseSeed;
+        SimPaste p = paste(s);
+        for (int i = 0; i < reconnects; i++) {
+            p.powerCycle();
+        }
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.row(290, 230, 2.5, 6, BLANK_Z, 800);
+        // the dots and the threads between them: both drawn from the noise
+        List<Double> m = new java.util.ArrayList<>();
+        for (SimPaste.Deposit d : p.deposits("blank")) {
+            m.add(d.mg);
+        }
+        assertEquals(6, SimNeedle.dots(p, "blank").size());
+        return m;
+    }
+
     @Test
     public void withoutAPasteBlockNothingIsLaidOrReported() {
         SimScene s = scene();

@@ -133,14 +133,21 @@ final class DispenseEndpoints {
     // Status (polled by the UI)
     // ------------------------------------------------------------------------------------------
 
+    /** BR-44: when this JVM started (epoch ms), so a status reader can tell OpenPnP's start-up stamps from its own. */
+    static final long JVM_STARTED_AT_MS = java.lang.management.ManagementFactory.getRuntimeMXBean().getStartTime();
+
     Object status(ApiServer s) throws Exception {
         Map<String, Object> out = new LinkedHashMap<>();
         Machine mach = ctx.configuration.getMachine();
         DispenseService svc = ctx.svcOrNull();
-        out.put("server", Views.map("version", Main.getVersion(), "timeMs", System.currentTimeMillis(), "port",
-                s.getPort(), "lanAccess", s.getSettings().lanAccess, "simulated", SimGuard.isLoopbackOnly(mach),
-                "simulatorConfirmed", svc != null ? svc.isSimulatorConfirmed() : SimGuard.isSimulated(mach)));
+        out.put("server", Views.map("version", Main.getVersion(), "timeMs", System.currentTimeMillis(), "startedAtMs",
+                JVM_STARTED_AT_MS, "port", s.getPort(), "lanAccess", s.getSettings().lanAccess, "trustedOrigins",
+                new ArrayList<>(s.getTrustedOrigins()), "simulated",
+                SimGuard.isLoopbackOnly(mach), "simulatorConfirmed",
+                svc != null ? svc.isSimulatorConfirmed() : SimGuard.isSimulated(mach)));
         out.put("machine", machine.machineStatus());
+        // BR-72: who holds the machine, what it does, since when
+        out.put("lock", ctx.lock.view());
         Map<String, Object> d = new LinkedHashMap<>();
         out.put("dispense", d);
         Map<String, Object> pressure = ctx.pressure.snapshot();
@@ -156,12 +163,19 @@ final class DispenseEndpoints {
         // an upload holds the import pipeline: every engine endpoint refuses until it has read the file
         out.put("boardImport", Views.map("reading", BoardImporter.reading()));
         if (svc == null) {
+            String state = DispenseService.startState();
+            d.put("state", state);
+            d.put("startError", DispenseService.startError());
             d.put("running", false);
             d.put("available", false);
-            d.put("unavailableReason", "the dispense engine is not running");
+            d.put("unavailableReason", "failed".equals(state)
+                    ? "the dispense engine failed to start: " + DispenseService.startError()
+                    : "the dispense engine is not running yet (starting)");
             return out;
         }
         DispenseConfig cfg = svc.getConfig();
+        d.put("state", "running");
+        d.put("startError", null);
         d.put("running", true);
         d.put("available", svc.isAvailable());
         d.put("unavailableReason", svc.getUnavailableReason());

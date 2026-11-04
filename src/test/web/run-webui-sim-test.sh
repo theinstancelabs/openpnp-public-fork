@@ -78,3 +78,7 @@ SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.pl
 # the home after a controller reset, the start angle measured again, Pressure on's park (BR-02, BR-03: §7 of
 # docs/backend-requests.md; the new status fields stubbed, the writes caught: nothing moves)
 node "$HERE/reset-home-pressure.playwright.cjs"
+# who has the machine and Take control (P0, BR-72): the screens on a stubbed lock (the states a simulator cannot reach;
+# it presses STOP on the SIM), then against the engine's own lock with an agent that really holds it
+node "$HERE/lock.playwright.cjs"
+node "$HERE/lock-real.playwright.cjs"

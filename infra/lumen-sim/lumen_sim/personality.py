@@ -19,6 +19,10 @@ CAPS = [
     ("THERMAL_PROTECTION", 1), ("MOTION_MODES", 0), ("ARCS", 1), ("BABYSTEPPING", 0), ("CHAMBER_TEMPERATURE", 0),
     ("COOLER_TEMPERATURE", 0), ("MEATPACK", 0), ("CONFIG_EXPORT", 0),
 ]
+# Not the board's: lumen-sim's own capability line, sent only behind --sim-cap (set's sim_cap). OpenPnP's SimGuard
+# (BR-47) treats a pty whose M115 carries exactly this line as a simulator. Off by default, so M115 stays the board's
+# byte for byte and the bug reproductions see the real controller.
+SIM_CAP_LINE = "Cap:SIMULATOR:lumen-sim"
 
 
 class Personality:
@@ -36,7 +40,8 @@ class Personality:
         self.homing_abort = homing_abort                 # a quick-stop ends G28 without kill()
         self.outputs_off_on_kill = outputs_off_on_kill
 
-    def m115(self):
+    def m115(self, sim_cap=False):
+        """M115's lines before the ok; sim_cap adds SIM_CAP_LINE last of the Cap lines."""
         lines = [FIRMWARE_LINE]
         for cap, value in CAPS:
             if value is None:
@@ -44,6 +49,8 @@ class Personality:
             lines.append("Cap:%s:%d" % (cap, value))
         if self.host_watchdog:
             lines.append("Cap:HOST_WATCHDOG:1")
+        if sim_cap:
+            lines.append(SIM_CAP_LINE)
         return lines
 
 

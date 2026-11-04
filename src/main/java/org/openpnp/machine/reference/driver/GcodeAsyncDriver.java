@@ -212,6 +212,13 @@ public class GcodeAsyncDriver extends GcodeDriver {
     }
 
     @Override
+    protected boolean keptAliveLinkIsDead() {
+        // Instance Labs (BR-44): the writer must have ended too, or one stuck past disconnect's join could write its
+        // old queue onto the new link
+        return super.keptAliveLinkIsDead() && (writerThread == null || !writerThread.isAlive());
+    }
+
+    @Override
     protected void disconnectThreads() {
         try {
             if (writerThread != null && writerThread.isAlive()) {

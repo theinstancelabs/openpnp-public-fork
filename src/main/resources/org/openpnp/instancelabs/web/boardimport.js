@@ -85,7 +85,7 @@
     if (signal) signal.addEventListener('abort', stop);
     let r, text;
     try {
-      r = await fetch(path, { method: 'POST', body: file, headers: { 'Content-Type': 'application/octet-stream' }, signal: ctl.signal, cache: 'no-store' });
+      r = await fetch(path, { method: 'POST', body: file, headers: Object.assign({ 'Content-Type': 'application/octet-stream' }, IL.CLIENT_HEADER), signal: ctl.signal, cache: 'no-store' });
       text = await r.text();
     } catch (e) {
       const why = signal && signal.aborted ? 'cancelled' : ctl.signal.aborted ? 'timeout' : 'network';

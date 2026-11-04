@@ -56,6 +56,8 @@ import xml.etree.ElementTree as ET
 
 SCENE_REL = os.path.join("instancelabs", "sim-scene.json")
 LIVE_CONFIG = os.path.join(os.path.expanduser("~"), ".openpnp2")
+# Never written either: the live config the harness reads when IL_LIVE_CONFIG points elsewhere (BR-40).
+LIVE_CONFIGS = [LIVE_CONFIG] + ([os.environ["IL_LIVE_CONFIG"]] if os.environ.get("IL_LIVE_CONFIG") else [])
 # Installs the SIM top camera in a uinav SIM session (uinav first turns Top into an ImageCamera).
 CAMERA_XML_SETS = [".//camera[@name='Top']@class=org.openpnp.instancelabs.sim.SimBoardCamera",
                    ".//camera[@name='Top']@width=1920",
@@ -73,7 +75,9 @@ FID_MASK = re.compile(r"(?i)mask(\d+(?:\.\d+)?)mm")
 DEFAULT_BLANK = {"rect": [280.0, 225.0, 365.0, 250.0], "surface": {"z0": 5.62, "slopeX": -0.0012, "slopeY": 0.0}}
 # Pad calibration (§11.3). mRevMg 2.30 differs on purpose from the configured 2.11 (tools/lumen.py:97): a weighing
 # must find 1.15 mg per half turn, not 1.06. needleZOffsetMm None = the engine configuration's.
-PASTE = {"mRevMg": 2.30, "ripple": 0.15, "ripplePeakDeg": 299, "cv": 0.08, "seed": 11,
+# noiseSeed (BR-74): the dose and thread noise is the same on every connection, so a calibrating test alone in a fresh
+# session draws what it draws after webui-sim's reconnects (pad-profile and tip-setups failed alone, Infra 11-03)
+PASTE = {"mRevMg": 2.30, "ripple": 0.15, "ripplePeakDeg": 299, "cv": 0.08, "seed": 11, "noiseSeed": 11,
          "footprint": {"c": 0.875, "e": 0.77},
          "transferRatio": 0.75, "oozeFirst": 0.40, "refillDip": 0.30, "refillTauDots": 2, "idleFullS": 300,
          "idleDeadS": 3600, "threadShare": 0.5, "threadFullMg": 0.35, "threadZeroMg": 0.45, "missBelowMg": 0.12,
@@ -432,9 +436,10 @@ def scene_path(config_dir):
 def write(config_dir, sc):
     """Atomic (tmp + rename): a running session reloads it on change. Never into the live config."""
     real = os.path.realpath(config_dir)
-    live = os.path.realpath(LIVE_CONFIG)
-    if real == live or real.startswith(live + os.sep):
-        raise SystemExit("il_sim_scene: refusing to write a sim scene into the live config %s" % LIVE_CONFIG)
+    for cfg in LIVE_CONFIGS:
+        live = os.path.realpath(cfg)
+        if real == live or real.startswith(live + os.sep):
+            raise SystemExit("il_sim_scene: refusing to write a sim scene into the live config %s" % cfg)
     path = scene_path(config_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".sim-scene.", suffix=".tmp", dir=os.path.dirname(path))

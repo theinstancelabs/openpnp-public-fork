@@ -20,8 +20,9 @@ localhost), §4.4–4.5 (Stop, on/off order), §5.5 (interlocks), §5.7 (Profile
   `DispenseService.install`. Both start on OpenPnP's `configurationComplete`.
 - URL: **http://127.0.0.1:8765/** (UI) and `/api/...` (JSON). JDK `com.sun.net.httpserver`, Gson, no new dependency.
 - Settings: `<configDir>/instancelabs/web-api.json` (never written by the API):
-  `{"port": 8765, "lanAccess": false, "enabled": true, "threads": 8}`.
-  Overrides: system properties `instancelabs.api.port|lan|enabled`, then env `OPENPNP_IL_API_PORT|LAN|ENABLED`.
+  `{"port": 8765, "lanAccess": false, "enabled": true, "threads": 8, "trustedOrigins": []}`.
+  Overrides: system properties `instancelabs.api.port|lan|enabled|trustedOrigins`, then env
+  `OPENPNP_IL_API_PORT|LAN|ENABLED|TRUSTED_ORIGINS` (trusted origins: a comma-separated list that replaces the file's).
 - `lanAccess: true` binds all interfaces (e.g. a tablet next to the machine). There is **no authentication**: turn it
   on only on a trusted network. Off by default.
 - If the port is taken, the API logs an error and OpenPnP continues without it.
@@ -30,6 +31,16 @@ localhost), §4.4–4.5 (Stop, on/off order), §5.5 (interlocks), §5.7 (Profile
 LAN access is on (DNS-rebinding guard). Requests other than GET/HEAD with a foreign `Origin`, or
 `Sec-Fetch-Site` other than `same-origin`/`none`, get 403 (CSRF guard), so a web page elsewhere cannot press buttons.
 `curl -X POST http://127.0.0.1:8765/api/stop` works. The UI is served with a strict CSP (`script-src 'self'`).
+
+**Trusted origins (BR-73).** The real machine's UI from the user's devices: `tailscale serve --https=8877` proxies
+`https://<name>.ts.net:8877` to the API on 127.0.0.1 and keeps the browser's `Host` and `Origin` (measured 11-03). With
+`trustedOrigins: ["https://<name>.ts.net:8877"]` (exact origins: scheme, host, port; a path or another scheme is dropped
+with a warning) that Host passes the DNS-rebinding guard, and a write passes the CSRF guard only with exactly that
+Origin (or none, as curl). `"http://" + Host` stays the rule for loopback Hosts (and LAN Hosts with `lanAccess`); a
+loopback Host keeps it even if an entry names loopback. The bind stays 127.0.0.1 (the proxy connects over loopback);
+never strip Origin in a proxy instead. `GET /api/status` lists them in `server.trustedOrigins`. **There is no login: the
+tailnet's access rules are the only access control** (any device they let in can drive the machine, with curl too).
+Never serve it on a port Funnel can publish (443, 8443, 10000).
 
 ## 2. Errors and refusals
 
@@ -44,6 +55,9 @@ Every error is JSON: `{"error": "<slug>", "reason": "<plain language>", ...detai
 | 404 | `art-gone` | `GET /api/board-art/{id}` of an unknown drawing |
 | 405 | `method-not-allowed` | |
 | 409 | `refused` | machine state or an interlock refuses; `interlocks: {ok, violations:[{code,message}], notes}` included when the engine's interlocks refused |
+| 409 | `locked`, `lock-lost`, `no-lock`, `stop-not-confirmed`, `stopped` | the machine lock (§3.7): someone else holds it; your lock was taken, released or ran out (`lost: {how, by, atMs, what}`); no lock (or an unknown token); Take control's STOP not confirmed (the lock is the user's anyway); a STOP ended your G-code batch. Each carries `lock` |
+| 400 / 403 | `refused-line`, `not-ui` | a G-code line the passthrough does not send (`index`, `line`, `why`; nothing sent); Take control without `X-IL-Client: ui` |
+| 502 / 504 | `controller-error`, `controller-timeout` | a passthrough line answered with a controller error, or no `ok` in `timeoutMs`; `index`, `line`, `replies`, `results` so far; the rest not sent |
 | 409 | `busy`, `exists`, `preview-stale`, `ids-exhausted` | board upload (§3.3) |
 | 409 | `suggestion-stale`, `status-evidence` | profile check, pad calibrations and pad types (§3.4, §3.5) |
 | 409 | `implausible`, `late`, `wrong-step` | a pad calibration's readings: far from the expected mass, typed long after the dots (both saved with `confirm: true`), or an answer to a step the job does not ask (§3.5) |
@@ -150,7 +164,8 @@ Also added for Register board and the home at run:
 
 | Field | Content |
 |---|---|
-| `server.simulated`, `server.simulatorConfirmed` | Every driver is a loopback TCP link; the controller answered `M115` as OpenPnP's simulator (the SIM camera and vacuum need this). |
+| `server.simulated`, `server.simulatorConfirmed` | `simulated`: every driver is a loopback TCP link (a label). `simulatorConfirmed`: every driver is a loopback TCP link or a serial port on a pseudo-terminal (`/dev/pts/N`, lumen-sim behind uinav `--controller pty`: no USB serial number or description set, since OpenPnP opens a port by those first; the last connect chose its port by name and opened a pseudo-terminal; the name, links followed, is one), and the controller answered `M115` as a simulator on this connection: OpenPnP's GcodeServer (`FIRMWARE_NAME:GcodeServer`) or lumen-sim (a line that is exactly `Cap:SIMULATOR:lumen-sim`, sent only behind its flag; the real board never sends it). On lumen-sim `server.simulated` (a loopback-only label) stays false. The SIM cameras, balance and vacuum need it, and records made then are simulated (BR-47). Never true on the board's `/dev/ttyACM*` or `/dev/serial/by-id/*`. |
+| `machine.homing`, `server.startedAtMs`, `dispense.state`, `dispense.startError` | BR-44, for the deployer: `homing` is true from the start of any home (the web's, the engine's, OpenPnP's own Home button) until it ends, also when a failure or a STOP ends it (a STOP inside G28 hangs the stock controller). A home is `ReferenceMachine.home()` as a whole: G28 and G92, the visual homing and the park after it; after a STOP inside G28 it stays true until G28's wait ends (up to the driver's 60 s). It turns true when the home's machine task starts: `POST /api/machine/home` without `wait` answers `homing: true` before the status does, and a home an engine task starts on its own can begin between a status read and a STOP (a check-then-STOP leaves that window; the deployer stops only when the machine has been idle). `startedAtMs`: when this JVM started (epoch ms). `state`: `running`, `starting` (OpenPnP starts the web API and the engine in no fixed order: not started yet) or `failed` (the last start threw; `startError` says what, and `unavailableReason` reads `the dispense engine failed to start: …`). |
 | `machine.home` | `{needed, whyCode, why, sinceMs, policy, homedAtMs, estimateS, n1Z, n1Low, lowTool}`. `whyCode`: `always` (the setting), `home-unconfirmed` (a stop came during the last home), `stopped` (stopped or reconnected since the last home), `not-homed`, `homed`. `estimateS`: the last home the engine timed, 25 s before the first. `n1Low`: a STOP left a tool outside z1's safe zone; the next home moves Z to the travel Z first. While `positionKnown` is false (BR-02) `n1Z`, `lowTool` are null and `n1Low` false: the believed Z is the boot's, and the attested home goes straight to G28. `lowTool` (null when not): `N1` (N1 under its safe zone: a STOP during a probe), or `needle` (N1 above it: on the shared Z axis the needle is low, a STOP during board dots, e.g. N1 at 60.06 and the needle at 2.94 over the pad). The web UI names that tool, its Z and the pad under the needle (`The needle (N2) stopped low (Z 2.94 mm) at R3.1: … Home lifts it first, then homes.`). |
 | `machine.zCheck` | `{needed, stale: [{what, atMs}], homeAtMs, reference: {name, x, y, z} \| null, last, estimateS, touches, touchesAfterHome, places: [{name, atMs}]}` (`places`: after a failed check of this home, the places set before it, which are refused until set again; the derived `waste-test-dot` aside): the Z data measured before the last home and the point the check would touch. `what`: `the needle frame`, `the touch-off`, `the '<name>' surface` (the needle tasks' scope: the blank and the board). A needle frame recorded after the home replaces the touch-off (no longer listed; the needle item asks for a touch-off again: `needle Z offset has not been set since the last needle change / needle frame (run a touch-off)`). `last` `{atMs, homeAtMs, refName, x, y, refZ, z, deltaMm, pass, covers}`: a failed check of this home (`pass` false) is "Z moved" until every datum listed is measured again. The reference may be one of the blank's points that a probe after a home replaced (`GET /api/config` → `surfaces.blank.replaced {points, setAtMs, homeAtMs}`, one frame kept). |
 | `boardImport` | `{reading}`: a board upload holds the import pipeline (a preview, save or attach reads its file); every engine endpoint refuses meanwhile (§2), and the web UI locks them. |
@@ -491,6 +506,59 @@ that is missing is 410 `file-missing`; a restore of a gone file is 410 `gone`; r
 on every pad-type write and `forTip` with a profile patch (400 without), while a pad edit without `padVersion` uses the
 version read now; a group of the job view keeps its own `label` and carries the record's as `calibrationLabel`;
 `otherTips` counts the typed pads only (a pad without a pad type is no tip's).
+
+### 3.7 The machine lock, Take control and the G-code passthrough (BR-72)
+
+P0 (user, 11-03): the user controls the real machine from the UI at any time; agents drive it through the engine.
+`MachineLock`, `LockEndpoints`, `GcodePassthrough`, `PassthroughLines`; full shape in `docs/backend-requests.md` "BR-72 API".
+
+- **Who:** the web UI sends `X-IL-Client: ui` (every window is the user); an agent sends its token as `X-IL-Lock`;
+  neither = anonymous (CI, the deployer, curl).
+- `GET /api/lock` = `status.lock` = `{holder: null | {kind: agent|user, who, label, what, thread, sinceMs, lastActiveMs,
+  busy, expiresAtMs}, takenFrom: null | {label, who, what, atMs, by}}`.
+- **Guarded writes:** every POST/PUT/DELETE except the stops (`/api/stop`, `/api/pressure/stop`, a pad calibration's
+  cancel), `/api/lock/*` and the data writes (photos, board import, `POST /api/plan`, pad types and their rules,
+  package mappings, a calibration's label or wrong-tip, coupon readings, tip-setup add/edit/retire/unretire; see
+  `LockEndpoints.DATA`). Nobody holds the lock: anyone (the UI's first one makes the user the holder); else the holder
+  only: the user's requests or the agent's token. Else 409 `locked`.
+- `POST /api/lock/acquire {who, label?, what, thread?, ttlS? 30..1800 = 300}` → `{token, lock}` (agents; 409 `locked`
+  while anyone holds it; with its own token: a renewal). The lease ends `ttlS` after the holder's last call ended,
+  never during one; `POST /api/lock/keepalive {what?}` renews it. `POST /api/lock/release {}` (the token, or the UI
+  while the user holds it: Give back).
+- `POST /api/lock/take {}` (the UI only): the agent's token answers `lock-lost` at once; a home in progress is left to
+  finish (≤ 120 s; a STOP inside a home hangs this controller); a working holder (a call or batch running, a move
+  queued since its last M400, an engine task, a pressure hold, a pad calibration, OpenPnP busy) gets the web STOP
+  (the machine ends off and unhomed: Start, then Home), an idle one valve, pump, N1 valve and pump off (`M107 P3/P2/
+  P1/P0`; still started and homed). `{lock, stopped: null | {label, who, what, mode: stop|outputs-off, actions (plain
+  phrases for the user), detail (the lines sent), machineOff, confirmed}, atMs}`. A lapsed lease ends the same way. The user's hold never lapses.
+- `POST /api/gcode {lines[] ≤ 1000, timeoutMs? per line 1000..300000 = 60000, what?}` (the holder): on OpenPnP's
+  machine thread through its driver, one `ok` per line; `{results: [{line, replies[], ms}], ms, lock}`. Taken or
+  stopped while a line ran (its last line included): 409 `lock-lost` / `stopped` with that line in `results` marked
+  `interrupted: true` (its `ok` may be the STOP's flush, not the move's end: never take it as done). Every line
+  is checked first (`PassthroughLines`): the bench tools' commands; X/Y/Z inside the soft limits and only once
+  homed; pump P2 / valve P3 only full on; `M906 B` ≤ 670; `G4` ≤ 60 s; refused with the route to use: `G28`
+  (`POST /api/machine/home`), `G92` on X/Y/Z, bare `M18`/`M84`, `G91`, `M92`, EEPROM, `M112`/`M999`/`M997`, `M990`,
+  anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before the next
+  guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
+
+### 3.8 Jog, move-to and the cameras (BR-49, BR-53)
+
+The user's Machine › Control (P0 after BR-72; `ControlEndpoints`; shape in `docs/backend-requests.md` "BR-49 + BR-53
+API"). Both motion routes are guarded writes (§3.7) and run one at a time as OpenPnP machine tasks, checked again on
+its thread; STOP ends them at once (a move that saw a STOP answers 409 "the move was stopped", even when its last ok
+came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the other.**
+- `POST /api/jog {tool: camera|n1|needle, dx?, dy?, dz?}` (mm; one press X/Y ≤ 10 or Z ≤ 2, never both) and
+  `POST /api/move-to {tool, place? | x?, y?}` (at safe Z; ends at the tool's safe Z, so both nozzles end at travel
+  height) → `{tool, from: {x, y, z}, to: {x, y, z}, positions}`.
+- Refused (409, the reason in words): not started, unhomed (nothing moves), switching off, busy (OpenPnP, a task, a
+  G-code batch, a pressure hold, a pad calibration), another move still running; X/Y while either nozzle is below
+  its safe zone; the camera's `dz`; a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
+  always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current frame (anchored and
+  touched off since the needle change, and no failed Z check of this home), not below the surface under it + its
+  offset nor its I4 floor, without one not below its safe zone; OpenPnP's soft limits. 404 for an unknown place.
+- `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
+  `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
+  ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.
 
 ## 4. Pressure hold (Dispense tab)
 

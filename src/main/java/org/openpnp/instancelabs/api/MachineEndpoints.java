@@ -23,6 +23,7 @@ import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeReport;
+import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
@@ -57,11 +58,8 @@ final class MachineEndpoints {
     static final long START_WAITS_FOR_SWITCH_OFF_MS = 20000;
 
     private final ApiContext ctx;
-    private final ExecutorService cameraExecutor = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "il-api-camera");
-        t.setDaemon(true);
-        return t;
-    });
+    /** One capture thread per camera: a hung camera never holds up the other (BR-53 review). */
+    private final Map<Camera, ExecutorService> cameraExecutors = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean noJpegLogged;
 
     MachineEndpoints(ApiContext ctx) {
@@ -81,11 +79,20 @@ final class MachineEndpoints {
     // ------------------------------------------------------------------------------------------
 
     Object stop() {
+        return stop("STOP pressed in the web UI");
+    }
+
+    /** The web STOP, also a take-over's from a working lock holder (BR-72). */
+    Map<String, Object> stop(String reason) {
+        ctx.stops.incrementAndGet();
         long answerBy = System.currentTimeMillis() + STOP_ANSWER_MS;
         List<String> actions = new ArrayList<>();
-        String reason = "STOP pressed in the web UI";
         DispenseService svc = ctx.svcOrNull();
         boolean engineWasBusy = svc != null && svc.isBusy();
+        // BR-72: a G-code batch of the lock holder sends nothing after its line in flight
+        if (ctx.passthrough.abort(reason)) {
+            actions.add("G-code batch: stopped before its next line");
+        }
         // a pad calibration first: it queues no further engine step once its stop flag is set (§7.8)
         ctx.padCalJobs.stop(reason);
         if (svc != null) {
@@ -286,6 +293,8 @@ final class MachineEndpoints {
         // OpenPnP opens the controller link when the machine is started (enabled).
         s.put("connected", m.isEnabled());
         s.put("homed", m.isHomed());
+        // BR-44: from the start of any home until it ends (the deployer never sends STOP while it is true)
+        s.put("homing", m instanceof ReferenceMachine && ((ReferenceMachine) m).isHoming());
         s.put("busy", m.isBusy());
         DispenseService svc = ctx.svcOrNull();
         if (svc != null) {
@@ -448,12 +457,32 @@ final class MachineEndpoints {
         if (cam == null) {
             throw ApiException.notFound("no top (head) camera is configured");
         }
-        int maxW = r.queryInt("w", 0, 0, 4096);
+        return frame(cam, r.queryInt("w", 0, 0, 4096), 0);
+    }
+
+    /**
+     * One frame of an OpenPnP camera (no motion, no lights, no scripts), at most {@code maxW} wide (0 = as is), taken
+     * {@code settleMs} after the call: JPEG (PNG without a JPEG writer), with {@code X-Frame-At} the server time when
+     * it was taken (BR-53: the picture's age).
+     */
+    ApiServer.Response frame(Camera cam, int maxW, long settleMs) throws Exception {
+        if (settleMs > 0) {
+            Thread.sleep(settleMs);
+        }
         BufferedImage img;
+        long at;
+        ExecutorService ex = cameraExecutors.computeIfAbsent(cam, c -> Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "il-api-camera-" + c.getName());
+            t.setDaemon(true);
+            return t;
+        }));
+        Future<BufferedImage> f = ex.submit(cam::captureTransformed);
         try {
-            img = cameraExecutor.submit(cam::captureTransformed).get(10, TimeUnit.SECONDS);
+            img = f.get(10, TimeUnit.SECONDS);
+            at = System.currentTimeMillis();
         }
         catch (TimeoutException e) {
+            f.cancel(true);
             throw ApiException.unavailable("the camera did not deliver a frame within 10 s");
         }
         catch (ExecutionException e) {
@@ -472,7 +501,7 @@ final class MachineEndpoints {
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
         g.drawImage(img, 0, 0, w, h, null);
         g.dispose();
-        return encodeFrame(rgb);
+        return encodeFrame(rgb).header("X-Frame-At", String.valueOf(at));
     }
 
     /** JPEG, else PNG: never an empty 200. */
@@ -496,7 +525,9 @@ final class MachineEndpoints {
     }
 
     void shutdown() {
-        cameraExecutor.shutdownNow();
+        for (ExecutorService ex : cameraExecutors.values()) {
+            ex.shutdownNow();
+        }
     }
 
     private static String capitalize(String s) {

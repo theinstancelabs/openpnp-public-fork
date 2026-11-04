@@ -109,6 +109,9 @@ public class SerialPortCommunications extends ReferenceDriverCommunications {
 
     private volatile SerialPortMatch lastMatch;
 
+    /** Instance Labs (BR-47): the device the last connect opened, links resolved; null before one. */
+    private volatile String openedRealPath;
+
     private SerialPort serialPort;
 
     @Override
@@ -121,6 +124,7 @@ public class SerialPortCommunications extends ReferenceDriverCommunications {
             throw new IOException("Could not open serial port " + match.getSummary()
                     + " (error code " + serialPort.getLastErrorCode() + ").");
         }
+        openedRealPath = realPath(serialPort.getSystemPortPath());
         serialPort.setComPortParameters(baud, dataBits.mask, stopBits.mask, parity.mask);
         serialPort.setFlowControl(flowControl.mask);
         if (setDtr) {
@@ -161,6 +165,23 @@ public class SerialPortCommunications extends ReferenceDriverCommunications {
      */
     public SerialPortMatch getLastMatch() {
         return lastMatch;
+    }
+
+    /**
+     * Instance Labs (BR-47): the device the last connect opened, links resolved (jSerialComm may open another name
+     * than the configured one); null before a connect.
+     */
+    public String getOpenedRealPath() {
+        return openedRealPath;
+    }
+
+    private static String realPath(String path) {
+        try {
+            return path == null ? null : java.nio.file.Paths.get(path).toRealPath().toString();
+        }
+        catch (Exception e) {
+            return path;
+        }
     }
 
     public SerialPortMatcher getPortMatcher() {

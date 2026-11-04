@@ -46,10 +46,14 @@ def read_some(fd, timeout):
 
 
 def wait_for(cond, timeout=3.0):
+    """True as soon as cond() reads true (never read again: see WaitFor), False after timeout s."""
     end = time.monotonic() + timeout
-    while not cond() and time.monotonic() < end:
+    while True:
+        if cond():
+            return True
+        if time.monotonic() >= end:
+            return False
         time.sleep(0.02)
-    return cond()
 
 
 def temp_dir(test):
@@ -162,6 +166,36 @@ class PtyTransport(unittest.TestCase):
         state = json.loads(out.stdout)["state"]
         self.assertEqual(state["personality"], "stock")
         self.assertEqual(state["pts"], os.path.realpath(self.sim.link))
+
+
+class SimCapOption(unittest.TestCase):
+    """BR-47: '--sim-cap' puts 'Cap:SIMULATOR:lumen-sim' into M115 on the pty (default off: PtyTransport's golden)."""
+
+    def test_the_cli_flag_sends_the_line_last_before_the_ok(self):
+        sim = SimProcess("--sim-cap")
+        self.addCleanup(sim.stop)
+        self.assertTrue(sim.ctl({"cmd": "state"})["state"]["sim_cap"])
+        fd = open_raw(sim.link)
+        try:
+            os.write(fd, b"M115\n")
+            want = [t for _, t in goldens.replies(goldens.load("m115"), "M115")]
+            self.assertEqual(read_until_ok(fd), want[:-1] + ["Cap:SIMULATOR:lumen-sim", "ok"])
+        finally:
+            os.close(fd)
+
+    def test_ctl_set_turns_it_on(self):
+        sim = SimProcess()
+        self.addCleanup(sim.stop)
+        self.assertFalse(sim.ctl({"cmd": "state"})["state"]["sim_cap"])
+        out = subprocess.run([sys.executable, "-m", "lumen_sim", "ctl", "--control", sim.sock, "set",
+                              '{"sim_cap": true}'], cwd=PKG_ROOT, capture_output=True, text=True, timeout=10)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        fd = open_raw(sim.link)
+        try:
+            os.write(fd, b"M115\n")
+            self.assertEqual(read_until_ok(fd)[-2:], ["Cap:SIMULATOR:lumen-sim", "ok"])
+        finally:
+            os.close(fd)
 
 
 class PowerCycle(unittest.TestCase):
@@ -847,12 +881,25 @@ class OneInstancePerPath(unittest.TestCase):
 
 
 def alive(pid):
-    """A process that exists and is not a zombie (its new parent may reap it late)."""
+    """A process that exists and is not a zombie (its new parent may reap it late) or dead (X: being reaped)."""
     try:
         with open("/proc/%d/stat" % pid) as f:
-            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+            return f.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
     except (FileNotFoundError, ProcessLookupError):
         return False
+
+
+class WaitFor(unittest.TestCase):
+    def test_a_condition_seen_true_once_is_met(self):
+        """A dead process can read alive a moment later (its PID in /proc's X state while it is reaped, or reused):
+        a second reading made wait_for say False 44 ms into PR #16's gate (run 41607411975)."""
+        readings = iter([False, True, False])
+        self.assertTrue(wait_for(lambda: next(readings), timeout=1.0))
+
+    def test_a_condition_never_true_times_out(self):
+        t0 = time.monotonic()
+        self.assertFalse(wait_for(lambda: False, timeout=0.1))
+        self.assertGreaterEqual(time.monotonic() - t0, 0.1)
 
 
 class LinkGuardian(unittest.TestCase):

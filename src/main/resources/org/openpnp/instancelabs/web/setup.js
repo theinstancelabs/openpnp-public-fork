@@ -1911,7 +1911,7 @@
     if (user) { c.bSnap.disabled = true; c.bSnap.setAttribute('aria-busy', 'true'); }
     const cam = IL.positions(S.status).cam;
     try {
-      const r = await fetch('/api/camera/top.jpg?w=800&t=' + Date.now(), { cache: 'no-store' });
+      const r = await fetch('/api/camera/top.jpg?w=800&t=' + Date.now(), { cache: 'no-store', headers: IL.CLIENT_HEADER });
       if (!r.ok) {
         let reason = r.status === 404 ? 'no top camera' : r.status === 503 ? 'no frame within 10 s' : r.status + ' ' + r.statusText;
         try { const j = await r.json(); reason = j.reason || reason; } catch (e) { /* not JSON */ }

@@ -42,8 +42,13 @@
     press2Ms: 4000, press2MinMs: 300, toastMs: 4000,
     needleDriftMm: 1.0, wasteNearMm: 3.0, attestMs: 8 * 3600 * 1000,
     planDebounceMs: 300, planEveryMs: 10000, eventsEveryMs: 5000,
+    // a take waits up to 120 s for a home in progress and 20 s for the STOP's confirmation (BR-72, #19 review)
+    lockWorkingMs: 10000, takeTimeoutMs: 240000,
   };
   const L = IL.LIMITS;
+  /** Every request this page sends says it is the UI's (X-IL-Client): the engine's machine lock tells the user's
+   *  requests from an agent's by it (BR-72). */
+  IL.CLIENT_HEADER = { 'X-IL-Client': 'ui' };
   /** Run phases during which the run holds the barrel under pressure (one pressure session per stream). */
   IL.PRESSURE_PHASES = new Set(['dispensing', 'shots', 'dispensing calibration dots']);
 
@@ -465,7 +470,7 @@
     const ms = o.timeoutMs || L.apiTimeoutMs;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), ms);
-    const init = { method, headers: {}, signal: ctl.signal, cache: 'no-store' };
+    const init = { method, headers: Object.assign({}, IL.CLIENT_HEADER), signal: ctl.signal, cache: 'no-store' };
     if (body !== undefined) {
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
@@ -775,6 +780,30 @@
   /** A backend with BR-03's zones (I12 in the status) knows `mode: 'pump'`; an older one would open the valve. */
   IL.hasPumpOnly = (status) => !!IL.interlock(status || S.status, 'I12');
 
+  // ---------------------------------------------------------------------------------- who has the machine (P0, BR-72)
+  // One holder at a time: an agent role (Process, Backend, …), the user (every window of this page), or nobody. While
+  // an agent holds it this page watches: the engine refuses its guarded writes (409 locked) and the controls that act
+  // on the machine are locked with that reason (data-only writes, such as a board upload, pad types or a plan, stay
+  // free); Take control stops the agent's work and the machine stays the user's until Give back. While nobody holds
+  // it, the user's first guarded write makes it theirs (docs/backend-requests.md, "BR-72 API").
+  /** The lock in a status: {known (this OpenPnP reports one), holder, takenFrom, agent (an agent holds it), mine}. */
+  IL.lockOf = function (status) {
+    const lk = (status || S.status || {}).lock;
+    if (!lk || typeof lk !== 'object') return { known: false, holder: null, takenFrom: null, agent: false, mine: false };
+    const h = lk.holder && typeof lk.holder === 'object' ? lk.holder : null;
+    return { known: true, holder: h, takenFrom: lk.takenFrom || null, agent: !!h && h.kind !== 'user', mine: !!h && h.kind === 'user' };
+  };
+  /** The holder's name for people: "Process". */
+  IL.holderName = (h) => (h && (h.label || cap(h.who || ''))) || 'An agent';
+  /** Its last command under 10 s ago (the server's clock). */
+  IL.holderWorking = (h) => !!h && isNum(h.lastActiveMs) && IL.serverNow() - h.lastActiveMs < L.lockWorkingMs;
+  /** "Process has the machine (since 14:24): Take control to use it." while an agent holds it, else null. */
+  IL.heldReason = function (status) {
+    const lk = IL.lockOf(status);
+    if (!lk.agent) return null;
+    const h = lk.holder;
+    return IL.holderName(h) + ' has the machine' + (isNum(h.sinceMs) ? ' (since ' + IL.fmtTime(h.sinceMs - S.skewMs) + ')' : '') + ': Take control to use it.';
+  };
   /**
    * Why a control is locked now, or null. need: {connected, homed, idle (default true), pressureOff (default true),
    * engine, homes (the task homes by itself: it waits while N1 is low)}. Texts are the spec's (§13 "Locked control").
@@ -784,6 +813,10 @@
     const n = Object.assign({ idle: true, pressureOff: true }, need || {});
     if (S.online === false) return 'No answer from OpenPnP: nothing can be sent until it answers again.';
     if (!s) return 'Waiting for OpenPnP';
+    // an agent holds the machine (BR-72): a control that acts on it waits for Take control (data-only writes stay free;
+    // a guarded write without these needs answers 409 locked, whose refusal offers Take control)
+    const held = n.connected || n.homed || n.engine || n.homes ? IL.heldReason(s) : null;
+    if (held) return held;
     const m = s.machine || {}, d = s.dispense || {}, pr = s.pressure || {};
     if (n.idle && IL.taskRunning(s)) {
       const lab = s.run && s.run.running ? s.run.label : 'task';
@@ -844,12 +877,17 @@
     lsSet('il.planId', null);
     return IL.setPlan(null);
   };
-  /** Loads a plan by id (restore); 404 → S.planForgotten (plan chip "Plan forgotten (OpenPnP restarted)"). */
+  /**
+   * Loads a plan by id (restore); 404 → S.planForgotten (plan chip "Plan forgotten (OpenPnP restarted)"). An answer that
+   * comes after another plan was shown or asked for is dropped (null): a finished registration's plan (status.run.nextPlanId)
+   * loaded late must not replace the plan made meanwhile.
+   */
   IL.loadPlan = async function (id) {
     if (!id) return null;
     S.planId = id;
     try {
-      return IL.setPlan(await IL.api('GET', '/api/plan/' + encodeURIComponent(id)));
+      const q = await IL.api('GET', '/api/plan/' + encodeURIComponent(id));
+      return S.planId === id ? IL.setPlan(q) : null;
     } catch (e) {
       if (e.status === 404 && S.planId === id) {
         const prev = S.plan;
@@ -2115,7 +2153,7 @@
     if (!cells) return;
     // the room the cells have, not only the window: the brand's heartbeat age or the STOP bay can change it (rc1 review:
     // a verdict fitted before they did was cut, "Stopped 06:…", with no shorter form applied)
-    const sig = cells.clientWidth + '|' + $('btn-start').hidden + $('btn-home').hidden + '|' + cells.textContent.replace(/\d/g, '0');
+    const sig = cells.clientWidth + '|' + $('btn-start').hidden + $('btn-home').hidden + $('btn-take').hidden + '|' + cells.textContent.replace(/\d/g, '0');
     if (sig === fitSig) return;
     fitSig = sig;
     const over = () => {
@@ -2125,12 +2163,15 @@
       const limit = cells.getBoundingClientRect().right - parseFloat(getComputedStyle(cells).paddingRight || '0');
       return last.getBoundingClientRect().right > limit + 0.5;
     };
-    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2v', 'cells--t3', 'cells--t4', 'cells--t5');
+    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2l', 'cells--t2v', 'cells--t3', 'cells--t4', 'cells--t5');
     cells.classList.add('cells--fit');   // the verdict at its full width while measuring
     if (over()) {
       // the other cells' long parts first: the verdict keeps its own ("Stopped 14:19", a task's progress) while it fits
       cells.classList.add('cells--t1');
       if (over()) cells.classList.replace('cells--t1', 'cells--t2');
+      // In control, while it reads You or Nobody, shrinks to its mark before the verdict's own long part (the time of a
+      // stop) goes; an agent holding the machine keeps its words: the user must always see that
+      if (over()) cells.classList.add('cells--t2l');
       if (over()) cells.classList.add('cells--t2v');
       // still too long (1024 px after a STOP, the widest state): the verdict is never cut (UI_DESIGN §4), so the
       // pressure cell goes while it reads a plain "Off" (Recovery says "Pressure vented"), then the other cells' labels,
@@ -2164,6 +2205,38 @@
       return { kind: 'live', v: onText((Date.now() - S.runPressureSince) / 1000), t: 'Held by the running ' + (run.label || 'task') + '. Switches off by itself after ' + (lim || '?') + ' on (I7).' };
     }
     return { kind: 'off', v: ['Off', ' · vented'], t: pr.engineRunActive ? 'The running task switches the pressure on and off by itself.' : 'Valve closed, barrel vented. Set the regulator by hand.' };
+  }
+  /**
+   * The In control cell (P0): who holds the machine, what it does and since when; Take control beside it while an agent
+   * holds it. Hidden while this OpenPnP reports no lock (before BR-72).
+   */
+  function renderLockCell(s, off, since) {
+    const lc = $('cell-lock'), bt = $('btn-take');
+    if (!lc) return;
+    const lk = IL.lockOf(s);
+    if (lk.known) S.lockSeen = true;
+    IL.show(lc, lk.known || (off && !!S.lockSeen));
+    IL.show(bt, !off && lk.agent);
+    const h = lk.holder;
+    const t = h && isNum(h.sinceMs) ? IL.fmtTime(h.sinceMs - S.skewMs) : null;
+    const k = lc.querySelector('.cell__k'), ks = t ? ' · since ' + t : '';
+    if (k.dataset.v !== ks) { k.dataset.v = ks; k.replaceChildren('In control', ks ? el('span', { class: 'long', 'data-l': 2, text: ks }) : ''); }
+    // while an agent holds it, a band at the top of the page says it all in a sentence, with Take control (the strip has
+    // no room for what it does at 1440 px); its text changes only with the holder, so its button is never rebuilt
+    // under a click
+    if (!s || off || !lk.agent) IL.msg('held', null);
+    if (!s || off) { setCell(lc, 'off', off ? 'Unknown' : '…', off ? cap(since) : null); return; }
+    if (!h) { setCell(lc, 'off', 'Nobody', 'Nobody has the machine. Its controls are yours: your first move makes it yours until you give it back. An agent may take it while nobody has it.'); return; }
+    if (lk.mine) { setCell(lc, 'ok', 'You', 'You have the machine' + (t ? ' since ' + t : '') + '. Agents cannot use it until you give it back (click here).'); return; }
+    const name = IL.holderName(h), working = h.busy === true || IL.holderWorking(h);
+    const last = isNum(h.lastActiveMs) ? 'its last command ' + IL.fmtAgo(h.lastActiveMs - S.skewMs) : 'no command yet';
+    setCell(lc, working ? 'live' : 'info', [name + (working ? ' · working' : ' · idle'), h.what ? ' · ' + h.what : '', 2],
+      name + ' (an agent) has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '. '
+      + (working ? 'Working' : 'Idle') + ': ' + last + '. Take control stops its work and makes the machine yours.');
+    IL.msg('held', { kind: working ? 'live' : 'info', alert: false,
+      text: name + ' has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '.',
+      sub: (working ? 'It is working now.' : 'It is idle (no command for a while).') + ' This page shows everything but cannot move the machine until you take control.',
+      actions: [IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true }, { cls: 'btn--sm' })] });
   }
   function renderStrip() {
     const s = S.status;
@@ -2227,9 +2300,13 @@
       }
     }
     const bs = $('btn-start'), bh = $('btn-home');
+    // while an agent holds the machine its controls are not the user's: Take control stands there instead
+    const agentHolds = !!s && !off && IL.lockOf(s).agent;
+    if (agentHolds) showStart = showHome = false;
     IL.show(bs, showStart);
     if (!showHome && armed && armed.btn === bh) disarm();
     IL.show(bh, showHome);
+    renderLockCell(s, off, since);
 
     // pressure, start angle, purge row
     const pc = $('pill-pressure'), ac = $('chip-angle'), uc = $('chip-purge');
@@ -2759,6 +2836,11 @@
     const lines = viol.length ? viol : codeFromMessage(e && e.message);
     // a form filled before a mount or a needle change (409 tip-changed / needle-changed, §22.3): its values are another
     // tip's or needle's; Reload reads the page again (the values are taken again from the mounted tip)
+    // an agent holds the machine: Take control in the refusal; a take still stopping the agent (409 taking-over): its
+    // reason alone, the take under way answers for every window
+    if (e && e.code === 'locked') {
+      box.appendChild(el('div', { class: 'btn-row' }, IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true }, { cls: 'btn--sm' })));
+    }
     if (e && (e.code === 'tip-changed' || e.code === 'needle-changed'
       || /^(The tip changed while this was open|The needle was changed at \d\d:\d\d (while this was open|after these values were taken))/.test(String(e.message || '')))) {
       box.appendChild(el('div', { class: 'btn-row' }, IL.fixButton({ fix: 'reload-page', label: 'Reload' }, { cls: 'btn--sm' })));
@@ -2927,7 +3009,7 @@
   // core fix-its
   IL.fix('reload-page', { run: async () => { location.reload(); } });
   IL.fix('connect', { run: () => IL.api('POST', '/api/machine/enable'), ok: 'Connecting to the controller…',
-    gate: (s) => (S.online === false ? IL.lockReason(s) : null) });
+    gate: (s) => (S.online === false ? IL.lockReason(s) : IL.heldReason(s)) });
   // the home's own answer (wait): a home that fails says why (`homing failed: …`, the pressure hold, a STOP before it
   // started), as the strip alone cannot; the engine waits up to 5 min for it
   IL.fix('home', { press2: (s) => (IL.positionUnknown(s) ? null : 'home'), gate: (s) => IL.lockReason(s, { connected: true }),
@@ -3009,6 +3091,73 @@
   });
   IL.fix('attest-paste', { run: async () => IL.attest.set('paste-life', true), ok: 'Noted: paste within its working life.' });
   IL.fix('same-seat', { run: async () => IL.setNewSeat(null), ok: 'Same seat: the board surface still holds.' });
+
+  // ---------------------------------------------------------------------------------- Take control, Give back (P0, BR-72)
+  /**
+   * Take control: one POST. The engine revokes the agent at once, lets a home in progress finish, stops a working
+   * agent the way STOP does (the machine ends off and unhomed) or switches an idle one's outputs off (it stays started
+   * and homed), then makes the user the holder. A stop not confirmed (409 stop-not-confirmed) leaves the lock the
+   * user's: this page then presses STOP itself, with its retry band, as the STOP button would.
+   */
+  IL.takeControl = async function () {
+    const before = IL.lockOf(S.status).holder;
+    IL.log('Take control pressed' + (before && before.kind !== 'user' ? ': ' + IL.holderName(before) + ' had the machine' : ''), 'need');
+    let r;
+    try {
+      r = await IL.api('POST', '/api/lock/take', {}, { timeoutMs: L.takeTimeoutMs });
+    } catch (e) {
+      if (e.code !== 'stop-not-confirmed') throw e;
+      showTaken(e.data, before, true);
+      IL.stop('Take control: the stop was not confirmed');
+      return e.data;
+    }
+    showTaken(r, before, false);
+    return r;
+  };
+  /** The confirmation band: the machine is the user's, and what was stopped (BR-72's answer). */
+  function showTaken(r, before, unconfirmed) {
+    const st = r && r.stopped;
+    const at = IL.fmtTimeS(r && isNum(r.atMs) ? r.atMs - S.skewMs : Date.now());
+    const was = st && before && before.kind !== 'user' && isNum(before.sinceMs) ? ', since ' + IL.fmtTime(before.sinceMs - S.skewMs) : '';
+    const work = st ? st.label + "'s work (" + (st.what || 'no task named') + was + ')' : '';
+    const done = st && st.actions && st.actions.length ? ': ' + st.actions.join(', ') : '';
+    let sub;
+    if (unconfirmed) sub = 'The stop of ' + (work || 'the machine') + ' was NOT confirmed: STOP is being sent again. Look at the machine; switch it off at its power switch if it still moves.';
+    else if (!st) sub = 'Nobody had it. Agents cannot use it until you give it back (In control › Give back).';
+    else if (st.mode === 'outputs-off') sub = st.label + ' was idle. Its outputs are off' + done + '. The machine is still connected and homed: its controls work now. ' + st.label + ' cannot use it until you give it back.';
+    else sub = 'Stopped ' + work + ' the way STOP does' + done + '. ' + (st.machineOff === false ? '' : 'The machine is off now: Connect, then Home before moving it. ') + st.label + ' cannot use it until you give it back.';
+    IL.log('The machine is yours (' + at + '). ' + sub, unconfirmed ? 'block' : 'ok');
+    // a refusal that offered Take control is answered now
+    for (const b of document.querySelectorAll('.refusal')) if (b.querySelector('[data-fix="take-control"]')) b.remove();
+    S.lockTakenAt = Date.now();
+    IL.msg('lock', { kind: unconfirmed ? 'block' : 'ok', text: 'The machine is yours (' + at + ').', sub,
+      actions: [el('button', { type: 'button', class: 'btn btn--sm', text: 'Got it', onclick: () => IL.msg('lock', null) })] });
+  }
+  IL.fix('take-control', {
+    gate: () => (S.online === false ? 'No answer from OpenPnP: nothing can be sent until it answers again.' : null),
+    run: () => IL.takeControl(),
+  });
+  /** Give back: the user's hold ends (nobody holds the machine; an agent may take it from then on). */
+  IL.giveBack = async function () {
+    const r = await IL.api('POST', '/api/lock/release', {});
+    IL.msg('lock', null);
+    S.lockTakenAt = 0;
+    return r;
+  };
+  /** The lock's changes of hands this page did not cause itself: a line in the activity log, and a toast. */
+  IL.on('status', (s, prev) => {
+    const a = IL.lockOf(s), b = IL.lockOf(prev);
+    if (!a.known || !prev || !b.known) return;
+    const ah = a.holder, bh = b.holder;
+    if ((ah && ah.kind) === (bh && bh.kind) && (ah && ah.who) === (bh && bh.who) && (ah && ah.sinceMs) === (bh && bh.sinceMs)) return;
+    if (!ah) S.lockTakenAt = 0;
+    const justTook = S.lockTakenAt && Date.now() - S.lockTakenAt < 5000;   // Take control's own band says it
+    if (a.mine && !bh) { if (!justTook) IL.toast('The machine is yours now (your first move). Agents wait until you give it back: In control › Give back.', 'ok'); }
+    else if (a.mine && b.agent) { if (!justTook) IL.toast('You took control from ' + IL.holderName(bh) + ' (another window).', 'ok'); }
+    else if (a.agent) IL.log(IL.holderName(ah) + ' took the machine' + (ah.what ? ': ' + ah.what : '') + '.', 'need');   // its band says so
+    else if (!ah && b.mine) IL.log('Given back: nobody has the machine.', 'info');
+    else if (!ah && b.agent) IL.log(IL.holderName(bh) + ' gave the machine back: nobody has it.', 'info');
+  });
 
   // ================================================================================== dialogs (in-page, §11)
   const DLG = [];          // open dialogs, top last
@@ -3228,6 +3377,49 @@
     },
   };
 
+  viewDefs.lock = {
+    title: 'In control',
+    render(p, s, first) {
+      if (first) {
+        p.body.append(el('div', { id: 'pv-lock-head' }), el('dl', { class: 'kv kv--wrap', id: 'pv-lock-kv' }),
+          el('p', { class: 'panel__lead', text: 'One holder at a time: an agent, you (every window of this page), or nobody. '
+            + 'While an agent has the machine this page shows everything but cannot move it. Take control stops a working agent '
+            + 'the way STOP does (then Connect and Home), or only switches an idle one\'s outputs off; the machine then stays '
+            + 'yours until you give it back. While nobody has it, your first move makes it yours.' }));
+        const take = IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true });
+        take.dataset.k = 'take';
+        const give = el('button', { type: 'button', class: 'btn', 'data-k': 'release', text: 'Give back' });
+        IL.press2(give, 'give back', () => IL.giveBack(), { ok: 'Given back: nobody has the machine. An agent may take it now.' });
+        p.foot.append(el('div', { class: 'btn-row', id: 'pv-lock-act', 'data-refusals': '' }, take, give));
+      }
+      const lk = IL.lockOf(s), h = lk.holder, tf = lk.takenFrom;
+      const name = h ? (lk.mine ? 'You' : IL.holderName(h)) : 'Nobody';
+      const working = !!h && !lk.mine && (h.busy === true || IL.holderWorking(h));
+      const q = !lk.known ? 'Not reported by this OpenPnP' : lk.mine ? 'You have the machine' : h ? name + ' has the machine' : 'Nobody has the machine';
+      const kind = !lk.known ? 'off' : lk.mine ? 'ok' : h ? (working ? 'live' : 'info') : 'off';
+      IL.keyed($('pv-lock-head'), kind + q, () => el('div', { class: 'ready-head' },
+        el('div', { class: 'ready-head__t' }, el('div', { class: 'eyebrow', text: 'Who has the machine' }), el('div', { class: 'ready-head__q', text: q })),
+        IL.glyph(kind)));
+      const tm = (ms) => (isNum(ms) ? IL.fmtTime(ms - S.skewMs) : '—');
+      const agentRows = lk.agent ? [
+        ['Doing', h.what || 'not said'],
+        ['Last command', (isNum(h.lastActiveMs) ? IL.fmtAgo(h.lastActiveMs - S.skewMs) : 'none yet') + (working ? ' · working' : ' · idle')],
+        ['Lease', isNum(h.expiresAtMs) ? 'until ' + tm(h.expiresAtMs) + ' unless it sends more' : '—'],
+        ['Thread', h.thread || '—'],
+      ] : [];
+      IL.kv($('pv-lock-kv'), !lk.known ? [['Lock', 'this OpenPnP does not report who has the machine yet (BR-72)']] : [
+        ['Who', h ? (lk.mine ? 'you' : name + ' (an agent)') : 'nobody'],
+        h ? ['Since', tm(h.sinceMs) + (isNum(h.sinceMs) ? ' · ' + IL.fmtAgo(h.sinceMs - S.skewMs) : '')] : null,
+        ...agentRows,
+        tf ? ['Last take-over', 'You took it from ' + (tf.label || cap(tf.who || 'an agent')) + ' at ' + tm(tf.atMs) + (tf.what ? ' (it was doing: ' + tf.what + ')' : '')] : null,
+      ].filter(Boolean));
+      const [take, give] = $('pv-lock-act').children;
+      IL.show(take, lk.agent);
+      if (!lk.mine && IL.isArmed(give)) IL.disarm();
+      IL.show(give, lk.mine);
+    },
+  };
+
   viewDefs.machine = {
     title: 'Machine',
     render(p, s, first) {
@@ -3423,7 +3615,7 @@
       snap.addEventListener('click', async () => {
         snap.disabled = true;
         try {
-          const r = await fetch('/api/camera/top.jpg?w=800&t=' + Date.now(), { cache: 'no-store' });
+          const r = await fetch('/api/camera/top.jpg?w=800&t=' + Date.now(), { cache: 'no-store', headers: IL.CLIENT_HEADER });
           if (!r.ok) {
             let reason = r.status === 404 ? 'no top camera' : r.status === 503 ? 'no frame within 10 s' : r.statusText;
             try { reason = (await r.json()).reason || reason; } catch (e) { /* not JSON */ }
@@ -3503,6 +3695,7 @@
     const tipCell = $('chip-tip');
     if (tipCell) tipCell.addEventListener('click', () => IL.go('#setup/tip'));
     $('btn-start').addEventListener('click', (ev) => IL.runFix('connect', ev.currentTarget, null, ev));
+    $('btn-take').addEventListener('click', (ev) => IL.runFix('take-control', ev.currentTarget, null, ev));
     $('btn-home').dataset.twoPress = 'home';
     $('btn-home').addEventListener('click', (ev) => IL.runFix('home', ev.currentTarget, null, ev));
     $('panel-back').addEventListener('click', () => IL.panel.close());

@@ -714,9 +714,11 @@ public final class SimPaste {
         return offset;
     }
 
+    /** The dose and thread noise: the scene's noiseSeed on every connection (BR-74), else seed + connection. */
     private Random noise(SimScene.Paste p) {
         if (noise == null) {
-            noise = new Random((p.seed + connection) * 0x9E3779B97F4A7C15L + 1);
+            long base = p.noiseSeed != null ? p.noiseSeed : p.seed + connection;
+            noise = new Random(base * 0x9E3779B97F4A7C15L + 1);
         }
         return noise;
     }
