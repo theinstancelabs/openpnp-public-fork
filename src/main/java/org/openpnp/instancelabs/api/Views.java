@@ -34,6 +34,7 @@ import org.openpnp.instancelabs.dispense.TipPictureResult;
 import org.openpnp.instancelabs.dispense.TipSetup;
 import org.openpnp.instancelabs.dispense.TipSetups;
 import org.openpnp.instancelabs.dispense.VacuumProber;
+import org.openpnp.instancelabs.padprofile.Anchor;
 import org.openpnp.instancelabs.padprofile.DoseModel;
 import org.openpnp.instancelabs.padprofile.Texts;
 import org.openpnp.instancelabs.padprofile.Tip;
@@ -75,7 +76,12 @@ final class Views {
      * in deg/min, start angles) and whether the start angle is valid for the current controller
      * connection (I11).
      */
-    static Map<String, Object> profile(DispenseConfig c, Long controllerConnectedAtMs) {
+    /**
+     * @param controllerConnectedAtMs when OpenPnP last connected (shown): an angle set before it needs a confirm at least
+     * @param controllerResetAtMs when the B step count last restarted or may have (BR-02): the start angle older than
+     *        it needs confirming
+     */
+    static Map<String, Object> profile(DispenseConfig c, Long controllerConnectedAtMs, Long controllerResetAtMs) {
         DispenseProfile p = c.profile;
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", p.name);
@@ -92,6 +98,7 @@ final class Views {
         m.put("liftMm", p.liftMm);
         m.put("purgeDots", p.purgeDots);
         m.put("notes", p.notes);
+        m.put("touchOffSkipDots", p.touchOffSkipDots);
         m.put("stepsPerRev", c.bStepsPerRev);
         m.put("stepsPerDeg", c.bStepsPerDeg);
         m.put("revolutionsPerDot", p.revolutionsPerDot(c));
@@ -101,10 +108,14 @@ final class Views {
         m.put("feedDegPerMin", p.feedDegS() * 60);
         m.put("partialTurn", p.isPartialTurn(c));
         m.put("startAngles", p.isPartialTurn(c) ? p.startAngles(c) : null);
+        // a confirm at least after every OpenPnP start or connect (the process engineer, 11-03), a measure after a reset
+        // or a switch-off (I11)
         boolean stale = p.isPartialTurn(c) && (p.startAngleSetAtMs == null
+                || (controllerResetAtMs != null && p.startAngleSetAtMs < controllerResetAtMs)
                 || (controllerConnectedAtMs != null && p.startAngleSetAtMs < controllerConnectedAtMs));
         m.put("startAngleNeedsConfirm", stale);
         m.put("controllerConnectedAtMs", controllerConnectedAtMs);
+        m.put("controllerResetAtMs", controllerResetAtMs);
         m.put("fingerprint", p.fingerprint());
         List<String> problems = p.validate(c);
         m.put("problems", problems);
@@ -608,10 +619,12 @@ final class Views {
         DispenseConfig.ParkedTip parked = cfg.parkedTips.get(s.key);
         DispenseProfile p = mounted ? cfg.profile : parked == null ? null : parked.profile;
         m.put("profile", p == null ? null : map("name", p.name, "pressurePsi", p.pressurePsi, "netStepsPerDot",
-                p.netStepsPerDot, "parked", !mounted, "from", parked == null ? null : parked.profileFrom));
+                p.netStepsPerDot, "touchOffSkipDots", p.touchOffSkipDots, "parked", !mounted, "from", parked == null
+                        ? null : parked.profileFrom));
         DispenseConfig.NeedleLanding l = mounted ? cfg.needleLanding : parked == null ? null : parked.needleLanding;
         m.put("landing", l == null ? null : map("dxMm", l.dxMm, "dyMm", l.dyMm, "setAtMs", l.setAtMs, "checked",
                 mounted && svc.isNeedleXyChecked(), "note", l.note, "jobId", l.jobId, "photoId", l.photoId));
+        m.put("doseAnchor", doseAnchor(mounted ? cfg.doseAnchor : parked == null ? null : parked.doseAnchor));
         m.put("padTypes", padTypeCounts(TipSetups.typesFor(db, s.key)));
         if (mounted) {
             m.put("dots", dots(svc.mountedTip(), cfg.bStepsPerRev));
@@ -635,6 +648,20 @@ final class Views {
         }
         m.put("photos", photos);
         return m;
+    }
+
+    /** BR-85: a tip's own dose anchor (the setup view, status.dispense.tip), or null. */
+    static Map<String, Object> doseAnchor(DispenseConfig.DoseAnchor a) {
+        return a == null ? null : map("massPerPadMg", a.massPerPadMg, "areaMm2", a.areaMm2, "mgPerMm2", a.mgPerMm2,
+                "padType", a.padType, "family", a.family, "source", a.source, "setAtMs", a.setAtMs, "fromFamily",
+                false);
+    }
+
+    /** BR-85: the family's anchor as status.dispense.tip shows it for a tip without its own ({@code fromFamily}). */
+    static Map<String, Object> familyAnchor(Anchor a) {
+        return a == null ? null : map("massPerPadMg", a.massPerPadMg, "areaMm2", a.areaMm2, "mgPerMm2", a.mgPerMm2,
+                "padType", a.typeKey, "family", a.family, "source", a.bench ? Anchor.BENCH.text : "validated on a board"
+                        + (a.setupName == null ? "" : " with the " + a.setupName), "setAtMs", null, "fromFamily", true);
     }
 
     /** A setup's calibrated pad types (§22.6 padTypes): counts per status above not-started, and their names. */

@@ -31,7 +31,7 @@ Scenarios (plan §4.4, §4.5, §8.1; bench recipe 2026-10-28):
               Test_Strip (the script is the operator: coupons on the SIM balance, wiped, weighed again, the readings
               typed); both characterized with the SIM's 2.30 mg per turn; the plan made at the end run with the WSON
               skipped (per-pad paste, dose blocks and the M114 Count lines of the controller); a reconnect then
-              refuses the quarter-turn block (I11). nano: the Arduino Nano's upload and top-side split (40 tip, 15
+              is not a reset (BR-02: no I11, the quarter-turn records stay fresh). nano: the Arduino Nano's upload and top-side split (40 tip, 15
               with a plan, 5 partial), Calibrate automatically for its two groups (SW_SPST characterized, the
               LED_0805 stays provisional: no allowed dose is within -25 %/+10 % of its amount), its next plan run.
               controls: §11.7's other negative controls, each ending with its reason. --padcal-parts runs some parts
@@ -279,11 +279,13 @@ class Session:
         else:
             raise RuntimeError("web API did not come up on %d" % self.port)
 
-    def api(self, method, path, body=None, timeout=60, ok=(200, 201, 202)):
+    def api(self, method, path, body=None, timeout=60, ok=(200, 201, 202), headers=None):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.base + path, data=data, method=method)
         if data is not None:
             req.add_header("Content-Type", "application/json")
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 payload, code = r.read(), r.status
@@ -360,11 +362,55 @@ class Session:
         subprocess.run([UINAV, "--session", self.name, "stop"], capture_output=True, timeout=60)
 
 
+def home(s, timeout=180):
+    """POST /api/machine/home. A controller fresh from power-on (lumen-sim's pty boots in Marlin's power-on state) reads
+    as a reset (BR-02): the home is refused until the operator's word, so home again saying so, as at the machine (the
+    see-saw levelled, both tips up, nothing under them). True when the home was attested."""
+    try:
+        s.api("POST", "/api/machine/home", {"wait": True}, timeout=timeout)
+        return False
+    except RuntimeError as e:
+        if "clearBelowAttested" not in str(e):
+            raise
+    s.api("POST", "/api/machine/home", {"wait": True, "clearBelowAttested": True}, timeout=timeout)
+    return True
+
+
+def set_start_angle(s, note):
+    """I11 after a connect: confirm the start angle. After a screw motor-off (a STOP's M18 B, BR-02) a confirm is
+    refused until the screw has turned and the angle is set as measured again: on the simulator only, turn the screw
+    3.6 deg (16 of its 1600 steps) through the passthrough under the lock, then set the profile's angle (the UI's
+    start-angle.cjs does the same). 'confirmed' or 'measured'."""
+    try:
+        s.api("POST", "/api/screw/start-angle", {"note": note})
+        return "confirmed"
+    except RuntimeError as e:
+        if "measure" not in str(e):
+            raise
+    st = s.api("GET", "/api/status")
+    if (st.get("server") or {}).get("simulated") is not True:
+        raise RuntimeError("start angle: not a simulator (status.server.simulated is not true): the screw was not turned")
+    b = next((a.get("driverCoordinate") for a in (st.get("machine") or {}).get("axes") or [] if a.get("letter") == "B"),
+             None)
+    if b is None:
+        raise RuntimeError("start angle: no B axis in the status")
+    token = s.api("POST", "/api/lock/acquire", {"who": "sim-acceptance", "what": note + ": the screw turns once"})["token"]
+    try:
+        s.api("POST", "/api/gcode", {"lines": ["G1 B%.3f F36000" % (float(b) + 3.6), "M400"],
+                                     "what": note + ": the screw turns once"}, headers={"X-IL-Lock": token})
+    finally:
+        s.api("POST", "/api/lock/release", {}, headers={"X-IL-Lock": token})
+    deg = s.api("GET", "/api/status")["dispense"]["profile"]["startAngleDeg"]
+    s.api("POST", "/api/screw/start-angle", {"startAngleDeg": deg,
+                                             "note": note + " (measured again after the screw turned)"})
+    return "measured"
+
+
 def setup_machine(s, characterize=True):
     """Enable, home (sim: no visual homing), the engine's board-run prerequisites through the web API."""
     s.api("POST", "/api/machine/enable")
     s.wait_status(lambda st: st["machine"]["enabled"], 30, "enabled")
-    s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
+    home(s)
     st = s.wait_status(lambda st: st["machine"]["homed"], 60, "homed")
     # tip setups (PROFILE_CALIBRATION_DESIGN.md §22.3): needle values name the needle change they were taken after,
     # pad-type writes the tip setup they were made for
@@ -378,7 +424,7 @@ def setup_machine(s, characterize=True):
     s.api("PUT", "/api/config", SIM_CONFIG)
     s.api("POST", "/api/purge-row/reset", {})  # the sim's blank is clean
     # I11: the start angle is valid for this controller connection only (confirmed after enable).
-    s.api("POST", "/api/screw/start-angle", {"note": "sim acceptance: confirmed after connect"})
+    set_start_angle(s, "sim acceptance: confirmed after connect")
     if characterize:
         s.api("PUT", "/api/pad-types/chip-0603", {"status": "characterized", "forSetup": tip,
                                                    "notes": "SIM ONLY: marked characterized for the acceptance run"})
@@ -446,7 +492,7 @@ def scenario_load(a):
         res["connect_gcode"] = s.sent_since(n0)
         n1 = s.mark()
         try:
-            s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
+            res["home_attested"] = home(s)
             res["home_result"] = "homed"
         except RuntimeError as e:
             res["home_result"] = str(e)  # the simulated camera sees no homing fiducial
@@ -565,7 +611,9 @@ def scenario_stop_one(a, what, how):
         setup_machine(s)
         if what == "hold":
             n0 = s.mark()
-            res["start"] = s.api("POST", "/api/pressure/start")
+            # BR-03: the valve opens only over a place where paste may go: park over the first purge spot first
+            res["start"] = s.api("POST", "/api/pressure/start",
+                                 {"park": {"x": PURGE_ROW["x0Mm"], "y": PURGE_ROW["y0Mm"]}})
             s.wait_status(lambda x: (x.get("pressure") or {}).get("on"), 30, "pressure on")
             time.sleep(1.5)  # held: keepalive/I7 timers running
             res["before_press"] = s.sent_since(n0)
@@ -1258,7 +1306,7 @@ def scenario_register(a):
                                    and s.api("GET", "/api/surfaces")["surfaces"]["board"]["setAtMs"] == surface_at)
         s.api("POST", "/api/machine/enable")
         s.wait_status(lambda x: x["machine"]["enabled"], 30, "enabled")
-        s.api("POST", "/api/screw/start-angle", {"note": "sim acceptance: confirmed after connect"})
+        set_start_angle(s, "sim acceptance: confirmed after connect")
         run_stop, lines = run_dots(s, p2["planId"], cfg)
         cmds = commands(lines)
         g28 = next((i for i, c in enumerate(cmds) if c.startswith("G28")), -1)
@@ -1893,26 +1941,32 @@ def padcal_main(a):
         res["run"] = padcal_run(s, nxt, cfg)
         ok["run"] = res["run"]["ok"]
 
-        # §11.7 reconnect: the quarter-turn camera records are stale, the weighings are not; the run refuses the
-        # 400 block (I11) until the start angle is confirmed
+        # §11.7 reconnect (BR-02): STOP and Start with the controller powered all along is not a reset: the position
+        # is known and the weighings stay fresh. But the STOP's DISABLE_COMMAND ends with M18 B: the screw motor was
+        # switched off and the screw may have turned, so I11 asks for the start angle to be measured again and the
+        # quarter-turn camera records are stale for that switch-off, never for a reset (the process engineer, 11-03). The
+        # reset half (I11 refuses the 400 block, the quarter records stale, the weighings not) needs the simulator's
+        # power-cycle fault (docs/infra-requests.md INF-08); PadCalibrationSimTest checks it on the backend's fake
+        # controller meanwhile.
         s.api("POST", "/api/stop", {})
         s.wait_status(lambda x: not x["machine"]["enabled"], 30, "disabled")
         s.api("POST", "/api/machine/enable")
         s.wait_status(lambda x: x["machine"]["enabled"], 30, "enabled")
         s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
-        wiped(s)
-        refused = s.api("POST", "/api/run", {"planId": nxt["planId"]}, ok=(409,))
+        mach = s.api("GET", "/api/machine")
         recs = s.api("GET", "/api/dose-records")
         quarter = [r for r in recs if r["steps"] == 400 and r["kind"] in ("optical", "coupon")]
-        s.api("POST", "/api/screw/start-angle", {"note": "sim padcal: the controller was not power-cycled"})
         after = s.api("GET", "/api/plan/" + nxt["planId"])["interlocks"]
-        res["reconnect"] = {"run": refused.get("reason"), "quarter_records": [(r["kind"], r["whyStale"]) for r in quarter],
+        res["reconnect"] = {"positionKnown": mach.get("positionKnown"), "powerCycle": mach.get("powerCycle"),
+                            "quarter_records": [(r["kind"], r["whyStale"]) for r in quarter],
                             "mass_fresh": [r["fresh"] for r in recs if r["kind"] == "mass"],
-                            "after_confirm": [v["code"] for v in after.get("violations") or []]}
-        ok["reconnect"] = ("I11: the controller (re)connected after the screw start angle was set" in refused.get(
-            "reason", "") and bool(quarter) and all(r["whyStale"] == "made before the controller last connected: the "
-                                                    "screw angle may have moved" for r in quarter)
-            and res["reconnect"]["mass_fresh"] == [True, True] and "I11" not in res["reconnect"]["after_confirm"])
+                            "violations": [v["code"] for v in after.get("violations") or []],
+                            "power_cycle": "not run: needs the simulator's power-cycle fault (INF-08)"}
+        ok["reconnect"] = (mach.get("positionKnown") is True and not (mach.get("powerCycle") or {}).get("detected")
+                           and bool(quarter) and all("switched off" in (r["whyStale"] or "")
+                                                     and "reset" not in (r["whyStale"] or "") for r in quarter)
+                           and res["reconnect"]["mass_fresh"] == [True, True]
+                           and "I11" in res["reconnect"]["violations"])
     except Exception:
         res["error"] = traceback.format_exc()
         log("padcal main:", res["error"])
@@ -2088,12 +2142,12 @@ def padcal_controls(a):
 
         def short_dwell():
             s.api("PUT", "/api/config", {"profile": {"dwellMs": 50}, "forTip": tip})
-            s.api("POST", "/api/screw/start-angle", {"note": "sim padcal: dwell 50 ms"})
+            set_start_angle(s, "sim padcal: dwell 50 ms")
             try:
                 return by_hand(s, "ladder", 1600, "chip-0805")
             finally:
                 s.api("PUT", "/api/config", {"profile": {"dwellMs": dwell}, "forTip": tip})
-                s.api("POST", "/api/screw/start-angle", {"note": "sim padcal: dwell back"})
+                set_start_angle(s, "sim padcal: dwell back")
         control("dwell-50-one-turn", "by hand: one-turn ladder at profile dwellMs 50", short_dwell,
                 lambda job, row: job["state"] == "failed" and row["laid"] == 0 and has("asks the screw for", "I6")(
                     job, row))

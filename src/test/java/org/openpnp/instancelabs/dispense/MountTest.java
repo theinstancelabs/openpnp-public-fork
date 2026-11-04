@@ -14,6 +14,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.padprofile.Family;
 import org.openpnp.instancelabs.padprofile.Tip;
 
 import com.google.gson.Gson;
@@ -231,6 +232,160 @@ public class MountTest {
         }
     }
 
+    /** A dose anchor of {@code mg} per chip-0603 pad (BR-85). */
+    static DispenseConfig.DoseAnchor anchor(double mg) {
+        DispenseConfig.DoseAnchor a = new DispenseConfig.DoseAnchor();
+        a.massPerPadMg = mg;
+        a.areaMm2 = 0.7257;
+        a.mgPerMm2 = mg / a.areaMm2;
+        a.padType = "chip-0603";
+        a.family = Family.CHIP;
+        a.source = "test";
+        a.setAtMs = System.currentTimeMillis();
+        return a;
+    }
+
+    /**
+     * BR-85: a tip's dose anchor is its own calibration value: parked with it at a mount, back with it at the next, and
+     * kept by an undo of the mount (an anchor set meanwhile stays the tip's it was set for).
+     */
+    @Test
+    public void aTipsDoseAnchorStaysWithItThroughMountsAndAnUndo() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            f.mount(K25);
+            svc.updateConfigAtomically(live -> {
+                live.doseAnchor = anchor(1.95);
+                live.parkedTips.get(Tip.SEED_KEY).doseAnchor = anchor(1.10);
+                return live;
+            });
+            svc.undoMount("tester");
+            DispenseConfig c = svc.getConfig();
+            assertEquals(Tip.SEED_KEY, c.tip.key);
+            assertEquals(1.10, c.doseAnchor.massPerPadMg, 0, "the 22G's, set while it was parked");
+            assertEquals(1.95, c.parkedTips.get(K25).doseAnchor.massPerPadMg, 0, "the 25G's, set while it was on");
+            f.mount(K25);
+            assertEquals(1.95, svc.getConfig().doseAnchor.massPerPadMg, 0);
+            assertEquals(1.10, svc.getConfig().parkedTips.get(Tip.SEED_KEY).doseAnchor.massPerPadMg, 0);
+            f.mount(Tip.SEED_KEY);
+            assertEquals(1.10, svc.getConfig().doseAnchor.massPerPadMg, 0);
+            assertEquals(1.95, svc.getConfig().parkedTips.get(K25).doseAnchor.massPerPadMg, 0);
+            assertNull(TipSetups.newEntry(svc.getConfig(), null, "default").doseAnchor, "a new tip has none");
+            // a settings file edited by hand: a mass of 0 or over 20 mg is no anchor, mounted or parked
+            DispenseConfig bad = svc.getConfig().copy();
+            bad.doseAnchor.massPerPadMg = 0;
+            bad.parkedTips.get(K25).doseAnchor.massPerPadMg = 21;
+            assertEquals(2, bad.validate().stream().filter(p -> p.contains("doseAnchor needs a mass per pad")).count(),
+                    bad.validate().toString());
+        }
+    }
+
+    /** A 27G straight to add, under {@code key} and {@code name}. */
+    static TipSetup straight27(String key, String name) {
+        TipSetup s = TipSetupsTest.straight25();
+        s.key = key;
+        s.name = name;
+        s.gauge = 27;
+        s.idMm = 0.20;
+        s.odMm = 0.41;
+        return s;
+    }
+
+    /**
+     * BR-85 review: an undo puts back the two entries its mount changed and nothing else. A third tip keeps the anchor
+     * and the recipe set for it while the 25G was on; a tip mounted without an entry keeps the anchor set while it was
+     * on (it gets the entry a mount would give it), and without one it is put back as it was, with no entry.
+     */
+    @Test
+    public void anUndoKeepsWhatWasSetMeanwhileForTheOtherTips() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            TipSetup s27 = svc.getDb().insertTipSetupVersion(straight27("27g-straight", "27G straight"));
+            svc.updateConfigAtomically(live -> {
+                live.parkedTips.put(s27.key, TipSetups.newEntry(live, live.profile, live.tip.key, s27.name));
+                return live;
+            });
+            f.mount(K25);
+            svc.updateConfigAtomically(live -> {
+                live.parkedTips.get(s27.key).doseAnchor = anchor(0.80);
+                live.parkedTips.get(s27.key).profile.touchOffSkipDots = 3;
+                return live;
+            });
+            svc.undoMount("tester");
+            DispenseConfig.ParkedTip p27 = svc.getConfig().parkedTips.get(s27.key);
+            assertEquals(0.80, p27.doseAnchor.massPerPadMg, 0, "the 27G's anchor, set while the 25G was on");
+            assertEquals(3, p27.profile.touchOffSkipDots, "and its recipe");
+
+            TipSetup bare = svc.getDb().insertTipSetupVersion(straight27("27g-straight-2", "27G straight 2"));
+            f.mount(bare.key);
+            svc.undoMount("tester");
+            assertFalse(svc.getConfig().parkedTips.containsKey(bare.key), "nothing set: no entry, as before its mount");
+            f.mount(bare.key);
+            svc.updateConfigAtomically(live -> {
+                live.doseAnchor = anchor(1.50);
+                return live;
+            });
+            svc.undoMount("tester");
+            DispenseConfig c = svc.getConfig();
+            assertEquals(Tip.SEED_KEY, c.tip.key);
+            assertNull(c.doseAnchor, "the 22G has none");
+            assertEquals(1.50, c.parkedTips.get(bare.key).doseAnchor.massPerPadMg, 0, "set while it was on");
+            assertTrue(c.validate().isEmpty(), c.validate().toString());
+        }
+    }
+
+    /**
+     * BR-85 re-review: the recipe set for the incoming tip while it was on stays with it after an undo, as its anchor
+     * does, but not the start angle (the machine's: it stays on); a tip mounted without an entry gets one to keep it.
+     */
+    @Test
+    public void anUndoKeepsTheRecipeSetForTheIncomingTipWhileItWasOn() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            svc.updateConfigAtomically(live -> {
+                live.parkedTips.get(K25).profile.startAngleDeg = 45;
+                live.parkedTips.get(K25).profile.startAngleSetAtMs = 1000L;
+                return live;
+            });
+            f.mount(K25);
+            svc.updateConfigAtomically(live -> {
+                live.profile.touchOffSkipDots = 2;
+                live.profile.pressurePsi = 13.7;
+                return live;
+            });
+            svc.setStartAngle(120.0, "measured");
+            svc.undoMount("tester");
+            DispenseConfig c = svc.getConfig();
+            assertEquals(Tip.SEED_KEY, c.tip.key);
+            DispenseProfile p25 = c.parkedTips.get(K25).profile;
+            assertEquals(2, p25.touchOffSkipDots, "the 25G's recipe, set while it was on");
+            assertEquals(13.7, p25.pressurePsi, 0);
+            assertEquals(45, p25.startAngleDeg, 0, "its parked start angle: the live one is the machine's");
+            assertEquals(1000L, (long) p25.startAngleSetAtMs);
+            assertEquals(0, c.profile.touchOffSkipDots, "the 22G's own recipe");
+            assertEquals(120, c.profile.startAngleDeg, 0, "the live angle stays on");
+            f.mount(K25);
+            assertEquals(2, svc.getConfig().profile.touchOffSkipDots, "back with the 25G");
+
+            TipSetup bare = svc.getDb().insertTipSetupVersion(straight27("27g-straight", "27G straight"));
+            f.mount(bare.key);
+            svc.updateConfigAtomically(live -> {
+                live.profile.touchOffSkipDots = 3;
+                return live;
+            });
+            svc.undoMount("tester");
+            c = svc.getConfig();
+            assertEquals(K25, c.tip.key);
+            assertEquals(3, c.parkedTips.get(bare.key).profile.touchOffSkipDots, "no entry before: it gets one");
+            assertNull(c.parkedTips.get(bare.key).doseAnchor);
+            assertEquals(2, c.profile.touchOffSkipDots);
+            assertTrue(c.validate().isEmpty(), c.validate().toString());
+        }
+    }
+
     /**
      * BR-82 review: the lift is the recipe's, like its pause. The 25G saved with pause 500 and lift 3, the 22G mounted
      * and the machine's hop height changed: the 25G mounted again lifts its 3 mm, and the hop height stays as it was.
@@ -280,12 +435,13 @@ public class MountTest {
             DispenseProfile now = svc.getConfig().profile;
             assertEquals(120, now.startAngleDeg, 0);
             assertEquals(live.startAngleSetAtMs, now.startAngleSetAtMs, "not stamped: no new measurement");
-            // after a controller reconnect the angle is stale (I11); a mount leaves it as it was
+            // after a controller reset (BR-02) the angle is stale (I11); a mount leaves it as it was
             f.sim.machine.setEnabled(false);
+            f.sim.server.powerCycle();
             f.sim.enableAndHome();
             f.mount(Tip.SEED_KEY);
             assertEquals(live.startAngleSetAtMs, svc.getConfig().profile.startAngleSetAtMs);
-            assertTrue(svc.getConfig().profile.startAngleSetAtMs < svc.getControllerConnectedAtMs(), "I11 still asks");
+            assertTrue(svc.getConfig().profile.startAngleSetAtMs < svc.getControllerResetAtMs(), "I11 still asks");
         }
     }
 

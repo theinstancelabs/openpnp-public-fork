@@ -36,6 +36,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const { chromium } = require(path.join(process.env.PLAYWRIGHT_DIR, 'node_modules', 'playwright'));
+const { setStartAngle } = require(path.join(__dirname, 'start-angle.cjs'));
 
 const BASE = process.env.IL_API_URL;
 const UINAV = process.env.UINAV;
@@ -1064,13 +1065,20 @@ async function runFirstDots(page, n) {
       /** Waits for a Register board task to end; returns its status. */
       const regEnd = async (since, timeout) => waitStatus(page, (x) => x.run && x.run.label === 'board registration' && !x.run.running
         && x.run.startedAtMs > since, timeout || 300000);
-      // the start-angle answer of the recovery panel (other workspaces carry their own copy of the fix, hidden)
+      // the start-angle answer of the recovery panel (other workspaces carry their own copy of the fix, hidden): a
+      // reconnect asks whether the controller was switched off (its confirm); a reset or the screw motor switched off
+      // since the angle was set (BR-02: every STOP's M18 B) asks for it to be measured again, with no confirm: then the
+      // set-up's setStartAngle turns the screw and sets it. Returns what the page offered and how it was answered.
       const answerI11 = async () => {
         const sel = '#panel [data-fix="I11-confirm"]';
-        await page.waitForSelector(sel + ':enabled', { state: 'visible', timeout: 20000 }).catch(() => {});
-        if (await page.isVisible(sel)) await page.click(sel);
-        else if ((await status()).dispense.profile.startAngleNeedsConfirm) await post('api/screw/start-angle', { note: 'PW: the controller stayed on' });
+        await page.waitForFunction((q) => { const b = document.querySelector(q); return (!!b && !b.disabled && b.offsetParent !== null)
+          || ['measure', 'off'].includes(IL.angleState(IL.S.status)); }, sel, { timeout: 20000 }).catch(() => {});
+        const seen = await page.evaluate((q) => { const b = document.querySelector(q); return { state: IL.angleState(IL.S.status), confirm: !!b && b.offsetParent !== null }; }, sel);
+        let how = null;
+        if (seen.state !== 'measure' && seen.confirm) { await page.click(sel); how = 'confirm'; }
+        else if ((await status()).dispense.profile.startAngleNeedsConfirm) how = await setStartAngle(page, BASE, 'PW: STOP recovery');
         await waitStatus(page, (x) => !x.dispense.profile.startAngleNeedsConfirm, 15000).catch(() => {});
+        return Object.assign(seen, { how });
       };
       let r = await put('api/config', { vacuumProbe: { vacuumSettleMs: 300, readDelayMs: 0 } });
       check('register: fast simulator probe timings saved (FAST_TIMINGS)', r.ok(), r.status());
@@ -1080,7 +1088,12 @@ async function runFirstDots(page, n) {
       await nav(page, 'run');
       await page.click('#btn-start');
       await waitText(page, 'pill-conn', /^Connected$/, 60000);
-      await answerI11();
+      const ang0 = await answerI11();
+      // BR-02: the STOP's M18 B switched the screw motor off, so a partial turn's angle is measured again, never confirmed
+      const st0 = await status();
+      if (st0.machine.screwMotorOff && st0.machine.screwMotorOff.atMs && st0.dispense.profile.partialTurn) {
+        check('recovery: after the STOP (M18 B) the start angle is to be measured again, no confirm offered; set after a screw turn', ang0.state === 'measure' && !ang0.confirm && ang0.how === 'measured', ang0);
+      }
       const home0 = await recStep('home');
       check('recovery: the home step reads "home first" and is done (N1 in the safe zone)', home0 && /home first/i.test(home0.title) && home0.done, home0);
       await page.waitForFunction(() => !IL.recoveryActive(), null, { timeout: 15000 }).catch(() => {});

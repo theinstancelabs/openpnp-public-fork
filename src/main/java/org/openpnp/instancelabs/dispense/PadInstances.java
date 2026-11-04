@@ -16,6 +16,7 @@ import org.openpnp.instancelabs.padprofile.DoseEvidence;
 import org.openpnp.instancelabs.padprofile.DotGeometry;
 import org.openpnp.instancelabs.padprofile.Limits;
 import org.openpnp.instancelabs.padprofile.PadInstance;
+import org.openpnp.instancelabs.padprofile.ProfileCheck;
 import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.instancelabs.padprofile.TypeInfo;
 import org.openpnp.model.Board;
@@ -160,9 +161,9 @@ public final class PadInstances {
 
     /**
      * The check's inputs around these pads: the current pad types with their rules, the gate, the mounted tip, the
-     * profile's dose and recipe, the packages pasted partly. Dose evidence and anchors other than the validated types'
-     * are the caller's (none here). The tip is the mounted setup with its dot table ({@link DispenseService#mountedTip},
-     * tip setups design §22.2), not {@code cfg.tip}.
+     * profile's dose and recipe, the packages pasted partly, the mounted tip's own dose anchor under its pad type
+     * (BR-85). Dose evidence and the other setups' anchors are the caller's (none here). The tip is the mounted setup
+     * with its dot table ({@link DispenseService#mountedTip}, tip setups design §22.2), not {@code cfg.tip}.
      */
     public static CheckInputs inputs(List<PadInstance> pads, Collection<PadType> types, Map<String, PadRule> rules,
             DispenseConfig cfg, Collection<String> pastePartial, boolean planned, Tip tip) {
@@ -183,6 +184,13 @@ public final class PadInstances {
         in.tip = tip;
         for (TypeInfo t : in.types.values()) {
             t.setupName = tip.name;
+        }
+        DispenseConfig.DoseAnchor own = cfg.doseAnchor;
+        if (own != null && tip.key.equals(cfg.tip.key)) {
+            // BR-85: the mounted tip's own anchor, for its pad type only (Calibrate's amount window too)
+            Anchor a = new Anchor(own.family, own.padType, null, own.massPerPadMg, own.areaMm2);
+            a.tipName = tip.name;
+            in.anchors.put(own.padType, a);
         }
         in.profileSteps = cfg.profile.netStepsPerDot;
         in.stepsPerRev = cfg.bStepsPerRev;
@@ -210,10 +218,24 @@ public final class PadInstances {
         List<PadType> types = svc.getPadTypes();
         CheckInputs in = inputs(pads, types, db.currentPadRules(), cfg, db.pastePartialPackages(), planned, tip);
         long since = in.nowMs - (long) (cfg.padCalibration.doseRecordMaxAgeH * 3600e3); // older ones are stale
-        in.evidence = DoseRecords.evidence(db.doseRecords(null, since), cfg, new DoseRecord.Epochs(
-                svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed()), in.nowMs, db.flaggedJobs());
+        in.evidence = DoseRecords.evidence(db.doseRecords(null, since), cfg, svc.doseEpochs(), in.nowMs,
+                db.flaggedJobs());
         others(db, tip.key, types, in);
         return in;
+    }
+
+    /**
+     * BR-85: the shared anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get under
+     * {@code cfg}, as the check picks it for any pad type but its own anchor's (a validated pad type of any setup, or
+     * the bench for chips), from the check's inputs without the dose evidence and the dot table (no anchor needs
+     * them). {@link DispenseService#familyAnchor} caches it for the status.
+     */
+    public static Anchor anchorFor(DispenseDb db, DispenseConfig cfg, String family, double areaMm2)
+            throws SQLException {
+        List<PadType> types = TipSetups.typesFor(db, cfg.tip.key);
+        CheckInputs in = inputs(new ArrayList<>(), types, null, cfg, null, false, specTip(cfg.tip));
+        others(db, cfg.tip.key, types, in);
+        return ProfileCheck.anchorFor(in, family, areaMm2);
     }
 
     /**

@@ -68,6 +68,9 @@ public final class BoardArtStore {
         public String origin;
         /** attach: the board file the drawing was attached to. */
         public String board;
+        /** BR-88: the footprints the upload does not place and its pasteDnp; null for drawings saved before them. */
+        public BoardArt.Skipped skipped;
+        public Boolean pasteDnp;
     }
 
     private static final class Fallback {
@@ -228,6 +231,8 @@ public final class BoardArtStore {
             i.atMs = a.imported.atMs;
             i.how = a.imported.how;
             i.board = a.imported.board;
+            i.skipped = a.imported.skipped;
+            i.pasteDnp = a.imported.pasteDnp;
         }
         if (a.source != null) {
             i.sourceName = a.source.name;

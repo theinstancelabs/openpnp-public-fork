@@ -137,6 +137,17 @@ final class ApiContext {
     }
 
     /**
+     * BR-02: after a controller reset nothing moves until a home (the home route itself asks for the operator's word
+     * that nothing is below). The engine's interlocks refuse too; this answers before anything else is checked.
+     */
+    void requirePositionKnown(DispenseService s) throws ApiException {
+        String why = s == null ? null : s.positionUnknownWhy();
+        if (why != null) {
+            throw ApiException.refused("MACHINE: " + why + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
+        }
+    }
+
+    /**
      * BR-52: while OpenPnP switches the machine off (a STOP's DISABLE_COMMAND, the link closing) it still reads started:
      * nothing that moves or switches an output starts then.
      */

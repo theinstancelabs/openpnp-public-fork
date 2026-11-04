@@ -19,6 +19,7 @@ import java.util.concurrent.TimeoutException;
 import javax.imageio.ImageIO;
 
 import org.openpnp.instancelabs.dispense.ControllerCommands;
+import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeReport;
@@ -171,6 +172,7 @@ final class MachineEndpoints {
 
     Object enable() throws Exception {
         Machine m = ctx.machine();
+        refuseWhileEngineStarts("Start");
         // BR-52: a machine switching off still reads started; start it again once the switch-off has ended
         if (!ctx.switchOff.awaitEnd(START_WAITS_FOR_SWITCH_OFF_MS)) {
             throw ApiException.refused("OpenPnP is still switching the machine off after "
@@ -193,8 +195,21 @@ final class MachineEndpoints {
         return Views.map("enabled", m.isEnabled(), "homed", m.isHomed());
     }
 
+    /**
+     * BR-02 (#11 review 11-04): OpenPnP starts the web API and the engine in no fixed order; until the engine runs it
+     * is not watching the connect, so a Start or a Home then would skip its reset checks (a home after a reset that
+     * moves no Z frame). "failed" is not waited for: the status says why.
+     */
+    private void refuseWhileEngineStarts(String what) throws ApiException {
+        if (ctx.svcOrNull() == null && "starting".equals(DispenseService.startState())) {
+            throw ApiException.refused("the dispense engine is still starting (it reads the controller at Start): "
+                    + "press " + what + " again in a few seconds");
+        }
+    }
+
     Object home(ApiServer.Request r) throws Exception {
         Machine m = ctx.machine();
+        refuseWhileEngineStarts("Home");
         if (!m.isEnabled()) {
             throw ApiException.refused("the machine is not started: press Start first");
         }
@@ -206,6 +221,15 @@ final class MachineEndpoints {
         // OpenPnP homing or jogging by itself: a home queued behind a task of its own that fails is dropped (rc1 review)
         ctx.requireMachineIdle();
         boolean wait = Json.bool(r.json(), "wait", false);
+        // BR-02: after a controller reset the home is G28 straight away, only on the operator's word that nothing is
+        // under either tool (the engine checks again on the machine thread)
+        boolean attested = Json.bool(r.json(), "clearBelowAttested", false);
+        String unknown = svc == null ? null : svc.positionUnknownWhy();
+        if (unknown != null && !attested) {
+            throw ApiException.refused("MACHINE: " + unknown + ". " + capitalize(ControllerReset.HOME_CHECK)
+                    + "; then home again saying so (clearBelowAttested): G28 is then the first line, with no Z move "
+                    + "before it.");
+        }
         // With the engine: N1 raised first when a STOP left it low, and a STOP during the home stops the
         // head for good (the drivers are disconnected), as the engine's own homes (§2.3).
         boolean safe = svc != null && svc.isAvailable();
@@ -225,7 +249,7 @@ final class MachineEndpoints {
                     throw new Exception("the machine is not started: press Start first");
                 }
                 if (safe) {
-                    return svc.homeSafely();
+                    return svc.homeSafely(attested);
                 }
                 m.home();
                 return null;
@@ -288,8 +312,13 @@ final class MachineEndpoints {
         s.put("busy", m.isBusy());
         DispenseService svc = ctx.svcOrNull();
         if (svc != null) {
+            // BR-02: a controller reset seen at a connect; nothing moves until a home the operator confirmed
+            s.putAll(svc.getControllerReset().view());
             Map<String, Object> home = Views.home(svc.homePlan());
             double[] n1 = svc.probeNozzleZ();
+            if (svc.positionUnknownWhy() != null) {
+                n1 = null; // the believed Z is the boot's, and the attested home goes straight to G28 (no raise)
+            }
             home.put("n1Z", n1 == null ? null : n1[0]);
             home.put("n1Low", n1 != null && n1[1] > 0);
             // which tool is low: N1 under its safe zone, or N1 above it, which on the shared Z puts the needle low
@@ -519,5 +548,9 @@ final class MachineEndpoints {
         for (ExecutorService ex : cameraExecutors.values()) {
             ex.shutdownNow();
         }
+    }
+
+    private static String capitalize(String s) {
+        return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 }

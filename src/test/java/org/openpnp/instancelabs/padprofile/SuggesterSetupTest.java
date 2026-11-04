@@ -26,6 +26,7 @@ import org.openpnp.instancelabs.dispense.PadTypeStatus;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -185,12 +186,22 @@ public class SuggesterSetupTest {
         assertEquals(keys, new ArrayList<>(inputs.keySet()), "the same checks");
         List<String> diffs = new ArrayList<>();
         int belowGate = 0;
+        int named = 0;
         for (Map.Entry<String, CheckInputs> e : inputs.entrySet()) {
             JsonObject was = golden.getAsJsonObject(e.getKey());
             ProfileCheck.Result r = ProfileCheck.of(e.getValue());
             JsonObject now = golden(r);
             was.remove("computedAtMs");
             now.remove("computedAtMs");
+            // BR-85 changes another: a family scaled from a validated chip type (the seed types' 0805) names it
+            JsonArray anchors = was.getAsJsonArray("anchors");
+            if (anchors.size() == 1 && !anchors.get(0).getAsJsonObject().get("bench").getAsBoolean()) {
+                String w = was.toString();
+                String half = "scaled from the 0603 half turn";
+                named += w.split(Pattern.quote(half), -1).length - 1;
+                was = new JsonParser().parse(w.replace(half, "scaled from " + anchors.get(0).getAsJsonObject().get(
+                        "text").getAsString())).getAsJsonObject();
+            }
             // §22.2 changes one text: a type below the gate names the mounted setup ("for the 22G tip")
             for (int i = 0; i < r.groups.size(); i++) {
                 ProfileCheck.Group g = r.groups.get(i);
@@ -205,6 +216,7 @@ public class SuggesterSetupTest {
         }
         assertTrue(diffs.isEmpty(), String.join("\n", diffs));
         assertTrue(belowGate > 0, "the seed types put groups below the gate");
+        assertEquals(20, named, "the seed types' families scaled from their validated 0805");
     }
 
     static final Pattern BELOW_GATE_TEXT = Pattern.compile(".+ is not calibrated for the " + Pattern.quote(goldenTip().name)
@@ -361,6 +373,171 @@ public class SuggesterSetupTest {
         ProfileCheck.Result alone = ProfileCheck.of(with(tip25(true), chips(null)));
         assertTrue(alone.anchors.get(0).bench);
         assertFalse(alone.groups.get(0).suggestion.confidenceWhy.stream().anyMatch(w -> w.contains("validated with")));
+    }
+
+    /** Two parts of {@code pkg} ({@code ref}1, {@code ref}2), each two untyped w x h openings {@code pitch} apart. */
+    static List<PadInstance> parts(String ref, String pkg, double w, double h, double pitch, double y) {
+        List<PadInstance> l = new ArrayList<>();
+        for (int part = 0; part < 2; part++) {
+            for (int i = 0; i < 2; i++) {
+                PadInstance p = new PadInstance(ref + (part + 1), pkg, Integer.toString(i + 1), 100 + part * 8 + i
+                        * pitch, y, 0, w, h, 25);
+                p.padId = p.ref + "." + (i + 1);
+                l.add(p);
+            }
+        }
+        return l;
+    }
+
+    /**
+     * BR-85: the 25G's own anchor, 1.95 mg (a whole turn, weighed by Process) on the chip-0603 type's opening, 0.80 x
+     * 0.95 mm: 0.760 mm² (the dose-anchor route takes the type's opening, not a board's).
+     */
+    static Anchor own0603() {
+        Anchor a = new Anchor(Family.CHIP, "chip-0603", null, 1.95, DotGeometry.padAreaMm2(0.80, 0.95, 0));
+        a.tipName = "25G straight";
+        return a;
+    }
+
+    /** Each group's target (mg per pad) by its pad type. */
+    static Map<String, Double> targets(CheckInputs in) {
+        Map<String, Double> m = new LinkedHashMap<>();
+        for (ProfileCheck.Group g : ProfileCheck.prepare(in).groups) {
+            m.put(g.typeKey, g.target);
+        }
+        return m;
+    }
+
+    /**
+     * BR-85 re-review: a tip's own anchor is the amount for its own pad type only. Reflow accepting the 25G's whole
+     * turn on 0603 pads says nothing of bigger ones: a 1206 and a QFN centre pad aim at what they aimed at before
+     * BR-85, the bench's 0603 half turn (k 0.5 on the centre pad), not at the 25G's 0603 rate scaled up to their
+     * openings (nearly twice as much). With the 22G's validated, weighed 0603 they aim at that one, as before; the
+     * check lists both anchors of chip-0603, the tip's and the 22G's.
+     */
+    @Test
+    public void aTipsOwnAnchorIsForItsOwnPadTypeOnly() {
+        TypeInfo t0603 = chip0603(TypeInfo.NOT_STARTED, 1);
+        List<PadInstance> pads = new ArrayList<>(chips(t0603));
+        pads.addAll(parts("R1", "R_1206_3216Metric", 1.125, 1.75, 2.925, 90));
+        PadInstance ep = new PadInstance("U1", "QFN-20-1EP_4x4mm_P0.5mm_EP3.1x3.1mm", "21", 120, 60, 0, 3.10, 3.10, 0);
+        ep.centrePad = true;
+        pads.add(ep);
+        CheckInputs in = with(tip25(true), pads);
+        in.types.put(t0603.key, t0603);
+        TypeInfo t1206 = chip0603(TypeInfo.NOT_STARTED, 1);
+        t1206.key = "chip-1206";
+        t1206.name = "1206 chip";
+        t1206.padWMm = 1.125;
+        t1206.padHMm = 1.75;
+        SuggesterTest.type(in, t1206, "R_1206_3216Metric");
+        TypeInfo centre = chip0603(TypeInfo.NOT_STARTED, 1);
+        centre.key = "qfn-centre";
+        centre.name = "QFN centre pad";
+        centre.family = Family.NO_LEAD;
+        centre.padWMm = 3.10;
+        centre.padHMm = 3.10;
+        centre.padRoundness = 0;
+        centre.k = 0.5;
+        SuggesterTest.type(in, centre, ep.packageId);
+        Map<String, Double> before = targets(in);
+        assertEquals(3, before.size(), before.toString());
+        Anchor own = own0603();
+        in.anchors.put(own.typeKey, own);
+        for (ProfileCheck.Group g : ProfileCheck.prepare(in).groups) {
+            if (t0603.key.equals(g.typeKey)) {
+                assertTrue(own == g.anchor, g.anchor.typeKey);
+                assertEquals(1.95 * g.area / 0.76, g.target, 1e-9);
+            }
+            else {
+                assertTrue(g.anchor.bench, g.typeKey + " aims at " + g.anchor.typeKey);
+                assertEquals(before.get(g.typeKey), g.target, 1e-12, g.typeKey);
+                assertEquals(Anchor.BENCH.mgPerMm2 * g.area * (g.centre ? 0.5 : 1), g.target, 1e-9, g.typeKey);
+            }
+        }
+        // the 22G's validated, weighed 0603 (§22.2) anchors the other types, as before BR-85
+        Anchor g22 = new Anchor(Family.CHIP, "chip-0603", 4, 1.10, DotGeometry.padAreaMm2(0.80, 0.95, 50));
+        g22.setupName = Tip.SEED_NAME;
+        in.moreAnchors.add(g22);
+        in.anchors.clear();
+        before = targets(in);
+        in.anchors.put(own.typeKey, own);
+        for (ProfileCheck.Group g : ProfileCheck.prepare(in).groups) {
+            assertTrue((t0603.key.equals(g.typeKey) ? own : g22) == g.anchor, g.typeKey + " aims at " + g.anchor.typeKey);
+            if (!t0603.key.equals(g.typeKey)) {
+                assertEquals(before.get(g.typeKey), g.target, 1e-12, g.typeKey);
+            }
+        }
+        ProfileCheck.Result r = ProfileCheck.of(in);
+        assertEquals(2, r.anchors.size(), "the tip's and the 22G's, both of chip-0603");
+        assertTrue(r.anchors.stream().anyMatch(a -> "25G straight".equals(a.tipName)));
+        assertTrue(r.anchors.stream().anyMatch(a -> Tip.SEED_NAME.equals(a.setupName)));
+    }
+
+    /**
+     * BR-85 re-review: on its own pad type the tip's anchor wins, also over the tip's own validated, weighed version of
+     * that type. The anchor is on the type's opening (0.760 mm²), the version on the board's opening it was calibrated
+     * on (R_0603_1608Metric, roundness 50: 0.726 mm², its calAreaMm2), which is the 0603 pads' own: by the nearest
+     * opening the version would win. Other chips keep that version as their anchor, as before BR-85.
+     */
+    @Test
+    public void onItsOwnPadTypeTheTipsAnchorWinsOverItsValidatedVersion() {
+        TypeInfo v0603 = chip0603(TypeInfo.VALIDATED, 2);
+        v0603.massPerPadMg = 1.30;
+        v0603.calAreaMm2 = DotGeometry.padAreaMm2(0.80, 0.95, 50);
+        List<PadInstance> pads = new ArrayList<>(chips(v0603));
+        for (PadInstance p : pads) {
+            p.roundness = 50; // the board's R_0603_1608Metric openings
+        }
+        pads.addAll(parts("R1", "R_1206_3216Metric", 1.125, 1.75, 2.925, 90));
+        CheckInputs in = with(tip25(true), pads);
+        in.types.put(v0603.key, v0603);
+        Anchor own = own0603();
+        in.anchors.put(own.typeKey, own);
+        assertEquals(0.726, v0603.calAreaMm2, 0.0005);
+        assertEquals(0.760, own.areaMm2, 1e-9);
+        int n = 0;
+        for (ProfileCheck.Group g : ProfileCheck.prepare(in).groups) {
+            n++;
+            if (v0603.key.equals(g.typeKey)) {
+                assertEquals(v0603.calAreaMm2, g.area, 1e-12);
+                assertTrue(own == g.anchor, "the tip's anchor, not its validated 0603 v" + g.anchor.version);
+                assertEquals(1.95 * g.area / 0.76, g.target, 1e-9);
+            }
+            else {
+                assertEquals(v0603.key, g.anchor.typeKey, "the 1206 (no type)");
+                assertNull(g.anchor.tipName, "the 25G's validated 0603, as before BR-85");
+                assertEquals(1.30 / v0603.calAreaMm2 * g.area, g.target, 1e-9);
+            }
+        }
+        assertEquals(2, n);
+    }
+
+    /**
+     * BR-85 re-review: a family with no anchor of its own scales from the chips' (§1.3), never from a tip's own anchor
+     * (its pad type's only), and the reason names the anchor: "the 0603 half turn" only for the bench's.
+     */
+    @Test
+    public void aFamilyWithNoAnchorOfItsOwnScalesFromTheChipsAndNamesTheAnchor() {
+        CheckInputs in = with(tip25(true), parts("D", "D_SOD-123", 0.90, 1.20, 3.30, 100));
+        in.anchors.put("chip-0603", own0603());
+        ProfileCheck.Group g = ProfileCheck.of(in).groups.get(0);
+        assertEquals(Family.SMALL_OUTLINE, g.family);
+        assertFalse(g.ownAnchor);
+        assertTrue(g.anchor.bench, "the bench's half turn, not the 25G's 0603 anchor");
+        assertFalse(g.capped, "3.3 mm apart: no fine-pitch cap");
+        assertEquals(Suggester.r3(Anchor.BENCH.mgPerMm2 * g.area), g.suggestion.amount.targetMg, 1e-9);
+        assertTrue(g.suggestion.confidenceWhy.contains("no validated Small-outline discretes pads yet: the amount is "
+                + "scaled from the 0603 half turn"), g.suggestion.confidenceWhy.toString());
+        // the 22G's validated, weighed 0805 anchors the chips: the reason names it
+        Anchor g22 = new Anchor(Family.CHIP, "chip-0805", 3, 2.00, DotGeometry.padAreaMm2(1.025, 1.40, 0));
+        g22.setupName = Tip.SEED_NAME;
+        in.moreAnchors.add(g22);
+        g = ProfileCheck.of(in).groups.get(0);
+        assertTrue(g22 == g.anchor);
+        assertTrue(g.suggestion.confidenceWhy.contains("no validated Small-outline discretes pads yet: the amount is "
+                + "scaled from chip-0805 validated on a board (2.00 mg on 1.43 mm²)"), g.suggestion.confidenceWhy
+                        .toString());
     }
 
     @Test

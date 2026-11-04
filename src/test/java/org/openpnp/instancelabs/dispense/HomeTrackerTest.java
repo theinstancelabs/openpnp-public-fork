@@ -159,6 +159,24 @@ public class HomeTrackerTest {
         assertEquals("not-homed", t.plan(true, false, W).whyCode);
     }
 
+    /**
+     * BR-02: a connect made before the service started (its listeners missed it) is dated at the start: I11 asks a
+     * confirm of an angle set before it, and a home before the start still counts. A connect seen is kept.
+     */
+    @Test
+    public void aConnectBeforeTheServiceStartedIsDatedAtTheStart() {
+        HomeTracker t = tracker(true);
+        long start = now;
+        now += 1000;
+        t.connectedBeforeStart();
+        assertEquals(Long.valueOf(start), t.getConnectedAtMs());
+        assertFalse(t.plan(true, true, W).needed, "the home before the start followed that connect");
+        now += 1000;
+        t.machineEnabled(machine());
+        t.connectedBeforeStart();
+        assertEquals(Long.valueOf(now), t.getConnectedAtMs(), "a connect seen is kept");
+    }
+
     @Test
     public void alwaysHomesAndComesFirst() {
         HomeTracker t = tracker(true);

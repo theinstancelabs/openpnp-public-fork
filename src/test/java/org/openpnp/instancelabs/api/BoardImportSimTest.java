@@ -1034,6 +1034,8 @@ public class BoardImportSimTest {
         assertEquals("kicad", listed.getAsJsonObject("art").get("kind").getAsString());
         assertEquals(artId, listed.getAsJsonObject("art").get("id").getAsString());
         assertEquals("attach", listed.getAsJsonObject("imported").get("how").getAsString());
+        assertEquals(pv.getAsJsonObject("skipped"), listed.getAsJsonObject("imported").getAsJsonObject("skipped"));
+        assertFalse(listed.getAsJsonObject("imported").get("pasteDnp").getAsBoolean());
         assertEquals(Arrays.asList("ftp.art.json", "ftp.kicad_pcb"), listing(new File(boardsRoot(), "ftp")));
 
         JsonObject after = plan(path);
@@ -1149,6 +1151,10 @@ public class BoardImportSimTest {
         assertEquals(8, blocked, "4 LEDs below the gate, J3, SW1, Y1 and IC3");
         JsonObject saved = importBoard(nano, "NanoV3.3.kicad_pcb", "Arduino Nano V3.3", false);
         assertEquals("arduino-nano-v3-3", saved.get("slug").getAsString());
+        // BR-88 (a): the board list keeps what the upload's preview listed as getting no paste
+        JsonObject listed = byId(ok(get("/api/boards")).getAsJsonArray("files"), "file", saved.get("file").getAsString());
+        assertEquals(pv.getAsJsonObject("skipped"), listed.getAsJsonObject("imported").getAsJsonObject("skipped"));
+        assertFalse(listed.getAsJsonObject("imported").get("pasteDnp").getAsBoolean());
         JsonObject plan = plan(saved.get("file").getAsString());
         assertEquals(55, plan.getAsJsonArray("pads").size());
         assertEquals(saved.getAsJsonObject("art").get("id").getAsString(),
@@ -1171,6 +1177,9 @@ public class BoardImportSimTest {
                 + withDnp.getAsJsonObject("file").get("sha256").getAsString() + "&decisions="
                 + withDnp.get("decisions").getAsString(), mobo);
         assertEquals(201, mres.status, mres.toString());
+        JsonObject mlisted = byId(mres.json().getAsJsonObject("boards").getAsJsonArray("files"), "file",
+                mres.json().get("file").getAsString());
+        assertTrue(mlisted.getAsJsonObject("imported").get("pasteDnp").getAsBoolean(), "U2 is pasted: " + mlisted);
         JsonObject mplan = plan(mres.json().get("file").getAsString());
         assertEquals(261, mplan.getAsJsonArray("pads").size());
         assertEquals(mres.json().getAsJsonObject("art").get("id").getAsString(),

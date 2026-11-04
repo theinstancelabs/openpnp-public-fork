@@ -38,6 +38,7 @@ public class ReviewSafetySimTest {
     public void before() throws Exception {
         sim = new SimMachine();
         svc = DispenseService.start(Configuration.get());
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         ApiSettings s = new ApiSettings();
         s.port = 0;
         api = ApiServer.start(Configuration.get(), s);
@@ -301,29 +302,16 @@ public class ReviewSafetySimTest {
             release.await();
             return null;
         });
-        JsonObject[] held = new JsonObject[1];
-        Thread hold = new Thread(() -> {
-            try {
-                held[0] = call("POST", "/api/pressure/start", null);
-            }
-            catch (Exception e) {
-                held[0] = new JsonObject();
-            }
-        });
-        hold.start();
-        long t0 = System.currentTimeMillis();
-        while (!"starting".equals(pressure().get("state").getAsString())) {
-            assertTrue(System.currentTimeMillis() - t0 < 10000, "the hold's start is queued");
-            Thread.sleep(10);
-        }
-        // the engine task passed its API checks before the hold's start set STARTING: queued behind it
+        // OpenPnP is busy: the hold's start is refused at once, never queued behind the machine thread's work (#12
+        // final review m2: a start queued behind motion trusted OpenPnP's planned position)
         sim.server.mark();
+        JsonObject held = call("POST", "/api/pressure/start", null);
+        assertEquals(409, lastStatus, held.toString());
+        assertTrue(held.toString().contains("busy"), held.toString());
         java.util.concurrent.Future<org.openpnp.instancelabs.dispense.RunResult> task = svc.checkZ();
         release.countDown();
-        hold.join(30000);
         org.openpnp.instancelabs.dispense.RunResult r = task.get(30, java.util.concurrent.TimeUnit.SECONDS);
-        assertEquals("off", pressure().get("state").getAsString(), "the hold refused on the machine thread: " + held[0]);
-        assertTrue(held[0].toString().contains("a dispense task is starting or running"), held[0].toString());
+        assertEquals("off", pressure().get("state").getAsString());
         assertEquals(org.openpnp.instancelabs.dispense.RunResult.Status.OK, r.status, r.toString());
         assertFalse(sim.server.sinceMark().contains(ControllerCommands.PUMP_ON), "the pump never went on");
 

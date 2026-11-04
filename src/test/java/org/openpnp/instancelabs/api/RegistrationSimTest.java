@@ -904,6 +904,7 @@ public class RegistrationSimTest {
     /** §10.2 cases 7, 13 and 16: refusals before N1 or anything else moves. */
     @Test
     public void refusalsComeBeforeAnythingMoves() throws Exception {
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a place
         String p0 = plan().get("planId").getAsString();
         assertEquals(400, post("/api/plan/" + p0 + "/register", "{\"probe\":\"bogus\"}").status);
         assertEquals(404, post("/api/plan/nope/register", "{}").status);
@@ -1429,10 +1430,17 @@ public class RegistrationSimTest {
         assertEquals("board-registration", last.get("kind").getAsString());
     }
 
-    /** Start (a controller connect) and the start-angle confirm of the new connection (I11). */
+    /**
+     * Start (a controller connect) and the start angle measured again (I11; BR-02: the stop sequence of the task the
+     * STOP ended switched the screw's motor off, so a confirm cannot keep the angle; the dot pair that measures it turns
+     * the screw first).
+     */
     void restart() throws Exception {
         ok(post("/api/machine/enable", null));
-        ok(post("/api/screw/start-angle", "{}"));
+        svc.noteControllerLine("G1 B30 F600");
+        double angle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile")
+                .get("startAngleDeg").getAsDouble();
+        ok(post("/api/screw/start-angle", "{\"startAngleDeg\":" + angle + "}"));
     }
 
     boolean n1Low() throws Exception {

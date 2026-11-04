@@ -42,8 +42,28 @@ public final class Interlocks {
         public double estimatedPressurisedSeconds;
         /** Top camera + dot vision present (I10 clean-pad check). */
         public boolean opticalCheckAvailable;
-        /** When OpenPnP last connected to the controller (epoch ms; I11), or null if unknown. */
+        /**
+         * When the B step count last restarted or may have (epoch ms; I11): a detected controller reset, a connect
+         * whose position could not be read, or the screw's motor switched off (BR-02); null if none was seen. A
+         * reconnect keeps the count.
+         */
+        public Long controllerResetAtMs;
+        /** When the last controller reset was detected (epoch ms; I11): the count restarted for sure; or null. */
+        public Long controllerResetDetectedAtMs;
+        /**
+         * When OpenPnP last connected to the controller (epoch ms; I11), or null: every OpenPnP start or connect may
+         * have changed the screw's phase (the process engineer, 11-03): an angle set before it is confirmed at least.
+         */
         public Long controllerConnectedAtMs;
+        /**
+         * When the screw's motor was last switched off (epoch ms; I11, BR-02): unpowered, the screw may have turned, so
+         * an angle set before it is measured again; or null. It dates {@link #controllerResetAtMs} too.
+         */
+        public Long screwMotorOffAtMs;
+        /** Why, in plain words: "the screw motor was switched off at 16:20 (a STOP: ...)"; null with it. */
+        public String screwMotorOffWhy;
+        /** BR-02: why the head's position is unknown (a controller reset not homed since), or null when known. */
+        public String positionUnknownWhy;
         /**
          * Purge-row spots this run lays (I9): the initial purge and the switch spots of every further
          * dose block ({@link DoseBlocks#purgeSpotsNeeded}); and whether it is a board run (I9, I10, I11
@@ -222,7 +242,14 @@ public final class Interlocks {
             return;
         }
         if (!cfg.isNeedleAnchored()) {
-            r.add("I4", putOn(in) + ": record its needle Z frame (Setup › Needle Z frame)");
+            if (cfg.isZFrameMovedSinceAnchor()) {
+                // BR-02: the home after a controller reset moved the frame (K by twice the shift)
+                r.add("I4", "the controller was reset: the Z frame moved at the home of "
+                        + ZCheck.clock(cfg.zFrameMovedAtMs) + ": record the needle frame again (Setup › Needle Z frame)");
+            }
+            else {
+                r.add("I4", putOn(in) + ": record its needle Z frame (Setup › Needle Z frame)");
+            }
             return;
         }
         String close = frameTooClose(cfg);
@@ -369,6 +396,14 @@ public final class Interlocks {
         return planSurface && in.plan != null ? in.plan.boardZMm : null;
     }
 
+    /**
+     * I4's rule for a dot on a probed surface, which I12 shares ({@link OutputZones}): within {@code surfaceMarginMm} of
+     * the probed points (their hull).
+     */
+    public static boolean onSurface(DispenseConfig cfg, SurfacePlane pl, double x, double y) {
+        return pl.distanceOutside(x, y) <= cfg.surfaceMarginMm;
+    }
+
     /** I4 for one probed surface and the dots that take their Z from it. */
     private static void checkSurface(Inputs in, InterlockReport r, String name, List<double[]> targets,
             boolean checkPlan) {
@@ -412,10 +447,9 @@ public final class Interlocks {
         int outside = 0;
         double worst = 0;
         for (double[] xy : targets) {
-            double d = pl.distanceOutside(xy[0], xy[1]);
-            if (d > cfg.surfaceMarginMm) {
+            if (!onSurface(cfg, pl, xy[0], xy[1])) {
                 outside++;
-                worst = Math.max(worst, d);
+                worst = Math.max(worst, pl.distanceOutside(xy[0], xy[1]));
             }
         }
         if (outside > 0) {
@@ -459,7 +493,11 @@ public final class Interlocks {
         if (!in.machineEnabled) {
             r.add("MACHINE", "machine is not enabled");
         }
-        if (!in.machineHomed) {
+        if (in.positionUnknownWhy != null) {
+            // BR-02: no task homes by itself after a reset: the home needs the operator's word that nothing is below
+            r.add("MACHINE", in.positionUnknownWhy + ": " + POSITION_UNKNOWN_REMEDY);
+        }
+        else if (!in.machineHomed) {
             if (in.homeFirst) {
                 r.notes.add("MACHINE: not homed: homes first");
             }
@@ -468,6 +506,9 @@ public final class Interlocks {
             }
         }
     }
+
+    /** What to do when the position is unknown (BR-02). */
+    public static final String POSITION_UNKNOWN_REMEDY = "home first (Home); " + ControllerReset.HOME_CHECK;
 
     /** I9 refusal: a plan of several doses names the spots each switch takes. */
     private static String i9Text(Inputs in, List<DoseBlocks.Run> blocks, int left) {
@@ -649,7 +690,24 @@ public final class Interlocks {
             if (prof.startAngleSetAtMs == null) {
                 r.add("I11", "the screw start angle has never been set: set or confirm it (Profiles)");
             }
+            else if (in.controllerResetDetectedAtMs != null
+                    && prof.startAngleSetAtMs < in.controllerResetDetectedAtMs) {
+                r.add("I11", "the controller was reset after the screw start angle was set; the B step count restarts "
+                        + "at power-up, so the angle is lost: measure it again (Profiles)");
+            }
+            else if (in.screwMotorOffAtMs != null && prof.startAngleSetAtMs <= in.screwMotorOffAtMs) {
+                // BR-02: the step count ran on, but the screw may have turned unpowered: no confirm can keep the angle
+                // (one set in the millisecond of the switch-off may have been set before it)
+                r.add("I11", in.screwMotorOffWhy + " after the screw start angle was set: the screw may have turned: "
+                        + "measure the start angle again (Profiles)");
+            }
+            else if (in.controllerResetAtMs != null && prof.startAngleSetAtMs < in.controllerResetAtMs) {
+                r.add("I11", "the controller was reset (or its position could not be read at a connect) after the "
+                        + "screw start angle was set; the B step count restarts at power-up, so the angle may be "
+                        + "lost: measure it again, or confirm it if the controller was not switched off (Profiles)");
+            }
             else if (in.controllerConnectedAtMs != null && prof.startAngleSetAtMs < in.controllerConnectedAtMs) {
+                // every OpenPnP start or connect is a possible phase change: a confirm at least
                 r.add("I11", "the controller (re)connected after the screw start angle was set; the B step count "
                         + "restarts at power-up, so the angle may be lost: confirm it if the controller was not "
                         + "power-cycled, otherwise measure it again (Profiles)");

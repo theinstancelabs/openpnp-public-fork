@@ -47,6 +47,15 @@ public final class SimMachine implements AutoCloseable {
         }
     }
 
+    /**
+     * BR-03: the towel under the needle where it is now (where its paste lands), so a pressure hold may open the valve
+     * there (the tests that hold the pressure with the head at home).
+     */
+    public void towelUnderNeedle(DispenseService svc) throws Exception {
+        double[] at = svc.needleXY();
+        svc.setLocation("towel", at[0], at[1], 5.5);
+    }
+
     /** Connects to the recording server (a controller connect) and homes. */
     public void enableAndHome() throws Exception {
         machine.setEnabled(true);

@@ -283,6 +283,38 @@ public class DispenseServiceSimTest {
         assertTrue(phases.contains("dispensing"));
     }
 
+    /** The journal's arms of the host watchdog (BR-02). */
+    int watchdogArms() throws Exception {
+        return svc.getDb().query("SELECT * FROM events WHERE code = ?", ControllerReset.EVENT_WATCHDOG_ARMED).size();
+    }
+
+    /**
+     * #11 re-review (11-04): a stream's arm of the host watchdog is on record while the stream runs (the journal thread
+     * writes it): nothing stops the engine when OpenPnP exits, so an arm kept in memory would die with it, and the trip
+     * the firmware reports after it would be taken for the one before the arm.
+     */
+    @Test
+    public void aStreamsArmIsOnRecordWhileTheStreamRuns() throws Exception {
+        svc.getControllerReset().watchdogTripped("a trip reported at the connect", true); // an arm ends it
+        java.util.concurrent.CountDownLatch pump = new java.util.concurrent.CountDownLatch(1);
+        sim.server.holdOkUntil.put(ControllerCommands.PUMP_ON, pump); // the stream waits there, after its arm
+        Future<RunResult> shots = svc.runShots("waste", 360, 1, true);
+        try {
+            long t0 = System.currentTimeMillis();
+            while (watchdogArms() == 0 && System.currentTimeMillis() - t0 < 5000) {
+                Thread.sleep(20);
+            }
+            assertEquals(1, watchdogArms(), "on record while the stream waits at its pump");
+            assertFalse(shots.isDone());
+        }
+        finally {
+            pump.countDown();
+        }
+        RunResult r = shots.get(60, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);
+        assertTrue(r.keepaliveActive, r.toString());
+    }
+
     /** I10: a pad that still carries paste refuses the run before the pressure goes on. */
     @Test
     public void dirtyPadRefusesBeforeAnythingIsStreamed() throws Exception {
@@ -349,7 +381,7 @@ public class DispenseServiceSimTest {
         infinity.setAccessible(true);
         infinity.setInt(sim.driver, 4000); // a G28 whose answer was cut off ends here (60 s otherwise)
         sim.server.mark();
-        Future<Object> home = sim.machine.submit(() -> svc.homeSafely()); // as POST /api/machine/home
+        Future<Object> home = sim.machine.submit(() -> svc.homeSafely(false)); // as POST /api/machine/home
         long t0 = System.currentTimeMillis();
         while (sim.server.sinceMark().stream().noneMatch(l -> l.startsWith("G28"))) {
             assertTrue(System.currentTimeMillis() - t0 < 10000, "the home sends G28");
@@ -414,15 +446,16 @@ public class DispenseServiceSimTest {
 
     /**
      * I11: the B step count restarts at a controller power-up, so a start angle set before the last
-     * connect is refused until it is confirmed (or measured again).
+     * detected reset (BR-02) is refused until it is confirmed (or measured again).
      */
     @Test
-    public void startAngleFromBeforeTheLastConnectIsRefused() throws Exception {
+    public void startAngleFromBeforeTheLastResetIsRefused() throws Exception {
         DispensePlan plan = plan();
         Thread.sleep(5);
         sim.machine.setEnabled(false);
-        sim.enableAndHome();
-        assertTrue(svc.getControllerConnectedAtMs() > svc.getConfig().profile.startAngleSetAtMs);
+        sim.server.powerCycle();
+        sim.enableAndHome(); // OpenPnP's own home: G28 first
+        assertTrue(svc.getControllerResetAtMs() > svc.getConfig().profile.startAngleSetAtMs);
         // the home makes the Z data older than it: a run checks Z with one N1 touch at a stored point
         FlatVacuum.install(sim, FlatVacuum.scene(5.45, new double[] {90, 70, 120, 95}, 5.6));
         DispenseConfig fast = svc.getConfig();
@@ -433,16 +466,44 @@ public class DispenseServiceSimTest {
         assertEquals(RunResult.Status.REFUSED, r.status, r.toString());
         assertTrue(r.interlocks.has("I11"), r.interlocks.toString());
         assertNothingStreamed(sim.server.sinceMark());
-        // confirmed (the controller was not power-cycled): the plan is still valid and runs
-        DispenseProfile p = svc.setStartAngle(null, "not power-cycled");
-        assertTrue(p.startAngleSetAtMs >= svc.getControllerConnectedAtMs());
+        // the count restarted for sure: a confirm cannot keep the old angle (#11 re-review); measured again, the
+        // same angle: the plan is still valid and runs
+        assertThrows(EngineRefusal.class, () -> svc.setStartAngle(null, "not power-cycled"));
+        svc.noteControllerLine("G1 B30 F600"); // the dot pair that measures it again turns the screw (BR-02)
+        DispenseProfile p = svc.setStartAngle(svc.getConfig().profile.startAngleDeg, "measured again");
+        // BR-02 (the process engineer, 11-04): the reset's home moved the Z frame: the needle frame and its touch-off
+        // are recorded again
+        assertTrue(svc.checkInterlocks(plan, 0).toString().contains("the controller was reset: the Z frame moved"),
+                svc.checkInterlocks(plan, 0).toString());
+        svc.setNeedleAnchor(5.5, 2.91, null, null, null, svc.getConfig().needleChangedAtMs);
+        svc.setNeedleZOffset(-2.59, "manual", "test", svc.getConfig().needleChangedAtMs);
+        assertTrue(p.startAngleSetAtMs >= svc.getControllerResetAtMs());
         r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
         assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);
         assertTrue(r.zCheck != null && r.zCheck.pass, String.valueOf(r.zCheck));
         assertFalse(r.homedFirst, "homed by the test: no home of its own");
     }
 
-    /** A disable and a home (a new connect: the start angle is confirmed again, I11). */
+    /**
+     * BR-02 (#11 review 11-04): the Z frame's move at a reset's home is the engine's stamp: a configuration copied
+     * before it (a settings form left open) cannot take it back when it is saved.
+     */
+    @Test
+    public void aCopyFromBeforeAResetsHomeKeepsTheZFrameMove() throws Exception {
+        DispenseConfig open = svc.getConfig();
+        assertNull(open.zFrameMovedAtMs);
+        Thread.sleep(5);
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.enableAndHome(); // OpenPnP's own home after the reset: it moved the Z frame
+        Long moved = svc.getConfig().zFrameMovedAtMs;
+        assertNotNull(moved);
+        svc.updateConfig(open);
+        assertEquals(moved, svc.getConfig().zFrameMovedAtMs);
+        assertFalse(svc.getConfig().isNeedleAnchored(), "the frame from before it is still not current");
+    }
+
+    /** A disable and a home (a reconnect; the start angle is confirmed again, as before BR-02: harmless). */
     void homeAgain() throws Exception {
         Thread.sleep(5);
         sim.machine.setEnabled(false);
@@ -719,6 +780,136 @@ public class DispenseServiceSimTest {
         assertFalse(sim.machine.isHomed(), "M410 may lose steps: machine must be re-homed");
         assertFalse(svc.isBZeroed());
         assertEquals(8, svc.getConfig().purgeRow.usedSpots, "spots reserved before streaming stay used");
+    }
+
+    /** BR-02: a count one of two handlers at once read late never takes the seen count back (a phantom later). */
+    @Test
+    public void aSeenCountNeverGoesBack() {
+        java.util.concurrent.atomic.AtomicLong seen = new java.util.concurrent.atomic.AtomicLong(1);
+        assertTrue(DispenseService.advanced(seen, 2), "the other handler's newer count");
+        assertFalse(DispenseService.advanced(seen, 1), "this one read before it: nothing new");
+        assertEquals(2, seen.get());
+        assertFalse(DispenseService.advanced(seen, 2), "the next look at the same count");
+    }
+
+    /** The journal's screw motor switch-offs (BR-02). */
+    List<java.util.Map<String, Object>> motorOffs() throws Exception {
+        return svc.getDb().query("SELECT * FROM events WHERE code = ?", ControllerReset.EVENT_MOTOR_OFF);
+    }
+
+    /**
+     * BR-02: the engine's I1 shutdown ends with M18 B (an error here; an abort or I7 alike): with its motor off the screw
+     * turns freely, so I11 asks for the angle to be measured again and a bare confirm is refused.
+     */
+    @Test
+    public void theEnginesStopSequenceSwitchesTheScrewMotorOff() throws Exception {
+        DispensePlan plan = plan();
+        sim.server.mark();
+        sim.server.failAtLine = 30; // inside the pressure session
+        RunResult r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.ERROR, r.status, r.toString());
+        assertTrue(sim.server.sinceMark().contains("M18 B"));
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(30)));
+        String why = String.valueOf(motorOffs().get(0).get("message"));
+        assertTrue(why.startsWith("the screw motor was switched off at ")
+                && why.endsWith(" (the engine's stop sequence: M18 B)"), why);
+        assertTrue(svc.getControllerResetAtMs() > svc.getConfig().profile.startAngleSetAtMs, "the screw count is dated");
+        assertTrue(svc.getControllerReset().isPositionKnown(), "the head's motors stayed on");
+        InterlockReport i = svc.checkInterlocks(plan, 0);
+        assertTrue(i.has("I11"), i.toString());
+        assertTrue(i.toString().contains(why + " after the screw start angle was set: the screw may have turned: "
+                + "measure the start angle again"), i.toString());
+        EngineRefusal e = assertThrows(EngineRefusal.class, () -> svc.setStartAngle(null, "not power-cycled"));
+        assertTrue(e.getMessage().contains("measure it again"), e.getMessage());
+        // nor set before the screw has turned since: the old value, one click away, would clear I11
+        EngineRefusal set = assertThrows(EngineRefusal.class, () -> svc.setStartAngle(118.0, "the old value"));
+        assertTrue(set.getMessage().startsWith("the screw has not turned since its motor was switched off at "),
+                set.getMessage());
+        svc.noteControllerLine("G1 B30 F600"); // the dot pair that measures it (the passthrough's turn)
+        svc.setStartAngle(226.0, "measured again");
+        assertFalse(svc.checkInterlocks(plan, 0).has("I11"), svc.checkInterlocks(plan, 0).toString());
+    }
+
+    /**
+     * BR-02: Marlin switches an idle motor off after DEFAULT_STEPPER_DEACTIVE_TIME (the setting screwIdleOffS, 3600 s).
+     * A board run's screw moves restart that clock; an hour without one dates a switch-off at the last move plus the
+     * timeout, journaled once, and I11 asks for the angle to be measured again (the engine's clock is the test's).
+     */
+    @Test
+    public void anHourWithoutAScrewMoveSwitchesTheScrewMotorOff() throws Exception {
+        assertEquals(3600, new DispenseConfig().screwIdleOffS, 0);
+        assertEquals(3600, DispenseConfig.fromJson("{}").screwIdleOffS, 0, "a settings file from before it");
+        DispenseConfig longer = new DispenseConfig();
+        longer.screwIdleOffS = 3601; // the controller's is 3600: a longer one would miss its switch-off
+        assertTrue(longer.validate().toString().contains("screwIdleOffS"), longer.validate().toString());
+        longer.screwIdleOffS = 3600;
+        assertFalse(longer.validate().toString().contains("screwIdleOffS"), longer.validate().toString());
+        DispensePlan plan = plan();
+        long before = System.currentTimeMillis();
+        RunResult r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);
+        long after = System.currentTimeMillis();
+        long hour = 3600_000L;
+        long[] now = {before + hour - 1};
+        DispenseService.testClock = () -> now[0];
+        try {
+            assertFalse(svc.checkInterlocks(plan, 0).has("I11"), "not idle for an hour since the run's last move");
+            assertNull(svc.getControllerResetAtMs());
+            now[0] = after + hour + 1000;
+            Long off = svc.getControllerResetAtMs();
+            assertTrue(off != null && off >= before + hour && off <= after + hour, "the last move + 1 h: " + off);
+            assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(30)));
+            assertEquals(off.longValue(), ((Number) motorOffs().get(0).get("ts")).longValue());
+            String why = String.valueOf(motorOffs().get(0).get("message"));
+            assertTrue(why.endsWith(" (the controller's idle timeout: no move for 60 min)"), why);
+            InterlockReport i = svc.checkInterlocks(plan, 0);
+            assertTrue(i.has("I11"), i.toString());
+            assertTrue(i.toString().contains(why + " after the screw start angle was set"), i.toString());
+            assertThrows(EngineRefusal.class, () -> svc.setStartAngle(null, "not power-cycled"));
+            now[0] += hour;
+            svc.getControllerResetAtMs();
+            svc.checkInterlocks(plan, 0);
+            assertEquals(1, motorOffs().size(), "journaled once");
+        }
+        finally {
+            DispenseService.testClock = null;
+        }
+    }
+
+    /**
+     * BR-02: Marlin restarts its idle clock on any queued move, so OpenPnP's own moves keep the screw's motor on too
+     * (an actuator switched, no move, does not).
+     */
+    @Test
+    public void openPnpsOwnMovesKeepTheScrewMotorOn() throws Exception {
+        DispensePlan plan = plan();
+        RunResult r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);
+        long after = System.currentTimeMillis();
+        long hour = 3600_000L;
+        long moveAt = after + hour / 2;
+        long[] now = {moveAt};
+        DispenseService.testClock = () -> now[0];
+        try {
+            sim.machine.execute(() -> {
+                Location l = sim.n1.getLocation().convertToUnits(LengthUnit.Millimeters);
+                sim.n1.moveTo(l.add(new Location(LengthUnit.Millimeters, 2, 0, 0, 0)));
+                sim.n1.waitForCompletion(CompletionType.WaitForStillstand);
+                return null;
+            });
+            now[0] = moveAt + hour / 2;
+            sim.machine.execute(() -> {
+                sim.machine.fireMachineHeadActivity(sim.machine.getDefaultHead()); // as an actuator does: no move
+                return null;
+            });
+            now[0] = after + hour + 60_000;
+            assertNull(svc.getControllerResetAtMs(), "OpenPnP's X move half an hour after the run kept it on");
+            now[0] = moveAt + hour + 1000;
+            assertEquals(Long.valueOf(moveAt + hour), svc.getControllerResetAtMs(), "an hour after that move");
+        }
+        finally {
+            DispenseService.testClock = null;
+        }
     }
 
     @Test
