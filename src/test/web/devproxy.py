@@ -193,15 +193,30 @@ def make_handler(web, api, fx, rf=None):
             self.end_headers()
             self.wfile.write(body)
 
+        def _cross_site(self):
+            # devproxy drops Origin and Sec-Fetch-Site, so the API's own guard never sees a page elsewhere in this
+            # browser writing through it: refuse such writes here (no Origin: a test or curl; the page's own: allowed)
+            if self.command in ("GET", "HEAD"):
+                return False
+            if self.headers.get("Sec-Fetch-Site", "") == "cross-site":
+                return True
+            origin, host = self.headers.get("Origin"), self.headers.get("Host", "")
+            return bool(origin) and origin not in ("http://" + host, "https://" + host)
+
         def _proxy(self):
+            if self._cross_site():
+                return self._send(403, b'{"error":"refused","reason":"a write from another site through devproxy"}', "application/json")
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else None
             spec = rf.find(self.command, self.path.split("?")[0]) if rf else None
             if spec and "file" in spec:
                 code, data = rf.answer(spec)
                 return self._send(code, data, "application/json")
-            req = urllib.request.Request(api + self.path, data=body, method=self.command,
-                                         headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
+            headers = {"Content-Type": self.headers.get("Content-Type", "application/json")}
+            # the page's X-IL-Client marks a request as the UI's: the machine lock (BR-72) tells the user from an agent by it
+            if self.headers.get("X-IL-Client"):
+                headers["X-IL-Client"] = self.headers.get("X-IL-Client")
+            req = urllib.request.Request(api + self.path, data=body, method=self.command, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=900) as r:
                     code, data, ctype = r.status, r.read(), r.headers.get("Content-Type", "application/json")

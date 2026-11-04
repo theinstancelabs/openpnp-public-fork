@@ -15,8 +15,8 @@ RUNNER = "src/test/web/run-webui-sim-test.sh"
 # One session for the scripts that share state: board-import after webui-sim; pad-profile and tip-setups need the
 # landing, N2 offset and needle Z those set (BR-74 closed 11-04: alone they fail on that state, not on the SIM's
 # noise; src/test/web/needs-before.cjs stops a lone run at once, by name). A name ending in "?" joins its leg once it
-# is in ALL_SCRIPTS (never the rest): tip-flow needs tip-setups' needle frame.
-SHARDS = {"main": ["webui-sim", "board-import", "pad-profile", "tip-setups", "tip-flow?"]}
+# is in ALL_SCRIPTS (never the rest): tip-flow needs tip-setups' needle frame; run-flow pastes on the board they leave.
+SHARDS = {"main": ["webui-sim", "board-import", "pad-profile", "tip-setups", "tip-flow?", "run-flow?"]}
 KEYS = tuple(SHARDS) + ("rest",)  # ci.yml's legs
 FULL = "full"  # every script in one session, as before the shards: for a comparison run, not a leg of the gate
 
