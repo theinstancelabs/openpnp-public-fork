@@ -31,6 +31,7 @@ import org.openpnp.instancelabs.dispense.TipSetup;
 import org.openpnp.instancelabs.dispense.TipSetups;
 import org.openpnp.instancelabs.dispense.TipSpec;
 import org.openpnp.instancelabs.dispense.ZCheck;
+import org.openpnp.instancelabs.padprofile.Anchor;
 import org.openpnp.instancelabs.padprofile.Tip;
 
 import com.google.gson.JsonObject;
@@ -246,14 +247,17 @@ final class TipSetupEndpoints {
     /**
      * BR-85 PUT /api/tip-setups/{key}/dose-anchor {massPerPadMg, padType, source?}: the tip's own dose anchor, the
      * paste per pad Calibrate aims for on the pad type's family (the area is the type's opening, the time is stamped);
-     * {@code {}} or {@code null} clears it (the family's again). A guarded write (BR-72's lock, as a live value
-     * Calibrate reads); for the mounted tip refused while the engine is busy. Returns the setup view.
+     * {@code {}} or {@code null} clears it (the family's again), no body is a 400. A guarded write (BR-72's lock, as a
+     * live value Calibrate reads); for the mounted tip refused while the engine is busy. Returns the setup view.
      */
     Object doseAnchor(ApiServer.Request r) throws Exception {
         DispenseService svc = ctx.svc();
         TipSetup s = require(svc, r.group(1));
-        boolean clear = "null".equals(new String(r.bytes(), java.nio.charset.StandardCharsets.UTF_8).trim());
-        JsonObject b = clear ? new JsonObject() : r.json();
+        String body = new String(r.bytes(), java.nio.charset.StandardCharsets.UTF_8).trim();
+        if (body.isEmpty()) {
+            throw ApiException.badRequest("send {massPerPadMg, padType, source?}, or {} or null to clear the anchor");
+        }
+        JsonObject b = "null".equals(body) ? new JsonObject() : r.json();
         DispenseConfig.DoseAnchor a = b.entrySet().isEmpty() ? null : anchorOf(svc, s, b);
         if (s.key.equals(svc.getConfig().tip.key)) {
             ctx.requireEngineIdle(svc);
@@ -276,7 +280,10 @@ final class TipSetupEndpoints {
         return setupView(svc, s);
     }
 
-    /** The anchor of a PUT dose-anchor body: 400 for a mass outside 0..20 mg or no pad type of that key. */
+    /**
+     * The anchor of a PUT dose-anchor body: 400 for a mass outside 0..20 mg, no pad type of that key, or a rate over 4 x
+     * the bench's (a typo: 19.5 for 1.95 mg on an 0603).
+     */
     private static DispenseConfig.DoseAnchor anchorOf(DispenseService svc, TipSetup s, JsonObject b) throws Exception {
         Double mass = Json.num(b, "massPerPadMg", null);
         if (mass == null || !(mass > 0 && mass <= DispenseConfig.DoseAnchor.MAX_MG)) {
@@ -297,6 +304,12 @@ final class TipSetupEndpoints {
         a.massPerPadMg = mass;
         a.areaMm2 = DotMath.padAreaMm2(t.padWMm, t.padHMm, t.padRoundness);
         a.mgPerMm2 = mass / a.areaMm2;
+        double max = 4 * Anchor.BENCH.mgPerMm2;
+        if (!(a.mgPerMm2 <= max)) {
+            throw ApiException.badRequest(String.format(java.util.Locale.ROOT, "'massPerPadMg' %s mg on the %s opening "
+                    + "(%s mm²) would be %.2f mg per mm²: at most %.2f, 4 x the bench's %.2f (a typo?)", Views.num(mass),
+                    t.typeKey, Views.num(a.areaMm2), a.mgPerMm2, max, Anchor.BENCH.mgPerMm2));
+        }
         a.padType = t.typeKey;
         a.family = t.family;
         a.source = source;

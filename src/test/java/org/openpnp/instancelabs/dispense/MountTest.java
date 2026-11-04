@@ -281,6 +281,61 @@ public class MountTest {
         }
     }
 
+    /** A 27G straight to add, under {@code key} and {@code name}. */
+    static TipSetup straight27(String key, String name) {
+        TipSetup s = TipSetupsTest.straight25();
+        s.key = key;
+        s.name = name;
+        s.gauge = 27;
+        s.idMm = 0.20;
+        s.odMm = 0.41;
+        return s;
+    }
+
+    /**
+     * BR-85 review: an undo puts back the two entries its mount changed and nothing else. A third tip keeps the anchor
+     * and the recipe set for it while the 25G was on; a tip mounted without an entry keeps the anchor set while it was
+     * on (it gets the entry a mount would give it), and without one it is put back as it was, with no entry.
+     */
+    @Test
+    public void anUndoKeepsWhatWasSetMeanwhileForTheOtherTips() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            TipSetup s27 = svc.getDb().insertTipSetupVersion(straight27("27g-straight", "27G straight"));
+            svc.updateConfigAtomically(live -> {
+                live.parkedTips.put(s27.key, TipSetups.newEntry(live, live.profile, live.tip.key, s27.name));
+                return live;
+            });
+            f.mount(K25);
+            svc.updateConfigAtomically(live -> {
+                live.parkedTips.get(s27.key).doseAnchor = anchor(0.80);
+                live.parkedTips.get(s27.key).profile.touchOffSkipDots = 3;
+                return live;
+            });
+            svc.undoMount("tester");
+            DispenseConfig.ParkedTip p27 = svc.getConfig().parkedTips.get(s27.key);
+            assertEquals(0.80, p27.doseAnchor.massPerPadMg, 0, "the 27G's anchor, set while the 25G was on");
+            assertEquals(3, p27.profile.touchOffSkipDots, "and its recipe");
+
+            TipSetup bare = svc.getDb().insertTipSetupVersion(straight27("27g-straight-2", "27G straight 2"));
+            f.mount(bare.key);
+            svc.undoMount("tester");
+            assertFalse(svc.getConfig().parkedTips.containsKey(bare.key), "nothing set: no entry, as before its mount");
+            f.mount(bare.key);
+            svc.updateConfigAtomically(live -> {
+                live.doseAnchor = anchor(1.50);
+                return live;
+            });
+            svc.undoMount("tester");
+            DispenseConfig c = svc.getConfig();
+            assertEquals(Tip.SEED_KEY, c.tip.key);
+            assertNull(c.doseAnchor, "the 22G has none");
+            assertEquals(1.50, c.parkedTips.get(bare.key).doseAnchor.massPerPadMg, 0, "set while it was on");
+            assertTrue(c.validate().isEmpty(), c.validate().toString());
+        }
+    }
+
     @Test
     public void theLiveStartAngleIsKeptAcrossAMount() throws Exception {
         try (TipFixture f = new TipFixture()) {

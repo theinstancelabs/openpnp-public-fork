@@ -94,4 +94,47 @@ public class NeedleTouchOffTipTest {
             assertEquals(2, svc.getConfig().profile.touchOffSkipDots);
         }
     }
+
+    /** A passing camera record of whole-turn dots of {@code d} mm, made under {@code c}'s recipe, paste and tip. */
+    static DoseRecord dots(DispenseService svc, DispenseConfig c, double d) {
+        DoseRecord r = DoseRecordTest.record(DoseRecord.OPTICAL, 1600, c, System.currentTimeMillis());
+        r.pass = true;
+        r.diameterMeanMm = d;
+        r.diameterP95Mm = d + 0.08;
+        r.simulated = svc.isSimulatorConfirmed();
+        return r;
+    }
+
+    /**
+     * BR-85 review: the touch-off's reference is the mounted tip's own dots of its recipe and paste. A passing camera
+     * record of another recipe, another paste or another tip is left out (the 22G model's then); the tip's own counts.
+     */
+    @Test
+    public void dotsOfAnotherRecipePasteOrTipAreNotTheReference() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            f.mount(MountTest.K25);
+            svc.updateConfigAtomically(live -> {
+                live.profile.netStepsPerDot = 1600;
+                return live;
+            });
+            DispenseConfig c = svc.getConfig();
+            DispenseConfig recipe = c.copy();
+            recipe.profile.pressurePsi += 2;
+            DoseRecord other = dots(svc, recipe, 1.20);
+            DoseRecord paste = dots(svc, c, 1.21);
+            paste.pasteKey = "another-paste";
+            DoseRecord tip = dots(svc, c, 1.22);
+            tip.tipKey = Tip.SEED_KEY;
+            for (DoseRecord r : new DoseRecord[] {other, paste, tip}) {
+                svc.getDb().insertDoseRecord(r);
+            }
+            NeedleTouchOff.Request req = new NeedleTouchOff.Request();
+            assertEquals(NeedleTouchOff.MODEL_REFERENCE, NeedleTouchOff.referenceFrom(req, c, svc.mountedTip()));
+            assertEquals(NeedleTouchOff.steadyDotMm(req, c), NeedleTouchOff.steadyDotMm(req, c, svc.mountedTip()), 0);
+            svc.getDb().insertDoseRecord(dots(svc, c, 1.23));
+            assertEquals(1.23, NeedleTouchOff.steadyDotMm(req, c, svc.mountedTip()), 0, "its own");
+        }
+    }
 }

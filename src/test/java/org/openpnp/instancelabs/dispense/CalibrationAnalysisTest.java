@@ -232,7 +232,7 @@ public class CalibrationAnalysisTest {
                 + "0.150"));
         assertTrue(skip2.apply(new Double[] {1.80, 1.50, 0.40, 0.42, 1.21, 1.60, null}).startsWith("the first two dots "
                 + "after the 2 skipped (0.400 mm at gap 0.200, 0.420 mm at gap 0.150) are under 60 % of the 1.20 mm"));
-        assertEquals("every dot of the ladder is skipped (touchOffSkipDots 2): lay at least 4", NeedleTouchOff
+        assertEquals("every dot of the ladder is skipped (touchOffSkipDots 2): lay at least 5", NeedleTouchOff
                 .analyze(new double[] {0.30, 0.25}, new Double[] {1.80, 1.50}, new String[2], 0.25, 1.20, 2).reason);
     }
 

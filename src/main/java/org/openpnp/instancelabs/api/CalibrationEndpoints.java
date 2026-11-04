@@ -224,10 +224,11 @@ final class CalibrationEndpoints {
             throw ApiException.badRequest("steps 2 to 20, step 0 to 0.5 mm, start gap at most 2 mm, pitch and jump ratio above 0");
         }
         int skip = svc.getConfig().profile.touchOffSkipDots;
-        if (req.steps < skip + 2) {
-            throw ApiException.badRequest(String.format(java.util.Locale.ROOT, "the %s's recipe skips the first %d "
-                    + "dots after the prime (touchOffSkipDots) and the reference takes the next two: lay at least %d "
-                    + "dots", svc.getConfig().tip.name, skip, skip + 2));
+        if (req.steps < skip + 3) {
+            throw ApiException.badRequest((skip == 0 ? "the reference takes the first two dots after the prime"
+                    : String.format(java.util.Locale.ROOT, "the %s's recipe skips the first %d dots after the prime "
+                            + "(touchOffSkipDots), the reference takes the next two", svc.getConfig().tip.name, skip))
+                    + " and a dot after them shows the contact: lay at least " + (skip + 3) + " dots");
         }
         String pitch = NeedleTouchOff.pitchProblem(req, svc.getConfig());
         if (pitch != null) {

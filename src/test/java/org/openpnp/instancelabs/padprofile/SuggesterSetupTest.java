@@ -363,6 +363,89 @@ public class SuggesterSetupTest {
         assertFalse(alone.groups.get(0).suggestion.confidenceWhy.stream().anyMatch(w -> w.contains("validated with")));
     }
 
+    /** Two parts of {@code pkg} ({@code ref}1, {@code ref}2), each two untyped w x h openings {@code pitch} apart. */
+    static List<PadInstance> parts(String ref, String pkg, double w, double h, double pitch, double y) {
+        List<PadInstance> l = new ArrayList<>();
+        for (int part = 0; part < 2; part++) {
+            for (int i = 0; i < 2; i++) {
+                PadInstance p = new PadInstance(ref + (part + 1), pkg, Integer.toString(i + 1), 100 + part * 8 + i
+                        * pitch, y, 0, w, h, 25);
+                p.padId = p.ref + "." + (i + 1);
+                l.add(p);
+            }
+        }
+        return l;
+    }
+
+    /** BR-85: the 25G's own anchor, 1.95 mg on the 0603 opening (a whole turn, weighed by Process). */
+    static Anchor own0603() {
+        Anchor a = new Anchor(Family.CHIP, "chip-0603", null, 1.95, DotGeometry.padAreaMm2(0.80, 0.95, 25));
+        a.tipName = "25G straight";
+        return a;
+    }
+
+    /**
+     * BR-85 review: the tip's own anchor replaces the bench's and the other setups' anchors of its family, not the
+     * tip's own validated, weighed pads. With a validated 1206 the 25G keeps aiming 1206 pads at it, not at its 0603
+     * anchor scaled up nor at the 22G's 1206 (on an opening nearer theirs); on its own opening the anchor wins the tie
+     * with the tip's validated 0603.
+     */
+    @Test
+    public void aTipsOwnAnchorKeepsItsValidatedPadTypes() {
+        List<PadInstance> pads = new ArrayList<>(chips(null));
+        pads.addAll(parts("R1", "R_1206_3216Metric", 1.125, 1.75, 2.925, 90));
+        CheckInputs in = with(tip25(true), pads);
+        TypeInfo v0603 = chip0603(TypeInfo.VALIDATED, 2);
+        v0603.massPerPadMg = 1.30;
+        TypeInfo v1206 = chip0603(TypeInfo.VALIDATED, 1);
+        v1206.key = "chip-1206";
+        v1206.name = "1206 chip";
+        v1206.padWMm = 1.125;
+        v1206.padHMm = 1.75;
+        v1206.massPerPadMg = 2.60;
+        v1206.calAreaMm2 = 1.05 * v1206.padAreaMm2();
+        in.types.put(v0603.key, v0603);
+        in.types.put(v1206.key, v1206);
+        Anchor g22 = new Anchor(Family.CHIP, "chip-1206", 3, 2.00, v1206.padAreaMm2());
+        g22.setupName = Tip.SEED_NAME;
+        in.moreAnchors.add(g22);
+        Anchor own = own0603();
+        in.anchors.put(Family.CHIP, own);
+        int n = 0;
+        for (ProfileCheck.Group g : ProfileCheck.prepare(in).groups) {
+            n++;
+            if (g.packageIds.contains("R_1206_3216Metric")) {
+                assertEquals("chip-1206", g.anchor.typeKey);
+                assertNull(g.anchor.setupName, "the 25G's own 1206, not the 22G's");
+                assertEquals(2.60 / 1.05, g.target, 1e-9);
+            }
+            else {
+                assertTrue(own == g.anchor, "the tip's anchor wins the tie on its opening: " + g.anchor.typeKey);
+                assertEquals(1.95, g.target, 1e-9);
+            }
+        }
+        assertEquals(2, n);
+    }
+
+    /**
+     * BR-85 review, made explicit: a family with no anchor of its own scales from the chip family's (§1.3), for a tip
+     * with its own chip anchor that one (its dose regime, not the 22G's half turn), and the reason names it.
+     */
+    @Test
+    public void aFamilyWithNoAnchorOfItsOwnScalesFromTheTipsOwnChipAnchor() {
+        CheckInputs in = with(tip25(true), parts("D", "D_SOD-123", 0.90, 1.20, 3.30, 100));
+        Anchor own = own0603();
+        in.anchors.put(Family.CHIP, own);
+        ProfileCheck.Group g = ProfileCheck.of(in).groups.get(0);
+        assertEquals(Family.SMALL_OUTLINE, g.family);
+        assertFalse(g.ownAnchor);
+        assertTrue(own == g.anchor);
+        assertFalse(g.capped, "3.3 mm apart: no fine-pitch cap");
+        assertEquals(Suggester.r3(own.mgPerMm2 * g.area), g.suggestion.amount.targetMg, 1e-9);
+        assertTrue(g.suggestion.confidenceWhy.contains("no validated Small-outline discretes pads yet: the amount is "
+                + "scaled from the 25G straight's own (1.95 mg on 0.75 mm²)"), g.suggestion.confidenceWhy.toString());
+    }
+
     @Test
     public void aStandInSaysWhatTheOtherSetupsHave() {
         TypeInfo t = chip0603(TypeInfo.NOT_STARTED, 0);

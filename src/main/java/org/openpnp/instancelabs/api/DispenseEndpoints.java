@@ -30,7 +30,6 @@ import org.openpnp.instancelabs.dispense.LandingResult;
 import org.openpnp.instancelabs.dispense.NeedleChange;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
 import org.openpnp.instancelabs.dispense.PadCleanReport;
-import org.openpnp.instancelabs.dispense.PadInstances;
 import org.openpnp.instancelabs.dispense.Photo;
 import org.openpnp.instancelabs.dispense.RunResult;
 import org.openpnp.instancelabs.dispense.TipSetup;
@@ -599,7 +598,7 @@ final class DispenseEndpoints {
             m.put("thumbUrl", main == null ? null : Views.photoUrl(main.id, true));
             m.put("undoUntilMs", svc.undoUntilMs());
             m.put("doseAnchor", cfg.doseAnchor != null ? Views.doseAnchor(cfg.doseAnchor)
-                    : Views.familyAnchor(PadInstances.anchorFor(svc, Family.CHIP, Anchor.BENCH.areaMm2)));
+                    : Views.familyAnchor(svc.familyAnchor(Family.CHIP, Anchor.BENCH.areaMm2)));
         }
         catch (Exception e) {
             m.put("error", MachineEndpoints.rootMessage(e));

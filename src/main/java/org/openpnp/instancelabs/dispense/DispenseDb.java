@@ -142,6 +142,8 @@ public class DispenseDb implements AutoCloseable {
     private final String url;
     /** The database file; null in memory. */
     private final File file;
+    /** Pad type and tip setup rows written since the open (both append-only): the anchors' cache key. */
+    private volatile long typeWrites;
     public static File fileFor(File configDir) {
         return new File(new File(configDir, DispenseConfig.SUBDIR), FILE_NAME);
     }
@@ -607,7 +609,16 @@ public class DispenseDb implements AutoCloseable {
             ps.executeUpdate();
             stored.rowId = generatedKey(ps);
         }
+        typeWrites++;
         return stored;
+    }
+
+    /**
+     * BR-85: the pad type and tip setup rows written since the open, without a query (DispenseService.familyAnchor's
+     * cache key: the anchors are read from those two tables).
+     */
+    public long typeWrites() {
+        return typeWrites;
     }
 
     /**
@@ -1847,6 +1858,7 @@ public class DispenseDb implements AutoCloseable {
             ps.executeUpdate();
             stored.rowId = generatedKey(ps);
         }
+        typeWrites++;
         return stored;
     }
 

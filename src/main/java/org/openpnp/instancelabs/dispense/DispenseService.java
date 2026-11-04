@@ -21,6 +21,7 @@ import java.util.function.BooleanSupplier;
 
 import org.openpnp.ConfigurationListener;
 import org.openpnp.instancelabs.board.EdtRunner;
+import org.openpnp.instancelabs.padprofile.Anchor;
 import org.openpnp.instancelabs.padprofile.DoseModel;
 import org.openpnp.instancelabs.padprofile.LadderStats;
 import org.openpnp.instancelabs.padprofile.Limits;
@@ -163,6 +164,8 @@ public final class DispenseService {
     private final PhotoStore photoStore;
     /** The mounted setup with its dot table and the identity it was made for ({@link #mountedTip}). */
     private volatile TipCache tipCache;
+    /** The anchor {@link #familyAnchor} found last and what it was found for. */
+    private volatile Map.Entry<String, Anchor> anchorCache;
     /** The last mount of another setup, kept for its undo (§22.3), or null. */
     private volatile UndoSnapshot undo;
     /** The token the last needle change wrote and the one it replaced {new, old} (old null: none), for the undo. */
@@ -1050,17 +1053,25 @@ public final class DispenseService {
             c.needleXyTrim = b.needleXyTrim;
             c.needleLanding = b.needleLanding;
             c.needleChangedAtMs = b.needleChangedAtMs;
-            // BR-85: a dose anchor is the tip's, not the mount's: one set since the mount stays with its tip
             DispenseConfig.ParkedTip nowParked = c.parkedTips.get(b.tip.key);
             DispenseConfig.DoseAnchor nowOn = c.doseAnchor;
-            c.parkedTips = new java.util.LinkedHashMap<>(b.copy().parkedTips);
-            for (Map.Entry<String, DispenseConfig.ParkedTip> e : cfg.parkedTips.entrySet()) {
-                // a setup added since the mount keeps its entry: the undo puts back the mount, nothing else
-                if (!e.getKey().equals(b.tip.key)) {
-                    c.parkedTips.putIfAbsent(e.getKey(), e.getValue());
+            // the undo puts back the mount, nothing else: the two entries it changed; the other tips keep theirs as
+            // they are now (a setup added since, BR-85 an anchor or a recipe set since)
+            Map<String, DispenseConfig.ParkedTip> was = b.copy().parkedTips;
+            for (String k : new String[] {b.tip.key, u.toKey}) {
+                if (was.containsKey(k)) {
+                    c.parkedTips.put(k, was.get(k));
+                }
+                else {
+                    c.parkedTips.remove(k);
                 }
             }
+            // BR-85: a dose anchor is the tip's, not the mount's: one set since the mount stays with its tip
             c.doseAnchor = nowParked != null ? nowParked.doseAnchor : b.doseAnchor;
+            if (nowOn != null && !c.parkedTips.containsKey(u.toKey)) {
+                // a tip with no entry before the mount gets one as the mount made it (TipSetups.newEntry), to keep it
+                c.parkedTips.put(u.toKey, TipSetups.newEntry(c, c.profile, c.tip.key, u.after.tip.name));
+            }
             DispenseConfig.ParkedTip off = c.parkedTips.get(u.toKey);
             if (off != null) {
                 off.doseAnchor = nowOn;
@@ -1921,6 +1932,25 @@ public final class DispenseService {
         tip.mgPerStepConfirmed = table.mgPerStepConfirmed;
         tipCache = new TipCache(key, tip); // one write: a tip is never paired with another identity's key
         return copyTip(tip);
+    }
+
+    /**
+     * BR-85: the anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get
+     * ({@link PadInstances#anchorFor}), cached until the mounted tip, its own anchor, a pad type or a tip setup changes:
+     * the status asks at every poll, and a hit reads no table. Read-only, as {@link Anchor#BENCH} is.
+     */
+    public Anchor familyAnchor(String family, double areaMm2) throws SQLException {
+        DispenseConfig c = cfg;
+        // the writes counted first: one made while the anchor is found makes the next call find it again
+        String key = db.typeWrites() + "|" + family + "|" + areaMm2 + "|" + new Gson().toJson(c.tip) + "|"
+                + new Gson().toJson(c.doseAnchor);
+        Map.Entry<String, Anchor> hit = anchorCache;
+        if (hit != null && key.equals(hit.getKey())) {
+            return hit.getValue();
+        }
+        Anchor a = PadInstances.anchorFor(db, c, family, areaMm2);
+        anchorCache = new java.util.AbstractMap.SimpleImmutableEntry<>(key, a);
+        return a;
     }
 
     /** The mounted setup's dot table (the setup view's dots, §22.6). */

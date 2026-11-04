@@ -284,7 +284,7 @@ public final class NeedleTouchOff {
         }
         if (idx.length <= skip) {
             a.reason = String.format(Locale.ROOT, "every dot of the ladder is skipped (touchOffSkipDots %d): lay at "
-                    + "least %d", skip, skip + 2);
+                    + "least %d", skip, skip + 3);
             return a;
         }
         // the texts' "first" dots are the first after the skipped ones

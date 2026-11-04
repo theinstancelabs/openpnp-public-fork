@@ -271,11 +271,15 @@ public final class ProfileCheck {
 
     /**
      * The anchors by family (§1.3): validated k = 1 types with a weighed mass per pad, in key order (ties in
-     * {@link #nearest}), and the other setups' (§22.2); a family given in {@link CheckInputs#anchors} has that one
-     * alone (BR-85: the mounted tip's own replaces its family's); the bench for chips without one.
+     * {@link #nearest}), and the other setups' (§22.2); the bench for chips without one. A family given in
+     * {@link CheckInputs#anchors} (BR-85: the mounted tip's own) has that one first, so it wins ties, and the tip's
+     * validated types after it: it replaces the bench and the other setups' anchors of its family.
      */
     static Map<String, List<Anchor>> collectAnchors(CheckInputs in) {
         Map<String, List<Anchor>> anchors = new HashMap<>();
+        for (Map.Entry<String, Anchor> e : in.anchors.entrySet()) {
+            anchors.put(e.getKey(), new ArrayList<>(Collections.singletonList(e.getValue())));
+        }
         for (TypeInfo t : new TreeMap<>(in.types).values()) {
             if (!t.retired && TypeInfo.rank(t.status) == 3 && t.massPerPadMg != null && t.massPerPadMg > 0
                     && t.family != null && Math.abs(t.k - 1) <= Limits.EPS) {
@@ -286,13 +290,10 @@ public final class ProfileCheck {
         // §22.2: the amount a joint needs is the paste's and the pad's: other setups' validated pads anchor too
         if (in.moreAnchors != null) {
             for (Anchor a : in.moreAnchors) {
-                if (a != null && a.family != null && a.areaMm2 > 0) {
+                if (a != null && a.family != null && a.areaMm2 > 0 && !in.anchors.containsKey(a.family)) {
                     anchors.computeIfAbsent(a.family, f -> new ArrayList<>()).add(a);
                 }
             }
-        }
-        for (Map.Entry<String, Anchor> e : in.anchors.entrySet()) {
-            anchors.put(e.getKey(), new ArrayList<>(Collections.singletonList(e.getValue())));
         }
         anchors.computeIfAbsent(Family.CHIP, f -> new ArrayList<>());
         if (anchors.get(Family.CHIP).isEmpty()) {
@@ -765,6 +766,7 @@ public final class ProfileCheck {
         g.k = g.centre || g.area > Limits.LARGE_PAD_MM2 + Limits.EPS ? Limits.K_PLACEHOLDER : 1.0;
         Anchor own = c.anchorFor(family, g.area);
         g.ownAnchor = own != null;
+        // a family with no anchor of its own scales from the chips' (BR-85: the tip's own chip anchor when it has one)
         g.anchor = own != null ? own : c.anchorFor(Family.CHIP, g.area);
         g.uncappedTarget = g.anchor.mgPerMm2 * g.area * g.k;
         g.target = g.uncappedTarget;

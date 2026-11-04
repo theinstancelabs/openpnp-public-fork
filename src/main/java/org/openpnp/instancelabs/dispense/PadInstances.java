@@ -225,15 +225,16 @@ public final class PadInstances {
     }
 
     /**
-     * BR-85: the anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get, as the check
-     * picks it (the tip's own, else the family's: a validated pad type of any setup, or the bench for chips), from the
-     * check's inputs without the dose evidence (the status asks at every poll).
+     * BR-85: the anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get under
+     * {@code cfg}, as the check picks it (the tip's own, else the family's: a validated pad type of any setup, or the
+     * bench for chips), from the check's inputs without the dose evidence and the dot table (no anchor needs them).
+     * {@link DispenseService#familyAnchor} caches it for the status.
      */
-    public static Anchor anchorFor(DispenseService svc, String family, double areaMm2) throws SQLException {
-        DispenseConfig cfg = svc.getConfig();
-        List<PadType> types = TipSetups.typesFor(svc.getDb(), cfg.tip.key);
-        CheckInputs in = inputs(new ArrayList<>(), types, null, cfg, null, false, svc.mountedTip());
-        others(svc.getDb(), cfg.tip.key, types, in);
+    public static Anchor anchorFor(DispenseDb db, DispenseConfig cfg, String family, double areaMm2)
+            throws SQLException {
+        List<PadType> types = TipSetups.typesFor(db, cfg.tip.key);
+        CheckInputs in = inputs(new ArrayList<>(), types, null, cfg, null, false, specTip(cfg.tip));
+        others(db, cfg.tip.key, types, in);
         return ProfileCheck.anchorFor(in, family, areaMm2);
     }
 

@@ -4,10 +4,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.DispenseDb;
+import org.openpnp.instancelabs.dispense.PadType;
+import org.openpnp.instancelabs.dispense.PadTypeStatus;
 import org.openpnp.instancelabs.padprofile.Anchor;
+import org.openpnp.instancelabs.padprofile.Family;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -58,14 +66,19 @@ public class TipSetupValuesSimTest {
         TipSim.refused(t.call("PUT", "/api/config", recipe + "6}}"), 400, "bad-request");
         assertEquals(2, skipOf(TipSim.K25));
         assertEquals(0, skipOf(TipSim.SEED));
-        // a ladder with no reference pair after the skipped dots is refused before anything moves
-        JsonObject few = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"steps\":3}"), 400, "bad-request");
-        assertEquals("the 25G straight's recipe skips the first 2 dots after the prime (touchOffSkipDots) and the "
-                + "reference takes the next two: lay at least 4 dots", TipSim.str(few, "reason"));
+        // a ladder with no dot after the skipped ones and the reference pair to show the contact is refused before
+        // anything moves
+        JsonObject few = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"steps\":4}"), 400, "bad-request");
+        assertEquals("the 25G straight's recipe skips the first 2 dots after the prime (touchOffSkipDots), the "
+                + "reference takes the next two and a dot after them shows the contact: lay at least 5 dots", TipSim
+                        .str(few, "reason"));
         // parked with the 25G's recipe while the 22G is on
         t.mount(TipSim.SEED);
         assertEquals(2, skipOf(TipSim.K25));
         assertEquals(0, skipOf(TipSim.SEED));
+        JsonObject two = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"steps\":2}"), 400, "bad-request");
+        assertEquals("the reference takes the first two dots after the prime and a dot after them shows the contact: "
+                + "lay at least 3 dots", TipSim.str(two, "reason"));
     }
 
     @Test
@@ -107,6 +120,17 @@ public class TipSetupValuesSimTest {
             "{\"massPerPadMg\":1.95,\"padType\":\"no-such-type\"}"}) {
             TipSim.refused(t.call("PUT", path, bad), 400, "bad-request");
         }
+        // a typo of 19.5 for 1.95 mg: 25.7 mg per mm² of the 0603 opening, over 4 x the bench's 1.46
+        JsonObject typo = TipSim.refused(t.call("PUT", path, "{\"massPerPadMg\":19.5,\"padType\":\"chip-0603\"}"),
+                400, "bad-request");
+        assertEquals("'massPerPadMg' 19.5 mg on the chip-0603 opening (0.76 mm²) would be 25.66 mg per mm²: at most "
+                + "5.82, 4 x the bench's 1.46 (a typo?)", TipSim.str(typo, "reason"));
+        // no body at all is no clearing: only {} or null clears it
+        for (String empty : new String[] {null, " "}) {
+            JsonObject none = TipSim.refused(t.call("PUT", path, empty), 400, "bad-request");
+            assertEquals("send {massPerPadMg, padType, source?}, or {} or null to clear the anchor", TipSim.str(none,
+                    "reason"));
+        }
         TipSim.refused(t.call("PUT", "/api/tip-setups/nope/dose-anchor", "{\"massPerPadMg\":1,\"padType\":"
                 + "\"chip-0603\"}"), 404, "not-found");
         TipSim.refused(t.call("PUT", "/api/config", "{\"doseAnchor\":{\"massPerPadMg\":1.0}}"), 400, "bad-request");
@@ -131,5 +155,100 @@ public class TipSetupValuesSimTest {
         assertFalse(statusAnchor().get("fromFamily").getAsBoolean());
         assertTrue(TipSim.ok(t.call("PUT", path, "null")).get("doseAnchor").isJsonNull());
         assertTrue(statusAnchor().get("fromFamily").getAsBoolean());
+    }
+
+    /**
+     * BR-85 review: the mounted tip's anchor is refused while the engine runs (a parked tip's is no live value: it is
+     * set), and a retired pad type is no anchor's.
+     */
+    @Test
+    public void theDoseAnchorIsRefusedWhileTheEngineRunsAndForARetiredPadType() throws Exception {
+        t.add25();
+        String body = "{\"massPerPadMg\":1.95,\"padType\":\"chip-0603\"}";
+        TipSim.ok(t.call("DELETE", "/api/pad-types/chip-0805", "{\"forSetup\":\"" + TipSim.SEED + "\"}"));
+        JsonObject retired = TipSim.refused(t.call("PUT", "/api/tip-setups/" + TipSim.K25 + "/dose-anchor",
+                "{\"massPerPadMg\":1.95,\"padType\":\"chip-0805\"}"), 400, "bad-request");
+        assertEquals("'padType' must be the key of a pad type that is not retired (GET /api/pad-types): not "
+                + "'chip-0805'", TipSim.str(retired, "reason"));
+        // a long run of shots at the waste (the SIM controller dwells for real, so the run lasts)
+        t.sim.server.realDwell = true;
+        TipSim.Res shots = t.post("/api/calibrations/shots-run", "{\"locationName\":\"waste\",\"rotationDeg\":360,"
+                + "\"count\":200}");
+        assertEquals(202, shots.status, shots.toString());
+        long until = System.currentTimeMillis() + 30_000;
+        while (!t.dispense().get("busy").getAsBoolean() && System.currentTimeMillis() < until) {
+            Thread.sleep(20);
+        }
+        try {
+            assertTrue(t.dispense().get("busy").getAsBoolean(), "the shots run");
+            JsonObject busy = TipSim.refused(t.call("PUT", "/api/tip-setups/" + TipSim.SEED + "/dose-anchor", body),
+                    409, "refused");
+            assertEquals("a dispense task is already running; wait for it or press STOP", TipSim.str(busy, "reason"));
+            assertTrue(setup(TipSim.SEED).get("doseAnchor").isJsonNull(), "not set");
+            TipSim.ok(t.call("PUT", "/api/tip-setups/" + TipSim.K25 + "/dose-anchor", body));
+        }
+        finally {
+            TipSim.ok(t.post("/api/stop", null));
+            until = System.currentTimeMillis() + 30_000;
+            while (t.dispense().get("busy").getAsBoolean() && System.currentTimeMillis() < until) {
+                Thread.sleep(20);
+            }
+        }
+        assertEquals(1.95, setup(TipSim.K25).getAsJsonObject("doseAnchor").get("massPerPadMg").getAsDouble(), 0);
+    }
+
+    /**
+     * BR-85 review: the family's anchor status.dispense.tip shows for a tip without its own is cached. The next status
+     * finds it without a query (it answers while another thread holds the database), a pad type written refreshes it.
+     */
+    @Test
+    public void theStatusFamilyAnchorIsCachedUntilAPadTypeIsWritten() throws Exception {
+        assertTrue(statusAnchor().get("fromFamily").getAsBoolean(), "the bench half turn, found once");
+        DispenseDb db = t.svc.getDb();
+        CountDownLatch held = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            synchronized (db) {
+                held.countDown();
+                try {
+                    release.await();
+                }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        holder.start();
+        try {
+            held.await();
+            Anchor again = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return t.svc.familyAnchor(Family.CHIP, Anchor.BENCH.areaMm2);
+                }
+                catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }).get(5, TimeUnit.SECONDS);
+            assertTrue(again.bench);
+        }
+        finally {
+            release.countDown();
+            holder.join();
+        }
+        // a validated, weighed 0603 of the 22G: it anchors the chips from the next status on
+        PadType v = db.padTypeHistory("chip-0603").get(db.padTypeHistory("chip-0603").size() - 1).copy();
+        v.tipKey = TipSim.SEED;
+        v.status = PadTypeStatus.VALIDATED;
+        v.dotSteps = 800;
+        v.dotsPerPad = 1;
+        v.massPerPadMg = 1.20;
+        v.origin = PadType.ORIGIN_MANUAL;
+        v.doseFp = null;
+        v.calAreaMm2 = null;
+        db.insertPadTypeVersion(v);
+        JsonObject fam = statusAnchor();
+        assertTrue(fam.get("fromFamily").getAsBoolean(), fam.toString());
+        assertEquals("chip-0603", TipSim.str(fam, "padType"));
+        assertEquals(1.20, fam.get("massPerPadMg").getAsDouble(), 1e-12);
     }
 }
