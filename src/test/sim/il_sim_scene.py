@@ -462,9 +462,10 @@ def preset_items(text, name):
             items += ["%s=%r" % kv for kv in v.items()]
         elif k == "landingBiasMm" and isinstance(v, list) and len(v) == 2:
             items.append("landing=%r:%r" % tuple(v))
-        elif isinstance(v, bool):
+        elif isinstance(v, bool) and k in PASTE_BY_TIP_FLAGS:  # exact keys only: SimScene.apply reads no others
             items.append("%s=%s" % (k, "true" if v else "false"))
-        elif isinstance(v, (int, float)) and k not in ("c", "e", "landing"):  # the CLI's short names: not JSON keys
+        elif not isinstance(v, bool) and isinstance(v, (int, float)) and k in (
+                ("mRevMg",) + PASTE_BY_TIP_INTS + PASTE_BY_TIP_NUMBERS):
             items.append("%s=%r" % (k, v))
         else:
             raise ValueError("--paste-by-tip %r: preset %r's %s=%r is not a key of the paste block" % (
@@ -654,7 +655,8 @@ def cmd_selftest(a):
           all(parse_paste_by_tip("k:preset=" + name)[1] for name in names))
     with tempfile.TemporaryDirectory() as d:
         bad_tips = {"typo": {"maxGapMM": 0.35}, "flag": {"wholeTurnsOnly": 1}, "nested": {"footprint": {"x": 1}},
-                    "inf": {"cv": float("inf")}, "list": [1], "alias": {"c": 0.5}}
+                    "inf": {"cv": float("inf")}, "list": [1], "alias": {"c": 0.5},
+                    "space": {"cv ": 0.3}, "boolean": {"c": True}}
         with open(os.path.join(d, "tips.json"), "w") as f:
             json.dump({"presets": bad_tips}, f)
         with open(os.path.join(d, "bare.json"), "w") as f:
