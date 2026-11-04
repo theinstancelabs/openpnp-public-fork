@@ -3683,8 +3683,8 @@ public final class DispenseService {
                             res.newOffsetMm, c.needleZOffsetMm, details, null);
                 }
             }
-            r.message = res.analysis.found() && moved != null ? res.analysis.reason + "; not applied: " + moved
-                    : res.analysis.reason;
+            r.message = moved == null ? res.analysis.reason : res.analysis.reason + "; " + (res.analysis.found()
+                    ? "not applied: " : "") + moved;
             s.ok();
         });
     }

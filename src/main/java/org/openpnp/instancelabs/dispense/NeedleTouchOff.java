@@ -105,7 +105,8 @@ public final class NeedleTouchOff {
         public Double checkGapMm;
         /**
          * BR-89: how far (mm) the 2nd check dot landed from the reference pair's mean landing (null: either was not
-         * measured), and the deepest counted dot's (information only: a squashed dot's centroid moves as paste spreads).
+         * measured), and the deepest measured counted dot's (information only: a squashed dot's centroid moves as
+         * paste spreads).
          */
         public Double landingShiftMm, squashedShiftMm;
         /** BR-89: why the new offset may not be applied (the tip may have moved, or the check could not be made). */
@@ -180,7 +181,7 @@ public final class NeedleTouchOff {
             return; // no reference pair to compare with: the analysis found no contact either
         }
         a.landingShiftMm = shift(second, ref);
-        if (a.landingShiftMm > LANDING_SHIFT_MAX_MM + 1e-9) {
+        if (!(a.landingShiftMm <= LANDING_SHIFT_MAX_MM + 1e-9)) { // a NaN centroid fails closed
             a.landingProblem = String.format(Locale.ROOT, "the 2nd check dot landed %.3f mm from where the first two "
                     + "counted dots landed (at most %s mm): the tip may have moved; look at it from below and run the "
                     + "touch-off again", a.landingShiftMm, DispenseProfile.plain(LANDING_SHIFT_MAX_MM));
@@ -294,7 +295,7 @@ public final class NeedleTouchOff {
      * gap i (review finding: with one flat Z, a slope of the blank along the ladder was mixed into
      * the gap steps and biased the offset). Without a plane (null) the blank place's single Z is
      * used; runs refuse that (I4: no blank surface). BR-89: then the {@link #CHECK_DOTS} on along the row at
-     * {@link #checkGapMm}.
+     * {@link #checkGapMm}, after one empty pitch.
      */
     public static List<GcodeStreamBuilder.DotSpec> layout(Request req, DispenseConfig.NamedLocation blank,
             DispenseConfig cfg, SurfacePlane plane) {
@@ -303,7 +304,8 @@ public final class NeedleTouchOff {
         double check = checkGapMm(req, cfg.profile.touchOffSkipDots);
         for (int i = 0; i < g.length + CHECK_DOTS; i++) {
             boolean ladder = i < g.length;
-            double x = blank.x + i * req.pitchMm, y = blank.y;
+            // one pitch left empty before the check dots: the floor's squashed dot is wider and would join the first
+            double x = blank.x + (ladder ? i : i + 1) * req.pitchMm, y = blank.y;
             double surface = plane == null ? blank.z : plane.z(x, y);
             double z = surface + cfg.needleZOffsetMm + (ladder ? g[i] : check);
             double hop = surface + cfg.needleZOffsetMm + Math.max(g[0], cfg.gapMm()) + cfg.liftMm();

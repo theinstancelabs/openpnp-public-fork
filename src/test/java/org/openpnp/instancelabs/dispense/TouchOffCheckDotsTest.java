@@ -42,7 +42,8 @@ public class TouchOffCheckDotsTest {
         for (int i : new int[] {13, 14}) {
             assertEquals(1.5 - 0.2 + 0.125, l.get(i).dispenseZ, 1e-12, "check dot " + i + " at the reference gap");
             assertEquals(l.get(3).dispenseZ, l.get(i).dispenseZ, 1e-12, "the first counted dot's Z");
-            assertEquals(10 + i * 1.6, l.get(i).x, 1e-12, "on along the row at the ladder's pitch");
+            assertEquals(10 + (i + 1) * 1.6, l.get(i).x, 1e-12, "on along the row, one pitch left empty after the "
+                    + "floor dot (a squashed dot is wider)");
             assertEquals(20, l.get(i).y, 1e-12);
             assertEquals(i, l.get(i).index);
             assertEquals(l.get(0).hopZ, l.get(i).hopZ, 1e-12);
@@ -56,13 +57,15 @@ public class TouchOffCheckDotsTest {
 
     /**
      * The 25G's ladder as a camera sees it: 3 droplets, the reference pair and 4 steady dots at 1.2 mm, then squashed
-     * (contact between 0.000 and -0.025 mm); the reference pair landed at (0.01, 0) and (-0.01, 0.02), the 1st check
-     * dot 0.3 mm off (paste from the floor), the 2nd at {@code check2}, the deepest squashed dot at {@code floor}.
+     * (contact between 0.000 and -0.025 mm); the droplets landed at (0.2, 0) (a wrong pair would show), the reference
+     * pair at (0.01, 0) and (-0.01, 0.02), the 1st check dot 0.3 mm off (paste from the floor), the 2nd at
+     * {@code check2}, the deepest squashed dot at {@code floor}.
      */
     static List<SpotDot> seen(double[] check2, double[] floor) {
         List<SpotDot> l = new ArrayList<>();
         for (int i = 0; i < 15; i++) {
-            double[] at = i == 3 ? new double[] {0.01, 0} : i == 4 ? new double[] {-0.01, 0.02} : i == 12 ? floor
+            double[] at = i < 3 ? new double[] {0.2, 0} : i == 3 ? new double[] {0.01, 0} : i == 4
+                    ? new double[] {-0.01, 0.02} : i == 12 ? floor
                     : i == 13 ? new double[] {0.3, 0} : i == 14 ? check2 : new double[] {0, 0.01};
             double d = i < 3 ? 0.5 : i < 9 || i > 12 ? 1.2 : 1.8;
             l.add(at == null ? SpotDot.none() : SpotDot.dot(new Dot(at[0], at[1], d, Math.PI * d * d / 4, 0.9)));
@@ -119,6 +122,9 @@ public class TouchOffCheckDotsTest {
         assertEquals("the 2nd check dot at gap 0.125 mm left no dot: the landing cannot be checked; look at the tip from "
                 + "below and run the touch-off again", gone.landingProblem);
         assertEquals("none", gone.checkDots.get(1).state);
+        // a centroid that is no number fails closed
+        l.set(14, SpotDot.dot(new Dot(Double.NaN, 0, 1.2, 1.13, 0.9)));
+        assertTrue(analyzed(l).landingProblem != null, "NaN is no landing");
         l.set(14, SpotDot.unmeasured("strings only", Collections.emptyList()));
         assertEquals("the 2nd check dot at gap 0.125 mm is strings only: the landing cannot be checked; look at the tip "
                 + "from below and run the touch-off again", analyzed(l).landingProblem);

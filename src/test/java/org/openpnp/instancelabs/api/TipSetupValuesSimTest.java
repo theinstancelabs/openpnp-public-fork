@@ -284,6 +284,11 @@ public class TipSetupValuesSimTest {
                 + "the tip may have moved; look at it from below and run the touch-off again", TipSim.str(a,
                         "landingProblem"));
         assertEquals(-0.0125, a.get("contactGapMm").getAsDouble(), 1e-9, "the contact is still reported");
+        assertTrue(TipSim.str(moved.getAsJsonObject("run"), "message").startsWith("dot squashed between 0.000 and -0.025 "
+                + "mm; not applied: the 2nd check dot landed 0.150 mm"), moved.toString());
+        String kept = String.valueOf(t.svc.getDb().query("SELECT method FROM needle_touchoff ORDER BY id DESC LIMIT 1")
+                .get(0).get("method"));
+        assertTrue(kept.startsWith("dot-ladder-touch-off (not applied: the 2nd check dot landed 0.150 mm"), kept);
         assertEquals(15, a.get("dotsLaid").getAsInt());
         assertEquals(15, cam.spots.size(), "15 spots photographed");
         java.util.List<Double> z = dotZ(sent());
