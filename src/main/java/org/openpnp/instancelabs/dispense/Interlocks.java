@@ -51,6 +51,11 @@ public final class Interlocks {
         /** When the last controller reset was detected (epoch ms; I11): the count restarted for sure; or null. */
         public Long controllerResetDetectedAtMs;
         /**
+         * When OpenPnP last connected to the controller (epoch ms; I11), or null: every OpenPnP start or connect may
+         * have changed the screw's phase (the process engineer, 11-03): an angle set before it is confirmed at least.
+         */
+        public Long controllerConnectedAtMs;
+        /**
          * When the screw's motor was last switched off (epoch ms; I11, BR-02): unpowered, the screw may have turned, so
          * an angle set before it is measured again; or null. It dates {@link #controllerResetAtMs} too.
          */
@@ -237,7 +242,14 @@ public final class Interlocks {
             return;
         }
         if (!cfg.isNeedleAnchored()) {
-            r.add("I4", putOn(in) + ": record its needle Z frame (Setup › Needle Z frame)");
+            if (cfg.isZFrameMovedSinceAnchor()) {
+                // BR-02: the home after a controller reset moved the frame (K by twice the shift)
+                r.add("I4", "the controller was reset: the Z frame moved at the home of "
+                        + ZCheck.clock(cfg.zFrameMovedAtMs) + ": record the needle frame again (Setup › Needle Z frame)");
+            }
+            else {
+                r.add("I4", putOn(in) + ": record its needle Z frame (Setup › Needle Z frame)");
+            }
             return;
         }
         String close = frameTooClose(cfg);
@@ -686,6 +698,12 @@ public final class Interlocks {
                 r.add("I11", "the controller was reset (or its position could not be read at a connect) after the "
                         + "screw start angle was set; the B step count restarts at power-up, so the angle may be "
                         + "lost: measure it again, or confirm it if the controller was not switched off (Profiles)");
+            }
+            else if (in.controllerConnectedAtMs != null && prof.startAngleSetAtMs < in.controllerConnectedAtMs) {
+                // every OpenPnP start or connect is a possible phase change: a confirm at least
+                r.add("I11", "the controller (re)connected after the screw start angle was set; the B step count "
+                        + "restarts at power-up, so the angle may be lost: confirm it if the controller was not "
+                        + "power-cycled, otherwise measure it again (Profiles)");
             }
         }
         checkFeed(in, r);

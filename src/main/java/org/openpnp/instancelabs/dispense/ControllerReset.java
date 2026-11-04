@@ -67,11 +67,13 @@ import java.util.regex.Pattern;
 public final class ControllerReset {
     /**
      * What the home after a reset does, and what the operator checks first: the board's G28 homes X, then Y, at the
-     * current height (no Z clearance: Z_HOMING_HEIGHT and HOME_Z_FIRST off), then Z at its Z_SAFE_HOMING point.
+     * current height (no Z clearance: Z_HOMING_HEIGHT and HOME_Z_FIRST off), then Z at its Z_SAFE_HOMING point. The
+     * see-saw is levelled by hand first, both tips up (the process engineer, 11-04).
      */
     public static final String HOME_CHECK = "the home first drives the head to its homing corner (X, then Y) at the "
             + "height the tools are at now, then homes Z there: check that nothing is under either tool (N1 or the "
-            + "needle) or in their way to that corner, and level N1 and the needle by hand if one is low";
+            + "needle) or in their way to that corner, and level N1 and the needle by hand before Home: the see-saw "
+            + "levelled, both tips up";
     /** Where stock Marlin believes A and B are at power-up (J_MAX_POS), until a G92. */
     public static final double BOOT_B_DEG = 720;
     /** Journal codes (the events table's {@code code}): a connect read the boot position. */
@@ -100,6 +102,11 @@ public final class ControllerReset {
     public static final String EVENT_WATCHDOG_TRIP = "HOST_WATCHDOG_TRIP";
     /** The host watchdog was armed again after a trip on record: the firmware forgot the trip. */
     public static final String EVENT_WATCHDOG_ARMED = "HOST_WATCHDOG_ARMED";
+    /**
+     * The home after a detected reset moved the Z frame (K by twice the shift, the process engineer 11-04): the needle
+     * frame and its touch-off are recorded again (I4).
+     */
+    public static final String EVENT_FRAME_MOVED = "Z_FRAME_MOVED";
     private static final double TOL = 1e-3;
     private static final Pattern WORD = Pattern.compile("(?:^|\\s)([A-Z]):(-?\\d+(?:\\.\\d+)?)");
 
@@ -136,6 +143,10 @@ public final class ControllerReset {
     private Long journaledMoveMs;
     /** A host watchdog trip on record that no arm or reset has ended since (its M990 still reports it), or null. */
     private Long watchdogTripAtMs;
+    /** A detected reset no home has followed yet: the next home moves the Z frame. */
+    private boolean resetUnhomed;
+    /** When the last home after a detected reset moved the Z frame, or null. */
+    private Long frameMovedAtMs;
     /** The changes made and not written yet (under this lock), in their order. */
     private final List<Event> toWrite = new ArrayList<>();
     /** One journal writer at a time, outside this lock (a stream's move never waits for an insert). */
@@ -166,14 +177,25 @@ public final class ControllerReset {
         this.journal = journal;
         this.idleOffMs = idleOffMs;
         positionKnown = true;
-        Long tripAt = null, tripEndedAt = null;
+        Long tripAt = null, tripEndedAt = null, resetAt = null, knownAt = null;
         for (Event e : history == null ? Collections.<Event> emptyList() : history) {
-            if (EVENT_WATCHDOG_TRIP.equals(e.code)) {
+            // the times what follows the loop is decided from
+            if (EVENT_RESET.equals(e.code)) {
+                resetAt = e.atMs;
+            }
+            else if (EVENT_KNOWN.equals(e.code)) {
+                knownAt = e.atMs;
+            }
+            else if (EVENT_FRAME_MOVED.equals(e.code)) {
+                frameMovedAtMs = e.atMs;
+            }
+            else if (EVENT_WATCHDOG_TRIP.equals(e.code)) {
                 tripAt = e.atMs;
             }
             else if (EVENT_WATCHDOG_ARMED.equals(e.code) || EVENT_UNREAD.equals(e.code)) {
                 tripEndedAt = later(tripEndedAt, e.atMs); // armed, or maybe a reset: the firmware forgot it
             }
+            // the state
             if (EVENT_RESET.equals(e.code)) {
                 tripEndedAt = later(tripEndedAt, e.atMs); // it boots without the trip
                 detectedAtMs = e.atMs; // what it reported is not journaled: reported stays null
@@ -204,6 +226,7 @@ public final class ControllerReset {
             }
         }
         watchdogTripAt(tripAt, tripEndedAt);
+        resetUnhomed = resetAt != null && (knownAt == null || resetAt > knownAt); // homed after a restart, if at all
         if (!positionKnown) {
             unknownWhy += "; no home has followed (OpenPnP restarted meanwhile)";
         }
@@ -304,6 +327,7 @@ public final class ControllerReset {
                     + "X 0, Y 0, Z 0 and %s), so the head may be anywhere", rot), now);
             stopIdleClock(now); // it boots with its motors off: the count's epoch covers the screw
             watchdogTripAtMs = null; // and without a host watchdog trip
+            resetUnhomed = true; // its home will move the Z frame
             record(EVENT_RESET, now, unknownWhy);
         }
     }
@@ -525,16 +549,34 @@ public final class ControllerReset {
         }
     }
 
-    /** A home succeeded (the engine's, the API's or OpenPnP's own): the position is known. */
-    public void homed() {
+    /**
+     * A home succeeded (the engine's, the API's or OpenPnP's own): the position is known. Returns whether it is the
+     * first home after a detected reset: it moved the Z frame ({@link #frameMovedAtMs}).
+     */
+    public boolean homed() {
+        boolean moved;
         synchronized (this) {
+            long now = clock.getAsLong();
+            moved = resetUnhomed;
+            if (moved) {
+                resetUnhomed = false;
+                frameMovedAtMs = now;
+                record(EVENT_FRAME_MOVED, now, "the home after the controller's reset moved the Z frame (K by twice the "
+                        + "shift): record the needle frame again");
+            }
             if (!positionKnown) {
-                record(EVENT_KNOWN, clock.getAsLong(), "homed: the position is known again");
+                record(EVENT_KNOWN, now, "homed: the position is known again");
             }
             positionKnown = true;
             unknownWhy = null;
         }
         writeOut();
+        return moved;
+    }
+
+    /** When the last home after a detected reset moved the Z frame (also before a restart), or null. */
+    public synchronized Long frameMovedAtMs() {
+        return frameMovedAtMs;
     }
 
     public synchronized boolean isPositionKnown() {

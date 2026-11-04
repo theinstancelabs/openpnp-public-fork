@@ -792,9 +792,13 @@ public class ApiServerSimTest {
         ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         reconnect();
         JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
-        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), "a reconnect keeps the screw count: " + p);
+        // every connect may have changed the phase (the process engineer, 11-03): a confirm is enough after it
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), "a reconnect asks a confirm: " + p);
         assertFalse(p.get("controllerConnectedAtMs").isJsonNull());
-        assertTrue(p.get("controllerResetAtMs").isJsonNull(), p.toString());
+        assertTrue(p.get("controllerResetAtMs").isJsonNull(), "a reconnect keeps the screw count: " + p);
+        ok(post("/api/screw/start-angle", "{}"));
+        p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
         powerCycle();
         p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
         assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
@@ -816,6 +820,10 @@ public class ApiServerSimTest {
         assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9);
         assertTrue(conf.get("startAngleSetAtMs").getAsLong() >= t0);
         assertFalse(conf.get("startAngleNeedsConfirm").getAsBoolean());
+        // and the reset's home moved the Z frame (the process engineer, 11-04): the needle frame, both tips touching,
+        // and its touch-off again
+        ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactZ\":2.91}"));
+        ok(post("/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}"));
         assertTrue(ok(get("/api/plan/" + plan.get("planId").getAsString())).getAsJsonObject("interlocks").get("ok")
                 .getAsBoolean());
 

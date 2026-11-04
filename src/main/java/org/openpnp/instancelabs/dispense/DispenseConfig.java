@@ -89,6 +89,12 @@ public class DispenseConfig {
     /** Epoch ms of the last needle change; I4 requires a touch-off after it. */
     public Long needleChangedAtMs = null;
     /**
+     * BR-02, engine-stamped: the home after a detected controller reset moved the Z frame (K by twice the shift, the
+     * process engineer 11-04): a needle frame and a touch-off from before it are not current (I4) until recorded again
+     * after it. Null: none. Ordinary homes leave it.
+     */
+    public Long zFrameMovedAtMs = null;
+    /**
      * Needle XY correction (calibration): the needle lands at camera + N2 head offset + this. The
      * head offset (machine.xml) is the bench's (25.291, -75.926); refinements from landing data go
      * here, not into machine.xml. Every dispensed target is moved by minus this.
@@ -511,17 +517,33 @@ public class DispenseConfig {
         return surfaces == null || name == null ? null : surfaces.get(name);
     }
 
-    /** Needle frame anchored since the last needle change (I4). */
-    public boolean isNeedleAnchored() {
-        return needleAnchor != null && (needleChangedAtMs == null || needleAnchor.setAtMs >= needleChangedAtMs);
+    /**
+     * BR-02: the needle frame is not current because a reset's home moved the Z frame after it was recorded (and no
+     * needle change came after that home: then the change is the reason).
+     */
+    public boolean isZFrameMovedSinceAnchor() {
+        return needleAnchor != null && zFrameMovedAtMs != null && needleAnchor.setAtMs <= zFrameMovedAtMs
+                && (needleChangedAtMs == null || zFrameMovedAtMs >= needleChangedAtMs);
     }
 
-    /** Offset touched off (or entered) since the last needle change and since the last anchor (I4). */
+    /** Needle frame anchored since the last needle change and since a reset's home moved the Z frame (I4). */
+    public boolean isNeedleAnchored() {
+        return needleAnchor != null && (needleChangedAtMs == null || needleAnchor.setAtMs >= needleChangedAtMs)
+                && (zFrameMovedAtMs == null || needleAnchor.setAtMs > zFrameMovedAtMs);
+    }
+
+    /**
+     * Offset touched off (or entered) since the last needle change, since the last anchor and since a reset's home moved
+     * the Z frame (I4).
+     */
     public boolean isNeedleTouchedOff() {
         if (needleZOffsetSetAtMs == null) {
             return false;
         }
         if (needleAnchor != null && needleZOffsetSetAtMs < needleAnchor.setAtMs) {
+            return false;
+        }
+        if (zFrameMovedAtMs != null && needleZOffsetSetAtMs <= zFrameMovedAtMs) {
             return false;
         }
         return needleChangedAtMs == null || needleZOffsetSetAtMs >= needleChangedAtMs;

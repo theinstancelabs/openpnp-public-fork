@@ -438,6 +438,12 @@ public class DispenseServiceSimTest {
         assertThrows(EngineRefusal.class, () -> svc.setStartAngle(null, "not power-cycled"));
         svc.noteControllerLine("G1 B30 F600"); // the dot pair that measures it again turns the screw (BR-02)
         DispenseProfile p = svc.setStartAngle(svc.getConfig().profile.startAngleDeg, "measured again");
+        // BR-02 (the process engineer, 11-04): the reset's home moved the Z frame: the needle frame and its touch-off
+        // are recorded again
+        assertTrue(svc.checkInterlocks(plan, 0).toString().contains("the controller was reset: the Z frame moved"),
+                svc.checkInterlocks(plan, 0).toString());
+        svc.setNeedleAnchor(5.5, 2.91, null, null, null, svc.getConfig().needleChangedAtMs);
+        svc.setNeedleZOffset(-2.59, "manual", "test", svc.getConfig().needleChangedAtMs);
         assertTrue(p.startAngleSetAtMs >= svc.getControllerResetAtMs());
         r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
         assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);

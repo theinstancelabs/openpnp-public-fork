@@ -373,6 +373,7 @@ public final class DispenseService {
         controllerReset = new ControllerReset(DispenseService::resetClockMs, machine != null && machine.isEnabled(),
                 machine != null && machine.isHomed(), resetHistory(dbExisted), this::journalReset,
                 () -> Math.round(cfg.screwIdleOffS * 1000));
+        stampZFrameMoved(); // BR-02: a reset's home on record (or homed at the start) that the settings miss
         GcodeDriver screwDriver = screwDriver(machine);
         if (screwDriver != null) {
             // what it sent before this engine started is not this engine's to record
@@ -387,8 +388,8 @@ public final class DispenseService {
                 @Override
                 public void machineHomed(Machine m, boolean isHomed) {
                     bZeroed.set(false);
-                    if (isHomed && m.isEnabled()) {
-                        controllerReset.homed();
+                    if (isHomed && m.isEnabled() && controllerReset.homed()) {
+                        stampZFrameMoved(); // BR-02: the first home after a detected reset moved the Z frame
                     }
                 }
 
@@ -599,7 +600,7 @@ public final class DispenseService {
             for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
                     ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH, ControllerReset.EVENT_MOTOR_OFF,
                     ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_WATCHDOG_TRIP,
-                    ControllerReset.EVENT_WATCHDOG_ARMED)) {
+                    ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }
@@ -631,6 +632,32 @@ public final class DispenseService {
     private boolean screwDriverConnected() {
         ReferenceControllerAxis b = screwAxis(configuration.getMachine());
         return b == null || ((GcodeDriver) b.getDriver()).isConnected();
+    }
+
+    /**
+     * BR-02 (the process engineer, 11-04): the home after a detected reset moved the Z frame (K by twice the shift):
+     * stamps it in the settings, so the needle frame and its touch-off count as not current until recorded again after
+     * it (I4, {@link DispenseConfig#isNeedleAnchored}). A fact: never refused.
+     */
+    private void stampZFrameMoved() {
+        Long moved = controllerReset.frameMovedAtMs();
+        synchronized (this) {
+            DispenseConfig live = cfg;
+            if (moved == null || live.zFrameMovedAtMs != null && live.zFrameMovedAtMs >= moved) {
+                return;
+            }
+            DispenseConfig c = live.copy();
+            c.zFrameMovedAtMs = moved;
+            try {
+                writeConfig(c);
+            }
+            catch (IOException e) {
+                Logger.error(e, "dispense: the Z frame's move at a reset's home was not saved");
+                cfg = c; // this engine still asks for the needle frame
+            }
+        }
+        db.event(null, "WARN", "I4", "the controller was reset: the Z frame moved at the home of " + ZCheck.clock(moved)
+                + ": record the needle frame again (and touch off)");
     }
 
     /** The screw's GcodeDriver, or null. */
@@ -1031,6 +1058,10 @@ public final class DispenseService {
         }
         refuseStaleTip(newCfg);
         DispenseConfig c = newCfg.copy();
+        if (cfg != null && cfg.zFrameMovedAtMs != null && (c.zFrameMovedAtMs == null
+                || c.zFrameMovedAtMs < cfg.zFrameMovedAtMs)) {
+            c.zFrameMovedAtMs = cfg.zFrameMovedAtMs; // BR-02, engine-stamped: a copy from before it cannot take it back
+        }
         long now = System.currentTimeMillis();
         if (cfg != null && c.profile.startAngleDeg != cfg.profile.startAngleDeg) {
             c.profile.startAngleSetAtMs = now;
@@ -1934,6 +1965,12 @@ public final class DispenseService {
                     + "and K moves by about twice that. Record the needle frame with both tips touching the same spot",
                     z.deltaMm, ZCheck.clock(z.homeAtMs));
         }
+        if (c.isZFrameMovedSinceAnchor()) {
+            // BR-02: the home after the controller's reset moved the Z frame
+            return "K was measured before the controller was reset: its home at " + ZCheck.clock(c.zFrameMovedAtMs)
+                    + " moved the Z frame, and K moves by about twice that. Record the needle frame with both tips "
+                    + "touching the same spot";
+        }
         if (c.needleAnchor != null && !c.isNeedleAnchored()) {
             return "K was measured with the needle before the change at " + ZCheck.clock(c.needleChangedAtMs)
                     + ": record the needle frame with both tips touching the same spot";
@@ -2792,6 +2829,7 @@ public final class DispenseService {
         in.scope = scope == null ? new Interlocks.Scope() : scope;
         in.controllerResetAtMs = controllerReset.countEpochMs();
         in.controllerResetDetectedAtMs = controllerReset.detectedAtMs();
+        in.controllerConnectedAtMs = homeTracker.getConnectedAtMs();
         ControllerReset.Event off = controllerReset.lastScrewMotorOff();
         in.screwMotorOffAtMs = off == null ? null : off.atMs;
         in.screwMotorOffWhy = off == null ? null : off.message;

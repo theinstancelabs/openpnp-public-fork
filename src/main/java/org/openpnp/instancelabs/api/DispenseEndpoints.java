@@ -62,7 +62,7 @@ final class DispenseEndpoints {
     static final java.util.Set<String> PROTECTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "needleZOffsetMm", "needleZOffsetSetAtMs", "needleZOffsetHomeAtMs", "needleChangedAtMs", "needleAnchor",
             "surfaces", "schemaVersion", "boardRegistrations", "newSeatAtMs", "tip", "parkedTips", "needleLanding",
-            "needleXyTrim"));
+            "needleXyTrim", "zFrameMovedAtMs"));
     /** Protected settings that Register board and POST /api/board/new-seat stamp (not the needle's). */
     static final java.util.Set<String> REGISTRATION_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "boardRegistrations", "newSeatAtMs"));
@@ -765,6 +765,10 @@ final class DispenseEndpoints {
         if ("parkedTips".equals(key)) {
             return "The tips that are not mounted keep their recipe and needle values here: mounting a tip sets them "
                     + "(Setup › Dispenser & tip).";
+        }
+        if ("zFrameMovedAtMs".equals(key)) {
+            return "'zFrameMovedAtMs' is stamped by the engine at the home after a controller reset (BR-02): record the "
+                    + "needle frame again to clear I4";
         }
         if ("needleLanding".equals(key) || "needleXyTrim".equals(key)) {
             return "Where the needle lands is set by Check where it lands and the trim panel (POST /api/needle/landing, "

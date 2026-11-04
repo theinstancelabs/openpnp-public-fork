@@ -211,6 +211,49 @@ public class InterlocksTest {
     }
 
     /**
+     * BR-02 (the process engineer, 11-04): the home after a controller reset moves the Z frame (K by twice the shift):
+     * the needle frame and its touch-off recorded before it are not current until recorded again after it.
+     */
+    @Test
+    public void i4TheNeedleFrameIsRecordedAgainAfterAResetsHome() {
+        Interlocks.Inputs in = ok(); // frame at 1500, offset at 2000
+        assertFalse(Interlocks.check(in).has("I4"), Interlocks.check(in).toString());
+        in.cfg.zFrameMovedAtMs = 2500L;
+        assertFalse(in.cfg.isNeedleAnchored());
+        assertFalse(in.cfg.isNeedleTouchedOff());
+        InterlockReport r = Interlocks.check(in);
+        assertTrue(r.toString().contains("the controller was reset: the Z frame moved at the home of "
+                + ZCheck.clock(2500L) + ": record the needle frame again (Setup › Needle Z frame)"), r.toString());
+        in.cfg.needleAnchor = new DispenseConfig.NeedleAnchor(5.5, 2.91, null, null, 2600L);
+        assertTrue(in.cfg.isNeedleAnchored(), "recorded again after it");
+        assertFalse(in.cfg.isNeedleTouchedOff(), "the touch-off follows the frame");
+        in.cfg.needleZOffsetSetAtMs = 2700L;
+        assertFalse(Interlocks.check(in).has("I4"), Interlocks.check(in).toString());
+    }
+
+    /**
+     * BR-02 (the process engineer, 11-03, confirmed 11-04): every OpenPnP start or connect may have changed the screw's
+     * phase: an angle set before it is confirmed at least; a reset or a switch-off still wants it measured.
+     */
+    @Test
+    public void i11EveryConnectAsksAtLeastForAConfirm() {
+        Interlocks.Inputs in = ok(); // set at 3000
+        in.controllerConnectedAtMs = 2900L;
+        assertFalse(Interlocks.check(in).has("I11"), Interlocks.check(in).toString());
+        in.controllerConnectedAtMs = 3500L;
+        InterlockReport r = Interlocks.check(in);
+        assertTrue(r.toString().contains("the controller (re)connected after the screw start angle was set; the B step "
+                + "count restarts at power-up, so the angle may be lost: confirm it if the controller was not "
+                + "power-cycled, otherwise measure it again (Profiles)"), r.toString());
+        in.screwMotorOffAtMs = 3600L;
+        in.screwMotorOffWhy = "the screw motor was switched off at 16:20 (a STOP)";
+        in.controllerResetAtMs = 3600L;
+        r = Interlocks.check(in);
+        assertTrue(r.toString().contains("measure the start angle again"), r.toString());
+        assertFalse(r.toString().contains("confirm it"), "a switch-off wants a measure: " + r);
+    }
+
+    /**
      * BR-02: after a controller reset no task homes by itself (the home needs the operator's word that nothing is
      * below): the unknown position is a MACHINE violation, also for a task that would home first.
      */

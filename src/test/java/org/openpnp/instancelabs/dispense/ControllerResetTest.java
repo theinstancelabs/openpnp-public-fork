@@ -156,7 +156,8 @@ public class ControllerResetTest {
         first.connected(reply(BOOT), 'B', null);
         now = 2000;
         first.homed();
-        assertEquals(Arrays.asList(ControllerReset.EVENT_RESET, ControllerReset.EVENT_KNOWN), codes());
+        assertEquals(Arrays.asList(ControllerReset.EVENT_RESET, ControllerReset.EVENT_FRAME_MOVED,
+                ControllerReset.EVENT_KNOWN), codes(), "the home after the reset moved the Z frame too");
         assertTrue(journal.get(0).message.contains("reset"), journal.get(0).message);
         assertEquals(1000, journal.get(0).atMs);
 
@@ -171,7 +172,8 @@ public class ControllerResetTest {
         second.connected(reply(PARKED), 'B', null);
         assertEquals(Long.valueOf(1000), second.countEpochMs());
         assertTrue(second.isPositionKnown());
-        assertEquals(2, journal.size(), "a plain reconnect journals nothing");
+        assertEquals(3, journal.size(), "a plain reconnect journals nothing");
+        assertFalse(second.homed(), "the reset's home is on record: no second Z frame move");
     }
 
     @Test
@@ -254,7 +256,8 @@ public class ControllerResetTest {
         r.homed();
         r.homed();
         assertEquals(Arrays.asList(ControllerReset.EVENT_RESET, ControllerReset.EVENT_RESET,
-                ControllerReset.EVENT_KNOWN), codes(), "every reset, and the home that ends the unknown position");
+                ControllerReset.EVENT_FRAME_MOVED, ControllerReset.EVENT_KNOWN), codes(),
+                "every reset, and the home that ends the unknown position (it moved the Z frame)");
     }
 
     @Test
@@ -612,6 +615,47 @@ public class ControllerResetTest {
         release.countDown();
         poll.join(5000);
         assertTrue(ms < 1000, "the moves waited " + ms + " ms for the journal");
+    }
+
+    /** The confirm before the home after a reset (the process engineer, 11-04): the see-saw levelled, both tips up. */
+    @Test
+    public void theHomeCheckLevelsTheSeeSawFirst() {
+        assertTrue(ControllerReset.HOME_CHECK.contains("homing corner")
+                && ControllerReset.HOME_CHECK.contains("check that nothing is under either tool")
+                && ControllerReset.HOME_CHECK.contains("level N1 and the needle by hand before Home: the see-saw "
+                        + "levelled, both tips up"), ControllerReset.HOME_CHECK);
+    }
+
+    /**
+     * The home after a detected reset moves the Z frame (K by twice the shift): it says so once, also when the reset was
+     * homed only after an engine restart; an ordinary home, or one after an unread connect, does not.
+     */
+    @Test
+    public void theHomeAfterAResetMovesTheZFrame() {
+        ControllerReset r = run(false, false);
+        now = 1000;
+        r.connected(reply(PARKED), 'B', null);
+        assertFalse(r.homed(), "an ordinary home keeps the frame");
+        now = 2000;
+        r.connected(reply(BOOT), 'B', null);
+        now = 3000;
+        assertTrue(r.homed(), "the home after the reset");
+        assertEquals(Long.valueOf(3000), r.frameMovedAtMs());
+        now = 4000;
+        assertFalse(r.homed(), "once");
+        r.connected(null, 'B', "timeout");
+        assertFalse(r.homed(), "a home after an unread connect: no reset seen");
+        assertEquals(Long.valueOf(3000), run(false, false).frameMovedAtMs(), "read back");
+        now = 5000;
+        run(false, false).connected(reply(BOOT), 'B', null); // reset, then OpenPnP restarted before the home
+        now = 6000;
+        ControllerReset after = run(false, false);
+        assertTrue(after.homed());
+        assertEquals(Long.valueOf(6000), after.frameMovedAtMs());
+        now = 7000;
+        run(false, false).connected(reply(BOOT), 'B', null);
+        now = 8000;
+        assertEquals(Long.valueOf(8000), run(true, true).frameMovedAtMs(), "an engine started on a homed machine");
     }
 
     @Test

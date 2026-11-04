@@ -152,6 +152,8 @@ public class PowerCycleSimTest {
         // #11 final review MAJOR: G28 drives X, then Y, at the tools' height first (no Z clearance on this firmware)
         assertTrue(lastBody.contains("homing corner") && lastBody.contains("at the height the tools are at now")
                 && lastBody.contains("level N1 and the needle by hand"), lastBody);
+        // the process engineer, 11-04: the see-saw levelled (both tips up) before Home
+        assertTrue(lastBody.contains("before Home: the see-saw levelled, both tips up"), lastBody);
         assertFalse(lastBody.contains("nothing moves before it"), lastBody);
         assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
 
@@ -412,10 +414,12 @@ public class PowerCycleSimTest {
         sim.machine.setEnabled(true);
         JsonObject status = ok("GET", "/api/status", null);
         JsonObject p = status.getAsJsonObject("dispense").getAsJsonObject("profile");
-        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), "the angle holds: " + p);
-        assertEquals("ok", i11(status).get("state").getAsString(), i11(status).toString());
+        // every connect asks a confirm (the process engineer, 11-03); no switch-off: no measure
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
+        assertTrue(i11(status).get("text").getAsString().contains("the controller (re)connected"), i11(status).toString());
         assertTrue(ok("GET", "/api/machine", null).getAsJsonObject("screwMotorOff").get("atMs").isJsonNull());
-        ok("POST", "/api/screw/start-angle", "{}");
+        ok("POST", "/api/screw/start-angle", "{}"); // the confirm keeps it
+        assertEquals("ok", i11(ok("GET", "/api/status", null)).get("state").getAsString());
 
         // the same disable with the driver connected sends its M18 B: on record
         sim.server.mark();
@@ -590,6 +594,91 @@ public class PowerCycleSimTest {
         assertTrue(lastBody.contains("the screw has not turned since"), lastBody);
         ok("POST", "/api/gcode", "{\"lines\":[\"G1 B30 F600\",\"G1 B30 F600\",\"M400\"]}");
         ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":226}");
+    }
+
+    /**
+     * BR-02 (the process engineer, 11-03, confirmed 11-04): every OpenPnP start or connect counts as a possible phase
+     * change: an angle set before it is confirmed (a confirm is enough: no reset, no switch-off), also after a restart
+     * of OpenPnP (the connect time is this engine's).
+     */
+    @Test
+    public void everyConnectAndRestartAsksForTheAngleToBeConfirmed() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        JsonObject s = ok("GET", "/api/status", null);
+        assertFalse(s.getAsJsonObject("dispense").getAsJsonObject("profile").get("startAngleNeedsConfirm")
+                .getAsBoolean(), "set after this connect");
+        assertEquals("ok", i11(s).get("state").getAsString(), i11(s).toString());
+        Thread.sleep(5);
+        reconnect();
+        s = ok("GET", "/api/status", null);
+        assertTrue(s.getAsJsonObject("dispense").getAsJsonObject("profile").get("startAngleNeedsConfirm")
+                .getAsBoolean(), s.toString());
+        assertEquals("blocked", i11(s).get("state").getAsString(), i11(s).toString());
+        assertTrue(i11(s).get("text").getAsString().contains("confirm it if the controller was not power-cycled"),
+                i11(s).toString());
+        ok("POST", "/api/screw/start-angle", "{}");
+        assertEquals("ok", i11(ok("GET", "/api/status", null)).get("state").getAsString());
+        Thread.sleep(5);
+        restartOpenPnp();
+        s = ok("GET", "/api/status", null);
+        assertTrue(s.getAsJsonObject("dispense").getAsJsonObject("profile").get("startAngleNeedsConfirm")
+                .getAsBoolean(), "a restart asks again: " + s);
+        ok("POST", "/api/screw/start-angle", "{}");
+    }
+
+    /**
+     * BR-02 (the process engineer, 11-04): the home after a controller reset moves the Z frame (K by twice the shift):
+     * the needle frame and its touch-off are recorded again, and the start angle measured again. An ordinary home keeps
+     * the frame.
+     */
+    @Test
+    public void theHomeAfterAResetMovesTheNeedleZFrame() throws Exception {
+        ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        ok("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}");
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        JsonObject n = ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertTrue(n.get("anchored").getAsBoolean() && n.get("touchedOff").getAsBoolean(), n.toString());
+        Thread.sleep(5);
+        reconnect();
+        ok("POST", "/api/machine/home", "{\"wait\":true}");
+        n = ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertTrue(n.get("anchored").getAsBoolean() && n.get("touchedOff").getAsBoolean(), "an ordinary home: " + n);
+
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        JsonObject status = ok("GET", "/api/status", null);
+        n = status.getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertFalse(n.get("anchored").getAsBoolean(), "the frame moved: " + n);
+        assertFalse(n.get("touchedOff").getAsBoolean(), n.toString());
+        String i4 = null;
+        for (com.google.gson.JsonElement e : status.getAsJsonArray("interlocks")) {
+            if ("I4".equals(e.getAsJsonObject().get("id").getAsString())) {
+                i4 = e.getAsJsonObject().get("text").getAsString();
+            }
+        }
+        assertTrue(i4 != null && i4.contains("the controller was reset: the Z frame moved at the home of ")
+                && i4.contains("record the needle frame again"), String.valueOf(i4));
+        call("PUT", "/api/config", "{\"zFrameMovedAtMs\":null}");
+        assertEquals(400, lastStatus, "stamped by the engine: " + lastBody);
+        // the start angle after it is measured again: a confirm is refused, a set needs a turn
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, lastBody);
+        call("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        assertEquals(409, lastStatus, lastBody);
+        // K moved with the frame (by twice the shift): no frame from it, both tips touch the same spot
+        call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("K was measured before the controller was reset"), lastBody);
+        // recorded again: the frame, then its touch-off
+        ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactZ\":2.91}");
+        n = ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertTrue(n.get("anchored").getAsBoolean(), n.toString());
+        assertFalse(n.get("touchedOff").getAsBoolean(), "the touch-off follows the frame: " + n);
+        ok("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}");
+        n = ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertTrue(n.get("touchedOff").getAsBoolean(), n.toString());
+        restartOpenPnp();
+        assertTrue(svc.getConfig().isNeedleAnchored(), "the stamp outlives the restart, the new frame too");
     }
 
     /** BR-02: the controller's idle timeout is at most Marlin's 3600 s (a longer one would miss its switch-off). */
