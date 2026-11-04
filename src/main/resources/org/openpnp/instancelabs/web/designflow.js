@@ -49,6 +49,7 @@
     if (!r) return { state: 'reading', text: 'Checking…' };
     if (r.error) return { state: 'error', text: 'Could not check it: ' + r.error };
     const g = PP().split(r.c);
+    g.tip = g.tip.filter((x) => x.blocking);   // as Run's Pad types item: a tip group the engine does not block on (ok) waits on nothing
     if (r.c.ok) return { state: 'ready', text: 'Ready · top side', g };
     const waits = IL.plural(g.fix.length, 'pad group');
     if (g.tip.length) {
