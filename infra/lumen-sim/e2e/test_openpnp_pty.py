@@ -331,8 +331,10 @@ class HomeAndPrimeTest(SessionTest):
         tip = st["dispense"]["tip"]["key"]
         token = st["dispense"]["needle"].get("changedAtMs")
         setup = [
-            ("POST", "/api/needle/anchor", {"surfaceZ": 5.5, "needleContactRawSum": 65.59, "needleChangedAtMs": token,
-                                            "note": "lumen-sim e2e: the bench relation K"}),
+            # both tips on the same spot (needle contact = 5.5 + the offset below): a frame from K is refused after the
+            # home that follows lumen-sim's power-on boot, a reset to BR-02 (K moves by twice the Z frame's shift)
+            ("POST", "/api/needle/anchor", {"surfaceZ": 5.5, "needleContactZ": 2.91, "needleChangedAtMs": token,
+                                            "note": "lumen-sim e2e: both tips on the bench blank"}),
             ("POST", "/api/needle/offset", {"offsetMm": -2.59, "needleChangedAtMs": token,
                                             "note": "lumen-sim e2e: the frame offset confirmed"}),
             ("PUT", "/api/surfaces/blank", {"points": BLANK_PROBES, "note": "lumen-sim e2e: the bench blank"}),

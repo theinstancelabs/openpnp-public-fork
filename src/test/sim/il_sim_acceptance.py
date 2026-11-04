@@ -279,11 +279,13 @@ class Session:
         else:
             raise RuntimeError("web API did not come up on %d" % self.port)
 
-    def api(self, method, path, body=None, timeout=60, ok=(200, 201, 202)):
+    def api(self, method, path, body=None, timeout=60, ok=(200, 201, 202), headers=None):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.base + path, data=data, method=method)
         if data is not None:
             req.add_header("Content-Type", "application/json")
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 payload, code = r.read(), r.status
@@ -374,6 +376,36 @@ def home(s, timeout=180):
     return True
 
 
+def set_start_angle(s, note):
+    """I11 after a connect: confirm the start angle. After a screw motor-off (a STOP's M18 B, BR-02) a confirm is
+    refused until the screw has turned and the angle is set as measured again: on the simulator only, turn the screw
+    3.6 deg (16 of its 1600 steps) through the passthrough under the lock, then set the profile's angle (the UI's
+    start-angle.cjs does the same). 'confirmed' or 'measured'."""
+    try:
+        s.api("POST", "/api/screw/start-angle", {"note": note})
+        return "confirmed"
+    except RuntimeError as e:
+        if "measure" not in str(e):
+            raise
+    st = s.api("GET", "/api/status")
+    if (st.get("server") or {}).get("simulated") is not True:
+        raise RuntimeError("start angle: not a simulator (status.server.simulated is not true): the screw was not turned")
+    b = next((a.get("driverCoordinate") for a in (st.get("machine") or {}).get("axes") or [] if a.get("letter") == "B"),
+             None)
+    if b is None:
+        raise RuntimeError("start angle: no B axis in the status")
+    token = s.api("POST", "/api/lock/acquire", {"who": "sim-acceptance", "what": note + ": the screw turns once"})["token"]
+    try:
+        s.api("POST", "/api/gcode", {"lines": ["G1 B%.3f F36000" % (float(b) + 3.6), "M400"],
+                                     "what": note + ": the screw turns once"}, headers={"X-IL-Lock": token})
+    finally:
+        s.api("POST", "/api/lock/release", {}, headers={"X-IL-Lock": token})
+    deg = s.api("GET", "/api/status")["dispense"]["profile"]["startAngleDeg"]
+    s.api("POST", "/api/screw/start-angle", {"startAngleDeg": deg,
+                                             "note": note + " (measured again after the screw turned)"})
+    return "measured"
+
+
 def setup_machine(s, characterize=True):
     """Enable, home (sim: no visual homing), the engine's board-run prerequisites through the web API."""
     s.api("POST", "/api/machine/enable")
@@ -392,7 +424,7 @@ def setup_machine(s, characterize=True):
     s.api("PUT", "/api/config", SIM_CONFIG)
     s.api("POST", "/api/purge-row/reset", {})  # the sim's blank is clean
     # I11: the start angle is valid for this controller connection only (confirmed after enable).
-    s.api("POST", "/api/screw/start-angle", {"note": "sim acceptance: confirmed after connect"})
+    set_start_angle(s, "sim acceptance: confirmed after connect")
     if characterize:
         s.api("PUT", "/api/pad-types/chip-0603", {"status": "characterized", "forSetup": tip,
                                                    "notes": "SIM ONLY: marked characterized for the acceptance run"})
@@ -1274,7 +1306,7 @@ def scenario_register(a):
                                    and s.api("GET", "/api/surfaces")["surfaces"]["board"]["setAtMs"] == surface_at)
         s.api("POST", "/api/machine/enable")
         s.wait_status(lambda x: x["machine"]["enabled"], 30, "enabled")
-        s.api("POST", "/api/screw/start-angle", {"note": "sim acceptance: confirmed after connect"})
+        set_start_angle(s, "sim acceptance: confirmed after connect")
         run_stop, lines = run_dots(s, p2["planId"], cfg)
         cmds = commands(lines)
         g28 = next((i for i, c in enumerate(cmds) if c.startswith("G28")), -1)
@@ -2107,12 +2139,12 @@ def padcal_controls(a):
 
         def short_dwell():
             s.api("PUT", "/api/config", {"profile": {"dwellMs": 50}, "forTip": tip})
-            s.api("POST", "/api/screw/start-angle", {"note": "sim padcal: dwell 50 ms"})
+            set_start_angle(s, "sim padcal: dwell 50 ms")
             try:
                 return by_hand(s, "ladder", 1600, "chip-0805")
             finally:
                 s.api("PUT", "/api/config", {"profile": {"dwellMs": dwell}, "forTip": tip})
-                s.api("POST", "/api/screw/start-angle", {"note": "sim padcal: dwell back"})
+                set_start_angle(s, "sim padcal: dwell back")
         control("dwell-50-one-turn", "by hand: one-turn ladder at profile dwellMs 50", short_dwell,
                 lambda job, row: job["state"] == "failed" and row["laid"] == 0 and has("asks the screw for", "I6")(
                     job, row))
