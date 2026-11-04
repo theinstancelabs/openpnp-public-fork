@@ -205,10 +205,28 @@ const visibleFixes = (page, root) => page.evaluate((r) => Array.from(document.qu
     await sleep(1200);
     const cal2b = await page.evaluate(() => { const w = document.getElementById('ws-calibrate'); return { text: w.textContent.replace(/\s+/g, ' '), confirm: !!w.querySelector('button[data-fix="I11-confirm"]:not([hidden])') }; });
     check('(2b) Calibrate\'s Start angle card: no bare confirm, the engine\'s why', !cal2b.confirm && cal2b.text.includes('a STOP: its DISABLE_COMMAND sends M18 B'), { confirm: cal2b.confirm });
+    // the old angle is not offered while I11 asks for a new measurement (one click on it would clear I11 unmeasured,
+    // #11 review): the field waits for the measured value, and its set says when it was typed (measuredAtMs)
+    const f2b = await page.evaluate(() => ({ value: document.getElementById('pf-angle').value, why: document.getElementById('btn-pf-angle-set').title }));
+    check('(2b) Calibrate offers no old angle to set: the field is empty, Set waits for the measured one', f2b.value === '' && /Enter the angle/.test(f2b.why), f2b);
+    const n2b = stub.angles.length;
+    const t2b = Date.now();
+    await page.fill('#pf-angle', '231.5');
+    await page.click('#btn-pf-angle-set');
+    for (let i = 0; i < 30 && stub.angles.length === n2b; i++) await sleep(100);
+    const sent2b = stub.angles[n2b] || null;
+    check('(2b) Set sends the typed angle with measuredAtMs, the server time it was typed', !!sent2b && sent2b.startAngleDeg === 231.5
+      && typeof sent2b.measuredAtMs === 'number' && Math.abs(sent2b.measuredAtMs - t2b) < 5000, sent2b);
     stub.motorOff = { agoMs: 5400000, why: 'the screw motor was switched off at 15:30 (the controller\'s idle timeout: no screw move for 60 min)' };
     await page.waitForFunction(() => /15:30/.test((IL.S.status.machine.screwMotorOff || {}).why || ''), null, { timeout: 5000 }).catch(() => null);
     const st2c = await page.evaluate(() => IL.angleState(IL.S.status));
     check('(2b) switched off before the angle was set: the angle holds', st2c === 'ok', st2c);
+    // a value typed before a switch-off is no measurement after it: the field is emptied again
+    stub.motorOff = { agoMs: 0, why: 'the screw motor was switched off at 16:45 (a STOP: its DISABLE_COMMAND sends M18 B)' };
+    await page.waitForFunction(() => IL.angleState(IL.S.status) === 'measure', null, { timeout: 5000 }).catch(() => null);
+    await sleep(800);
+    const f2c = await page.evaluate(() => document.getElementById('pf-angle').value);
+    check('(2b) a value typed before the switch-off is dropped: the field is empty again', f2c === '', f2c);
     stub.motorOff = null;
 
     // ---- (3) Recovery after a STOP reads the reset instead of asking -----------------------------------------------------
