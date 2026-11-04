@@ -324,7 +324,10 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
 
     // ---- (6) On now after the checks ----------------------------------------------------------------------------------
     await page.evaluate(() => IL.go('#tip'));
-    await page.waitForSelector('#tipnow-evidence tr[data-k="lands"]', { timeout: 10000 }).catch(() => null);
+    // On now reads the engine's needle state, which takes the saved landing on its next status (the Checks step shows
+    // the job's own result at once; CI read this row before the status caught up, #24's gate 11-04)
+    await page.waitForFunction(() => { const r = document.querySelector('#tipnow-evidence tr[data-k="lands"] .how'); return !!r && /\d\d:\d\d/.test(r.textContent); },
+      null, { timeout: 15000 }).catch(() => null);
     const lands6 = await page.evaluate(() => { const r = document.querySelector('#tipnow-evidence tr[data-k="lands"]'); return r ? r.querySelector('.how').textContent.trim() : null; });
     check('(6) On now: where it lands, with the time it was checked', /\d\d:\d\d/.test(lands6 || ''), lands6);
 
