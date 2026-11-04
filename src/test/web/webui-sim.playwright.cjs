@@ -111,8 +111,16 @@ async function openDetails(page, id) {
   if (!(await page.evaluate((i) => document.getElementById(i).open, id))) await page.click('#' + id + ' > summary');
 }
 
-/** Opens a workspace from the left navigation. */
+/**
+ * Opens a workspace from the left navigation. Setup, Profile (pad types) and Calibrate are reached the way the agreed
+ * menu has them (11-02): Machine, then its By hand link.
+ */
 async function nav(page, ws) {
+  if (['setup', 'profile', 'calibrate'].includes(ws)) {
+    await page.click('.tabs [role=tab][data-tab=machine]');
+    await page.click('#ws-machine a[href="#' + ws + '"]');
+    return;
+  }
   await page.click('.tabs [role=tab][data-tab=' + ws + ']');
 }
 
@@ -876,9 +884,21 @@ async function runFirstDots(page, n) {
     // ---- Records › the stopped run of the 140 pads left: finish only its own pads, never the test run's 20 ---------
     {
       const left = 140 - stopped.run.dotsDone;
-      // as the operator does: Records first, then the run (a run chosen there shows instead of the pushed Recovery)
+      const panelView = () => page.evaluate(() => document.getElementById('panel').dataset.view);
+      // the STOP's Recovery is still open: Connect asks again whether the controller was switched off (I11)
+      const open = await page.evaluate(() => IL.recoveryActive());
+      // a run chosen on Records before the page has drawn Records once shows instead of the Recovery too (CI runs
+      // 41602221815 and 41607411975: the run was chosen before the first render, and the Recovery came over it)
+      await page.evaluate((id) => { IL.go('#records'); IL.go('#records/boards/' + id); }, stopped.run.runId);
+      const early = await page.waitForSelector('#rec-finish', { timeout: 20000 }).then(() => true, () => false);
+      const earlyView = await panelView();
+      check('Records: with the STOP\'s Recovery open, a run chosen before the page drew Records shows instead of it',
+        open && early && earlyView === 'record', { open, early, view: earlyView });
+      // as the operator does: Records first, the Recovery on the right, then the run (it shows instead of the Recovery)
+      await nav(page, 'machine');
       await nav(page, 'records');
       await page.waitForSelector('#records-runs', { state: 'visible', timeout: 15000 });
+      if (open) await page.waitForFunction(() => document.getElementById('panel').dataset.view === 'recovery', null, { timeout: 10000 });
       await page.evaluate((id) => IL.go('#records/boards/' + id), stopped.run.runId);
       await page.waitForSelector('#rec-finish', { timeout: 20000 });
       const fin = await textOf(page, 'rec-finish');
