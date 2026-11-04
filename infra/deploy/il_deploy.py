@@ -1284,6 +1284,7 @@ def api_stop_and_wait(api, timeout, poll=0.2, clock=None):
 
 
 PLANNED_STOP = "/api/stop/planned"  # BR-75
+PLANNED_STOP_RETRY_S = 5  # a refusal lasts while something works: asked again this often, not every poll
 NO_PLANNED_STOP = f"no {PLANNED_STOP} in this build (before BR-75)"
 
 
@@ -1310,7 +1311,7 @@ def api_planned_stop(api, timeout, poll=0.2, clock=None):
         if code == 409 and error == "refused":
             if clock.monotonic() >= end:
                 return None, f"no planned stop for {timeout:g} s: {reason}"
-            clock.sleep(poll)
+            clock.sleep(max(poll, min(PLANNED_STOP_RETRY_S, end - clock.monotonic())))
             continue
         if code != 200:
             return False, f"POST {PLANNED_STOP}: HTTP {code} {reason}"

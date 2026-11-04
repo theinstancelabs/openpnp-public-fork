@@ -389,6 +389,12 @@ class PlannedStop(unittest.TestCase):
         self.assertGreaterEqual(d.clock.monotonic() - t0, 10)
         self.assertEqual(set(api.calls), {"/api/stop/planned"}, "never a real STOP in its place")
 
+    def test_a_refusal_is_asked_again_every_few_seconds(self):
+        """Not every poll: a refusal lasts while something works (seconds to minutes), and each one is a request."""
+        api = PlannedApi(lambda n: REFUSED)
+        self.deployer(api).planned_stop()
+        self.assertEqual(len(api.calls), 3, "at 0, 5 and 10 s of the 10 s wait")
+
     def test_a_deploy_that_gets_no_planned_stop_changes_nothing(self):
         for answer in (LOCKED, REFUSED):
             with self.subTest(answer[1]["error"]):
