@@ -586,6 +586,25 @@ public class ControllerResetTest {
     }
 
     /**
+     * #11 review (11-04): a trip heard as it happens is recorded at once, in memory (the driver's reader thread does no
+     * I/O), so the arm after it on the wire ends it; {@link ControllerReset#flush} writes both, in their order.
+     */
+    @Test
+    public void aTripHeardIsRecordedAtOnceAndWrittenByTheFlush() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.watchdogTripHeard("the controller's host watchdog tripped: Error:host watchdog");
+        now = 2000;
+        r.watchdogArmed(); // a stream's M990 S: the firmware forgot that trip
+        assertTrue(journal.isEmpty(), "no I/O on the reader thread or between a stream's lines: " + codes());
+        r.flush();
+        assertEquals(Arrays.asList(ControllerReset.EVENT_MOTOR_OFF, ControllerReset.EVENT_WATCHDOG_TRIP,
+                ControllerReset.EVENT_WATCHDOG_ARMED), codes());
+        now = 3000;
+        assertTrue(withIdle().watchdogTripped("the host watchdog tripped", true), "read back: one reported now is new");
+    }
+
+    /**
      * A journal write runs outside the lock: a status poll writing a switch-off it found must not make the stream's next
      * move wait for the insert.
      */
@@ -628,7 +647,8 @@ public class ControllerResetTest {
 
     /**
      * The home after a detected reset moves the Z frame (K by twice the shift): it says so once, also when the reset was
-     * homed only after an engine restart; an ordinary home, or one after an unread connect, does not.
+     * homed only after an engine restart; an ordinary home does not. A connect whose position was not read may have been
+     * a reset (I11 counts it so): its home moves the frame too (#11 review 11-04, the conservative side).
      */
     @Test
     public void theHomeAfterAResetMovesTheZFrame() {
@@ -644,8 +664,8 @@ public class ControllerResetTest {
         now = 4000;
         assertFalse(r.homed(), "once");
         r.connected(null, 'B', "timeout");
-        assertFalse(r.homed(), "a home after an unread connect: no reset seen");
-        assertEquals(Long.valueOf(3000), run(false, false).frameMovedAtMs(), "read back");
+        assertTrue(r.homed(), "a home after an unread connect: it may have been a reset");
+        assertEquals(Long.valueOf(4000), run(false, false).frameMovedAtMs(), "read back");
         now = 5000;
         run(false, false).connected(reply(BOOT), 'B', null); // reset, then OpenPnP restarted before the home
         now = 6000;
@@ -656,6 +676,10 @@ public class ControllerResetTest {
         run(false, false).connected(reply(BOOT), 'B', null);
         now = 8000;
         assertEquals(Long.valueOf(8000), run(true, true).frameMovedAtMs(), "an engine started on a homed machine");
+        now = 9000;
+        run(false, false).connected(null, 'B', "timeout"); // unread, then OpenPnP restarted before the home
+        now = 10000;
+        assertTrue(run(false, false).homed(), "an unread connect read back");
     }
 
     @Test

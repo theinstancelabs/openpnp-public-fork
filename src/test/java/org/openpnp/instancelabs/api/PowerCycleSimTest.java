@@ -2,6 +2,7 @@ package org.openpnp.instancelabs.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -106,6 +107,36 @@ public class PowerCycleSimTest {
         sim.machine.setEnabled(false);
         svc = DispenseService.start(Configuration.get());
         sim.machine.setEnabled(true);
+    }
+
+    /**
+     * OpenPnP (stopped) starts again and Start is pressed while the engine is starting: the web API and the engine start
+     * in no fixed order. At the engine start's {@code point}: "listeners" before its machine listeners exist,
+     * "catch-up" right after they do.
+     */
+    void startOpenPnpWithStartPressedAt(String point) throws Exception {
+        TipSim.hook(p -> {
+            if (point.equals(p)) {
+                try {
+                    sim.machine.setEnabled(true);
+                }
+                catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        });
+        try {
+            svc = DispenseService.start(Configuration.get());
+        }
+        finally {
+            TipSim.hook(null);
+        }
+        assertTrue(sim.machine.isEnabled(), "Start was pressed at " + point);
+    }
+
+    /** The journal's events of one code. */
+    List<java.util.Map<String, Object>> events(String code) throws Exception {
+        return svc.getDb().query("SELECT * FROM events WHERE code = ?", code);
     }
 
     /** The lines since the mark that move an axis or switch an output. */
@@ -712,5 +743,168 @@ public class PowerCycleSimTest {
         ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
         call("POST", "/api/pressure/start", null);
         assertFalse(lastBody.contains("controller was reset"), "known again after the home: " + lastBody);
+    }
+
+    /**
+     * #11 review (11-04) MAJOR: the web API and the engine start in no fixed order, and Start does not wait for the
+     * engine. A connect made before the engine's listeners existed is handled at its start: after a power cycle the
+     * home is G28 first on the operator's word, I11 asks for the angle, and the home moves the Z frame.
+     */
+    @Test
+    public void aConnectMadeBeforeTheEngineStartedIsHandledAtItsStart() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        Thread.sleep(5);
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        startOpenPnpWithStartPressedAt("listeners");
+
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.get("positionKnown").getAsBoolean(), m.toString());
+        assertTrue(m.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), "read at the engine's start: " + m);
+        JsonObject s = ok("GET", "/api/status", null);
+        assertEquals("blocked", i11(s).get("state").getAsString(), i11(s).toString());
+        assertTrue(i11(s).get("text").getAsString().contains("the controller was reset"), i11(s).toString());
+        assertNotNull(svc.getControllerConnectedAtMs(), "the connect is dated at the engine's start");
+
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        List<String> l = motionAndOutputs();
+        assertTrue(!l.isEmpty() && l.get(0).startsWith("G28"), "G28 first, no Z move before it: " + l);
+        assertTrue(svc.getConfig().zFrameMovedAtMs != null, "the reset's home moved the Z frame");
+    }
+
+    /**
+     * #11 review (11-04): Start and Home both before the engine started: the home followed the connect, so the position
+     * is known; the connect is dated at the engine's start, so an angle set before it is confirmed (every OpenPnP start,
+     * the process engineer 11-03).
+     */
+    @Test
+    public void anEngineStartedOnAHomedMachineAsksTheAngleToBeConfirmed() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        Thread.sleep(5);
+        svc = DispenseService.start(Configuration.get()); // OpenPnP started and homed the machine before the engine
+        assertTrue(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean());
+        JsonObject s = ok("GET", "/api/status", null);
+        assertTrue(s.getAsJsonObject("dispense").getAsJsonObject("profile").get("startAngleNeedsConfirm")
+                .getAsBoolean(), s.toString());
+        assertTrue(i11(s).get("text").getAsString().contains("the controller (re)connected"), i11(s).toString());
+    }
+
+    /**
+     * #11 review (11-04): read only at the engine's start, a position other than the boot's may follow a move made
+     * since the connect (the passthrough needs no engine): the connect counts as unread, a possible reset, and its home
+     * moves the Z frame (the conservative side).
+     */
+    @Test
+    public void aConnectReadOnlyAtTheEngineStartCountsAsUnread() throws Exception {
+        sim.machine.setEnabled(false);
+        startOpenPnpWithStartPressedAt("listeners");
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.get("positionKnown").getAsBoolean(), m.toString());
+        assertFalse(m.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), m.toString());
+        assertTrue(m.get("positionUnknownWhy").getAsString().contains("read it only later"), m.toString());
+        assertEquals(1, events(ControllerReset.EVENT_UNREAD).size());
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        assertTrue(svc.getConfig().zFrameMovedAtMs != null, "the home after a possible reset");
+    }
+
+    /**
+     * #11 review (11-04): a trip while OpenPnP was gone is in the firmware's M990 report, read for a connect the engine
+     * did not hear too (OpenPnP died with the watchdog armed; Start was pressed before the engine was up).
+     */
+    @Test
+    public void aWatchdogTripIsReadForAConnectMadeBeforeTheEngineStarted() throws Exception {
+        sim.machine.setEnabled(false);
+        sim.server.watchdogReport = "echo:Host watchdog: off tripped";
+        startOpenPnpWithStartPressedAt("listeners");
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
+    }
+
+    /** #11 review (11-04): a connect both the listener and the engine start's catch-up see is handled once. */
+    @Test
+    public void aConnectTheListenerAndTheStartBothSeeIsHandledOnce() throws Exception {
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.server.mark();
+        startOpenPnpWithStartPressedAt("catch-up");
+        assertEquals(1, java.util.Collections.frequency(sim.server.sinceMark(), "M114"), sim.server.sinceMark()
+                .toString());
+        assertEquals(1, events(ControllerReset.EVENT_RESET).size(), String.valueOf(svc.getDb().recentEvents(20)));
+        assertNotNull(svc.getControllerConnectedAtMs());
+    }
+
+    /**
+     * #11 review (11-04): the pressure hold's arm of the host watchdog is on record at once, and an engine that stops
+     * writes one its stream left in memory: OpenPnP may die right after an arm, the keepalive stops and the firmware
+     * trips again, and the trip reported at the next connect is a new switch-off, not the one before the arm.
+     */
+    @Test
+    public void anArmIsOnRecordSoATripReportedAfterARestartIsNew() throws Exception {
+        sim.server.watchdogReport = "echo:Host watchdog: off tripped";
+        reconnect();
+        assertEquals(1, motorOffs().size(), "the trip reported at the connect");
+        ok("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals("on", ok("POST", "/api/pressure/start", null).get("state").getAsString()); // it arms the watchdog
+        assertEquals(1, events(ControllerReset.EVENT_WATCHDOG_ARMED).size(), "on record at once");
+        ok("POST", "/api/pressure/stop", null);
+        Thread.sleep(5);
+        restartOpenPnp(); // OpenPnP died with the watchdog armed: it tripped again
+        assertEquals(2, motorOffs().size(), "a trip reported after the arm is a new one");
+        Thread.sleep(5);
+        svc.getControllerReset().watchdogArmed(); // a stream's arm, until the journal thread writes it
+        restartOpenPnp();
+        assertEquals(3, motorOffs().size(), "the engine wrote the arm when it stopped");
+    }
+
+    /**
+     * #11 review (11-04): after a reset's home a frame from K is refused also for a tip without a frame (the seeded 22G:
+     * the page offers the bench's 65.59), and the engine checks under its lock: a K posted as the home ends, its check
+     * passed before the stamp, is refused too.
+     */
+    @Test
+    public void aFrameFromKIsRefusedAfterAResetsHomeWithoutAnOldFrameToo() throws Exception {
+        assertTrue(svc.getConfig().needleAnchor == null, "the seeded tip has no frame");
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("K was measured before the controller was reset"), lastBody);
+        assertFalse(ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("needle")
+                .get("kRefusal").isJsonNull());
+        double nz = svc.needleContactZFromRawSum(5.5, 65.59);
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> svc.setNeedleAnchor(5.5, nz, null, null, 65.59, null));
+        assertTrue(e.getMessage().contains("K was measured before the controller was reset"), e.getMessage());
+        assertTrue(svc.getConfig().needleAnchor == null, "nothing recorded");
+        ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactZ\":2.91}");
+        assertTrue(svc.needleFrameFromKRefusal() == null, "a frame after the home: K holds again");
+        Thread.sleep(5);
+        // the next reset's home has ended, its stamp in the settings comes a moment later: refused from the home on
+        powerCycle();
+        svc.getControllerReset().homed();
+        assertTrue(svc.needleFrameFromKRefusal() != null, "from the home, before its stamp");
+    }
+
+    /**
+     * #11 review (11-04): the status tells a reset's home from a needle change (needle.zFrameMovedAtMs), and the frame
+     * recorded after it asks nothing about the tip: the old frame was of another Z frame, so a frame 1.5 mm off it says
+     * nothing about which tip is on.
+     */
+    @Test
+    public void aFrameAfterAResetsHomeAsksNoTipQuestion() throws Exception {
+        ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactZ\":2.91}");
+        JsonObject n = ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertTrue(n.get("zFrameMovedAtMs").isJsonNull(), n.toString());
+        Thread.sleep(5);
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        n = ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("needle");
+        assertEquals(svc.getConfig().zFrameMovedAtMs.longValue(), n.get("zFrameMovedAtMs").getAsLong(), n.toString());
+        JsonObject f = ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,"
+                + "\"needleContactZ\":1.41}");
+        assertTrue(f.get("question").isJsonNull(), f.toString());
     }
 }

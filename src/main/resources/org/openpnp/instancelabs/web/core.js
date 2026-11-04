@@ -2962,7 +2962,7 @@
     const msg = String(message || '');
     switch (code) {
       case 'MACHINE': return m.enabled ? [{ fix: 'home', label: 'Home' }] : [{ fix: 'connect', label: 'Connect' }];
-      case 'I11': return IL.angleState(status) === 'measure' || /measure it again/i.test(String(msg || '')) ? [{ href: '#calibrate/angle', label: 'Measure again', primary: true }]
+      case 'I11': return IL.angleState(status) === 'measure' ? [{ href: '#calibrate/angle', label: 'Measure again', primary: true }]
         : [{ fix: 'I11-confirm', label: 'Controller stayed on: confirm' }, { href: '#calibrate/angle', label: 'Measure again' }];
       case 'I9': return row.defined && row.spots < IL.purgeNeed(row)
         ? [{ href: '#setup/purge', label: 'Purge row: more spots' }, { href: '#profile', label: 'Profile: purge dots' }]
