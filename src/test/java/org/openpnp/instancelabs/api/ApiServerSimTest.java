@@ -1162,6 +1162,28 @@ public class ApiServerSimTest {
         assertTrue(p.get("fingerprint").getAsString().endsWith(" pause=500"), p.toString());
     }
 
+    /**
+     * BR-82 review: the recipe's own lift is saved with it (above 0 to 10 mm) and shown with it; the recipe editor
+     * sends a blank as null, which gives the machine's hop height back. The machine's hop height never changes.
+     */
+    @Test
+    public void liftIsSavedWithTheRecipe() throws Exception {
+        for (String bad : new String[] {"0", "10.1"}) {
+            Res r = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftMm\":" + bad + "}}");
+            assertEquals(400, r.status, r.toString());
+            assertTrue(r.body.contains("liftMm must be > 0 and <= 10"), r.toString());
+        }
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftMm\":3}}"));
+        JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertEquals(3.0, p.get("liftMm").getAsDouble(), 0, p.toString());
+        assertTrue(p.get("fingerprint").getAsString().endsWith(" lift=3.000"), p.toString());
+        assertEquals(1.0, ok(get("/api/config")).get("hopHeightMm").getAsDouble(), 0);
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftMm\":null}}"));
+        JsonObject c = ok(get("/api/config"));
+        assertTrue(c.getAsJsonObject("profile").get("liftMm").isJsonNull(), c.toString());
+        assertEquals(1.0, c.get("hopHeightMm").getAsDouble(), 0);
+    }
+
     /** PUT /api/config merges the nested settings one level deep; stamped fields are the engine's. */
     @Test
     public void nestedSettingsMergeOneLevelDeep() throws Exception {

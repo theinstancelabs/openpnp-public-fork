@@ -89,6 +89,7 @@ final class Views {
         m.put("dwellMs", p.dwellMs);
         m.put("gapMm", p.gapMm);
         m.put("liftPauseMs", p.liftPauseMs);
+        m.put("liftMm", p.liftMm);
         m.put("purgeDots", p.purgeDots);
         m.put("notes", p.notes);
         m.put("stepsPerRev", c.bStepsPerRev);

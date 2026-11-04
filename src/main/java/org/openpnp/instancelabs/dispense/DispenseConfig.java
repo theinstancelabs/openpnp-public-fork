@@ -73,7 +73,7 @@ public class DispenseConfig {
     public String blankLocationName = "blank";
 
     // --- Z geometry (the dispense gap is profile.gapMm) ------------------------------------------
-    /** Hop height above the dispense Z between dots on the same board. */
+    /** Hop height above the dispense Z between dots on the same board, for profiles without a lift of their own. */
     public double hopHeightMm = 1.0;
     /** N2 Z used for travel to/from the board, waste and blank. 31.5 = see-saw balanced (LIVE home). */
     public double travelSafeZMm = 31.5;
@@ -524,6 +524,11 @@ public class DispenseConfig {
     /** The dispense gap of the active profile. */
     public double gapMm() {
         return profile.gapMm;
+    }
+
+    /** The lift after each dot, above its dispense Z: the active profile's own, else the machine's hop height. */
+    public double liftMm() {
+        return profile.liftMm != null ? profile.liftMm : hopHeightMm;
     }
 
     /**

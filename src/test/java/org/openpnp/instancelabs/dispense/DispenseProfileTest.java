@@ -3,6 +3,7 @@ package org.openpnp.instancelabs.dispense;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Arrays;
@@ -233,6 +234,42 @@ public class DispenseProfileTest {
         assertRefused(x -> x.liftPauseMs = 5001, "liftPauseMs must be 0 to 5000");
         DispenseConfig old = DispenseConfig.fromJson("{\"profile\":{\"dwellMs\":250}}");
         assertEquals(0, old.profile.liftPauseMs, "older files: no pause");
+    }
+
+    /**
+     * BR-82 review: the recipe's own lift after a dot (the plastic 25G's 3 mm; null = the machine's hopHeightMm), so
+     * it comes and goes with the tip like its pause. Set, it is in both fingerprints; null (the default, and older
+     * files) keeps them byte for byte.
+     */
+    @Test
+    public void liftOfItsOwn() {
+        DispenseProfile p = new DispenseProfile();
+        assertNull(p.liftMm);
+        DispenseConfig c = new DispenseConfig();
+        assertEquals(1.0, c.liftMm(), 0, "null: the machine's hop height");
+        assertEquals("psi=18.000 suck=10.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000", p.doseFingerprint());
+        assertEquals("psi=18.000 net=800 suck=10.000 start=298.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000 "
+                + "purge=8", p.fingerprint());
+        String dose = p.doseFingerprint();
+        String plan = p.fingerprint();
+        p.liftMm = 3.0;
+        assertEquals(dose + " lift=3.000", p.doseFingerprint());
+        assertEquals(plan + " lift=3.000", p.fingerprint());
+        assertEquals("lift none -> 3", DispenseProfile.fingerprintDiff(dose, p.doseFingerprint()));
+        p.liftPauseMs = 500;
+        assertEquals(dose + " pause=500 lift=3.000", p.doseFingerprint());
+        assertEquals(3.0, p.copy().liftMm, 0);
+        c.profile = p;
+        assertEquals(3.0, c.liftMm(), 0);
+        assertEquals(1.0, c.hopHeightMm, 0, "the machine's hop height stays");
+        assertTrue(c.validate().isEmpty(), c.validate().toString());
+        for (double ok : new double[] {0.01, 3, 10}) {
+            p.liftMm = ok;
+            assertTrue(p.validate(C).isEmpty(), ok + ": " + p.validate(C));
+        }
+        assertRefused(x -> x.liftMm = 0.0, "liftMm must be > 0 and <= 10");
+        assertRefused(x -> x.liftMm = 10.1, "liftMm must be > 0 and <= 10");
+        assertNull(DispenseConfig.fromJson("{\"profile\":{\"dwellMs\":250}}").profile.liftMm, "older files: none");
     }
 
     /** Screw angle = Marlin's M114 step count of B ("Count ... B:<n>"), never the B position. */

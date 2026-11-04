@@ -210,8 +210,8 @@ public class GcodeStreamBuilder {
         }
         if (d.hopZ > cfg.travelSafeZMm + 1e-6) {
             throw new IllegalStateException(String.format(Locale.ROOT, "dot %d (%s): lift Z %.3f is above the travel Z "
-                    + "%.3f (hopHeightMm %.3f too large): on the see-saw that pushes N1 down", d.index, d.label, d.hopZ,
-                    cfg.travelSafeZMm, cfg.hopHeightMm));
+                    + "%.3f (%s %.3f too large): on the see-saw that pushes N1 down", d.index, d.label, d.hopZ,
+                    cfg.travelSafeZMm, cfg.profile.liftMm != null ? "profile liftMm" : "hopHeightMm", cfg.liftMm()));
         }
     }
 

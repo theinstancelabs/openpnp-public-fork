@@ -430,7 +430,7 @@
     }
     return t
       .replace(/\b([0-9a-f]{4})[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(-subset-[\w-]+)?/gi, (m, a, sub) => a + (sub ? ' (part)' : ''))
-      .replace(/ psi=[\d.]+ net=\d+ suck=[\d.]+ start=[\d.]+ rpm=[\d.]+ acc=[\d.]+ dwell=\d+ gap=[\d.]+( purge=\d+)?( pause=\d+)?/g, '')
+      .replace(/ psi=[\d.]+ net=\d+ suck=[\d.]+ start=[\d.]+ rpm=[\d.]+ acc=[\d.]+ dwell=\d+ gap=[\d.]+( purge=\d+)?( pause=\d+)?( lift=[\d.]+)?/g, '')
       .replace(/\{[^{}]{40,}\}|\[[^\[\]]{60,}\]/g, '{…}');
   };
   /**

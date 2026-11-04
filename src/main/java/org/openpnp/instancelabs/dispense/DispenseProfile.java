@@ -61,6 +61,11 @@ public class DispenseProfile {
      */
     public int liftPauseMs = 0;
     /**
+     * The lift after each dot, above its dispense Z (mm; null = the machine's {@link DispenseConfig#hopHeightMm}): the
+     * plastic 25G recipe's 3 mm, kept with its pause so a tip mount brings both back ({@link DispenseConfig#liftMm()}).
+     */
+    public Double liftMm = null;
+    /**
      * Purge dots on the purge row before the work, same recipe, then cross without stopping; the
      * first one sets the start angle.
      */
@@ -151,23 +156,27 @@ public class DispenseProfile {
     public String fingerprint() {
         return String.format(Locale.ROOT, "psi=%.3f net=%d suck=%.3f start=%.3f rpm=%.3f acc=%.1f dwell=%d gap=%.4f "
                 + "purge=%d", pressurePsi, netStepsPerDot, suckBackDeg, startAngleDeg, screwRpm, screwAccelDegS2,
-                dwellMs, gapMm, purgeDots) + pauseKey();
+                dwellMs, gapMm, purgeDots) + liftKeys();
     }
 
     /**
      * Identity of everything but the turn that sets how much paste a turn lays (pressure, suck-back,
-     * speed, acceleration, dwell, gap, the pause after the lift): dose records and calibrated pad types
-     * carry it (§1.7). The net turn is the record's own, the start angle has its own rule, purge count
-     * and name are no part of a dot.
+     * speed, acceleration, dwell, gap, the pause after the lift and the recipe's own lift): dose records
+     * and calibrated pad types carry it (§1.7). The net turn is the record's own, the start angle has its
+     * own rule, purge count and name are no part of a dot.
      */
     public String doseFingerprint() {
         return String.format(Locale.ROOT, "psi=%.3f suck=%.3f rpm=%.3f acc=%.1f dwell=%d gap=%.4f", pressurePsi,
-                suckBackDeg, screwRpm, screwAccelDegS2, dwellMs, gapMm) + pauseKey();
+                suckBackDeg, screwRpm, screwAccelDegS2, dwellMs, gapMm) + liftKeys();
     }
 
-    /** " pause=500", nothing without a pause: the fingerprints stored before the pause existed stay byte-identical. */
-    private String pauseKey() {
-        return liftPauseMs > 0 ? " pause=" + liftPauseMs : "";
+    /**
+     * " pause=500 lift=3.000", each only when set: the fingerprints stored before these keys existed stay
+     * byte-identical.
+     */
+    private String liftKeys() {
+        return (liftPauseMs > 0 ? " pause=" + liftPauseMs : "")
+                + (liftMm != null ? String.format(Locale.ROOT, " lift=%.3f", liftMm) : "");
     }
 
     /**
@@ -223,6 +232,9 @@ public class DispenseProfile {
         if (!(liftPauseMs >= 0 && liftPauseMs <= 5000)) {
             p.add("profile liftPauseMs must be 0 to 5000");
         }
+        if (liftMm != null && !(liftMm > 0 && liftMm <= 10)) {
+            p.add("profile liftMm must be > 0 and <= 10 (null: the machine's hopHeightMm)");
+        }
         if (!(purgeDots >= 0 && purgeDots <= 60)) {
             p.add("profile purgeDots must be 0 to 60");
         }
@@ -249,6 +261,7 @@ public class DispenseProfile {
         x.dwellMs = dwellMs;
         x.gapMm = gapMm;
         x.liftPauseMs = liftPauseMs;
+        x.liftMm = liftMm;
         x.purgeDots = purgeDots;
         x.sustainedFeedMgS = sustainedFeedMgS;
         x.notes = notes;

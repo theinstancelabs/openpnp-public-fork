@@ -124,6 +124,7 @@ public class DispensePlan {
     public String profileFingerprint;
     public double needleGapMm;
     public double needleZOffsetMm;
+    /** The lift after each dot it was made with: the profile's own liftMm, else the machine's hopHeightMm. */
     public double hopHeightMm;
     /** Identity of the board surface map the dot Z came from (null: none, single board Z). */
     public String surfaceFingerprint;

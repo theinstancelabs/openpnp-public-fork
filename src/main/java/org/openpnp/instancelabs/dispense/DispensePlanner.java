@@ -180,7 +180,7 @@ public class DispensePlanner {
         plan.profileFingerprint = cfg.profile.fingerprint();
         plan.needleGapMm = cfg.gapMm();
         plan.needleZOffsetMm = cfg.needleZOffsetMm;
-        plan.hopHeightMm = cfg.hopHeightMm;
+        plan.hopHeightMm = cfg.liftMm();
         plan.surfaceFingerprint = surface == null ? null : surface.fingerprint();
         plan.padTypesFingerprint = resolver == null ? null : resolver.fingerprint();
         double worstBoardZDiff = 0;
@@ -267,7 +267,7 @@ public class DispensePlanner {
                 d.yMm = g.yMm + o[0] * sn + o[1] * c;
                 d.surfaceZMm = surface == null ? g.surfaceZMm : surface.z(d.xMm, d.yMm);
                 d.dispenseZMm = d.surfaceZMm + cfg.needleZOffsetMm + cfg.gapMm();
-                d.hopZMm = d.dispenseZMm + cfg.hopHeightMm;
+                d.hopZMm = d.dispenseZMm + cfg.liftMm();
                 d.netSteps = steps;
                 d.rotationDeg = steps / cfg.bStepsPerDeg;
                 d.padIndex = plan.pads.size() - 1;

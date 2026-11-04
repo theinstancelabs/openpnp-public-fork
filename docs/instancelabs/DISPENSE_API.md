@@ -80,7 +80,8 @@ Fields and defaults:
 - pneumatics: `pumpToValveSettleMs 1000`, `valveSettleMs 3000` (bench `disp.py`);
 - recipe: `profile` (below), `purgeRow` (below), `cleanPadCheck` (below);
 - places: `locations {}`, `wasteLocationName "waste"`, `blankLocationName "blank"`;
-- Z: `hopHeightMm 1.0` (0 < hop <= 10), `travelSafeZMm 31.5` (must map into the Z axis safe zone),
+- Z: `hopHeightMm 1.0` (0 < hop <= 10; the lift after a dot for profiles without their own `liftMm`),
+  `travelSafeZMm 31.5` (must map into the Z axis safe zone),
   `needleZOffsetMm 0`, `needleZOffsetSetAtMs null`, `needleChangedAtMs null`, `needleAnchor null`
   (`surfaceZMm`, `needleContactZMm`, `xMm`, `yMm`, `setAtMs`, `rawSumMm`), `surfaces {}` (`points`, `setAtMs`, `note`,
   `boardFingerprint` = the board registration it was probed on), `boardSurfaceName "board"`, `zFrameToleranceMm 1.0`
@@ -125,7 +126,8 @@ One profile per pressure session, the same for the purge row and the work. Defau
 | `screwAccelDegS2` | 20000 | Sent as `M204 S` around the B moves only (1000..30000). |
 | `dwellMs` | 250 | Dwell after the forward turn, before the suck-back: the dot-size knob at fixed pressure. |
 | `gapMm` | 0.10 | Needle-to-surface gap while dispensing (0.05..0.15; >= 0.20 misses dots). |
-| `liftPauseMs` | 0 | Pause at the lift height after each dot, the pressure on, before any X/Y travel (0..5000 ms; 0 = none). The plastic 25G 0603 recipe lifts 3 mm (`hopHeightMm`) and waits 500 ms: the paste thread breaks there instead of being dragged across the board. Sent as `G4 P<ms>` right after the lift, split like the dwell while the watchdog is armed, counted in every estimate (I7's pressurised time, the dot clock). In both fingerprints only when > 0 (` pause=500`), so records and plans made without it keep theirs. |
+| `liftPauseMs` | 0 | Pause at the lift height after each dot, the pressure on, before any X/Y travel (0..5000 ms; 0 = none). The plastic 25G 0603 recipe lifts 3 mm (`liftMm`) and waits 500 ms: the paste thread breaks there instead of being dragged across the board. Sent as `G4 P<ms>` right after the lift, split like the dwell while the watchdog is armed, counted in every estimate (I7's pressurised time, the dot clock). In both fingerprints only when > 0 (` pause=500`), so records and plans made without it keep theirs. |
+| `liftMm` | null | The lift after each dot above its dispense Z (mm; > 0 and <= 10; null = the machine's `hopHeightMm`). The recipe's own, so a tip mount brings it back with the pause (the plastic 25G 0603 recipe: 3). Every dot's hop uses it (`DispenseConfig.liftMm()`): board, purge row, shots, calibration blocks, dot ladder, touch-off (a dot at a place, like the prime, lifts to `travelSafeZMm`). In both fingerprints only when set (` lift=3.000`), so records and plans made without it keep theirs. |
 | `purgeDots` | 8 | Purge dots on the purge row before the work (>= 2 for a partial turn: the first sets the start angle, at least one normal dot flushes it). |
 | `notes` | | Operator notes. |
 
@@ -215,8 +217,9 @@ Coordinates: X/Y are OpenPnP machine coordinates of the N2 needle tip (what `N2.
 minus (`needleLanding` + `needleXyTrim`) (*tips*; `landingInEffect()`). Surface Z (places, board, surfaces) is in
 OpenPnP's frame: the N1 nozzle Z touching the surface. Dispense Z (N2) = surface Z + `needleZOffsetMm` +
 `profile.gapMm`; on a board the surface Z of each dot is the probed `board` plane at the dot, on the purge row the
-`blank` plane; hop Z = dispense Z + `hopHeightMm`. On the Lumen (z2 = 63 − raw, K 65.59) the needle dispenses at raw Z =
-65.49 − c for a surface at N1 contact c. B is degrees of the auger (Marlin units).
+`blank` plane; hop Z = dispense Z + the lift (`profile.liftMm`, else `hopHeightMm`). On the Lumen (z2 = 63 − raw,
+K 65.59) the needle dispenses at raw Z = 65.49 − c for a surface at N1 contact c. B is degrees of the auger (Marlin
+units).
 
 ## 3. Data (`<configDir>/instancelabs/dispense.db`, SQLite, every table append-only via triggers)
 
@@ -281,11 +284,11 @@ than its rule's `largestSingleDotPadMm2`, `ceil(area / largestSingleDotPadMm2)` 
 on the grid that maximises the short side of a cell (`bestGrid`). Order: nearest neighbour from the start + 2-opt; the
 start is the last purge spot of the next run (so the cross is short), else N2's XY.
 
-`DispensePlan` carries `profile` (a copy) and `profileFingerprint`, `needleGapMm`, `needleZOffsetMm`, `hopHeightMm`,
-`surfaceFingerprint`, `boardFingerprint`, `pads`, `dots`, `warnings`, path lengths. `PlannedDot`: `index`, `padId`,
-`xMm`, `yMm`, `surfaceZMm`, `dispenseZMm`, `hopZMm`, `rotationDeg`. `PlannedPad`: geometry, type, area, target volume
-and mass (informational), `dotCount`, `rotationPerDotDeg`, `flags`. Blocking flags: `NO_PAD_TYPE`, `STATUS_BELOW_MIN`
-(§5.7 rule), `NO_GEOMETRY`.
+`DispensePlan` carries `profile` (a copy) and `profileFingerprint`, `needleGapMm`, `needleZOffsetMm`, `hopHeightMm`
+(the lift it was made with), `surfaceFingerprint`, `boardFingerprint`, `pads`, `dots`, `warnings`, path lengths.
+`PlannedDot`: `index`, `padId`, `xMm`, `yMm`, `surfaceZMm`, `dispenseZMm`, `hopZMm`, `rotationDeg`. `PlannedPad`:
+geometry, type, area, target volume and mass (informational), `dotCount`, `rotationPerDotDeg`, `flags`. Blocking
+flags: `NO_PAD_TYPE`, `STATUS_BELOW_MIN` (§5.7 rule), `NO_GEOMETRY`.
 
 *Board import.* A board plan also carries the board frame: `boardToMachine` (6 affine numbers), `boardFile`,
 `boardWidthMm`, `boardHeightMm`, `boardTransformStatus`, `fiducials` (`id`, `partId`, board and machine X/Y),

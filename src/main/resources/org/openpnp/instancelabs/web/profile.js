@@ -201,8 +201,10 @@
     { id: 'pf-notes', key: 'notes', text: true, textarea: true, label: 'Notes' },
     { id: 'pf-liftpause', key: 'liftPauseMs', int: true, label: 'Pause after the lift', unit: 'ms', range: '0 to 5000', step: '10', min: '0', max: '5000',
       check: (v) => v >= 0 && v <= 5000, err: 'Must be 0 to 5000 ms.', help: 'The 25G recipe waits 500 ms at the lift height before travel (it stops threads).' },
+    { id: 'pf-lift', key: 'liftMm', optional: true, dec: 1, label: 'Lift after a dot', unit: 'mm', range: 'blank or above 0 to 10', step: '0.1', min: '0.1', max: '10',
+      check: (v) => v > 0 && v <= 10, err: 'Must be above 0 and at most 10 mm, or blank.', help: 'Blank: the machine’s hop height. The 25G recipe lifts 3 mm.' },
   ];
-  const FINGERPRINT_KEYS = new Set(['pressurePsi', 'netStepsPerDot', 'suckBackDeg', 'screwRpm', 'screwAccelDegS2', 'dwellMs', 'gapMm', 'purgeDots', 'liftPauseMs']);
+  const FINGERPRINT_KEYS = new Set(['pressurePsi', 'netStepsPerDot', 'suckBackDeg', 'screwRpm', 'screwAccelDegS2', 'dwellMs', 'gapMm', 'purgeDots', 'liftPauseMs', 'liftMm']);
   const PF = { dirty: new Set(), expect: null, expectUntil: 0, turnKey: null, errors: {}, tipKey: null };
 
   function readVal(f) {
@@ -247,6 +249,7 @@
     for (const f of FIELDS) {
       const v = readVal(f);
       if (f.text ? v !== undefined : isNum(v)) out[f.key] = f.text ? v : Number(v);
+      else if (f.optional && v === undefined) out[f.key] = null;
     }
     return out;
   }
@@ -275,7 +278,7 @@
     for (const f of FIELDS) {
       if (f.text) continue;
       const v = readVal(f);
-      if (!isNum(v)) { errs[f.id] = 'Enter a number.'; continue; }
+      if (!isNum(v)) { if (!(f.optional && v === undefined)) errs[f.id] = 'Enter a number.'; continue; }
       if (f.int && !Number.isInteger(Number(v))) { errs[f.id] = 'Must be a whole number.'; continue; }
       if (f.check && !f.check(Number(v))) errs[f.id] = f.err;
     }
@@ -311,6 +314,7 @@
     d(F.screwAccelDegS2, 'acceleration', IL.fmtInt, ' °/s²');
     d(F.purgeDots, 'purge', String, ' dots');
     d(F.liftPauseMs, 'pause after the lift', String, ' ms');
+    d(F.liftMm, 'lift after a dot', (v) => (isNum(v) ? IL.fmt(v, 1) + ' mm' : 'the machine’s hop height'));
     if (!same(F.notes, b.notes, e.notes)) parts.push('notes edited');
     const stale = FIELDS.some((f) => FINGERPRINT_KEYS.has(f.key) && !same(f, b[f.key], e[f.key]));
     const psiChanged = !same(F.pressurePsi, b.pressurePsi, e.pressurePsi);
@@ -412,7 +416,8 @@
   function collectBody() {
     const v = (i) => readVal(FIELDS[i]);
     return { name: String(v(0) || '').trim(), pressurePsi: v(1), netStepsPerDot: v(2), dwellMs: v(3), suckBackDeg: v(4), gapMm: v(5),
-      screwRpm: v(6), screwAccelDegS2: v(7), purgeDots: v(8), notes: v(9) || '', liftPauseMs: v(10) };
+      screwRpm: v(6), screwAccelDegS2: v(7), purgeDots: v(8), notes: v(9) || '', liftPauseMs: v(10),
+      liftMm: v(11) === undefined ? null : v(11) };
   }
   async function doSave(body) {
     const s0 = S.status;
@@ -494,7 +499,7 @@
           el('ul', { id: 'pf-problems', class: 'pf-problems' })),
         group('Recipe', null, field(F('pf-name')), field(F('pf-psi'))),
         group('One dot', 'Each dot: lower to the gap, turn the screw forward, wait the dwell, turn back, lift, pause.',
-          field(F('pf-turn')), field(F('pf-dwell')), field(F('pf-suck')), field(F('pf-gap')), field(F('pf-liftpause')),
+          field(F('pf-turn')), field(F('pf-dwell')), field(F('pf-suck')), field(F('pf-gap')), field(F('pf-liftpause')), field(F('pf-lift')),
           el('div', { class: 'pf-derived span2' }, IL.icon('i-angle'), el('span', { id: 'pf-turn-info' }))),
         group('Screw motion', null, field(F('pf-rpm')), field(F('pf-accel'))),
         group('Before each board', null, field(F('pf-purge')), field(F('pf-notes')))),
