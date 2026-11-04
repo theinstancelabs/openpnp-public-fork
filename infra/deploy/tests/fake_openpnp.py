@@ -47,7 +47,8 @@ vent-fail (a STOP cannot vent it: pressure.state 'vent_failed'), engine (the dis
 unavailable (engine without its nozzle), machine-500 (GET /api/status and /api/machine answer 500), home-404 (no
 home endpoint), old-status (a build before BR-44: no machine.homing, server.startedAtMs, dispense.state or
 dispense.startError, and an enable on a kept-alive link that died fails on the dead port), old-stop (a build before
-BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the lock just before the planned stop).
+BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the lock just before the planned stop),
+planned-lines-failed (the planned stop's M107 P3 gets no ok: linesFailed).
 BR-75's planned stop: 409 locked while someone holds the lock, 409 refused (nothing sent) while anything works or for
 the first fake-machine.json "planned_refusals" N calls; else the STOP without the screw's motor-off, the link closed
 (keep-alive or not). A STOP of a machine already off sends nothing (it still vents the pressure and ends a run).
@@ -460,8 +461,10 @@ class FakeOpenPnP:
             was = self.enabled
             self.enabled = self.homed = self.connected = False
             lines = ["M410", "M107 P3", "M107 P2", "M107 P1", "M107 P0"] if was else []
-            return 200, {"stopped": True, "machineEnabled": False, "planned": True, "linesSent": lines,
-                         "linesFailed": [], "actions": ["OpenPnP Stop; the screw's motor stays on"] if was
+            failed = lines[1:2] if "planned-lines-failed" in self.fail else []  # the valve off line got no ok
+            return 200, {"stopped": True, "machineEnabled": False, "planned": True,
+                         "linesSent": [x for x in lines if x not in failed], "linesFailed": failed,
+                         "actions": ["OpenPnP Stop; the screw's motor stays on"] if was
                          else ["machine was already stopped"]}
 
     def power_cycle(self):

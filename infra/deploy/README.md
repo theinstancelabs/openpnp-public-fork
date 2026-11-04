@@ -281,20 +281,23 @@ Exit codes:
 - **The deployer's own stops are planned (BR-75):** the health check's last stop, its stop of a machine left enabled
   and the stop before the switch use `POST /api/stop/planned`: OpenPnP's STOP without the screw's motor-off line
   (`M18 B`), so the screw keeps its timing through a deploy; it also closes the controller link. It is confirmed as a
-  STOP (below); a 200 whose lines went unanswered (`linesFailed`: the valve or pump may be on) is a failure.
+  STOP (below); a 200 whose lines went unanswered (`linesFailed`: the valve or pump may be on) is a failure, and in
+  the health check a machine problem (nothing restarts and homes unattended); so is a request that timed out (it
+  may have run: no second stop blind).
   - Before the switch the machine is off already (the idle check), so neither stop sends a line; the planned one
     guards the race of someone pressing Start after the idle check: `409 locked`, nothing sent, instead of a STOP on
     their session. The unit's ExecStop then finds the machine stopped and sends nothing; SIGTERM sends nothing either.
   - A refusal is never answered with a real STOP before the switch. `409 locked` ends the deploy or rollback at once,
     `409 refused` (something works) is asked again every 5 s for `--stop-timeout`, then it ends: exit 3 `not idle`,
-    nothing changed, no hold, a later run deploys. A refusal while `/api/status` shows the machine already stopped is
-    nothing to stop: #41 refuses without its engine (a failed engine start) or a machine before it looks.
+    nothing changed, no hold, a later run deploys. Here only, a refusal while `/api/status` shows the machine
+    stopped and nobody holding the lock is nothing to stop: #41 refuses without its engine (a failed engine start)
+    or a machine before it looks.
   - In the health check (OpenPnP it just started, and homed) a refusal fails the step: the lock as someone else's
     session (`claim-lost`, left alone, as before), anything else as a machine problem, which the deploy's failure path
     handles like any other (its STOP if safe, the previous build back unchecked, the hold).
-  - No planned stop to use (a build before BR-75: 404 `no such endpoint`; the API not answering): the stop as before
-    BR-75 decides. That is the first deploy over an older build, and a rollback to one. Failures and the exception path
-    STOP for real, as does the unit's ExecStop (`stop-openpnp`).
+  - No planned stop to use (a build before BR-75: 404 `no such endpoint`; the API refusing connections): the stop as
+    before BR-75 decides. That is the first deploy over an older build, and a rollback to one. Failures and the
+    exception path STOP for real, as does the unit's ExecStop (`stop-openpnp`).
 - Always a stop through the API before stopping the process. SIGTERM saves nothing and sends no Stop, and the
   outputs keep their state. A STOP is confirmed only when `/api/status` shows the machine disabled, the dispense
   engine idle and the pressure hold off: `MachineEndpoints.stop` disables the machine, but the engine's abort sends

@@ -398,18 +398,47 @@ class PlannedStop(unittest.TestCase):
         self.deployer(api).planned_stop()
         self.assertEqual(len(api.calls), 3, "at 0, 5 and 10 s of the 10 s wait")
 
-    def test_a_refusal_with_the_machine_already_stopped_is_nothing_to_stop(self):
+    ENGINE_REFUSED = (409, {"error": "refused", "reason": "No planned stop: the dispense engine is not running. The real "
+                                                          "STOP is POST /api/stop"})
+
+    @staticmethod
+    def off(**over):
+        st = {"machine": {"busy": False, "enabled": False}, "run": None, "pressure": {"on": False, "state": "off"},
+              "dispense": {"busy": False}, "lock": {"holder": None}}
+        st.update(over)
+        return 200, st
+
+    def test_before_the_switch_a_refusal_with_the_machine_stopped_is_nothing_to_stop(self):
         """#41 refuses without its engine (a failed start) or a machine, before it looks whether the machine is off: a
         stopped machine needs no stop, so the deploy goes on (a STOP of it sends nothing either)."""
-        off = 200, {"machine": {"busy": False, "enabled": False}, "run": None, "pressure": {"on": False, "state": "off"},
-                    "dispense": {"busy": False}}
-        api = PlannedApi(lambda n: (409, {"error": "refused", "reason": "No planned stop: the dispense engine is not "
-                                                                         "running. The real STOP is POST /api/stop"}),
-                         st=lambda n: off)
-        ok, detail = self.deployer(api).planned_stop()
+        api = PlannedApi(lambda n: self.ENGINE_REFUSED, st=lambda n: self.off())
+        ok, detail = self.deployer(api).planned_stop(off_is_done=True)
         self.assertIs(ok, True, detail)
         self.assertTrue(detail.startswith(il_deploy.STOP_DONE), detail)
         self.assertIn("the dispense engine is not running", detail)
+        self.assertEqual(api.calls, ["/api/stop/planned"])
+
+    def test_only_before_the_switch(self):
+        """In the health check a refusal is never read as stopped: #41's own retry closes a link left open, and a
+        refusal after its stop ran ('did not switch the machine off') hides unanswered lines."""
+        api = PlannedApi(lambda n: self.ENGINE_REFUSED, st=lambda n: self.off())
+        self.assertIsNone(self.deployer(api).planned_stop()[0])
+        self.assertEqual(set(api.calls), {"/api/stop/planned"})
+
+    def test_a_stopped_machine_that_still_works_is_not_stopped(self):
+        for over in ({"pressure": {"on": True, "state": "on"}}, {"dispense": {"busy": True}},
+                     {"lock": {"holder": {"kind": "user", "who": "user", "label": "User"}}}):
+            with self.subTest(over):
+                api = PlannedApi(lambda n: self.ENGINE_REFUSED, st=lambda n: self.off(**over))
+                self.assertIsNone(self.deployer(api).planned_stop(off_is_done=True)[0])
+                self.assertNotIn("/api/stop", api.calls)
+
+    def test_a_planned_stop_that_times_out_is_a_failure(self):
+        """It may have run: no second stop blind (the old stop's fallback STOPs without its home check)."""
+        api = PlannedApi(lambda n: il_deploy.ApiTimeout("no answer within 60 s"))
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIs(ok, False)
+        self.assertIn("no answer within 60 s", detail)
         self.assertEqual(api.calls, ["/api/stop/planned"])
 
     def test_lines_without_an_ok_are_a_failure(self):

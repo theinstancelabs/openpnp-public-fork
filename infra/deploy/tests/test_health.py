@@ -89,6 +89,22 @@ class Health(HealthLab, unittest.TestCase):
         self.assertEqual(self.posts()[-1], ("POST", "/api/stop/planned"))
         self.assertNotIn(("POST", "/api/stop"), self.posts())
 
+    def test_unanswered_lines_at_the_last_stop_are_the_machines(self):
+        """The valve or pump off line got no ok: the outputs are not known to be off. A machine problem: nothing
+        restarts and homes the previous build unattended, and the build is not marked bad for it."""
+        self.start(jar_fail=["planned-lines-failed"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine", rep)
+        self.assertIn("M107 P3", rep["failure"])
+
+    def test_a_locked_answer_is_proof_enough(self):
+        """409 locked is someone else's session even if the status read after it fails."""
+        self.start(jar_fail=["lock-at-planned-stop"])
+        with mock.patch.object(il_deploy.Deployer, "_lock_taken", return_value=None):
+            rep = self.check()
+        self.assertEqual(rep["kind"], "claim-lost", rep)
+
     def test_a_lock_taken_at_the_planned_stop_is_left_alone(self):
         self.start(jar_fail=["lock-at-planned-stop"])
         rep = self.check()
