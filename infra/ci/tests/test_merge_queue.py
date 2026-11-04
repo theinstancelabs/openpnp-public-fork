@@ -1,4 +1,5 @@
-"""ci.yml for a merge queue: a fast gate on pull requests, the full gate in the queue (merge_group) and on pushes.
+"""ci.yml for a merge queue: a fast gate on pull requests, the full gate in the queue (merge_group); a push of a commit
+the queue gated skips each test job that commit's queue run passed.
 
 Run from the repo root: python3 -m unittest discover -s infra/ci/tests -t infra/ci
 """
@@ -9,8 +10,8 @@ import unittest
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 CI = os.path.join(REPO, ".github", "workflows", "ci.yml")
 SLOW = ("ui-e2e", "acceptance")  # skipped on a PR without the full-ci label; always run in the queue and on pushes
-SKIP_ON_PR = ("github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, "
-              "'full-ci')")
+TESTS = ("infra", "maven", "deploy-e2e", "controller-e2e", "ui-e2e", "ui-boardview", "acceptance")  # the test jobs
+SHA = "5ddcd936ff4077e06b3edd8293a3bc8f5b3052f7"
 
 
 def job(ci, name):
@@ -37,9 +38,55 @@ class MergeQueue(unittest.TestCase):
         self.assertIn("format('ci-{0}-{1}', github.event_name, github.run_id)", conc)
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", conc)
 
+    def runs(self, name, event, passed=(), labels=()):
+        """Whether job `name` runs for this event, the queued job's answer and the PR's labels (its if:)."""
+        cond = ci_wiring.job_value(ci_wiring.jobs(self.ci)[name], "if")
+        ctx = {"github.event_name": event, "needs.queued.outputs.passed": json.dumps(list(passed)),
+               "github.event.pull_request.labels.*.name": list(labels)}
+        return cond is None or ci_wiring.condition(cond, ctx)
+
     def test_the_slow_jobs_skip_only_on_a_pull_request_without_full_ci(self):
         for name in SLOW:
-            self.assertIn("if: " + SKIP_ON_PR, job(self.ci, name), name)
+            self.assertFalse(self.runs(name, "pull_request"), name)
+            self.assertTrue(self.runs(name, "pull_request", labels=["full-ci"]), name)
+            for event in ("merge_group", "push", "workflow_dispatch"):
+                self.assertTrue(self.runs(name, event), (name, event))
+
+    def test_a_push_skips_a_test_job_only_if_the_commits_queue_run_passed_that_job(self):
+        js = ci_wiring.jobs(self.ci)
+        self.assertEqual(set(TESTS), set(js) - {"build", "queued", "gate", "release"})  # a new job must decide too
+        for name in TESTS:
+            needs = [n.strip() for n in (ci_wiring.job_value(js[name], "needs") or "").strip("[]").split(",")]
+            self.assertIn("queued", needs, name)
+            self.assertFalse(self.runs(name, "push", passed=[name]), name)
+            self.assertTrue(self.runs(name, "push", passed=[t for t in TESTS if t != name]), name)
+            self.assertTrue(self.runs(name, "push"), name)
+            for event in ("pull_request", "merge_group", "workflow_dispatch"):  # queued answers [] there
+                self.assertTrue(self.runs(name, event, labels=["full-ci"]), (name, event))
+
+    def test_the_build_and_the_queued_job_always_run(self):
+        js = ci_wiring.jobs(self.ci)
+        for name in ("build", "queued"):
+            self.assertIsNone(ci_wiring.job_value(js[name], "if"), name)
+            self.assertIsNone(ci_wiring.job_value(js[name], "needs"), name)
+
+    def test_the_queue_gate_keeps_what_its_run_passed_by_job(self):
+        """After both verdicts, a merge_group gate uploads its needs (by job id) as gate-needs. A failed upload never
+        fails the gate, so it cannot eject a PR: the push then runs every test job."""
+        steps = ci_wiring.job_steps(ci_wiring.jobs(self.ci)["gate"])
+        verdicts = [i for i, s in enumerate(steps) if "name: Every job passed" in s or "name: No job of this run" in s]
+        keep = [i for i, s in enumerate(steps) if "needs.json" in s]
+        self.assertEqual(len(verdicts), 2)
+        self.assertEqual(len(keep), 2)
+        self.assertGreater(min(keep), max(verdicts))
+        for i in keep:
+            self.assertIn("if: github.event_name == 'merge_group'", steps[i])
+            self.assertIn("continue-on-error: true", steps[i])
+        write, upload = (steps[i] for i in keep)
+        self.assertIn("NEEDS: ${{ toJSON(needs) }}", write)
+        self.assertIn('echo "$NEEDS" > needs.json', write)
+        self.assertIn("actions/upload-artifact", upload)
+        self.assertIn("name: gate-needs", upload)
 
     def test_gate_accepts_a_skip_only_for_the_slow_jobs_on_a_pull_request(self):
         g = job(self.ci, "gate")
@@ -58,6 +105,7 @@ class MergeQueue(unittest.TestCase):
 
 import importlib.util
 import json
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -90,8 +138,10 @@ class GateBehaviour(unittest.TestCase):
             self.ci = f.read()
         self.needs = ci_wiring.jobs(self.ci)["gate"]
 
-    def verdict(self, results, event, full=False):
+    def verdict(self, results, event, full=False, passed=()):
         needs = {k: {"result": v, "outputs": {}} for k, v in results.items()}
+        if "queued" in needs:
+            needs["queued"]["outputs"] = {"passed": json.dumps(list(passed))}
         env = dict(os.environ, NEEDS=json.dumps(needs), EVENT=event, FULL="true" if full else "false")
         return subprocess.run(["bash", "-e", "-c", gate_step(self.ci, "Every job passed")], env=env,
                               capture_output=True, text=True).returncode == 0
@@ -116,6 +166,26 @@ class GateBehaviour(unittest.TestCase):
             self.assertFalse(self.verdict(self.all_jobs(**{"ui-e2e": bad}), "pull_request"), bad)
             self.assertFalse(self.verdict(self.all_jobs(**{"maven": bad}), "merge_group"), bad)
         self.assertFalse(self.verdict({}, "push"))
+
+    def test_a_push_may_skip_exactly_the_test_jobs_its_queue_run_passed(self):
+        skipped = {t: "skipped" for t in TESTS}
+        everything = list(TESTS) + ["build", "queued"]
+        self.assertTrue(self.verdict(self.all_jobs(**skipped), "push", passed=everything))
+        self.assertTrue(self.verdict(self.all_jobs(**skipped), "push", passed=TESTS))
+        # a partial queue run (say, a label-dependent workflow ran no UI end-to-end or SIM acceptance): those must pass
+        partial = [t for t in TESTS if t not in SLOW]
+        self.assertFalse(self.verdict(self.all_jobs(**skipped), "push", passed=partial))
+        self.assertTrue(self.verdict(self.all_jobs(**{t: "skipped" for t in partial}), "push", passed=partial))
+        self.assertFalse(self.verdict(self.all_jobs(infra="skipped"), "push"))  # the queue passed nothing
+        self.assertTrue(self.verdict(self.all_jobs(), "push", passed=TESTS))  # ran anyway and passed
+        for bad in ("failure", "cancelled"):
+            self.assertFalse(self.verdict(self.all_jobs(**dict(skipped, maven=bad)), "push", passed=TESTS), bad)
+            self.assertFalse(self.verdict(self.all_jobs(**dict(skipped, queued=bad)), "push", passed=TESTS), bad)
+        self.assertFalse(self.verdict(self.all_jobs(**dict(skipped, build="skipped")), "push", passed=everything))
+        for event in ("merge_group", "workflow_dispatch"):  # only a push may skip
+            self.assertFalse(self.verdict(self.all_jobs(**skipped), event, passed=everything), event)
+        self.assertFalse(self.verdict(self.all_jobs(**skipped), "pull_request", full=True, passed=everything))
+        self.assertFalse(self.verdict(self.all_jobs(infra="skipped"), "pull_request", passed=everything))
 
     def run_jobs_check(self, jobs):
         """The second step with a stand-in gh that answers the run's jobs."""
@@ -147,3 +217,109 @@ class GateBehaviour(unittest.TestCase):
         """`webui_shards.py … | tee` without pipefail exits 0 and leaves the leg with no scripts: green, ran nothing."""
         step = next(s for s in ci_wiring.job_steps(ci_wiring.jobs(self.ci)["ui-e2e"]) if "name: The leg's scripts" in s)
         self.assertRegex(step, r"\n\s+shell: bash(\s+#[^\n]*)?\n")  # GitHub runs bash as -eo pipefail
+
+
+# A stand-in gh: `api` answers $FAKE/runs.json (none there: the call fails); `run download … -D dir` puts
+# $FAKE/needs.json into dir (none there: no artifact). Every call is logged to $FAKE/gh.log.
+FAKE_GH = """#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE/gh.log"
+case "$1" in
+  api) exec cat "$FAKE/runs.json" ;;
+  run) { [ "$2" = download ] && [ -f "$FAKE/needs.json" ]; } || { echo "no valid artifacts found" >&2; exit 1; }
+       dir=.; while [ $# -gt 0 ]; do [ "$1" = -D ] && dir=$2; shift; done
+       mkdir -p "$dir" && exec cp "$FAKE/needs.json" "$dir/needs.json" ;;
+  *) exit 2 ;;
+esac
+"""
+
+
+class QueueVerdict(unittest.TestCase):
+    """The queued job's script under bash -e with a stand-in gh: which test jobs a push of this commit may skip."""
+    NEEDS = {n: {"result": "success", "outputs": {}} for n in ("queued", "build") + TESTS}
+
+    def setUp(self):
+        with open(CI) as f:
+            block = ci_wiring.jobs(f.read())["queued"]
+        self.step = next(ci_wiring.step_run(s) for s in ci_wiring.job_steps(block) if "run:" in s)
+        self.tmp = tempfile.mkdtemp(prefix="queued-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        gh = os.path.join(self.tmp, "bin", "gh")
+        os.makedirs(os.path.dirname(gh))
+        with open(gh, "w") as f:
+            f.write(FAKE_GH)
+        os.chmod(gh, os.stat(gh).st_mode | stat.S_IEXEC)
+
+    @staticmethod
+    def queue_run(**over):
+        return dict({"id": 41, "event": "merge_group", "path": ".github/workflows/ci.yml", "head_sha": SHA,
+                     "head_branch": "gh-readonly-queue/il/integration/pr-29-" + "a" * 40, "status": "completed",
+                     "conclusion": "success"}, **over)
+
+    def passed(self, runs, needs, event="push", ref="refs/heads/il/integration"):
+        """(the step's passed list, the gh calls) for these merge_group runs (None: the API call fails) and this
+        gate-needs artifact (None: none; a str: its raw text)."""
+        fake = os.path.join(self.tmp, "fake")
+        shutil.rmtree(fake, True)
+        os.makedirs(fake)
+        if runs is not None:
+            with open(os.path.join(fake, "runs.json"), "w") as f:
+                json.dump({"total_count": len(runs), "workflow_runs": runs}, f)
+        if needs is not None:
+            with open(os.path.join(fake, "needs.json"), "w") as f:
+                f.write(needs if isinstance(needs, str) else json.dumps(needs))
+        work = tempfile.mkdtemp(dir=self.tmp)
+        out = os.path.join(work, "github_output")
+        env = dict(os.environ, PATH=os.path.join(self.tmp, "bin") + os.pathsep + os.environ["PATH"], FAKE=fake,
+                   EVENT=event, GITHUB_REF=ref, GITHUB_SHA=SHA, GITHUB_REPOSITORY="o/r", GITHUB_OUTPUT=out)
+        r = subprocess.run(["bash", "-e", "-c", self.step], env=env, cwd=work, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)  # never fails: anything unexpected answers []
+        with open(out) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        key, _, value = lines[0].partition("=")
+        self.assertEqual(key, "passed")
+        log = os.path.join(fake, "gh.log")
+        calls = open(log).read().splitlines() if os.path.exists(log) else []
+        return json.loads(value), calls
+
+    def test_a_push_skips_what_the_commits_queue_run_passed(self):
+        passed, calls = self.passed([self.queue_run()], self.NEEDS)
+        self.assertEqual(passed, sorted(("queued", "build") + TESTS))
+        self.assertEqual(len(calls), 2, calls)
+        self.assertIn("api repos/o/r/actions/runs?event=merge_group&head_sha=" + SHA, calls[0])
+        self.assertRegex(calls[1], r"^run download 41 ")
+        self.assertIn("-R o/r", calls[1])
+        self.assertIn("-n gate-needs", calls[1])
+
+    def test_a_job_the_queue_run_did_not_run_runs_on_the_push(self):
+        """A partial or label-dependent queue run (here: no UI end-to-end, no SIM acceptance): those jobs run here."""
+        needs = dict(self.NEEDS, **{s: {"result": "skipped", "outputs": {}} for s in SLOW})
+        self.assertEqual(self.passed([self.queue_run()], needs)[0],
+                         sorted(n for n in ("queued", "build") + TESTS if n not in SLOW))
+
+    def test_anything_unexpected_runs_every_test_job(self):
+        other_queue = "gh-readonly-queue/main/pr-3-" + "b" * 40
+        cases = {
+            "the API call fails": (None, self.NEEDS),
+            "no artifact (an older workflow, or its upload failed)": ([self.queue_run()], None),
+            "the artifact is not JSON": ([self.queue_run()], "{oops"),
+            "the artifact is not the gate's needs": ([self.queue_run()], '["infra"]'),
+            "a need that is not an object": ([self.queue_run()], '{"infra": "success"}'),
+            "no queue run of this commit": ([], self.NEEDS),
+            "the queue run failed": ([self.queue_run(conclusion="failure")], self.NEEDS),
+            "the queue run is still going": ([self.queue_run(status="in_progress", conclusion=None)], self.NEEDS),
+            "another workflow": ([self.queue_run(path=".github/workflows/build_and_deploy.yml")], self.NEEDS),
+            "another branch's queue": ([self.queue_run(head_branch=other_queue)], self.NEEDS),
+            "another commit": ([self.queue_run(head_sha="f" * 40)], self.NEEDS),
+            "not a queue run": ([self.queue_run(event="push")], self.NEEDS),
+        }
+        for why, (runs, needs) in cases.items():
+            with self.subTest(why):
+                self.assertEqual(self.passed(runs, needs)[0], [])
+
+    def test_only_a_push_to_il_integration_asks(self):
+        queue_ref = "refs/heads/gh-readonly-queue/il/integration/pr-7-" + "a" * 40
+        for event, ref in (("pull_request", "refs/pull/7/merge"), ("merge_group", queue_ref),
+                           ("workflow_dispatch", "refs/heads/il/integration"), ("push", "refs/heads/il/scratch")):
+            with self.subTest(event=event, ref=ref):
+                self.assertEqual(self.passed([self.queue_run()], self.NEEDS, event=event, ref=ref), ([], []))

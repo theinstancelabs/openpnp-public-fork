@@ -11,6 +11,7 @@
   passes on that release, and a release anyone else put at the tag first fails the step (the run must not end green
   while its build is never released).
 """
+import json
 import os
 import re
 import shutil
@@ -54,8 +55,10 @@ def jobs(text):
 
 
 def job_value(block, key):
-    """A job's one-line key (four spaces of indent), or None."""
-    m = re.search(rf"^    {re.escape(key)}: *(.*)$", block, re.M)
+    """A job's one-line key (four spaces of indent), or None; a folded `>-` value is its lines joined by spaces."""
+    m = re.search(rf"^    {re.escape(key)}: *(.*)$((?:\n      .*)*)", block, re.M)
+    if m and m.group(1).strip() in (">", ">-"):
+        return " ".join(line.strip() for line in m.group(2).splitlines() if line.strip())
     return m.group(1).strip() if m else None
 
 
@@ -98,13 +101,13 @@ def step_run(step):
 
 # --- a GitHub Actions expression evaluator: the part of the language ci.yml uses -----------------------------------
 _TOKEN = re.compile(r"\s*(?:(?P<str>'(?:[^']|'')*')|(?P<num>\d+)|(?P<op>==|!=|&&|\|\||[!(),])"
-                    r"|(?P<name>[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)*))")
+                    r"|(?P<name>[A-Za-z_][\w-]*(?:\.(?:[A-Za-z_][\w-]*|\*))*))")
 
 
 def evaluate(expr, ctx):
     """Evaluate an expression the way GitHub does: '...' strings ('' is a quote), numbers, true/false/null, context
-    paths (one not in ctx is null), ==/!= (strings compared case-insensitively), !, && and || (which return an
-    operand, not a boolean), parentheses and format(). Anything else raises ValueError, so a change to ci.yml the
+    paths (one not in ctx is null; `labels.*.name` is one path), ==/!= (strings compared case-insensitively), !, && and
+    || (which return an operand, not a boolean), parentheses, format(), contains() and fromJSON(). Anything else raises ValueError, so a change to ci.yml the
     evaluator cannot read fails the test instead of passing it."""
     expr, toks, pos = expr.strip(), [], 0
     while pos < len(expr):
@@ -181,9 +184,9 @@ def evaluate(expr, ctx):
                     take()
                     args.append(disjunction())
                 take("op", ")")
-                if v != "format":
+                if v not in FUNCTIONS:
                     raise ValueError(f"function {v}() is not known to this evaluator")
-                return gh_format(*args)
+                return FUNCTIONS[v](*args)
             return ctx.get(v)
         raise ValueError(f"unexpected {v!r} in {expr!r}")
 
@@ -213,6 +216,23 @@ def to_str(v):
 def gh_format(fmt, *args):
     return re.sub(r"\{\{|\}\}|\{(\d+)\}",
                   lambda m: {"{{": "{", "}}": "}"}.get(m.group(0)) or to_str(args[int(m.group(1))]), fmt)
+
+
+def gh_contains(search, item):
+    """GitHub's contains(): an element of an array, or a part of a string; strings ignore case."""
+    if isinstance(search, list):
+        return any(equal(x, item) for x in search)
+    return to_str(item).lower() in to_str(search).lower()
+
+
+def gh_from_json(value):
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"fromJSON({value!r}): {e}")
+
+
+FUNCTIONS = {"format": gh_format, "contains": gh_contains, "fromJSON": gh_from_json}
 
 
 def interpolate(value, ctx):
@@ -467,7 +487,12 @@ class Concurrency(unittest.TestCase):
         self.assertEqual(evaluate("github.event_name == 'pull_request' && 'pr' || 'other'", ctx), "other")
         self.assertEqual(evaluate("!(n != 7) && 'it''s'", ctx), "it's")
         self.assertEqual(evaluate("format('{{{0}}}', 'x')", ctx), "{x}")
-        for bad in ("contains(github.ref, 'x')", "github.ref = 'x'", "github.ref[0]", "'open"):
+        ctx = {"labels.*.name": ["Full-CI"], "passed": '["infra", "ui-e2e"]', "ref": "refs/heads/il/integration"}
+        self.assertTrue(evaluate("contains(labels.*.name, 'full-ci')", ctx))  # an element, ignoring case
+        self.assertFalse(evaluate("contains(labels.*.name, 'full')", ctx))  # an element, not a part of one
+        self.assertTrue(evaluate("contains(ref, 'IL/integ')", ctx))  # a string: a part of it, ignoring case
+        self.assertTrue(evaluate("!contains(fromJSON(passed), 'maven') && contains(fromJSON(passed), 'ui-e2e')", ctx))
+        for bad in ("startsWith(github.ref, 'x')", "fromJSON('[')", "github.ref = 'x'", "github.ref[0]", "'open"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 evaluate(bad, ctx)
 
