@@ -1971,7 +1971,7 @@
     IL.keyed(c.kv, key, () => el('dl', { class: 'kv kv--wrap' },
       el('dt', { text: 'Profile' }), el('dd', { text: prof.name || '—' }),
       el('dt', { text: 'Recipe' }), el('dd', { text: parts.slice(1, 4).join(' · ') }),
-      el('dt', {}), el('dd', { text: [parts[4], isNum(prof.screwRpm) ? fmt(prof.screwRpm, 0) + ' rpm' : null, parts[5]].filter(Boolean).join(' · ') }),
+      el('dt', {}), el('dd', { text: [parts[4], isNum(prof.screwRpm) ? fmt(prof.screwRpm, 0) + ' rpm' : null, parts[5], ...parts.slice(6)].filter(Boolean).join(' · ') }),
       el('dt', { text: 'Start angle' }), el('dd', { text: prof.partialTurn === false ? 'whole turns: any angle' : a + (prof.startAngles ? ' · dots alternate ' + IL.startAnglesText(prof) : '') }),
       el('dt', { text: 'Set' }), el('dd', { text: (prof.startAngleSetAtMs ? tm(prof.startAngleSetAtMs) : 'never') + (prof.controllerConnectedAtMs ? ' · controller connected ' + tm(prof.controllerConnectedAtMs) : '') }),
       problems.length ? [el('dt', { text: 'Problems' }), el('dd', { class: 'su-bad', text: problems.join('; ') })] : null));

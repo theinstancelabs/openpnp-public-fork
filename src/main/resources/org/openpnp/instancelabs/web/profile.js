@@ -200,9 +200,9 @@
       check: (v) => v >= 0 && v <= 60, err: 'Must be 0 to 60 dots.', help: 'On the purge row before every board; the first one turns the screw to the start angle.' },
     { id: 'pf-notes', key: 'notes', text: true, textarea: true, label: 'Notes' },
     { id: 'pf-liftpause', key: 'liftPauseMs', int: true, label: 'Pause after the lift', unit: 'ms', range: '0 to 5000', step: '10', min: '0', max: '5000',
-      check: (v) => v >= 0 && v <= 5000, err: 'Must be 0 to 5000 ms.', help: 'The 25G recipe waits 500 ms at the lift height before travel (it stops threads).' },
-    { id: 'pf-lift', key: 'liftMm', optional: true, dec: 1, label: 'Lift after a dot', unit: 'mm', range: 'blank or above 0 to 10', step: '0.1', min: '0.1', max: '10',
-      check: (v) => v > 0 && v <= 10, err: 'Must be above 0 and at most 10 mm, or blank.', help: 'Blank: the machine’s hop height. The 25G recipe lifts 3 mm.' },
+      check: (v) => v >= 0 && v <= 5000, err: 'Must be 0 to 5000 ms.', help: 'Waits at the lift height before moving on, so the paste breaks off there, not across the board. The 25G recipe waits 500 ms.' },
+    { id: 'pf-lift', key: 'liftMm', optional: true, dec: 1, label: 'Lift after a dot', unit: 'mm', range: '0.1 to 10, or blank', step: '0.1', min: '0.1', max: '10',
+      check: (v) => v > 0 && v <= 10, err: 'Must be above 0 and at most 10 mm, or blank.', help: 'Blank: the machine’s hop height, with no pause after it. The 25G recipe lifts 3 mm.' },
   ];
   const FINGERPRINT_KEYS = new Set(['pressurePsi', 'netStepsPerDot', 'suckBackDeg', 'screwRpm', 'screwAccelDegS2', 'dwellMs', 'gapMm', 'purgeDots', 'liftPauseMs', 'liftMm']);
   const PF = { dirty: new Set(), expect: null, expectUntil: 0, turnKey: null, errors: {}, tipKey: null };
@@ -278,7 +278,12 @@
     for (const f of FIELDS) {
       if (f.text) continue;
       const v = readVal(f);
-      if (!isNum(v)) { if (!(f.optional && v === undefined)) errs[f.id] = 'Enter a number.'; continue; }
+      if (!isNum(v)) {
+        if (!(f.optional && v === undefined)) errs[f.id] = 'Enter a number.';
+        // a number input reads a stray character ("3e") as '': an optional field must not take it for blank
+        else if ($(f.id).validity.badInput) errs[f.id] = 'Enter a number or leave it blank.';
+        continue;
+      }
       if (f.int && !Number.isInteger(Number(v))) { errs[f.id] = 'Must be a whole number.'; continue; }
       if (f.check && !f.check(Number(v))) errs[f.id] = f.err;
     }
@@ -293,6 +298,11 @@
     const partial = isNum(net) && net % rev !== 0;
     const purge = readVal(FIELDS[8]);
     if (!errs['pf-purge'] && partial && isNum(purge) && purge < 2) errs['pf-purge'] = 'At least 2 for a partial turn: the first purge dot sets the start angle, one more flushes it.';
+    // a pause needs the recipe's own lift (the engine's rule): blank is whatever hop height the machine has
+    const pause = readVal(FIELDS[10]);
+    if (!errs['pf-lift'] && isNum(pause) && pause > 0 && readVal(FIELDS[11]) === undefined) {
+      errs['pf-lift'] = 'Needed for the pause after the lift: give a lift, or set the pause to 0.';
+    }
     const rpm = readVal(FIELDS[6]);
     if (!errs['pf-rpm'] && isNum(rpm) && p.feedDegPerMin && p.screwRpm && S.config && isNum(S.config.bMaxFeedDegS) && rpm * 6 > S.config.bMaxFeedDegS) {
       errs['pf-rpm'] = 'Above the screw axis limit of ' + IL.fmtInt(S.config.bMaxFeedDegS / 6) + ' rpm.';
@@ -313,8 +323,8 @@
     d(F.screwRpm, 'speed', IL.fmtInt, ' rpm');
     d(F.screwAccelDegS2, 'acceleration', IL.fmtInt, ' °/s²');
     d(F.purgeDots, 'purge', String, ' dots');
-    d(F.liftPauseMs, 'pause after the lift', String, ' ms');
     d(F.liftMm, 'lift after a dot', (v) => (isNum(v) ? IL.fmt(v, 1) + ' mm' : 'the machine’s hop height'));
+    d(F.liftPauseMs, 'pause after the lift', String, ' ms');
     if (!same(F.notes, b.notes, e.notes)) parts.push('notes edited');
     const stale = FIELDS.some((f) => FINGERPRINT_KEYS.has(f.key) && !same(f, b[f.key], e[f.key]));
     const psiChanged = !same(F.pressurePsi, b.pressurePsi, e.pressurePsi);
@@ -499,7 +509,7 @@
           el('ul', { id: 'pf-problems', class: 'pf-problems' })),
         group('Recipe', null, field(F('pf-name')), field(F('pf-psi'))),
         group('One dot', 'Each dot: lower to the gap, turn the screw forward, wait the dwell, turn back, lift, pause.',
-          field(F('pf-turn')), field(F('pf-dwell')), field(F('pf-suck')), field(F('pf-gap')), field(F('pf-liftpause')), field(F('pf-lift')),
+          field(F('pf-turn')), field(F('pf-dwell')), field(F('pf-suck')), field(F('pf-gap')), field(F('pf-lift')), field(F('pf-liftpause')),
           el('div', { class: 'pf-derived span2' }, IL.icon('i-angle'), el('span', { id: 'pf-turn-info' }))),
         group('Screw motion', null, field(F('pf-rpm')), field(F('pf-accel'))),
         group('Before each board', null, field(F('pf-purge')), field(F('pf-notes')))),
