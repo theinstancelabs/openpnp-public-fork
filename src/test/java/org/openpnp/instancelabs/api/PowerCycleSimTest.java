@@ -886,6 +886,7 @@ public class PowerCycleSimTest {
         reconnect();
         assertEquals(1, motorOffs().size(), "the trip reported at the connect");
         ok("POST", "/api/machine/home", "{\"wait\":true}");
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a sink
         assertEquals("on", ok("POST", "/api/pressure/start", null).get("state").getAsString()); // it arms the watchdog
         assertEquals(1, events(ControllerReset.EVENT_WATCHDOG_ARMED).size(), "on record at once");
         ok("POST", "/api/pressure/stop", null);
