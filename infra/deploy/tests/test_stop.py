@@ -1,6 +1,7 @@
 """When a STOP is sent: never during a home (a STOP inside G28 hangs the controller), at once while outputs may
 be on, never blind when OpenPnP's state is unknown. Covers stop_machine (deploy flows) and stop-openpnp (the
 unit's ExecStop, and the subprocess manager's pre-stop)."""
+import contextlib
 import io
 import os
 import sys
@@ -233,20 +234,28 @@ class Decisions(unittest.TestCase):
         be: systemd then marks the unit failed, which il_deploy treats as an exit it did not cause (a hold). systemd
         also runs ExecStop after the JVM ended by itself with 0 or 143 (a kill from outside), $MAINPID unset: nothing
         answers then, and nothing confirmed a STOP (1, the run marker stays)."""
-        for answer, mainpid, posts, word, rc in (
-                (lambda n: status(busy=True), "4242", [], "not sent", 1),
-                (lambda n: il_deploy.ApiTimeout("x"), "4242", [], "not sent", 1),
-                (lambda n: il_deploy.ApiDown("refused"), "4242", [], "nothing to stop", 0),
-                (lambda n: il_deploy.ApiDown("refused"), None, [], "no STOP confirmed", 1),
-                (lambda n: status(), "4242", ["/api/stop"], "disabled", 0),
-                (lambda n: status(), None, ["/api/stop"], "disabled", 0)):
-            with self.subTest(posts=posts, word=word, mainpid=mainpid), \
+        for answer, mainpid, marker, posts, word, rc in (
+                (lambda n: status(busy=True), "4242", True, [], "not sent", 1),
+                (lambda n: il_deploy.ApiTimeout("x"), "4242", True, [], "not sent", 1),
+                # a live JVM started after its last log: its API never came up, nothing is on yet
+                (lambda n: il_deploy.ApiDown("refused"), "4242", True, [], "nothing to stop", 0),
+                # no marker (a unit from before mark-start): whether its API ran is unknown: fail closed
+                (lambda n: il_deploy.ApiDown("refused"), "4242", False, [], "answered earlier in this run", 1),
+                (lambda n: il_deploy.ApiDown("refused"), None, True, [], "no STOP confirmed", 1),
+                (lambda n: status(), "4242", True, ["/api/stop"], "disabled", 0),
+                (lambda n: status(), None, True, ["/api/stop"], "disabled", 0)):
+            with self.subTest(posts=posts, word=word, mainpid=mainpid, marker=marker), \
                     mock.patch.dict(os.environ, {"MAINPID": mainpid} if mainpid else {}):
                 if not mainpid:
                     os.environ.pop("MAINPID", None)
                 api = StubApi(answer)
                 d = self.deployer(api)
                 d.out = io.StringIO()
+                if marker:
+                    il_deploy.write_json(d.run_marker_path, {"boot_id": il_deploy.boot_id(), "at": d.iso()})
+                else:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(d.run_marker_path)
                 self.assertEqual(d.stop_openpnp(), rc)
                 self.assertEqual(api.posts, posts)
                 self.assertIn(word, d.out.getvalue())

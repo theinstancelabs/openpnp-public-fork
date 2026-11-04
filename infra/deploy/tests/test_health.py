@@ -523,9 +523,19 @@ class HealthLock(HealthLab, unittest.TestCase):
                          "takenFrom": None})
         rep = self.check()
         self.assertFalse(rep["ok"], rep)
-        self.assertEqual(rep["kind"], "machine")  # a hold, never the bad list
-        self.assertTrue(rep["failure"].startswith("enable: HTTP 409: Process has the machine"), rep["failure"])
+        self.assertEqual(rep["kind"], "claim-lost")  # their session: left alone (no rollback over it), a hold
+        self.assertTrue(rep["failure"].startswith("enable: someone took the machine lock: Process has the machine"),
+                        rep["failure"])
         self.assertNotIn(("POST", "/api/machine/home"), self.posts())
+        self.assertNotIn(("POST", "/api/stop"), self.posts())  # STOP would end the new holder's work
+
+    def test_a_lock_taken_between_the_enable_and_the_home_is_left_alone_too(self):
+        self.start(jar_fail=["lock-at-home"])
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "claim-lost")
+        self.assertTrue(rep["failure"].startswith("home: someone took the machine lock"), rep["failure"])
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
 
     def test_a_refused_enable_that_is_not_the_lock_stays_the_builds(self):
         self.start(jar_fail=["enable"])

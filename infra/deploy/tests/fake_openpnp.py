@@ -314,6 +314,8 @@ class FakeOpenPnP:
         own limit (f.get(5, MINUTES); "home_cap_s" here) and answers 409 after it while the home runs on."""
         if self.locked():
             return self.locked()
+        if "lock-at-home" in self.fail:  # an agent took the lock between the enable and the home
+            return 409, {"error": "locked", "reason": "Process has the machine (a bench session). Take control to use it."}
         if "home-404" in self.fail:
             return 404, {"error": "not-found", "reason": "no such endpoint: /api/machine/home"}
         with self.lock:

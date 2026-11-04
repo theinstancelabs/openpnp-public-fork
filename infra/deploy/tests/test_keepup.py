@@ -1,5 +1,6 @@
 """keep-up: the real machine's web UI is up whenever nobody holds the machine (the user's P0, 11-03). It starts
 OpenPnP, never enabled or homed, when it is down and the machine is free, and leaves it down otherwise."""
+import datetime
 import fcntl
 import http.server
 import os
@@ -200,10 +201,52 @@ class KeepUp(unittest.TestCase):
         self.assertFalse(self.lab.service().is_active())
 
     def test_a_stop_of_a_live_jvm_before_its_api_is_up_clears_the_marker(self):
-        path = self.marker()
+        """Started after the last OpenPnP.log was written (OpenPnP starts a new one at each start): still starting."""
+        path = self.marker(at=datetime.datetime.now().astimezone().isoformat(timespec="seconds"))
+        log = os.path.join(self.lab.config, "log", "OpenPnP.log")
+        old = time.time() - 120
+        os.utime(log, (old, old))
         with mock.patch.dict(os.environ, {"MAINPID": "4242"}):
             self.assertEqual(self.lab.main("stop-openpnp"), 0, self.lab.last_out)
         self.assertFalse(os.path.exists(path))
+
+    def test_a_live_jvm_whose_api_answered_in_this_run_and_no_more_keeps_the_marker(self):
+        """Its outputs may be on: 'nothing to stop' confirms nothing then (a hold at the next il_deploy)."""
+        path = self.marker(at=(datetime.datetime.now().astimezone() - datetime.timedelta(minutes=5)).isoformat(
+            timespec="seconds"))
+        with open(os.path.join(self.lab.config, "log", "OpenPnP.log"), "a") as f:
+            f.write("2026-11-03 18:00:00.000 ApiServer INFO: Instance Labs web UI: http://127.0.0.1:18877/\n")
+        with mock.patch.dict(os.environ, {"MAINPID": "4242"}):
+            self.assertEqual(self.lab.main("stop-openpnp"), 1, self.lab.last_out)
+        self.assertIn("answered earlier in this run", self.lab.last_out)
+        self.assertTrue(os.path.exists(path))
+
+    def test_an_exit_where_deploy_and_rollback_read_was_running_is_never_started_over(self):
+        """OpenPnP read running at the claim's check, then down where the action reads was_running: the exit first."""
+        for action, call in (("deploy", lambda d: d._deploy("il-build-6-x", {}, None, False)),
+                             ("rollback", lambda d: d._rollback("il-build-6-x", "il-build-5-y", {}, None, []))):
+            with self.subTest(action=action):
+                svc = StubService(active=[False], exits=[{"id": f"7@{action}", "detail": "il-openpnp.service failed"}])
+                d = il_deploy.Deployer(il_deploy.config_from_args(self.lab.argv("status")), self.lab.deps(service=svc))
+                rc, note = call(d)
+                self.assertEqual(rc, 5)
+                self.assertIn("OpenPnP ended without il_deploy stopping it", note)
+                self.assertEqual(svc.starts, 0)
+                os.unlink(os.path.join(self.lab.root, "hold.json"))
+
+    def test_the_holder_is_read_again_just_before_the_start(self):
+        """A session that took the Holder after keep-up's checks: OpenPnP stays down."""
+        self.set_holder("nobody (released by Process at 18:00)")
+        real = il_deploy.Deployer.keep_up_reasons
+
+        def then_a_session_starts(d, *a, **kw):
+            out = real(d, *a, **kw)
+            self.set_holder("Process `mcp:c07b84cf` (from 18:01: bench session)")
+            return out
+        with mock.patch.object(il_deploy.Deployer, "keep_up_reasons", then_a_session_starts):
+            out = self.keep_up(3)
+        self.assertIn("STATE.md Holder: Process", out)
+        self.assertFalse(self.lab.service().is_active())
 
     def test_a_stop_that_is_not_confirmed_keeps_the_marker(self):
         self.keep_up(0)

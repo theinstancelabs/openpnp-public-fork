@@ -1397,6 +1397,31 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
+def write_json_durable(path, obj):
+    """write_json, then fsync the file and its directory: once this returns, it survives a power cut."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=1, default=str)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    fd = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _iso_ts(text):
+    """The POSIX time of an ISO 8601 stamp with its zone (il_deploy's iso()), or None."""
+    try:
+        return datetime.datetime.fromisoformat(str(text)).timestamp()
+    except ValueError:
+        return None
+
+
 def read_json(path, default=None):
     try:
         with open(path) as f:
@@ -1878,7 +1903,7 @@ class Deployer:
         if held:
             self.say("mark-start: " + "; ".join(held))
             return 1
-        write_json(self.run_marker_path, {"boot_id": boot_id(), "at": self.iso()})
+        write_json_durable(self.run_marker_path, {"boot_id": boot_id(), "at": self.iso()})  # before java starts
         return 0
 
     def _note_exit_seen(self, ex=None):
@@ -2315,9 +2340,12 @@ class Deployer:
         except ApiDown as e:
             return gone("enable", e)
         if code != 200 or body.get("enabled") is not True:
-            # someone took the machine lock after the idle check (BR-72): theirs, never the build's fault
-            locked = code == 409 and body.get("error") in LOCK_REFUSALS
-            return fail("enable", f"HTTP {code}: {body.get('reason', body)}", "machine" if locked else "build")
+            if code == 409 and body.get("error") in LOCK_REFUSALS:
+                # someone took the machine lock after the idle check (BR-72): their session, left alone (no STOP, no
+                # rollback over it); the build stays installed, unverified, and the hold asks a person to check
+                return fail("enable", f"someone took the machine lock: {body.get('reason', body)}", "claim-lost",
+                            stop=False)
+            return fail("enable", f"HTTP {code}: {body.get('reason', body)}")
         step("enable", "machine enabled")
 
         pattern = self._serial_pattern()
@@ -2354,6 +2382,9 @@ class Deployer:
         except ApiDown as e:
             return gone("home", e)
         late = code is None or str(body.get("reason", "")).startswith(HOME_GAVE_UP)
+        if code == 409 and body.get("error") in LOCK_REFUSALS:
+            # the home never started: someone took the machine lock after the enable (BR-72): theirs, left alone
+            return fail("home", f"someone took the machine lock: {body.get('reason', body)}", "claim-lost", stop=False)
         if code != 200 or body.get("homed") is not True:
             # Never STOP during a home: whatever the answer, wait while the machine is busy. The server answers 409
             # after its own 5 min (HOME_GAVE_UP) while the home may run on; --home-timeout is longer.
@@ -2698,6 +2729,9 @@ class Deployer:
 
     def _deploy(self, tag, info, cur, forced):
         was_running = self.svc.is_active()
+        exited = None if was_running else self.check_openpnp_exit()  # it may have died since the claim's check
+        if exited:
+            return 5, exited
         before = {"current": self._link("current"), "previous": self._link("previous"),
                   "deployed": self.read_deployed()}
         self.record("begin", action="deploy", tag=tag, current=cur, was_running=was_running)
@@ -2868,6 +2902,9 @@ class Deployer:
 
     def _rollback(self, cur, prev, dep, snap, changes):
         was_running = self.svc.is_active()
+        exited = None if was_running else self.check_openpnp_exit()  # it may have died since the claim's check
+        if exited:
+            return 5, exited
         self.record("begin", action="rollback", tag=cur, to=prev, was_running=was_running, discarded=changes)
         lost = self._claim_lost()
         if lost:
@@ -3020,11 +3057,26 @@ class Deployer:
         if reasons:
             self.say("OpenPnP is down; not starting it: " + "; ".join(reasons))
             return 3
+        late = self._hold_or_holder()  # again, just before the start: a session may have taken the Holder meanwhile
+        if late:
+            self.say("OpenPnP is down; not starting it: " + late)
+            return 3
         ok, detail = self._start_not_enabled()
         self.record("keep-up", ok=ok, detail=detail)
         self.say(f"OpenPnP was down with the machine free: {detail}" if ok else
                  f"OpenPnP was down with the machine free but did not start: {detail}")
         return 0 if ok else 1
+
+    def _hold_or_holder(self):
+        """Two file reads: why the hold or STATE.md's Holder keeps OpenPnP down, or None."""
+        if self.read_hold():
+            return "on hold (after a person has checked the machine: il_deploy.py resume)"
+        try:
+            with open(self.cfg.state_md, encoding="utf-8") as f:
+                h = parse_holder(f.read())
+        except OSError as e:
+            return f"STATE.md unreadable ({self.cfg.state_md}): {e.strerror}"
+        return None if h.idle else h.reason
 
     def keep_up_reasons(self):
         """Why OpenPnP must stay down ([] = start it): a hold, a Holder, the serial lock or device taken, another
@@ -3228,15 +3280,38 @@ class Deployer:
         next command sets the hold (an exit it did not cause)."""
         ok, detail = self.stop_machine()
         self.say(f"stop-openpnp: {detail}")
-        if ok and detail != STOP_DONE and not os.environ.get("MAINPID"):
-            # systemd runs ExecStop also after the main process ended by itself with 0 or 143 (a kill from outside:
-            # never a STOP), with $MAINPID unset: no OpenPnP answered, so nothing confirmed the outputs off. The run
-            # marker stays and the unit ends 'failed': the next il_deploy sets the hold (an exit it did not cause).
-            self.say("stop-openpnp: OpenPnP had already ended by itself: no STOP confirmed, the run marker stays")
-            return 1
+        if ok and detail != STOP_DONE:
+            # No OpenPnP answered. systemd runs ExecStop also after the main process ended by itself with 0 or 143 (a
+            # kill from outside: never a STOP), with $MAINPID unset; and a live JVM whose API answered earlier in this
+            # run and does not now may still have its outputs on. Only a live JVM whose API never came up (still
+            # starting: nothing enabled yet) has nothing to stop. Otherwise the run marker stays and the unit ends
+            # 'failed': the next il_deploy sets the hold (an exit it did not cause).
+            gone = not os.environ.get("MAINPID")
+            if gone or self._api_was_up_this_run():
+                self.say("stop-openpnp: " + ("OpenPnP had already ended by itself" if gone else
+                                             "OpenPnP's API answered earlier in this run and does not now")
+                         + ": no STOP confirmed, the run marker stays")
+                return 1
         if ok:
             self._drop_run_marker()  # a confirmed STOP (or a JVM stopped before its API was up): this run ended well
         return 0 if ok else 1
+
+    def _api_was_up_this_run(self):
+        """OpenPnP.log shows the API started in this run (ApiServer: 'Instance Labs web UI: <url>'). OpenPnP starts a
+        new log at each start, so a log older than the run marker is an earlier run's. No readable marker: unknown,
+        taken as up (fail closed: the hold)."""
+        m = read_json(self.run_marker_path)
+        started = _iso_ts(m.get("at")) if isinstance(m, dict) else None
+        if started is None:
+            return True
+        path = self._log_path()
+        try:
+            if os.stat(path).st_mtime < started:
+                return False
+            with open(path, errors="replace") as f:
+                return any("Instance Labs web UI:" in line for line in f)
+        except OSError:
+            return False
 
     def wait_display(self, timeout, x11_dir="/tmp/.X11-unix"):
         """The Xvfb unit's ExecStartPost: wait until the X server listens. Type=simple counts as started at the
