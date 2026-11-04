@@ -312,12 +312,28 @@ il_deploy.py init --seed-from ~/instancelabs/realcfg-sw-20261030n   # once, with
 il_deploy.py poll                       # stage the newest eligible release
 il_deploy.py deploy [--version TAG]     # deploy when idle
 il_deploy.py run                        # poll + deploy (the timer)
+il_deploy.py keep-up                    # start OpenPnP (never enabled or homed) if it is down and the machine is free
 il_deploy.py rollback [--discard-config-changes]   # one step back
 il_deploy.py health [--sha7 X] [--no-claim]   # JSON report; --no-claim if you hold the machine already
 il_deploy.py status                     # JSON: versions, last deploy, idle verdict, hold, bad list
 il_deploy.py resume                     # after checking the machine: clear the hold, hand back the Holder
 il_deploy.py units --out DIR            # render the systemd user units (and the user manager's system drop-in)
 ```
+`--trusted-origin URL` (repeatable): an origin the API must also answer, the real machine's web UI on the tailnet
+(`https://lumen-thinkpad.tail3e978a.ts.net:8877` = `tailscale serve --bg --https=8877 http://127.0.0.1:18877`, no proxy
+in between: tailscaled keeps the Host header and passes the browser's Origin). `units` puts it into OpenPnP's
+environment (`OPENPNP_IL_API_TRUSTED_ORIGINS`, BR-73) and into the deployer's own flags; the health check then probes
+each one before it enables anything: a POST with that Host and Origin must pass the API's browser guards (404 on a
+route that does not exist) and a foreign Origin must still be refused (403). A build from before BR-73 lists no
+trusted origins: passed with a note, so a rollback to it stays possible (the tailnet URL is refused there).
+
+`keep-up` keeps the real machine's web UI up (the user's P0, 11-03): when OpenPnP is down it starts it, never enabled
+or homed, unless the machine is not free: a Holder other than nobody (a bench session), a hold, the serial lock or
+device taken, another OpenPnP or something else on the API port. An exit il_deploy did not cause sets the hold first,
+so a crash is never restarted over a machine a person must check. It runs under the root lock (never during a deploy).
+Before a bench session stops OpenPnP, write the Holder first, or keep-up starts it again within a minute (the bench
+tool then refuses on the serial lock: no harm, but no session either).
+
 `stop-openpnp` (the unit's ExecStop) and `check-device` (its ExecStartPre) are called by the OpenPnP unit,
 `wait-display` (its ExecStartPost: wait until Xvfb listens) by the Xvfb unit.
 
@@ -353,6 +369,8 @@ The units:
 | `il-openpnp-xvfb.service` | `Xvfb :50 -nolisten tcp` (outside uinav's :91-:299). `ExecStartPost=il_deploy.py wait-display` (up to 20 s for `/tmp/.X11-unix/X50`): Type=simple counts as started at the fork, and OpenPnP's first AWT call exits 1 without the socket, which at the first start after a boot would put a good build on the bad list. |
 | `il-deploy.service` | oneshot `run`. Exit code 3 (not idle) counts as success; no start timeout (a deploy homes the machine); 10 min stop timeout. `After=il-openpnp.service`, so at shutdown it stops first: its SIGTERM handler waits out a home and STOPs before the OpenPnP unit's ExecStop runs. That needs the user manager's drop-in above; without it a reboot kills both after 5 s (then "Killed outright" applies). |
 | `il-deploy.timer` | Starts the deploy service 2 min after the last run ended (and 5 min after boot). |
+| `il-keepup.service` | oneshot `keep-up` with the deployer's flags; exit 3 (not free) counts as success. |
+| `il-keepup.timer` | Starts keep-up 1 min after its last run ended (and 1 min after boot). Enable it on its own: `systemctl --user enable --now il-keepup.timer` (the deploy timer may stay off). |
 
 GitHub access: `gh` when it is logged in, else unauthenticated urllib (60 requests/h). An idle poll costs one
 request. Attestations are verified with `gh` only (2.97 on this host; `gh attestation verify` needs the policy flags
