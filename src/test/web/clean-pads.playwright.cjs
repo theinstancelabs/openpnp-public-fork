@@ -44,8 +44,9 @@ async function press2(page, sel) {
 const BOARD = 'ftp';
 const SETS = ['R', 'D'];
 const HOUR = 3600 * 1000;
-/** `h` hours ago, but never before today's midnight: the card adds the date to an older time (a run at 00:30). */
-const ago = (h) => { const m = new Date(); m.setHours(0, 0, 0, 0); return Math.max(Date.now() - h * HOUR, m.getTime()); };
+/** `h` hours ago, but never before today 00:00:30: the card adds the date to an older time (a run at 00:30), and the
+ *  page subtracts the server clock's skew (a time right at midnight could read as yesterday). */
+const ago = (h) => { const m = new Date(); m.setHours(0, 0, 30, 0); return Math.max(Date.now() - h * HOUR, m.getTime()); };
 function makePads() {
   const pads = [];
   SETS.forEach((set, si) => {

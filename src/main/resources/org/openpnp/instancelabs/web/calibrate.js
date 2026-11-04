@@ -300,10 +300,7 @@
     IL.render();
   }
   /** A server time as hh:mm today, else with its date. */
-  function when(ms) {
-    const t = ms - S.skewMs;
-    return new Date(t).toDateString() === new Date().toDateString() ? IL.fmtTime(t) : IL.fmtDateTime(t);
-  }
+  const when = (ms) => IL.fmtDateTime(IL.toClient(ms));
   function renderTestBoard(s) {
     const all = s && s.padLedgers;
     IL.show($('cal-testboard'), Array.isArray(all));
