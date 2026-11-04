@@ -298,6 +298,110 @@ class Decisions(unittest.TestCase):
         self.assertLess(clock.monotonic() - t0, 300 + 10)
 
 
+PLANNED_OK = (200, {"stopped": True, "machineEnabled": False, "planned": True, "linesSent": ["M410"],
+                    "linesFailed": []})
+REFUSED = (409, {"error": "refused", "reason": "No planned stop: a G-code batch. Wait for it, or use the real STOP."})
+LOCKED = (409, {"error": "locked", "reason": "User has the machine (using the web UI). Take control to use it."})
+NO_ROUTE = (404, {"error": "not-found", "reason": "no such endpoint: /api/stop/planned"})
+
+
+class PlannedApi(StubApi):
+    """StubApi with BR-75's POST /api/stop/planned, answering planned(n) (n: its count); only a 200 stops the machine.
+    calls: every POST in order."""
+
+    def __init__(self, planned, after_stop=None):
+        super().__init__(lambda n: status(), after_stop)
+        self.planned, self.calls = planned, []
+
+    def post(self, path, body=None, timeout=10):
+        self.calls.append(path)
+        if path != "/api/stop/planned":
+            return super().post(path, body, timeout)
+        code, answer = self.planned(self.calls.count(path))
+        if code == 200:
+            super().post(path, body, timeout)
+        return code, answer
+
+
+class PlannedStop(unittest.TestCase):
+    """BR-75: the deployer's own stops are planned (the screw's motor stays on, its timing kept). A refusal is waited
+    out, or the deployer waits for another time with nothing sent: never a real STOP in its place. A build before
+    BR-75 (404) is stopped as before."""
+
+    def setUp(self):
+        self.lab = Lab()
+        self.svc = StubService()
+
+    def tearDown(self):
+        self.lab.cleanup()
+
+    def deployer(self, api):
+        cfg = il_deploy.config_from_args(self.lab.argv("status", extra=["--stop-timeout", "10", "--poll-interval",
+                                                                           "0.5"]))
+        d = il_deploy.Deployer(cfg, self.lab.deps(clock=FakeClock(), service=self.svc))
+        d.api = api
+        return d
+
+    def test_the_planned_stop_is_confirmed_as_a_stop(self):
+        api = PlannedApi(lambda n: PLANNED_OK)
+        self.assertEqual(self.deployer(api).planned_stop(), (True, il_deploy.STOP_DONE))
+        self.assertEqual(api.calls, ["/api/stop/planned"])
+
+    def test_an_unconfirmed_planned_stop_fails_without_a_real_stop(self):
+        api = PlannedApi(lambda n: PLANNED_OK, after_stop=lambda n: status())  # the machine stays enabled
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIs(ok, False)
+        self.assertIn("still enabled", detail)
+        self.assertIn("/api/stop/planned", detail)
+        self.assertEqual(api.calls, ["/api/stop/planned"])
+
+    def test_a_build_before_br75_is_stopped_as_before(self):
+        api = PlannedApi(lambda n: NO_ROUTE)
+        self.assertEqual(self.deployer(api).planned_stop(), (True, il_deploy.STOP_DONE))
+        self.assertEqual(api.calls, ["/api/stop/planned", "/api/stop"])
+
+    def test_another_404_is_not_read_as_an_old_build(self):
+        api = PlannedApi(lambda n: (404, {"error": "not-found", "reason": "no machine"}))
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIs(ok, False)
+        self.assertIn("no machine", detail)
+        self.assertEqual(api.calls, ["/api/stop/planned"])
+
+    def test_the_lock_holders_machine_is_left_alone(self):
+        api = PlannedApi(lambda n: LOCKED)
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIsNone(ok)
+        self.assertIn("User has the machine", detail)
+        self.assertEqual(api.calls, ["/api/stop/planned"])
+
+    def test_a_refusal_is_waited_out(self):
+        api = PlannedApi(lambda n: REFUSED if n < 3 else PLANNED_OK)
+        self.assertEqual(self.deployer(api).planned_stop(), (True, il_deploy.STOP_DONE))
+        self.assertEqual(api.calls, ["/api/stop/planned"] * 3)
+
+    def test_a_machine_that_keeps_working_is_left_alone(self):
+        api = PlannedApi(lambda n: REFUSED)
+        d = self.deployer(api)
+        t0 = d.clock.monotonic()
+        ok, detail = d.planned_stop()
+        self.assertIsNone(ok)
+        self.assertIn("a G-code batch", detail)
+        self.assertGreaterEqual(d.clock.monotonic() - t0, 10)
+        self.assertEqual(set(api.calls), {"/api/stop/planned"}, "never a real STOP in its place")
+
+    def test_a_deploy_that_gets_no_planned_stop_changes_nothing(self):
+        for answer in (LOCKED, REFUSED):
+            with self.subTest(answer[1]["error"]):
+                api = PlannedApi(lambda n: answer)
+                d = self.deployer(api)
+                rc, note = d.stop_service()
+                self.assertEqual(rc, 3, "not idle: try again later")
+                self.assertIn("nothing changed", note)
+                self.assertFalse(self.svc.stopped)
+                self.assertIsNone(d.read_hold(), "nothing for a person to check")
+                self.assertNotIn("/api/stop", api.calls)
+
+
 class AgainstTheFake(unittest.TestCase):
     """stop-openpnp and the subprocess manager's pre-stop against a fake OpenPnP that is homing."""
 

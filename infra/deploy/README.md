@@ -126,7 +126,7 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
      read-modify-write script) replaces it silently. Gone: nothing more is done (a machine il_deploy enabled is
      STOPped), the hold is set, exit 5. A claim gone at the hand-back is said on stderr and in the journal, sets the
      hold and makes the exit code non-zero; someone else's Holder is never overwritten.
-   - **Switch.** It stops OpenPnP gracefully (`POST /api/stop`, waits until the machine is disabled, then
+   - **Switch.** It stops OpenPnP gracefully (the planned stop below, waits until the machine is disabled, then
      stops the service). It snapshots `state/config` to `snapshots/<ts>-pre-<tag>/` (`dispense.db`, `-wal` and
      `-shm` are copied together). It records the new build in `deployed.json` as **pending** (with the snapshot,
      the previous version and the records before it) and writes the Deployed line `<tag> being installed over
@@ -180,7 +180,7 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
         position (no home). A build before BR-44 failed the enable on the dead port (`enable: HTTP 409 ... IO Error`,
         no home). A deploy restarts OpenPnP, so its enable always connects afresh.
      6. Homed and not busy.
-     7. `POST /api/stop`, and the STOP is confirmed (below).
+     7. The planned stop (below), confirmed as a STOP.
    - **On failure it rolls back.** It STOPs (only if the STOP is safe; otherwise it leaves OpenPnP running,
      sets the hold and records the new build as installed but NOT verified), restores the snapshot (keeping the
      abandoned state as `snapshots/<ts>-abandoned-<tag>/`) and switches back. The restore and the switch are one
@@ -277,7 +277,17 @@ Exit codes:
   - OpenPnP not answering at all (connection refused): nothing to stop.
 - Never homes a controller that shows the power-cycle signature. It reports `controller was reset; a person
   must check the machine` and sets the hold.
-- Always `POST /api/stop` before stopping the process. SIGTERM saves nothing and sends no Stop, and the
+- **The deployer's own stops are planned (BR-75):** before the switch, the health check's last stop and its stop of a
+  machine left enabled use `POST /api/stop/planned`: OpenPnP's STOP without the screw's motor-off line (`M18 B`), so
+  the screw keeps its timing through a deploy; with the machine already off it closes a link kept open, on which
+  OpenPnP's quit would send `M18 B`. Its confirm is a STOP's (below); the unit's ExecStop then finds the machine
+  stopped and sends nothing. A refusal is never answered with a real STOP: `409 refused` (something works) is asked
+  again for `--stop-timeout`, then the deploy or rollback ends `not idle` (exit 3, nothing changed, no hold: a
+  later run deploys); `409 locked` (someone has the machine lock) ends it so at once. In the health check, after its
+  own home, a refusal fails the `stop` step as a machine problem (the lock: as someone else's session). A build
+  before BR-75 (404 `no such endpoint`) is stopped by `POST /api/stop` as before: the first deploy over one, and a
+  rollback to one. Failures and the exception path STOP for real (the rule below), as does the unit's ExecStop.
+- Always a stop through the API before stopping the process. SIGTERM saves nothing and sends no Stop, and the
   outputs keep their state. A STOP is confirmed only when `/api/status` shows the machine disabled, the dispense
   engine idle and the pressure hold off: `MachineEndpoints.stop` disables the machine, but the engine's abort sends
   its valve-and-pump-off lines only after the move in progress (a 10 s prime), and with the plain GcodeDriver the
@@ -401,7 +411,9 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
 - `tests/fake_openpnp.py` is a fake OpenPnP API with configurable failures: version, enable, reset, no S/N,
   home, slow home, stop, busy, run (with its phase; a STOP ends it, `run_abort_s` later), pressure (a STOP vents
   it; `vent-fail`), crash, engine (not started), unavailable, machine-500, home-404, axes left out or without a
-  driver coordinate, and failures for one build only. Its status has the real shape: `run.finishedAtMs`,
+  driver coordinate, and failures for one build only; BR-75's planned stop (refused while anything works or for
+  the first `planned_refusals` calls; `old-stop`: a build before it, 404; `lock-at-planned-stop`), and a STOP's
+  `M18 B` on an open link recorded as `{"screw": "M18 B"}`. Its status has the real shape: `run.finishedAtMs`,
   `lastRun.endedAtMs`, `padCalibration.endedAtMs`, the pressure hold's start value, `machine.zCheck.homeAtMs`
   and the dispense config's times (needle, XY trim, anchor, tip, seat, places, surfaces, purge row, start angle,
   controller connected). It answers as the real server does:

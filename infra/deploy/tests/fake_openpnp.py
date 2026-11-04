@@ -5,7 +5,7 @@ Usage (as the deployed service would run OpenPnP; the working directory is the r
   fake_openpnp.py --port N --config-dir DIR
 
 It implements the calls the deploy health check makes: GET /api/status, GET /api/machine,
-POST /api/machine/enable, POST /api/machine/home {"wait": true}, POST /api/stop.
+POST /api/machine/enable, POST /api/machine/home {"wait": true}, POST /api/stop, POST /api/stop/planned (BR-75).
 
 Behaviour comes from two places:
 - the release's "jar" (<cwd>/openpnp-il.jar) is JSON: {"sha": full sha, "fail": [...], "schema": n}.
@@ -46,7 +46,11 @@ engine run until a STOP ends it), pressure (the pressure held until a STOP vents
 vent-fail (a STOP cannot vent it: pressure.state 'vent_failed'), engine (the dispense engine did not start),
 unavailable (engine without its nozzle), machine-500 (GET /api/status and /api/machine answer 500), home-404 (no
 home endpoint), old-status (a build before BR-44: no machine.homing, server.startedAtMs, dispense.state or
-dispense.startError, and an enable on a kept-alive link that died fails on the dead port).
+dispense.startError, and an enable on a kept-alive link that died fails on the dead port), old-stop (a build before
+BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the lock just before the planned stop).
+BR-75's planned stop: 409 locked while someone holds the lock, 409 refused (nothing sent) while anything works or for
+the first fake-machine.json "planned_refusals" N calls; else the STOP without the screw's motor-off, the link closed
+(keep-alive or not), after which a STOP finds the machine already stopped and sends nothing until the next enable.
 BR-44's fields otherwise, as DispenseEndpoints.status and MachineEndpoints.machineStatus: machine.homing (true while a
 home runs), server.startedAtMs, dispense.state ("running", "starting" before engine_start_s, "failed" with "engine",
 startError then the exception's text).
@@ -60,7 +64,7 @@ next enable connects again and logs it (BR-44: GcodeDriver.setEnabled), and the 
 Every request is appended to --requests (default <config>/fake-requests.jsonl). A STOP while homing (also while the
 controller is still in a G28 that OpenPnP timed out on) is recorded as
 {"violation": "stop-during-home"}; SIGTERM while the machine is enabled as
-{"violation": "sigterm-while-enabled"}.
+{"violation": "sigterm-while-enabled"}; a STOP's DISABLE_COMMAND on an open link (its M18 B: the screw's motor off) as {"screw": "M18 B"}.
 """
 import argparse
 import contextlib
@@ -119,6 +123,8 @@ class FakeOpenPnP:
         self.connected_at_ms = None  # HomeTracker's connectedAtMs: this OpenPnP's first connect
         self.run_active = "run" in self.fail  # the engine run: a STOP ends it (after "run_abort_s")
         self.pressure_state = "on" if "pressure" in self.fail else "off"  # PressureHold: a STOP vents it
+        self.planned_refusals = int(machine.get("planned_refusals", 0))
+        self.planned_closed = False  # BR-75: a planned stop closed the link; nothing switches the screw off till Start
         log_dir = os.path.join(config_dir, "log")
         os.makedirs(log_dir, exist_ok=True)
         # OpenPnP's tinylog RollingFileWriter (StartupPolicy) starts a new OpenPnP.log at each start
@@ -298,6 +304,7 @@ class FakeOpenPnP:
                 self.connected = self.link_dead = False  # GcodeDriver.setEnabled: disconnect(), then connect()
             connect = not self.connected
             self.enabled = self.connected = True
+            self.planned_closed = False
             if connect and self.connected_at_ms is None:
                 self.connected_at_ms = int(time.time() * 1000)
             if "reset" in self.fail or self.booted:
@@ -384,6 +391,12 @@ class FakeOpenPnP:
             c.close()
 
     def stop(self):
+        with self.lock:
+            if self.planned_closed and not self.enabled:
+                return 200, {"stopped": True, "machineEnabled": False,
+                             "actions": ["machine was already stopped", "the screw's controller link is closed"]}
+            if self.connected:
+                self.record({"screw": "M18 B"})  # the DISABLE_COMMAND's last line on the open link
         self.journal("SCREW_MOTOR_OFF", "the screw's motor was switched off: M18 B")
         with self.lock:
             if (self.homing or time.time() < self.g28_until or self.run_homing()
@@ -415,6 +428,41 @@ class FakeOpenPnP:
                 if not self.machine.get("keep_alive", True):
                     self.connected = False
             return 200, {"stopped": True, "machineEnabled": self.enabled, "actions": ["OpenPnP Stop"]}
+
+    def planned_stop(self):
+        """BR-75 (MachineEndpoints.plannedStop): a guarded write; refused with nothing sent while anything works; else
+        OpenPnP's Stop with the DISABLE_COMMAND minus its M18 B (no SCREW_MOTOR_OFF), and the link closed."""
+        if "lock-at-planned-stop" in self.fail:
+            self.machine["lock"] = {"holder": {"kind": "user", "who": "user", "label": "User",
+                                               "what": "using the web UI"}, "takenFrom": None}
+        if self.locked():
+            return self.locked()
+        with self.lock:
+            works = [why for why, on in (
+                ("a home runs", self.homing or time.time() < self.g28_until or self.run_homing()),
+                ("an engine task", self.run_active), ("the pressure hold", self.pressure_state != "off"),
+                ("OpenPnP is busy (homing or moving)", "busy" in self.fail)) if on]
+            if not works and self.planned_refusals > 0:
+                self.planned_refusals -= 1
+                works = ["a G-code batch"]
+            if works:
+                return 409, {"error": "refused", "reason": f"No planned stop: {', '.join(works)}. Wait for it, or "
+                                                           "use the real STOP (POST /api/stop)."}
+            if "stop" in self.fail and self.enabled:  # a disable listener threw: the machine still reads started
+                return 409, {"error": "refused", "reason": "No planned stop: OpenPnP's Stop did not switch the machine "
+                                                           "off (see the OpenPnP log). The real STOP is POST /api/stop"}
+            if "lock-at-stop" in self.fail:  # as stop(): the user took the lock and switched the machine on again
+                self.machine["lock"] = {"holder": {"kind": "user", "who": "user", "label": "User",
+                                                   "what": "using the web UI"}, "takenFrom": None}
+                return 200, {"stopped": True, "machineEnabled": True, "planned": True, "linesSent": [],
+                             "linesFailed": [], "actions": ["OpenPnP Stop"]}
+            was = self.enabled
+            self.enabled = self.homed = self.connected = False
+            self.planned_closed = True
+            lines = ["M410", "M107 P3", "M107 P2", "M107 P1", "M107 P0"] if was else []
+            return 200, {"stopped": True, "machineEnabled": False, "planned": True, "linesSent": lines,
+                         "linesFailed": [], "actions": ["OpenPnP Stop; the screw's motor stays on"] if was
+                         else ["machine was already stopped"]}
 
     def power_cycle(self):
         """The controller switched off and on while OpenPnP runs: a link kept open dies (its reader ends on the dead
@@ -458,6 +506,8 @@ class FakeOpenPnP:
             return self.home(body)
         if method == "POST" and path == "/api/stop":
             return self.stop()
+        if method == "POST" and path == "/api/stop/planned" and "old-stop" not in self.fail:
+            return self.planned_stop()
         return 404, {"error": "not-found", "reason": "no such endpoint: " + path}
 
     # --- server --------------------------------------------------------------------------------

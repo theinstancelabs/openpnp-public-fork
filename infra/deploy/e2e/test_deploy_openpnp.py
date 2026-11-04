@@ -122,6 +122,7 @@ CAPTURE_ELEMENTS = ("back-light-compensation", "brightness", "contrast", "exposu
                     "power-line-frequency", "saturation", "sharpness", "white-balance", "zoom")
 IMAGE_SOURCE = "classpath://samples/pnp-test/pnp-test.png"
 DISABLE_LINES = make_machine_patch.DISABLE_LINES  # the Stop sequence OpenPnP sends on every disable
+PLANNED_LINES = [line for line in DISABLE_LINES if line != "M18 B"]  # BR-75: the screw's motor stays on
 # Key paths il_deploy reads that /api/status has only after an engine run (RunTracker.snapshot, DispenseService.lastRun)
 # or a pad calibration (PadCalibrationJob.view): null here, so not checked by this test (Backend's contract test)
 ENGINE_TASK_FIELDS = ("run.finishedAtMs", "lastRun.endedAtMs", "padCalibration.endedAtMs", "run.running",
@@ -713,7 +714,8 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertEqual([r for r in self.journal() if r["event"] in ("hold", "exception", "bad")
                           and r.get("tag") != self.tag_b], [])
 
-        # the serial traffic: one home per health check, never a STOP inside it, the Stop sequence after each
+        # the serial traffic: one home per health check, never a STOP inside it, the planned stop after each (BR-75:
+        # the Stop sequence without M18 B), and no M18 B at all: the screw keeps its timing through it all
         io_rows = self.sim.io(self.io_start)
         lines = sent(io_rows)
         homes = [i for i, line in lines if line == "G28"]
@@ -734,8 +736,9 @@ class DeployRealOpenPnP(unittest.TestCase):
             self.assertEqual([io_rows[j][2] for j in range(g, ok) if io_rows[j][1] == ">" and io_rows[j][2] == "M410"],
                              [], "an M410 inside G28 #%d" % (k + 1))
             after = [line for i, line in lines if i > ok and (k + 1 == len(homes) or i < homes[k + 1])]
-            self.assertTrue(any(after[i:i + len(DISABLE_LINES)] == DISABLE_LINES for i in range(len(after))),
-                            "no Stop sequence %s after G28 #%d: %s" % (DISABLE_LINES, k + 1, after))
+            self.assertTrue(any(after[i:i + len(PLANNED_LINES)] == PLANNED_LINES for i in range(len(after))),
+                            "no planned stop %s after G28 #%d: %s" % (PLANNED_LINES, k + 1, after))
+        self.assertNotIn("M18 B", [line for _, line in lines], "a STOP switched the screw's motor off")
         st = self.sim.state()
         self.assertFalse(st["halted"], st.get("halt_reason"))
         self.assertEqual(st["sim_errors"], [])

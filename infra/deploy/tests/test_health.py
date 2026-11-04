@@ -65,9 +65,36 @@ class Health(HealthLab, unittest.TestCase):
         self.assertEqual([s["step"] for s in rep["steps"]],
                          ["status", "enable", "serial", "axes", "home", "homed", "stop"])
         self.assertIn(("POST", "/api/machine/home"), self.paths())
-        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop/planned"), "BR-75: the screw's motor stays on")
         self.assertFalse(self.fake.enabled)
         self.assertEqual(self.violations(), [])
+        self.assertEqual([r for r in self.lab.requests() if "screw" in r], [], "no M18 B")
+
+    def test_healthy_on_a_build_before_br75(self):
+        """A build without the planned stop (a rollback target): its STOP, as before."""
+        self.start(jar_fail=["old-stop"])
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertEqual(self.posts()[-2:], [("POST", "/api/stop/planned"), ("POST", "/api/stop")])
+        self.assertFalse(self.fake.enabled)
+
+    def test_a_planned_stop_refused_after_the_home_is_the_machines(self):
+        """Something works after the check's own home and keeps the planned stop refused: nothing sent here, a machine
+        problem for the deploy to recover from (its STOP)."""
+        self.start(planned_refusals=1000)
+        rep = self.check("--stop-timeout", "0.5")
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("machine", "stop"), rep)
+        self.assertIn("a G-code batch", rep["failure"])
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop/planned"))
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_a_lock_taken_at_the_planned_stop_is_left_alone(self):
+        self.start(jar_fail=["lock-at-planned-stop"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "claim-lost", rep)
+        self.assertNotIn(("POST", "/api/stop"), self.posts())  # STOP would end the new holder's work
         json.dumps(rep)
 
     def test_already_enabled_is_stopped_first(self):
