@@ -2108,12 +2108,15 @@
       const limit = cells.getBoundingClientRect().right - parseFloat(getComputedStyle(cells).paddingRight || '0');
       return last.getBoundingClientRect().right > limit + 0.5;
     };
-    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2v', 'cells--t3', 'cells--t4', 'cells--t5');
+    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2l', 'cells--t2v', 'cells--t3', 'cells--t4', 'cells--t5');
     cells.classList.add('cells--fit');   // the verdict at its full width while measuring
     if (over()) {
       // the other cells' long parts first: the verdict keeps its own ("Stopped 14:19", a task's progress) while it fits
       cells.classList.add('cells--t1');
       if (over()) cells.classList.replace('cells--t1', 'cells--t2');
+      // In control, while it reads You or Nobody, gives its room before the verdict's own long part (the time of a stop);
+      // an agent holding the machine never leaves the strip: the user must always see that
+      if (over()) cells.classList.add('cells--t2l');
       if (over()) cells.classList.add('cells--t2v');
       // still too long (1024 px after a STOP, the widest state): the verdict is never cut (UI_DESIGN §4), so the
       // pressure cell goes while it reads a plain "Off" (Recovery says "Pressure vented"), then the other cells' labels,

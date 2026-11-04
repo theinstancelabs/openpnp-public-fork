@@ -282,6 +282,31 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     check('(8) the strip reads You', /^You/.test((await cellText(page)).v), await cellText(page));
     await page.screenshot({ path: path.join(OUT, 'lock-unconfirmed.png') });
 
+    // ---- (8b) the strip after that STOP, its widest state: the verdict never cut, its time kept at 1440 px (In control
+    // gives its room first while it reads You or Nobody); an agent's cell never leaves the strip ---------------------------
+    await page.evaluate(() => IL.msg('lock', null));
+    await page.waitForFunction(() => /^Stopped \d\d:\d\d/.test(document.querySelector('#pill-engine .cell__v').textContent), null, { timeout: 10000 }).catch(() => null);
+    const fit = async (w, h) => {
+      await page.setViewportSize({ width: w, height: h });
+      await sleep(500);
+      return page.evaluate((ww) => {
+        const v = document.querySelector('#pill-engine .cell__v'), cells = document.getElementById('cells'), lc = document.getElementById('cell-lock');
+        const r = v.getBoundingClientRect(), lim = cells.getBoundingClientRect().right;
+        return { w: ww, shown: v.innerText, cut: v.scrollWidth > v.clientWidth + 0.5 || r.right > lim + 0.5, tier: cells.className, lock: lc.offsetParent !== null };
+      }, w);
+    };
+    const cuts = [];
+    for (const [w, h] of [[1440, 900], [1280, 800], [1024, 768]]) cuts.push(await fit(w, h));
+    check('(8b) after a STOP, with You in control: the verdict reads "Stopped…" in full at 1440, 1280 and 1024 px', cuts.every((c) => !c.cut && /^Stopped/.test(c.shown)), cuts);
+    check('(8b) and keeps the time of the stop at 1440 px', /^Stopped \d\d:\d\d/.test(cuts[0].shown), cuts[0]);
+    stub.holder = agent(3, 1);
+    await waitCell(page, /^Process/);
+    const a1024 = await fit(1024, 768);
+    check('(8b) an agent holding the machine stays in the strip at 1024 px', a1024.lock, a1024);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    stub.holder = user(Date.now());
+    await waitCell(page, /^You/);
+
     // ---- (9) a write while a take still stops the agent (409 taking-over): the reason, no second Take control -------------------
     await page.evaluate(() => { IL.msg('lock', null); IL.openView('machine', { keep: true }); });
     stub.holder = user(Date.now());

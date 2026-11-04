@@ -216,6 +216,7 @@ kbd {
    labels, t5 the tip cell while it is ok (Setup, the run confirm and the pad-cal view name the tip; 1024 px after a
    STOP with the tip cell: PROFILE_CALIBRATION_DESIGN §22.13); the verdict keeps its label and value (cells never
    truncate, §4) */
+.cells--t2l #cell-lock.cell--ok, .cells--t2l #cell-lock.cell--off { display: none; }
 .cells--t3 #pill-pressure.cell--off { display: none; }
 .cells--t4 .cell:not(.cell--verdict) .cell__k { display: none; }
 .cells--t5 #chip-tip.cell--ok { display: none; }
