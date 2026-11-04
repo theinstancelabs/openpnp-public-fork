@@ -239,8 +239,7 @@ final class GcodePassthrough {
                 stop = stopReason(m, b);
                 log(who, "!", why);
                 if (stop != null) {
-                    return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i,
-                            l.text, replies, stop);
+                    return interrupted(stop, results, t0, i, l, replies, ls);
                 }
                 synchronized (this) {
                     motionPending = motionPending || l.motion; // it may have been queued
@@ -251,6 +250,12 @@ final class GcodePassthrough {
             }
             for (String r : replies) {
                 log(who, "<", r);
+            }
+            // taken or stopped while this line ran: its ok may be the STOP's flush (M410), not its end (Infra's
+            // lumen-sim e2e: an M400 answered as if the head had arrived)
+            stop = stopReason(m, b);
+            if (stop != null) {
+                return interrupted(stop, results, t0, i, l, replies, ls);
             }
             synchronized (this) {
                 if (l.motion) {
@@ -298,6 +303,26 @@ final class GcodePassthrough {
             log(who, "!", "re-reading the position failed: " + e.getMessage());
         }
         return new Outcome("ok", results, ms(t0), null, null, null, null);
+    }
+
+    /**
+     * The line in flight when the lock was taken or STOP pressed, marked {@code interrupted}: whatever answered it, the
+     * agent must not take it as done (an M400's ok after a quick stop is not the head at its target).
+     */
+    private Outcome interrupted(String stop, List<Map<String, Object>> results, long t0, int i,
+            PassthroughLines.Line l, List<String> replies, long ls) {
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("line", l.text);
+        res.put("replies", replies);
+        res.put("ms", ms(ls));
+        res.put("interrupted", true);
+        results.add(res);
+        synchronized (this) {
+            motionPending = motionPending || l.motion;
+            positionStale = positionStale || l.frame;
+        }
+        return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i, l.text, replies,
+                stop);
     }
 
     /** Why the batch must send nothing more ("lock-lost: ..." for a revoked holder), or null. */

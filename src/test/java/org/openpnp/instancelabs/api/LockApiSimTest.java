@@ -154,6 +154,19 @@ public class LockApiSimTest {
 
     static final String NEEDLE_OFFSET = "{\"needleChangedAtMs\":null,\"offsetMm\":0.01}";
 
+    /**
+     * After a STOP: waits until the machine reads off, so the teardown does not close the simulated controller while
+     * OpenPnP still sends its DISABLE_COMMAND lines (each would then wait the driver's timeout: a 200 s test, 11-03).
+     */
+    void awaitOff() throws Exception {
+        long t0 = System.currentTimeMillis();
+        while (status().getAsJsonObject("machine").get("enabled").getAsBoolean()
+                && System.currentTimeMillis() - t0 < 20000) {
+            Thread.sleep(50);
+        }
+        assertFalse(status().getAsJsonObject("machine").get("enabled").getAsBoolean(), "off 20 s after the STOP");
+    }
+
     @Test
     public void anAgentTakesTheLockAndDrivesTheMachineThroughThePassthrough() throws Exception {
         assertTrue(lock().get("holder").isJsonNull());
@@ -278,6 +291,40 @@ public class LockApiSimTest {
         assertTrue(lock().get("takenFrom").isJsonNull(), "cleared when the lock changes hands");
     }
 
+    /**
+     * Infra's lumen-sim e2e (11-03 16:30): a take during a batch's LAST line (the M400 of a long move) answered 200: the
+     * M400's ok came from the STOP's flush, not from the head reaching its target. The batch must answer lock-lost, with
+     * the line in flight marked interrupted, so the agent never assumes the move completed.
+     */
+    @Test
+    public void takeControlDuringABatchsLastLineAnswersLockLostNotDone() throws Exception {
+        String token = acquire("one long move");
+        sim.server.delayBeforeOkMs.put("M400", 3000L);
+        sim.server.mark();
+        CompletableFuture<Res> batch = CompletableFuture.supplyAsync(() -> {
+            try {
+                return gcode(token, "G1 X200 Y200 F600", "M400");
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        long t0 = System.currentTimeMillis();
+        while (!commands(sim.server.sinceMark()).contains("M400") && System.currentTimeMillis() - t0 < 10000) {
+            Thread.sleep(10);
+        }
+        ok(post("/api/lock/take", "{}", UI));
+        Res b = batch.get();
+        assertError(409, "lock-lost", b);
+        assertEquals("taken", b.json.getAsJsonObject("lost").get("how").getAsString(), b.toString());
+        JsonArray results = b.json.getAsJsonArray("results");
+        assertEquals(2, results.size(), b.toString());
+        JsonObject last = results.get(1).getAsJsonObject();
+        assertEquals("M400", last.get("line").getAsString());
+        assertTrue(last.has("interrupted") && last.get("interrupted").getAsBoolean(), b.toString());
+        assertEquals(1, b.json.get("index").getAsInt(), "the line in flight: " + b);
+    }
+
     @Test
     public void takeControlFromAnIdleAgentSwitchesTheOutputsOffAndKeepsTheMachineHomed() throws Exception {
         String token = acquire("pressure check");
@@ -314,6 +361,7 @@ public class LockApiSimTest {
         // STOP is everyone's, always
         ok(post("/api/stop", null, null));
         assertEquals("user", holder().get("kind").getAsString(), "a STOP does not change the holder");
+        awaitOff();
     }
 
     @Test
@@ -338,6 +386,7 @@ public class LockApiSimTest {
         assertError(409, "stopped", b);
         assertFalse(commands(sim.server.sinceMark()).contains("G1 X20 Y20 F600"));
         assertEquals("process", holder().get("who").getAsString());
+        awaitOff();
     }
 
     @Test
