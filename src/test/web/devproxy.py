@@ -200,8 +200,11 @@ def make_handler(web, api, fx, rf=None):
             if spec and "file" in spec:
                 code, data = rf.answer(spec)
                 return self._send(code, data, "application/json")
-            req = urllib.request.Request(api + self.path, data=body, method=self.command,
-                                         headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
+            headers = {"Content-Type": self.headers.get("Content-Type", "application/json")}
+            # the page's X-IL-Client marks a request as the UI's: the machine lock (BR-72) tells the user from an agent by it
+            if self.headers.get("X-IL-Client"):
+                headers["X-IL-Client"] = self.headers.get("X-IL-Client")
+            req = urllib.request.Request(api + self.path, data=body, method=self.command, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=900) as r:
                     code, data, ctype = r.status, r.read(), r.headers.get("Content-Type", "application/json")

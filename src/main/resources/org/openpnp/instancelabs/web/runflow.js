@@ -382,12 +382,15 @@
         go.addEventListener('click', () => R.flow.openConfirm(none ? 'full' : 'rest'));
         const all = el('button', { type: 'button', class: 'btn', id: 'rv-need-all' }, 'Wipe all, run all');
         all.addEventListener('click', () => R.flow.openConfirm('all'));
+        // a new board in the holder instead: Next board (a new seat; nothing moves), then Start
+        const fresh = el('button', { type: 'button', class: 'btn', id: 'rv-need-new', title: 'Unload this board as it is and load a new one: a new seat. Nothing moves.' }, 'It is a new board');
+        fresh.addEventListener('click', () => { R.flow.nextBoard(); IL.render(); });
         return el('div', { class: 'ri ri--need', 'data-key': 'stopped' }, IL.glyph('need'),
           el('div', {}, el('div', { class: 'ri__t' }, none ? 'Run the board again' : 'Finish the pads left', el('span', { class: 'tag tag--next', text: 'Next' })),
             el('div', { class: 'ri__d', text: none ? 'It stopped before the first dot: nothing to keep or wipe.'
               : (d.run.dotsDone || 0) + ' of ' + (d.run.dotsPlanned || '?') + ' dots are on the board. The pads left get their paste; the dots there stay.' })),
           el('div', { class: 'ri__act' }, go, el('details', { class: 'rf-more', id: 'rv-need-more' }, el('summary', { text: 'Other choices…' }),
-            el('div', { class: 'btn-row' }, none ? null : all, el('a', { class: 'link', href: '#run/steps', text: 'Step by step' })))),
+            el('div', { class: 'btn-row' }, none ? null : all, fresh, el('a', { class: 'link', href: '#run/steps', text: 'Step by step' })))),
           el('div', { class: 'ri__note', text: 'Nothing moves until you press it. The run checks every pad first.' }));
       });
     } else {

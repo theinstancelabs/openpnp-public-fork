@@ -50,6 +50,21 @@ const startState = (page) => page.evaluate(() => {
   const w = document.getElementById('rs-start-why');
   return b ? { disabled: b.disabled, label: b.textContent.trim(), why: w && !w.hidden ? w.textContent.trim() : '' } : null;
 });
+/**
+ * Start, as an operator gets there when the board on the seat is part done (Needs you: an earlier run in this
+ * session, webui-sim's or this test's own): Other choices › It is a new board (a new seat; nothing moves). Returns
+ * whether Needs you came first; null when neither page showed.
+ */
+async function toStart(page) {
+  const first = await page.waitForFunction(() => (document.getElementById('btn-rs-start') && !document.getElementById('run-start').hidden ? 'start'
+    : document.getElementById('rv-need-new') ? 'needs' : null), null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
+  if (first !== 'needs') return first ? false : null;
+  await page.click('#rv-need-more > summary');
+  await page.click('#rv-need-new');
+  const back = await page.waitForFunction(() => { const pd = IL.S.plan && IL.S.plan.pasted; return !!document.getElementById('btn-rs-start')
+    && !document.getElementById('run-start').hidden && (!pd || !pd.pads || !Object.keys(pd.pads).length); }, null, { timeout: 15000 }).then(() => true, () => false);
+  return back ? true : null;
+}
 const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.getElementById(i); if (c && c.checked !== v) c.click(); return !!c && c.checked; }, [id, on]);
 
 (async () => {
@@ -62,7 +77,10 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
   try {
     await page.goto(BASE + '#run');
     await page.waitForFunction(() => window.IL && IL.S && IL.S.status && IL.runFlow && IL.ready, null, { timeout: 30000 });
-    await page.waitForFunction(() => !!document.getElementById('btn-rs-start'), null, { timeout: 15000 }).catch(() => null);
+    // this test registers and pastes: a simulator only, before anything is changed or pressed
+    const sim = await page.evaluate(() => !!(IL.S.status.server && IL.S.status.server.simulated === true));
+    check('the server is an OpenPnP simulator (status.server.simulated)', sim);
+    if (!sim) throw new Error('not a simulator: nothing was done');
 
     // ---- (0) the state it needs, from what the main leg leaves: tip-flow mounts a second tip of its own (no pad types):
     // the setup with the board's pad types goes back on, its needle frame by hand as tip-flow does when the mount lost it
@@ -81,11 +99,31 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
       }
       st0 = await page.evaluate(() => IL.api('GET', '/api/status'));
     }
-    check('(0) the setup with the board\'s pad types is on, its needle frame recorded', !!use && st0.dispense.tip.key === use.key && st0.dispense.needle.anchored,
-      { use: use && use.key, tip: st0.dispense.tip.key, needle: st0.dispense.needle });
+    // the tip put back on: where it lands is its stored landing, kept as the operator's "Keep where it lands" does
+    const nd0 = st0.dispense.needle;
+    if (nd0.xyChecked === false && nd0.landing && nd0.landing.keepable) {
+      await page.evaluate((tk) => IL.api('POST', '/api/needle/landing', { keep: true, needleChangedAtMs: tk }), nd0.changedAtMs);
+      st0 = await page.evaluate(() => IL.api('GET', '/api/status'));
+    } else if (nd0.xyChecked === false) {
+      // a bent tip lands where its bend points (no keeping): the landing check on the SIM, as tip-flow's checks run it,
+      // on a calibration area the earlier scripts used up: "Blank wiped" first (the SIM's blank)
+      await page.evaluate(() => IL.api('POST', '/api/calibration-area/reset', {}));
+      const job = await page.evaluate(() => { const at = Date.now() + IL.S.skewMs; return IL.api('POST', '/api/pad-calibrations', { measure: 'landing', save: true,
+        regulator: { psi: IL.S.status.dispense.profile.pressurePsi, atMs: at }, pasteLifeAtMs: at }, { timeoutMs: 60000 }); });
+      for (let i = 0; i < 120 && job && job.id; i++) {
+        await sleep(2000);
+        const j = await page.evaluate((id) => IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(id)).catch(() => null), job.id);
+        if (j && !/^(running|queued|starting|waiting)$/.test(String(j.state))) break;
+      }
+      st0 = await page.evaluate(() => IL.api('GET', '/api/status'));
+    }
+    check('(0) the setup with the board\'s pad types is on, its needle frame recorded, where it lands kept', !!use && st0.dispense.tip.key === use.key
+      && st0.dispense.needle.anchored && st0.dispense.needle.xyChecked !== false, { use: use && use.key, tip: st0.dispense.tip.key, needle: st0.dispense.needle });
 
     // ---- (1) Run opens Start while nothing runs ---------------------------------------------------------------------
-    const s1 = await page.evaluate(() => ({ run: IL.S.status.run, hash: location.hash }));
+    const needsFirst = await toStart(page);
+    if (needsFirst) check('(1) a board part done on its seat: Run opens Needs you; "It is a new board" gives Start back', true);
+    const s1 = Object.assign(await page.evaluate(() => ({ run: IL.S.status.run && { label: IL.S.status.run.label, running: IL.S.status.run.running }, hash: location.hash })), { needsFirst });
     check('(1) Run, while nothing runs, opens Start: its own main column and panel, not today\'s board picture', await shown(page, '#run-start')
       && !(await shown(page, '#run-hero')) && await shown(page, '#btn-rs-start') && (await page.textContent('#run-start .eyebrow')).trim() === 'Make a board', s1);
     check('(1) today\'s pages are one link away: Step by step', await shown(page, '#rs-step-by-step')
@@ -119,6 +157,10 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     check('(2) a click on a design plans it where it sat (its last registration): the card is pressed', !!made2 && !!p2 && !!nom && Math.abs(p2.source.x - nom.x) < 1e-6
       && Math.abs(p2.source.y - nom.y) < 1e-6 && (await page.getAttribute('#rs-designs .design[aria-pressed="true"]', 'data-board')) === key2, { key2, nom, src: p2 && p2.source });
 
+    // a board part done on its seat (webui-sim's runs): Needs you; a new board in the holder is one of its other choices
+    const needs2 = await toStart(page);
+    if (needs2 !== false) check('(2) a board part done on its seat: Needs you; "It is a new board" (a new seat, nothing moves) gives Start back', needs2 === true);
+
     // ---- (3) Boards this run -----------------------------------------------------------------------------------------
     const b3 = await page.evaluate(() => ({ one: document.getElementById('rs-one').getAttribute('aria-pressed'), tile: document.getElementById('rs-tile').disabled,
       cap: document.getElementById('rs-boards-cap').textContent }));
@@ -126,9 +168,10 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
 
     // ---- (4) Load side 1 ---------------------------------------------------------------------------------------------
     const pads = await page.evaluate(() => IL.S.plan && IL.S.plan.summary && IL.S.plan.summary.pads);
-    const load = await page.evaluate(() => ({ t: document.querySelector('#rs-load-card .card__title').textContent, kv: document.getElementById('rs-load-kv').textContent,
+    const load = await page.evaluate(() => ({ t: document.querySelector('#rs-load-card .card__title').textContent,
+      kv: Array.from(document.querySelectorAll('#rs-load-kv dd')).map((d) => d.textContent).join(' | '),
       cap: document.getElementById('rs-load-cap').textContent, pic: !!document.querySelector('#rs-load-pic img, #rs-load-pic .design__none') }));
-    check('(4) Load side 1: the top, its pads, where it sits and the time', /Load side 1: the top/.test(load.t) && load.pic && new RegExp('\\b' + pads + ' pads').test(load.kv)
+    check('(4) Load side 1: the top, its pads, where it sits and the time', /Load side 1: the top/.test(load.t) && load.pic && new RegExp('^' + pads + ' pads').test(load.kv)
       && /X -?[\d.]+.*Y -?[\d.]+/.test(load.kv) && /≈ \d+/.test(load.kv) && /top side up/.test(load.cap), { pads, load });
 
     // ---- (5) the three answers only a person can give -----------------------------------------------------------------
@@ -155,7 +198,7 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
 
     // ---- (6) a need of the readiness checks ---------------------------------------------------------------------------
     await fakeStatus(page, (s) => { if (s.dispense && s.dispense.purgeRow) Object.assign(s.dispense.purgeRow, { defined: false, spotsLeft: 0, boardsLeft: 0 }); });
-    await page.waitForFunction(() => !!document.querySelector('#rs-needs .ri[data-key]'), null, { timeout: 8000 }).catch(() => null);
+    await page.waitForFunction(() => !!document.querySelector('#rs-needs .ri[data-key="purge"]'), null, { timeout: 8000 }).catch(() => null);
     const n6 = await page.evaluate(() => ({ cards: Array.from(document.querySelectorAll('#rs-needs .ri[data-key]')).map((r) => ({ key: r.dataset.key, t: r.textContent.slice(0, 140), fix: !!r.querySelector('[data-fix]') })),
       start: document.getElementById('btn-rs-start').disabled }));
     check('(6) a readiness need (no purge row) is a Needs-you card with its fix, and Start stays locked', n6.start && n6.cards.some((c) => /purge/i.test(c.key + ' ' + c.t) && c.fix), n6);
