@@ -72,7 +72,8 @@ runs:
         node-version: 22
 
     - name: Playwright browsers cache
-      if: inputs.playwright == 'true'
+      # a merge-queue run could restore only from its own temporary ref and save ~280 MB nobody reads again
+      if: inputs.playwright == 'true' && github.event_name != 'merge_group'
       uses: actions/cache@v6
       with:
         path: ${{ runner.temp }}/pw-browsers

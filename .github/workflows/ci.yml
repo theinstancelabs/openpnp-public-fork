@@ -1,8 +1,10 @@
 name: CI
 
-# The gate for the integration branch (il/integration) and every PR (INF-01, owner: Infra role). One required check:
-# "gate", green only if every job below passed. A green push to il/integration also publishes a versioned build as a
-# GitHub prerelease, which the lab computer's deployer installs when the machine is idle (INF-02, infra/deploy/).
+# The gate for the integration branch (il/integration) and every PR (INF-01, owner: Infra role). One required check,
+# "gate": in the merge queue (merge_group) and on pushes, green only if every job below passed; on a PR without the
+# label full-ci, the UI end-to-end and SIM acceptance jobs are skipped (the fast gate) and run in the queue. A green
+# push to il/integration also publishes a versioned build as a GitHub prerelease, which the lab computer's deployer
+# installs when the machine is idle (INF-02, infra/deploy/).
 # What runs where: infra/README.md.
 
 on:
@@ -16,9 +18,9 @@ on:
     branches: [il/integration]
   workflow_dispatch:
 
-# A PR's newer run cancels its older one. Push and manual runs never share a group: GitHub keeps one pending run per
-# group and cancels the older pending one, which would drop an il/integration merge's gate and release. The deployer
-# orders releases by run number and accepts ancestors, so parallel push runs are safe.
+# A PR's newer run cancels its older one. Push, merge-queue and manual runs never share a group: GitHub keeps one
+# pending run per group and cancels the older pending one, which would drop an il/integration merge's gate and release,
+# or a queued PR's gate. The deployer orders releases by run number and accepts ancestors, so parallel push runs are safe.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.event_name, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -42,7 +44,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: maven
+          cache: ${{ github.event_name != 'merge_group' && 'maven' || '' }}  # queue runs restore nothing
       - name: Package
         run: mvn -B -T1 -DskipTests package
       - uses: actions/upload-artifact@v7
@@ -80,7 +82,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: maven
+          cache: ${{ github.event_name != 'merge_group' && 'maven' || '' }}  # queue runs restore nothing
       - name: Test inputs from infra/fixtures (BR-40 env overrides)
         # LiveBoardPlanTest reads IL_TEST_BOARD and IL_LIVE_CONFIG (without them: the repo's copies, never skipped)
         run: python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"
@@ -175,12 +177,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {shard: main, title: "webui-sim, board-import, pad-profile, tip-setups"}
+          - {shard: main, title: "webui-sim, board-import, pad-profile, tip-setups, tip-flow"}
           - {shard: rest, title: "lock and the other UI scripts"}
     steps:
       - uses: actions/checkout@v7
       - name: The leg's scripts
         id: shard
+        shell: bash  # -eo pipefail: a failing webui_shards.py fails the leg, it never runs nothing and passes
         run: python3 infra/ci/webui_shards.py ${{ matrix.shard }} | tee -a "$GITHUB_OUTPUT"
       - uses: ./.github/actions/sim-env
         if: steps.shard.outputs.scripts != ''
@@ -286,6 +289,9 @@ jobs:
     if: always()
     needs: [build, infra, maven, deploy-e2e, controller-e2e, ui-e2e, ui-boardview, acceptance]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read  # the run's jobs, for the second step
     steps:
       - name: Every job passed
         env:
@@ -301,6 +307,17 @@ jobs:
           else
             echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null
           fi
+      - name: No job of this run failed or was cancelled
+        # needs can report a matrix job 'success' while one of its legs was cancelled before a runner took it
+        # (a GitHub bug, 10-2026): the run's own job list has every leg
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" > jobs.json
+          jq -r '.jobs[] | select(.name != "gate" and (.name | startswith("Release") | not))
+            | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
+            | "\(.conclusion)\t\(.name)"' jobs.json > bad.txt
+          if [ -s bad.txt ]; then echo "jobs of this run that did not pass:"; cat bad.txt; exit 1; fi
 
   release:
     name: Release (versioned build for the deployer)
