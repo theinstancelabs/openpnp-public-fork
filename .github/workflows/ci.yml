@@ -177,7 +177,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {shard: main, title: "webui-sim, board-import, pad-profile, tip-setups"}
+          - {shard: main, title: "webui-sim, board-import, pad-profile, tip-setups, tip-flow"}
           - {shard: rest, title: "lock and the other UI scripts"}
     steps:
       - uses: actions/checkout@v7
