@@ -142,6 +142,49 @@ public class DispenseExecutorTest {
         assertFalse(ch.sent.subList(0, ch.sent.size() - 6).contains("M410"));
     }
 
+    /**
+     * BR-82 review: a STOP while the pause after a dot's lift runs (the 25G recipe's 500 ms) leaves that dot counted:
+     * it is laid and lifted, so its pad is recorded and "Finish the pads left" does not lay it again.
+     */
+    @Test
+    public void stopDuringTheLiftPauseLeavesTheDotCounted() throws Exception {
+        DispenseConfig c = GcodeStreamTest.toyConfig();
+        c.profile.liftPauseMs = 500;
+        GcodeProgram p = program(c, false);
+        // the first work dot's first pause piece: the G4 right after its lift
+        List<String> t = new ArrayList<>();
+        int pause = -1;
+        boolean work = false;
+        for (GcodeProgram.Line l : p.lines) {
+            if (l.isComment()) {
+                continue;
+            }
+            work |= l.has(GcodeProgram.Marker.DOT_BEGIN) && l.dotIndex == 0;
+            if (work && pause < 0 && l.text.equals("G4 P250") && t.get(t.size() - 1).matches("G1 Z\\S+ F3000")) {
+                pause = t.size();
+            }
+            t.add(l.text);
+        }
+        int stopAt = pause;
+        DispenseExecutor[] ex = new DispenseExecutor[1];
+        FakeChannel ch = new FakeChannel() {
+            @Override
+            public void send(String line, long timeoutMs) throws Exception {
+                super.send(line, timeoutMs);
+                if (sent.size() == stopAt + 1) {
+                    ex[0].requestAbort("operator stop");
+                }
+            }
+        };
+        ex[0] = new DispenseExecutor(c, ch, "B", () -> ch.now);
+        RunResult r = run(3);
+        assertThrows(DispenseExecutor.AbortedException.class, () -> ex[0].stream(p, r, null));
+        assertEquals("G4 P250", ch.sent.get(stopAt), "the STOP came during the pause");
+        assertEquals(stop(false), ch.sent.subList(stopAt + 1, ch.sent.size()), "the rest of the pause is not sent");
+        assertEquals(1, r.dotsDone, "the first work dot was laid and lifted");
+        assertEquals(0, r.dotTimings.get(0).dotIndex);
+    }
+
     @Test
     public void i7OnTimeLimitAborts() throws Exception {
         DispenseConfig c = GcodeStreamTest.toyConfig();

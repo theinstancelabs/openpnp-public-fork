@@ -17,6 +17,7 @@ import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseDb;
 import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.DotMath;
 import org.openpnp.instancelabs.dispense.EngineRefusal;
 import org.openpnp.instancelabs.dispense.MountResult;
 import org.openpnp.instancelabs.dispense.NeedleChange;
@@ -30,6 +31,8 @@ import org.openpnp.instancelabs.dispense.TipSetup;
 import org.openpnp.instancelabs.dispense.TipSetups;
 import org.openpnp.instancelabs.dispense.TipSpec;
 import org.openpnp.instancelabs.dispense.ZCheck;
+import org.openpnp.instancelabs.padprofile.Anchor;
+import org.openpnp.instancelabs.padprofile.Limits;
 import org.openpnp.instancelabs.padprofile.Tip;
 
 import com.google.gson.JsonObject;
@@ -62,6 +65,7 @@ final class TipSetupEndpoints {
         s.route("GET", "/api/tip-setups/" + KEY + "/mount-preview", this::mountPreview);
         s.route("POST", "/api/tip-setups/" + KEY + "/mount", this::mount);
         s.route("POST", "/api/tip-setups/" + KEY + "/picture", this::picture);
+        s.route("PUT", "/api/tip-setups/" + KEY + "/dose-anchor", this::doseAnchor);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -239,6 +243,86 @@ final class TipSetupEndpoints {
             }
             return live;
         });
+    }
+
+    /**
+     * BR-85 PUT /api/tip-setups/{key}/dose-anchor {massPerPadMg, padType, source?}: the tip's own dose anchor, the
+     * paste per pad Calibrate aims for on that pad type only (the area is the type's opening, the time is stamped);
+     * {@code {}} or {@code null} clears it (the family's again), no body is a 400. A guarded write (BR-72's lock, as a
+     * live value Calibrate reads); for the mounted tip refused while the engine is busy. Returns the setup view.
+     */
+    Object doseAnchor(ApiServer.Request r) throws Exception {
+        DispenseService svc = ctx.svc();
+        TipSetup s = require(svc, r.group(1));
+        String body = new String(r.bytes(), java.nio.charset.StandardCharsets.UTF_8).trim();
+        if (body.isEmpty()) {
+            throw ApiException.badRequest("send {massPerPadMg, padType, source?}, or {} or null to clear the anchor");
+        }
+        JsonObject b = "null".equals(body) ? new JsonObject() : r.json();
+        DispenseConfig.DoseAnchor a = b.entrySet().isEmpty() ? null : anchorOf(svc, s, b);
+        if (s.key.equals(svc.getConfig().tip.key)) {
+            ctx.requireEngineIdle(svc);
+        }
+        svc.updateConfigAtomically(live -> {
+            if (s.key.equals(live.tip.key)) {
+                live.doseAnchor = a;
+            }
+            else {
+                // a setup that never got its entry gets it as a mount would (TipSetups.newEntry)
+                live.parkedTips.computeIfAbsent(s.key, k -> TipSetups.newEntry(live, live.profile, live.tip.key,
+                        s.name)).doseAnchor = a;
+            }
+            return live;
+        });
+        svc.getDb().event(null, "INFO", "TIP", a == null ? "cleared the " + s.name + "'s dose anchor: Calibrate aims "
+                + "for its pads' family's" : "the " + s.name + "'s dose anchor: " + Views.num(a.massPerPadMg)
+                        + " mg per " + a.padType + " pad (" + Views.num(a.areaMm2) + " mm²)" + (a.source == null ? ""
+                                : ", " + a.source));
+        return setupView(svc, s);
+    }
+
+    /**
+     * The anchor of a PUT dose-anchor body: 400 for a mass outside 0..20 mg, no pad type of that key, a pad type that
+     * is not k 1 on an opening of at most 4 mm², or a rate over 4 x the bench's (a typo: 19.5 for 1.95 mg on an 0603).
+     */
+    private static DispenseConfig.DoseAnchor anchorOf(DispenseService svc, TipSetup s, JsonObject b) throws Exception {
+        Double mass = Json.num(b, "massPerPadMg", null);
+        if (mass == null || !(mass > 0 && mass <= DispenseConfig.DoseAnchor.MAX_MG)) {
+            throw ApiException.badRequest("'massPerPadMg' must be above 0 and at most "
+                    + (int) DispenseConfig.DoseAnchor.MAX_MG + " mg: the paste per pad weighed");
+        }
+        String key = Json.str(b, "padType", null);
+        PadType t = key == null ? null : svc.getDb().currentPadType(key, s.key);
+        if (t == null || PadTypeEndpoints.RETIRED.equals(t.family)) {
+            throw ApiException.badRequest("'padType' must be the key of a pad type that is not retired (GET "
+                    + "/api/pad-types)" + (key == null ? "" : ": not '" + key + "'"));
+        }
+        double area = DotMath.padAreaMm2(t.padWMm, t.padHMm, t.padRoundness);
+        // the whole amount of a pad, as a validated type's anchor: centre and larger pads take the k placeholder
+        if (Math.abs(t.k - 1) > Limits.EPS || area > Limits.LARGE_PAD_MM2 + Limits.EPS) {
+            throw ApiException.badRequest("'padType' " + t.typeKey + " (k " + Views.num(t.k) + ", " + Views.num(area)
+                    + " mm²) cannot carry a dose anchor: an anchor needs k 1 and an opening of at most "
+                    + Views.num(Limits.LARGE_PAD_MM2) + " mm²");
+        }
+        String source = Json.str(b, "source", null);
+        if (source != null && source.length() > 200) {
+            throw ApiException.badRequest("'source' must be at most 200 characters");
+        }
+        DispenseConfig.DoseAnchor a = new DispenseConfig.DoseAnchor();
+        a.massPerPadMg = mass;
+        a.areaMm2 = area;
+        a.mgPerMm2 = mass / a.areaMm2;
+        double max = 4 * Anchor.BENCH.mgPerMm2;
+        if (!(a.mgPerMm2 <= max)) {
+            throw ApiException.badRequest(String.format(java.util.Locale.ROOT, "'massPerPadMg' %s mg on the %s opening "
+                    + "(%s mm²) would be %.2f mg per mm²: at most %.2f, 4 x the bench's %.2f (a typo?)", Views.num(mass),
+                    t.typeKey, Views.num(a.areaMm2), a.mgPerMm2, max, Anchor.BENCH.mgPerMm2));
+        }
+        a.padType = t.typeKey;
+        a.family = t.family;
+        a.source = source;
+        a.setAtMs = System.currentTimeMillis();
+        return a;
     }
 
     /** POST /api/tip-setups/{key}/retire and /unretire: a retired setup cannot be mounted; the mounted one stays. */

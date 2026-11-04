@@ -219,16 +219,24 @@ final class CalibrationEndpoints {
         }
         // without a pitch: 1.6 mm, or the smallest that leaves room between larger dots (F14)
         req.pitchMm = Json.num(b, "pitchMm", NeedleTouchOff.defaultPitchMm(req, svc.getConfig()));
+        int skip = svc.getConfig().profile.touchOffSkipDots;
         if (req.steps < 2 || req.steps > 20 || req.stepMm <= 0 || req.stepMm > 0.5 || req.startGapMm > 2
                 || req.pitchMm <= 0 || req.jumpRatio <= 0) {
-            throw ApiException.badRequest("steps 2 to 20, step 0 to 0.5 mm, start gap at most 2 mm, pitch and jump ratio above 0");
+            throw ApiException.badRequest("steps " + (skip + 3) + " to 20, step 0 to 0.5 mm, start gap at most 2 mm, "
+                    + "pitch and jump ratio above 0");
+        }
+        if (req.steps < skip + 3) {
+            throw ApiException.badRequest((skip == 0 ? "the reference takes the first two dots after the prime"
+                    : String.format(java.util.Locale.ROOT, "the %s's recipe skips the first %d dots after the prime "
+                            + "(touchOffSkipDots), the reference takes the next two", svc.getConfig().tip.name, skip))
+                    + " and a dot after them shows the contact: lay at least " + (skip + 3) + " dots");
         }
         String pitch = NeedleTouchOff.pitchProblem(req, svc.getConfig());
         if (pitch != null) {
             throw ApiException.badRequest(pitch);
         }
         double lowest = req.startGapMm - (req.steps - 1) * req.stepMm;
-        if (lowest < -0.1) {
+        if (lowest < -0.1 - 1e-9) { // F16: 0.30 - 8 x 0.05 is -0.10000000000000003 in doubles
             throw ApiException.badRequest(String.format(java.util.Locale.ROOT,
                     "the lowest gap would be %.3f mm, i.e. the needle %.3f mm into the surface if the current offset is right; "
                             + "keep it at -0.1 mm or above", lowest, -lowest));

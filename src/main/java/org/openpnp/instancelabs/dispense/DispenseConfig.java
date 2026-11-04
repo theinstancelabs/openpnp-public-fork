@@ -75,7 +75,7 @@ public class DispenseConfig {
     public String blankLocationName = "blank";
 
     // --- Z geometry (the dispense gap is profile.gapMm) ------------------------------------------
-    /** Hop height above the dispense Z between dots on the same board. */
+    /** Hop height above the dispense Z between dots on the same board, for profiles without a lift of their own. */
     public double hopHeightMm = 1.0;
     /** N2 Z used for travel to/from the board, waste and blank. 31.5 = see-saw balanced (LIVE home). */
     public double travelSafeZMm = 31.5;
@@ -230,6 +230,12 @@ public class DispenseConfig {
      * when it is added; a mount parks the outgoing setup here and brings the incoming one in.
      */
     public Map<String, ParkedTip> parkedTips = new LinkedHashMap<>();
+    /**
+     * BR-85: the mounted tip's own dose anchor, the paste per pad Calibrate aims for on its pad type only; null (and
+     * every other type) = the shared ones ({@code padprofile.Anchor}: the bench 0603 half turn, or a validated pad
+     * type). Set only by PUT /api/tip-setups/{key}/dose-anchor; parked and brought back with the tip.
+     */
+    public DoseAnchor doseAnchor = null;
     /** The paste in the syringe; "New paste loaded" stamps it. */
     public PasteSpec paste = new PasteSpec();
     /** Where on the blank the pad calibration lays its test dots (default: 40 x 20 mm at the blank place). */
@@ -267,6 +273,31 @@ public class DispenseConfig {
     }
 
     /**
+     * A tip's own dose anchor (BR-85): the weighed paste per pad of a pad type's opening, so Calibrate's amount window
+     * for that pad type follows this tip, not the 22G's half turn.
+     */
+    public static class DoseAnchor {
+        /** The largest paste per pad an anchor may say (mg). */
+        public static final double MAX_MG = 20;
+        public double massPerPadMg;
+        /** The pad type's opening (mm²) and mass / opening (mg per mm²). */
+        public double areaMm2;
+        public double mgPerMm2;
+        /** The pad type's key ({@code /api/pad-types/{key}}) and its family when the anchor was set. */
+        public String padType;
+        public String family;
+        /** Where the number comes from ("weighed by Process"), or null. */
+        public String source;
+        public Long setAtMs;
+
+        /** Whether a stored anchor holds: a mass above 0 and at most {@link #MAX_MG} on a pad type's opening. */
+        boolean holds() {
+            return massPerPadMg > 0 && massPerPadMg <= MAX_MG && areaMm2 > 0 && mgPerMm2 > 0 && padType != null
+                    && family != null;
+        }
+    }
+
+    /**
      * What a tip setup that is not mounted keeps (tip setups design §22.1): its profile, needle frame,
      * offset with its two times, trim and landing. A new setup's entry has no frame, the mounted offset
      * as a placeholder (both times null), a zero trim noted "new tip" and no landing.
@@ -279,6 +310,8 @@ public class DispenseConfig {
         public Long needleZOffsetHomeAtMs;
         public NeedleXyTrim needleXyTrim;
         public NeedleLanding needleLanding;
+        /** BR-85: its own dose anchor, or null. */
+        public DoseAnchor doseAnchor;
         /** When it was parked (null for a setup never mounted). */
         public Long parkedAtMs;
         /** The setup key its profile was first copied from, or "default". */
@@ -580,6 +613,11 @@ public class DispenseConfig {
     /** The dispense gap of the active profile. */
     public double gapMm() {
         return profile.gapMm;
+    }
+
+    /** The lift after each dot, above its dispense Z: the active profile's own, else the machine's hop height. */
+    public double liftMm() {
+        return profile.liftMm != null ? profile.liftMm : hopHeightMm;
     }
 
     /**
@@ -909,6 +947,14 @@ public class DispenseConfig {
                 p.add("parkedTips['" + e.getKey() + "']: its trim must be within +-1 mm and its landing within +-"
                         + (int) MAX_LANDING_MM + " mm");
             }
+            else if (t.doseAnchor != null && !t.doseAnchor.holds()) {
+                p.add("parkedTips['" + e.getKey() + "'].doseAnchor needs a mass per pad above 0 and at most "
+                        + (int) DoseAnchor.MAX_MG + " mg on a pad type's opening");
+            }
+        }
+        if (doseAnchor != null && !doseAnchor.holds()) {
+            p.add("doseAnchor needs a mass per pad above 0 and at most " + (int) DoseAnchor.MAX_MG + " mg on a pad "
+                    + "type's opening");
         }
         if (keepaliveIntervalMs < 100) {
             p.add("keepaliveIntervalMs must be >= 100");

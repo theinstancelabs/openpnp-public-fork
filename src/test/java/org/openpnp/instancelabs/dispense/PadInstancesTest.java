@@ -78,6 +78,35 @@ public class PadInstancesTest {
         assertFalse(r.ok);
     }
 
+    /**
+     * BR-85 re-review: the mounted tip's own dose anchor reaches the check under its pad type and moves that type's
+     * amount only: the 0603 resistors aim at 1.95 mg on the anchor's opening, the two-tab chips and the SOTs at what
+     * they aimed at without it.
+     */
+    @Test
+    public void theTipsDoseAnchorMovesItsPadTypesAmountOnly() {
+        DispenseConfig c = GcodeBlocksTest.cfg();
+        List<PadInstance> l = PadInstances.fromPlan(PlannerDoseTest.threeDosePlan(c));
+        List<PadType> types = Arrays.asList(PlannerDoseTest.chip0603(), PlannerDoseTest.TAB, PlannerDoseTest.SOT);
+        Map<String, ProfileCheck.PadInfo> before = ProfileCheck.of(PadInstances.inputs(l, types, null, c, null, true,
+                PadInstances.specTip(c.tip))).pads;
+        c.doseAnchor = MountTest.anchor(1.95);
+        CheckInputs in = PadInstances.inputs(l, types, null, c, null, true, PadInstances.specTip(c.tip));
+        assertEquals(Collections.singleton("chip-0603"), in.anchors.keySet());
+        Map<String, ProfileCheck.PadInfo> after = ProfileCheck.of(in).pads;
+        int own = 0;
+        for (PadInstance p : l) {
+            if ("chip-0603".equals(p.typeKey)) {
+                own++;
+                assertEquals(1.95 / c.doseAnchor.areaMm2 * p.areaMm2(), after.get(p.padId).anchorMassMg, 0.0005);
+            }
+            else {
+                assertEquals(before.get(p.padId).anchorMassMg, after.get(p.padId).anchorMassMg, 0, p.padId);
+            }
+        }
+        assertEquals(4, own);
+    }
+
     @Test
     public void fromABoardAtTheOrigin() {
         PadTypeResolver r = new PadTypeResolver(PadTypeResolverExplainTest.seeds(), null);

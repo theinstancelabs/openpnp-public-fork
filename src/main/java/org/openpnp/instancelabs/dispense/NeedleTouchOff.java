@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Locale;
 
 import org.openpnp.instancelabs.padprofile.DoseModel;
+import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.instancelabs.vision.SpotDot;
 
 /**
@@ -44,6 +45,8 @@ public final class NeedleTouchOff {
     public static final double MIN_REFERENCE_SHARE = 0.6;
     /** Start of the reason when paste at a dot's spot could not be measured. */
     public static final String STRUNG = "dots touch or are strung together";
+    /** {@link Analysis#referenceFrom} when the steady dot is the dose model's (the bench 22G's, §1.4). */
+    public static final String MODEL_REFERENCE = "the 22G model";
 
     private NeedleTouchOff() {
     }
@@ -77,6 +80,13 @@ public final class NeedleTouchOff {
         public Double bracketHighMm;
         public Double bracketLowMm;
         public Double referenceDiameterMm;
+        /**
+         * BR-85: where the steady dot the reference must reach comes from: "the tip's dots at 1600 steps (11-04 14:07)"
+         * or {@link #MODEL_REFERENCE}; null when not checked.
+         */
+        public String referenceFrom;
+        /** BR-85: the dots after the prime left out before the reference pair (the recipe's touchOffSkipDots). */
+        public int skippedDots;
         public String reason;
 
         Analysis(double[] g, Double[] d, String[] notes) {
@@ -121,6 +131,26 @@ public final class NeedleTouchOff {
         return DoseModel.dLoMm(Math.max(1, dotSteps(req, c)));
     }
 
+    /**
+     * BR-85: the steady dot of the mounted tip: its own measured dot of this dose when its dot table has one (not the
+     * 22G, whose dots are the bench model's), else the 22G model's ({@link #steadyDotMm(Request, DispenseConfig)}).
+     */
+    public static double steadyDotMm(Request req, DispenseConfig c, Tip tip) {
+        Tip.Measured own = ownDot(req, c, tip);
+        return own != null ? own.dMeanMm : steadyDotMm(req, c);
+    }
+
+    /** Where {@link #steadyDotMm(Request, DispenseConfig, Tip)} comes from, as {@link Analysis#referenceFrom} says it. */
+    public static String referenceFrom(Request req, DispenseConfig c, Tip tip) {
+        Tip.Measured own = ownDot(req, c, tip);
+        return own == null ? MODEL_REFERENCE : "the tip's dots at " + dotSteps(req, c) + " steps ("
+                + ZCheck.dayClock(own.atMs) + ")";
+    }
+
+    private static Tip.Measured ownDot(Request req, DispenseConfig c, Tip tip) {
+        return tip == null || tip.benchModel || tip.measured == null ? null : tip.measured.get(dotSteps(req, c));
+    }
+
     /** The smallest pitch for these dots (mm): the expected dot diameter + {@link #PITCH_MARGIN_MM}. */
     public static double minPitchMm(Request req, DispenseConfig c) {
         return expectedDotDiameterMm(req, c) + PITCH_MARGIN_MM;
@@ -163,7 +193,7 @@ public final class NeedleTouchOff {
             double x = blank.x + i * req.pitchMm, y = blank.y;
             double surface = plane == null ? blank.z : plane.z(x, y);
             double z = surface + cfg.needleZOffsetMm + g[i];
-            double hop = surface + cfg.needleZOffsetMm + Math.max(g[0], cfg.gapMm()) + cfg.hopHeightMm;
+            double hop = surface + cfg.needleZOffsetMm + Math.max(g[0], cfg.gapMm()) + cfg.liftMm();
             l.add(new GcodeStreamBuilder.DotSpec(x, y, z, hop, req.rotationDeg, i,
                     String.format(java.util.Locale.ROOT, "touch-off gap %.3f", g[i])));
         }
@@ -177,6 +207,12 @@ public final class NeedleTouchOff {
      * {@link #analyze(double[], Double[], String[], double, double)}.
      */
     public static Analysis analyze(double[] gapsMm, List<SpotDot> seen, double jumpRatio, double steadyDotMm) {
+        return analyze(gapsMm, seen, jumpRatio, steadyDotMm, 0);
+    }
+
+    /** As above with the first {@code skip} dots after the prime left out ({@link DispenseProfile#touchOffSkipDots}). */
+    public static Analysis analyze(double[] gapsMm, List<SpotDot> seen, double jumpRatio, double steadyDotMm,
+            int skip) {
         Double[] d = new Double[gapsMm.length];
         String[] notes = new String[gapsMm.length];
         for (int i = 0; i < gapsMm.length; i++) {
@@ -195,7 +231,7 @@ public final class NeedleTouchOff {
                         + " mm";
             }
         }
-        return analyze(gapsMm, d, notes, jumpRatio, steadyDotMm);
+        return analyze(gapsMm, d, notes, jumpRatio, steadyDotMm, skip);
     }
 
     /**
@@ -211,23 +247,32 @@ public final class NeedleTouchOff {
         return analyze(gapsMm, diametersMm, unmeasured, jumpRatio, Double.NaN);
     }
 
+    /** As {@link #analyze(double[], Double[], String[], double, double, int)} with no dot skipped. */
+    public static Analysis analyze(double[] gapsMm, Double[] diametersMm, String[] unmeasured, double jumpRatio,
+            double steadyDotMm) {
+        return analyze(gapsMm, diametersMm, unmeasured, jumpRatio, steadyDotMm, 0);
+    }
+
     /**
-     * Far to near: the first two dots are the reference and must both form, agree within the jump ratio and be steady
-     * dots, at least {@link #MIN_REFERENCE_SHARE} of {@code steadyDotMm} (dots laid too high miss or come out as
-     * droplets, then the next one carries the paste: the real ladder's first dot was a 0.37 mm droplet, and two
-     * droplets would make the first full dot look squashed); then the first dot squashed by more than the jump ratio,
-     * or missing, is the contact. Paste that could not be measured at a dot's spot ({@code unmeasured}) before the
-     * contact is reached refuses the conclusion: it could be a squashed dot as well as a normal one.
+     * Far to near: the first {@code skip} dots are left out (a tip's start blob after the prime, BR-85); the next two
+     * are the reference and must both form, agree within the jump ratio and be steady dots, at least
+     * {@link #MIN_REFERENCE_SHARE} of {@code steadyDotMm} (dots laid too high miss or come out as droplets, then the
+     * next one carries the paste: the real ladder's first dot was a 0.37 mm droplet, and two droplets would make the
+     * first full dot look squashed); then the first dot squashed by more than the jump ratio, or missing, is the
+     * contact. Paste that could not be measured at a dot's spot ({@code unmeasured}) before the contact is reached
+     * refuses the conclusion: it could be a squashed dot as well as a normal one.
      *
      * @param gapsMm commanded gaps in any order
      * @param diametersMm measured diameter per gap, null = no dot formed (or not measured)
      * @param unmeasured per gap: why the paste at its spot could not be measured, null = measured or no paste
      * @param steadyDotMm the diameter a steady dot of the ladder's dose makes on the blank ({@link #steadyDotMm}),
      *        NaN = not checked
+     * @param skip the dots left out after the prime ({@link DispenseProfile#touchOffSkipDots})
      */
     public static Analysis analyze(double[] gapsMm, Double[] diametersMm, String[] unmeasured, double jumpRatio,
-            double steadyDotMm) {
+            double steadyDotMm, int skip) {
         Analysis a = new Analysis(gapsMm.clone(), diametersMm.clone(), unmeasured.clone());
+        a.skippedDots = skip;
         Integer[] idx = new Integer[gapsMm.length];
         for (int i = 0; i < idx.length; i++) {
             idx[i] = i;
@@ -237,49 +282,60 @@ public final class NeedleTouchOff {
             a.reason = "no dots";
             return a;
         }
-        if (strung(a, gapsMm, unmeasured, idx[0])) {
+        if (idx.length <= skip) {
+            a.reason = String.format(Locale.ROOT, "every dot of the ladder is skipped (touchOffSkipDots %d): lay at "
+                    + "least %d", skip, skip + 3);
             return a;
         }
-        Double d0 = diametersMm[idx[0]];
+        // the texts' "first" dots are the first after the skipped ones
+        String after = skip == 0 ? "" : " after the " + skip + " skipped";
+        int r0 = idx[skip];
+        if (strung(a, gapsMm, unmeasured, r0)) {
+            return a;
+        }
+        Double d0 = diametersMm[r0];
         if (d0 == null) {
-            a.reason = "no dot at the largest gap: the needle is at or below the surface for every step, or "
-                    + "nothing dispensed; raise startGapMm";
+            a.reason = skip == 0 ? "no dot at the largest gap: the needle is at or below the surface for every step, or "
+                    + "nothing dispensed; raise startGapMm" : String.format(Locale.ROOT, "no dot at gap %.3f mm, the "
+                            + "first%s: the needle is at or below the surface from there, or nothing dispensed; raise "
+                            + "startGapMm", gapsMm[r0], after);
             return a;
         }
         double refD = d0;
-        if (idx.length > 1) {
-            if (strung(a, gapsMm, unmeasured, idx[1])) {
+        if (idx.length > skip + 1) {
+            int r1 = idx[skip + 1];
+            if (strung(a, gapsMm, unmeasured, r1)) {
                 return a;
             }
-            Double d1 = diametersMm[idx[1]];
+            Double d1 = diametersMm[r1];
             if (d1 == null) {
-                a.reason = String.format(Locale.ROOT, "only the first dot formed before a missing one (%.3f mm at gap "
+                a.reason = String.format(Locale.ROOT, "only the first dot%s formed before a missing one (%.3f mm at gap "
                         + "%.3f, none at gap %.3f): a contact needs two steady dots before it (the first may be a "
-                        + "droplet from too high); run the ladder again from another start gap", d0, gapsMm[idx[0]],
-                        gapsMm[idx[1]]);
+                        + "droplet from too high); run the ladder again from another start gap", after, d0, gapsMm[r0],
+                        gapsMm[r1]);
                 return a;
             }
             double lo = Math.min(d0, d1), hi = Math.max(d0, d1);
             if (hi > lo * (1 + jumpRatio)) {
-                a.reason = String.format(Locale.ROOT, "the first two dots differ too much to be the reference "
+                a.reason = String.format(Locale.ROOT, "the first two dots%s differ too much to be the reference "
                         + "(%.3f mm at gap %.3f, %.3f mm at gap %.3f: more than %.0f %%): the dots far from the "
                         + "surface did not form evenly, or the needle reached the surface at once; run the ladder "
-                        + "again from another start gap", d0, gapsMm[idx[0]], d1, gapsMm[idx[1]], 100 * jumpRatio);
+                        + "again from another start gap", after, d0, gapsMm[r0], d1, gapsMm[r1], 100 * jumpRatio);
                 return a;
             }
             refD = (d0 + d1) / 2;
         }
         if (refD < MIN_REFERENCE_SHARE * steadyDotMm) {
-            String first = idx.length > 1 ? String.format(Locale.ROOT, "two dots (%.3f mm at gap %.3f, %.3f mm at gap "
-                    + "%.3f) are", d0, gapsMm[idx[0]], diametersMm[idx[1]], gapsMm[idx[1]])
-                    : String.format(Locale.ROOT, "dot (%.3f mm at gap %.3f) is", d0, gapsMm[idx[0]]);
+            String first = idx.length > skip + 1 ? String.format(Locale.ROOT, "two dots%s (%.3f mm at gap %.3f, %.3f mm "
+                    + "at gap %.3f) are", after, d0, gapsMm[r0], diametersMm[idx[skip + 1]], gapsMm[idx[skip + 1]])
+                    : String.format(Locale.ROOT, "dot%s (%.3f mm at gap %.3f) is", after, d0, gapsMm[r0]);
             a.reason = String.format(Locale.ROOT, "the first %s under %.0f %% of the %.2f mm a steady dot of this dose "
                     + "makes on the blank: droplets from a needle too high, so a larger dot after them is no contact; "
                     + "run the ladder again from a lower start gap", first, 100 * MIN_REFERENCE_SHARE, steadyDotMm);
             return a;
         }
         a.referenceDiameterMm = refD;
-        for (int k = 2; k < idx.length; k++) {
+        for (int k = skip + 2; k < idx.length; k++) {
             if (strung(a, gapsMm, unmeasured, idx[k])) {
                 return a;
             }

@@ -40,6 +40,7 @@ const REPO = path.join(__dirname, '..', '..', '..');
 const FIX = path.join(__dirname, 'fixtures', 'tips');
 fs.mkdirSync(OUT, { recursive: true });
 fs.mkdirSync(SHOTS, { recursive: true });
+require('./needs-before.cjs')('tip-setups', ['webui-sim', 'board-import', 'pad-profile'], path.join(OUT, 'tip-setups-results.json'));
 
 const results = [];
 function check(name, cond, detail) {
