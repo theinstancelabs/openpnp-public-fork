@@ -126,6 +126,7 @@ public final class ApiServer {
         machineEndpoints.register(this);
         this.lockEndpoints = new LockEndpoints(context, machineEndpoints);
         lockEndpoints.register(this);
+        new ControlEndpoints(context, machineEndpoints).register(this);
         DispenseEndpoints dispense = new DispenseEndpoints(context, machineEndpoints);
         dispense.register(this);
         dispense.registration.register(this);
