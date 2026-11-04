@@ -3297,7 +3297,8 @@
           el('p', { class: 'panel__lead', text: 'One holder at a time: an agent, you (every window of this page), or nobody. '
             + 'While an agent has the machine this page shows everything but cannot move it. Take control stops a working agent '
             + 'the way STOP does (then Connect and Home), or only switches an idle one\'s outputs off; the machine then stays '
-            + 'yours until you give it back. While nobody has it, your first move makes it yours.' }));
+            + 'yours until you give it back. While nobody has it, your first move makes it yours. While anyone has it, '
+            + 'updates of this software wait (they install only when nobody has the machine).' }));
         const take = IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true });
         take.dataset.k = 'take';
         const give = el('button', { type: 'button', class: 'btn', 'data-k': 'release', text: 'Give back' });
