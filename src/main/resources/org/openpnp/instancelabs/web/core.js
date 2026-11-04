@@ -34,7 +34,13 @@
     ['Screw motor off (turns freely)', 'M18 B'],
     ['OpenPnP stopped: machine disabled', ''],
   ];
-  IL.WORKSPACES = ['run', 'setup', 'profile', 'calibrate', 'records'];
+  // The menu follows the agreed flows (the user's OK, 11-02; docs/ui-flows/mockups/): Run, Designs, Tip, Machine,
+  // Records (Alt+1…5). Today's Setup, Profile (pad types) and Calibrate stay workspaces of their own, reached from
+  // Machine › By hand, with Machine selected in the menu while one is open.
+  IL.NAV = ['run', 'designs', 'tip', 'machine', 'records'];
+  IL.WORKSPACES = IL.NAV.concat(['setup', 'profile', 'calibrate']);
+  /** The menu item a workspace shows as selected. */
+  IL.navOf = (ws) => (ws === 'setup' || ws === 'profile' || ws === 'calibrate' ? 'machine' : ws);
   IL.LIMITS = {
     pollMs: 700, pollHiddenMs: 2000, statusTimeoutMs: 2500, apiTimeoutMs: 10000,
     staleMs: 1500, offlineMs: 3000,
@@ -2316,7 +2322,7 @@
       // an item's nav form where its short name is too long for the subline (it never wraps, §15)
       return { sub: r.next ? r.next.nav || cap(r.next.short) : '', kind, badge: String(needs), badgeKind: kind, badgeLabel: needs + ' need you' };
     }
-    if (name === 'setup' || name === 'calibrate') return running ? { sub: 'Locked · running' } : {};
+    if (name === 'setup' || name === 'calibrate' || name === 'machine') return running ? { sub: 'Locked · running' } : {};
     if (name === 'profile') {
       const p = d.profile || {};
       if (p.startAngleNeedsConfirm) return { sub: 'Confirm angle', kind: 'need' };
@@ -2326,7 +2332,7 @@
   }
   function renderNav() {
     const s = S.status;
-    for (const name of IL.WORKSPACES) {
+    for (const name of IL.NAV) {
       const a = $('tab-btn-' + name);
       if (!a) continue;
       let v = defaultNav(name, s);
@@ -2560,9 +2566,13 @@
       P.first = true;
     }
     const w = WS[r.ws];
-    // a detail chosen in this workspace (#records/boards/<id>, #profile/pad-types/<key>) shows in its default panel: a
-    // pushed Recovery yields to it here (like its back arrow); the strip still says Stopped, other workspaces show it again
-    if (r.id && P.pushed && P.pushed.view === 'recovery' && !(w && w.ownsRecovery) && prev.ws === r.ws && prev.id !== r.id) IL.panel.close();
+    // a detail chosen in this workspace (#records/boards/<id>, #profile/pad-types/<key>) shows in its default panel: the
+    // Recovery yields to it here (like its back arrow), also one not drawn yet (a choice before the first render would
+    // have it pushed over the detail); the strip still says Stopped, other workspaces show it again
+    if (r.id && !(w && w.ownsRecovery) && prev.ws === r.ws && prev.id !== r.id) {
+      recoveryDismissedWs = r.ws;
+      if (P.pushed && P.pushed.view === 'recovery') IL.panel.close();
+    }
     if (w && w.route) safe(() => w.route(r), 'route ' + r.ws);
     IL.emit('route', r, prev);
     IL.render();
@@ -2576,7 +2586,7 @@
       if (pw.hide) safe(() => pw.hide(), 'hide ' + from);
     }
     for (const sec of document.querySelectorAll('[data-workspace]')) sec.hidden = sec.dataset.workspace !== to;
-    for (const a of document.querySelectorAll('.nav [role=tab]')) a.setAttribute('aria-selected', String(a.dataset.tab === to));
+    for (const a of document.querySelectorAll('.nav [role=tab]')) a.setAttribute('aria-selected', String(a.dataset.tab === IL.navOf(to)));
     if (P.pushed && !P.pushed.sticky) { if (P.pushed.spec.unmount) safe(() => P.pushed.spec.unmount()); P.pushed = null; }
     if (P.pushed && P.pushed.view === 'recovery' && WS[to] && WS[to].ownsRecovery) P.pushed = null;
     recoveryDismissedWs = null;
@@ -3207,7 +3217,7 @@
     if (e.key === 'Tab' && IL.dialog.top()) { trapTab(e); return; }
     if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-5]$/.test(e.code)) {
       e.preventDefault();
-      IL.go('#' + IL.WORKSPACES[Number(e.code.slice(5)) - 1]);
+      IL.go('#' + IL.NAV[Number(e.code.slice(5)) - 1]);
       return;
     }
     if (e.key === 'Enter' && isField(e.target) && e.target.tagName !== 'TEXTAREA' && !e.isComposing) {
