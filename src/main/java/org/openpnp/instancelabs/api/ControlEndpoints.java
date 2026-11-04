@@ -51,7 +51,7 @@ final class ControlEndpoints {
     static final double SURFACE_MARGIN_MM = 2;
     static final long MAX_SETTLE_MS = 2000;
     /** How long a motion request waits for its move (tests shorten it). */
-    static long moveTimeoutMs = 120_000;
+    static volatile long moveTimeoutMs = 120_000;
 
     private final ApiContext ctx;
     private final MachineEndpoints machine;
@@ -163,7 +163,7 @@ final class ControlEndpoints {
             // task OpenPnP drops would leave this press unanswered for minutes; re-review MINOR 1)
             ctx.requireMachineIdle();
             ctx.passthrough.resyncIfStale();
-            // claimed by the task when it begins, or by the timeout first: then it never runs (cancel(false) is true
+            // claimed by the task when it begins, or by the timeout first: then it does nothing (cancel(false) is true
             // for a running task too, so it cannot tell; #21 review MAJOR 1)
             AtomicBoolean claimed = new AtomicBoolean();
             Future<Object> f = m.submit(() -> {
@@ -187,8 +187,9 @@ final class ControlEndpoints {
                 out = f.get(moveTimeoutMs, TimeUnit.MILLISECONDS);
             }
             catch (TimeoutException e) {
+                // no f.cancel: a cancelled task left in OpenPnP's queue keeps the machine busy after the task ahead of
+                // it ends (follow-up review); a task the timeout claimed returns null when it runs
                 boolean neverRan = claimed.compareAndSet(false, true);
-                f.cancel(false);
                 long s = moveTimeoutMs / 1000;
                 throw ApiException.refused("the " + what + " did not " + (neverRan ? "start within " + s
                         + " s: it will not run" : "end within " + s + " s: look at the machine, press STOP if it still "
