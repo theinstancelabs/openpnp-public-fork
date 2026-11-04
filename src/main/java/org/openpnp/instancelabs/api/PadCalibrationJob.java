@@ -1844,21 +1844,27 @@ final class PadCalibrationJob {
             if (saMeasuredAtMs == null) {
                 saMeasuredAtMs = res.run.startedAtMs;
             }
-            // a dot not found in its after frame laid nothing (the dead quarter)
             List<ScrewPhaseFit.Dot> row = new ArrayList<>();
-            for (DoseBlocksResult.DotOut d : res.blocks.get(0).dots) {
+            List<DoseBlocksResult.DotOut> out = res.blocks.get(0).dots;
+            for (int i = 0; i < out.size(); i++) {
+                DoseBlocksResult.DotOut d = out.get(i);
+                // a thread or one blob joins a dot and the next: neither area is its own
+                boolean joined = d.threadToNext || i > 0 && out.get(i - 1).threadToNext;
                 row.add(new ScrewPhaseFit.Dot(DispenseProfile.angleOfCount(d.startCount, rev), d.found == null ? 0
-                        : d.found.areaMm2));
+                        : d.found.areaMm2, d.found != null, joined));
             }
             rows.add(row);
             done(b.label, String.format(Locale.ROOT, "%d dots from %s°: %d found", row.size(), Texts.num(
                     row.get(0).startDeg, 1), res.blocks.get(0).found()));
         }
-        ScrewPhaseFit.Fit fit = HALVES.equals(saMode) ? ScrewPhaseFit.halves(rows.get(0), rows.get(1))
-                : ScrewPhaseFit.quarters(rows.get(0));
-        Double feature = fit.featureDeg();
         DispenseProfile now = svc.getConfig().profile;
         DispenseProfile.StartAngleFeature old = now.startAngleFeature;
+        // the planned starts as the builder rounds them to steps
+        double s1 = DispenseProfile.angleOfCount(Math.round(saStartDeg / 360 * rev), rev);
+        ScrewPhaseFit.Fit fit = HALVES.equals(saMode) ? ScrewPhaseFit.halves(rows.get(0), s1, rows.get(1),
+                ScrewPhaseFit.norm(s1 + 90)) : ScrewPhaseFit.quarters(rows.get(0), s1, old != null && QUARTERS.equals(
+                        old.mode));
+        Double feature = fit.featureDeg();
         if (feature != null && old != null && saMode.equals(old.mode)) {
             saSuggested = ScrewPhaseFit.norm(now.startAngleDeg + feature - old.deg);
         }

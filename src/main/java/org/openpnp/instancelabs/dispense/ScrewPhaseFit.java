@@ -8,15 +8,18 @@ import java.util.TreeMap;
 
 /**
  * BR-77: the fits of the start-angle measure (plan §4), pure. Count angles in degrees, mod 360; a dot's angle is the one
- * its own Marlin count started at, its area 0 when the camera found nothing in its after frame.
+ * its own Marlin count started at, which must be the start the plan put it at.
  *
  * <ul>
  * <li><b>Halves</b> (the 22G, roles/process.md "Screw timing"): two rows of half-turn pairs, the second 90° after the
- * first. Per row x = (A − B)/(A + B) of the dots at its start and half a turn on; x = −(2a/π)·sin(start − peak) gives
- * the flow's peak and its amplitude a.</li>
- * <li><b>Quarters</b> (the 25G at a threshold): 4 quarter dots per turn; the dead quarter's start by the first harmonic
- * of the 4 means (the 90° grid alone misses ±22.5°), the grid's own minimum kept beside it.</li>
+ * first. Per row x = (A − B)/(A + B) of the found dots at its start and half a turn on (a half turn always lays paste);
+ * x = −(2a/π)·sin(start − peak) gives the flow's peak and its amplitude a.</li>
+ * <li><b>Quarters</b> (the 25G at a threshold): 4 quarter dots per turn, a dot not found laid nothing; the dead quarter's
+ * start by the first harmonic of the 4 means (the 90° grid alone misses ±22.5°), the grid's own minimum kept beside
+ * it.</li>
  * </ul>
+ *
+ * <p>Two dots a thread or one blob joins are left out (their areas are not their own), and named.</p>
  */
 public final class ScrewPhaseFit {
     public static final String HIGH = "high", LOW = "low", NONE = "none";
@@ -26,6 +29,8 @@ public final class ScrewPhaseFit {
     /** Quarters (Process 11-04): dead at or below 0.2 of the largest mean, a dip at or below 0.5; a live cv above 0.15. */
     static final double DEAD_SHARE = 0.2, DIP_SHARE = 0.5, LIVE_CV_MAX = 0.15;
     static final int MIN_DOTS_PER_ANGLE = 2;
+    /** A dot's count angle this far (deg, about 4 steps) from its planned start: the count does not match the plan. */
+    static final double SLOT_DEG = 1;
 
     private ScrewPhaseFit() {
     }
@@ -33,10 +38,18 @@ public final class ScrewPhaseFit {
     /** A measured dot: the count angle it started at (deg) and its area (mm², 0 when not found). */
     public static final class Dot {
         public final double startDeg, areaMm2;
+        /** Found in its after frame; joined to a neighbour by a thread or one blob (its area is not its own). */
+        public final boolean found, joined;
 
         public Dot(double startDeg, double areaMm2) {
+            this(startDeg, areaMm2, areaMm2 > 0, false);
+        }
+
+        public Dot(double startDeg, double areaMm2, boolean found, boolean joined) {
             this.startDeg = startDeg;
             this.areaMm2 = areaMm2;
+            this.found = found;
+            this.joined = joined;
         }
     }
 
@@ -66,7 +79,8 @@ public final class ScrewPhaseFit {
     }
 
     public static final class Quarters extends Fit {
-        public Double deadQuarterStartDeg, gridDeadStartDeg;
+        /** The start of one more grid when the dead region straddles two quarters (Process 11-04), else null. */
+        public Double deadQuarterStartDeg, gridDeadStartDeg, regridStartDeg;
         /** The means of the three quarters but the grid's dead one, by start angle. */
         public final Map<Double, Double> liveQuarterAreas = new TreeMap<>();
         /** Each angle's cv (sample SD / mean); null for a dead quarter. Never pooled over the live quarters. */
@@ -79,22 +93,25 @@ public final class ScrewPhaseFit {
         }
     }
 
-    /** Two rows of half-turn pairs, row 2 starting 90° after row 1. */
-    public static Halves halves(List<Dot> row1, List<Dot> row2) {
+    /** Two rows of half-turn pairs as planned: row 1 from s1, row 2 from s2 = s1 + 90. */
+    public static Halves halves(List<Dot> row1, double s1, List<Dot> row2, double s2) {
         Halves h = new Halves();
+        List<String> notes = new ArrayList<>();
         double maxSe = 0;
-        for (List<Dot> dots : java.util.Arrays.asList(row1, row2)) {
+        double[] starts = {norm(s1), norm(s2)};
+        List<List<Dot>> rows = java.util.Arrays.asList(row1, row2);
+        for (int k = 0; k < 2; k++) {
             Row r = new Row();
-            r.startDeg = norm(dots.get(0).startDeg);
-            List<List<Double>> half = groups(dots, r.startDeg, 180, 2);
-            for (int j = 0; j < 2; j++) {
-                int found = 0;
-                for (double v : half.get(j)) {
-                    found += v > 0 ? 1 : 0;
-                }
-                if (found < MIN_FOUND_PER_HALF && h.why.isEmpty()) {
-                    h.why.add("only " + found + (found == 1 ? " dot" : " dots") + " found at " + deg(r.startDeg + 180
-                            * j) + ": at least " + MIN_FOUND_PER_HALF + " per half");
+            r.startDeg = starts[k];
+            List<List<Double>> half = groups(h, rows.get(k), r.startDeg, 180, 2, true, notes);
+            if (half == null) {
+                return h;
+            }
+            for (int j = 0; j < 2 && h.why.isEmpty(); j++) {
+                if (half.get(j).size() < MIN_FOUND_PER_HALF) {
+                    int n = half.get(j).size();
+                    h.why.add("only " + n + (n == 1 ? " dot" : " dots") + " found at " + deg(r.startDeg + 180 * j)
+                            + ": at least " + MIN_FOUND_PER_HALF + " per half");
                 }
             }
             if (!h.why.isEmpty()) {
@@ -106,11 +123,13 @@ public final class ScrewPhaseFit {
             maxSe = Math.max(maxSe, r.xSe);
             h.rows.add(r);
         }
-        double x1 = h.rows.get(0).x, x2 = h.rows.get(1).x, k = Math.hypot(x1, x2);
-        h.peakDeg = norm(h.rows.get(0).startDeg - Math.toDegrees(Math.atan2(-x1, -x2)));
+        Row r1 = h.rows.get(0), r2 = h.rows.get(1);
+        double x1 = r1.x, x2 = r2.x, k = Math.hypot(x1, x2);
+        h.peakDeg = norm(r1.startDeg - Math.toDegrees(Math.atan2(-x1, -x2)));
         h.a = Math.PI / 2 * k;
         h.balancedStartDeg = norm(h.peakDeg + 180);
-        h.peakSeDeg = k == 0 ? null : Math.toDegrees(Math.hypot(h.rows.get(0).xSe, h.rows.get(1).xSe) / k);
+        // the error of atan2(−x1, −x2) by x1 and x2
+        h.peakSeDeg = k == 0 ? null : Math.toDegrees(Math.hypot(x2 * r1.xSe, x1 * r2.xSe) / (k * k));
         if (k == 0 || k < RIPPLE_SE * maxSe) {
             h.why.add("no ripple: a whole-turn recipe needs no start angle");
         }
@@ -119,20 +138,28 @@ public final class ScrewPhaseFit {
                     + "it)", DispenseProfile.plain(round1(h.peakSeDeg)), DispenseProfile.plain(LOW_SE_DEG)));
         }
         else {
-            h.confidence = h.peakSeDeg <= HIGH_SE_DEG ? HIGH : LOW;
-            if (LOW.equals(h.confidence)) {
+            h.confidence = h.peakSeDeg <= HIGH_SE_DEG && notes.isEmpty() ? HIGH : LOW;
+            if (h.peakSeDeg > HIGH_SE_DEG) {
                 h.why.add(String.format(Locale.ROOT, "the peak's standard error is %s° (high at most %s°)",
                         DispenseProfile.plain(round1(h.peakSeDeg)), DispenseProfile.plain(HIGH_SE_DEG)));
             }
         }
+        h.why.addAll(notes);
         return h;
     }
 
-    /** Quarter dots of whole turns, from the first dot's angle on. */
-    public static Quarters quarters(List<Dot> dots) {
+    /**
+     * Quarter dots of whole turns from p as planned. {@code deadQuarterStored}: the stored start angle was set from a
+     * dead quarter (no dead quarter now says the pressure changed).
+     */
+    public static Quarters quarters(List<Dot> dots, double p, boolean deadQuarterStored) {
         Quarters q = new Quarters();
-        double p = norm(dots.get(0).startDeg);
-        List<List<Double>> g = groups(dots, p, 90, 4);
+        List<String> notes = new ArrayList<>();
+        p = norm(p);
+        List<List<Double>> g = groups(q, dots, p, 90, 4, false, notes);
+        if (g == null) {
+            return q;
+        }
         double[] m = new double[4], s = new double[4];
         for (int j = 0; j < 4; j++) {
             s[j] = norm(p + 90 * j);
@@ -171,7 +198,8 @@ public final class ScrewPhaseFit {
             }
         }
         if (dips.isEmpty()) {
-            q.why.add("no dead quarter: every quarter lays more than half the largest");
+            q.why.add((deadQuarterStored ? "the dead quarter is gone: check the regulator (" : "no dead quarter: ")
+                    + "every quarter lays more than half the largest" + (deadQuarterStored ? ")" : ""));
             return q;
         }
         for (int j = 0; j < 4; j++) {
@@ -179,7 +207,9 @@ public final class ScrewPhaseFit {
                 q.why.add("a dead half: run the halves measure");
                 return q;
             }
-            if (j < 2 && dip[j] && dip[j + 2]) {
+        }
+        for (int j = 0; j < 2; j++) {
+            if (dip[j] && dip[j + 2]) {
                 q.why.add("two dips half a turn apart (" + deg(s[j]) + " and " + deg(s[j + 2]) + ")");
                 return q;
             }
@@ -187,8 +217,10 @@ public final class ScrewPhaseFit {
         if (dips.size() == 2) {
             int a = dips.get(0), b = dips.get(1);
             int first = (a + 1) % 4 == b ? a : b; // in turn order
+            q.regridStartDeg = q.deadQuarterStartDeg;
             q.why.add("the dead region straddles two quarters (" + deg(s[first]) + " and " + deg(s[(first + 1) % 4])
-                    + ")");
+                    + "): measure again from startDeg " + DispenseProfile.plain(round1(q.regridStartDeg) % 360) + " to "
+                    + "put a grid start on it");
         }
         else if (!dead[min]) {
             q.why.add("the dip at " + deg(s[min]) + " is only partly dead");
@@ -200,20 +232,66 @@ public final class ScrewPhaseFit {
                         cv, LIVE_CV_MAX));
             }
         }
+        q.why.addAll(notes);
         q.confidence = q.why.isEmpty() ? HIGH : LOW;
         return q;
     }
 
-    /** The values of the dots grouped by the nearest of {@code n} angles {@code step} apart from {@code p}. */
-    private static List<List<Double>> groups(List<Dot> dots, double p, double step, int n) {
+    /**
+     * The areas of the dots by the nearest of {@code n} planned starts {@code step} apart from {@code p} (found only when
+     * {@code foundOnly}, else a dot not found counts 0); the joined and, with foundOnly, the missed dots named in
+     * {@code notes}. Null, with the fit's reason, when an area is no number or a dot is off its planned start.
+     */
+    private static List<List<Double>> groups(Fit f, List<Dot> dots, double p, double step, int n, boolean foundOnly,
+            List<String> notes) {
         List<List<Double>> g = new ArrayList<>();
+        int[] missed = new int[n], joined = new int[n];
         for (int j = 0; j < n; j++) {
             g.add(new ArrayList<>());
         }
         for (Dot d : dots) {
-            g.get((int) Math.floorMod(Math.round(norm(d.startDeg - p) / step), (long) n)).add(d.areaMm2);
+            int j = (int) Math.floorMod(Math.round(norm(d.startDeg - p) / step), (long) n);
+            if (Math.abs(norm(d.startDeg - p - j * step + 180) - 180) > SLOT_DEG) {
+                List<String> planned = new ArrayList<>();
+                for (int i = 0; i < n; i++) {
+                    planned.add(deg(p + i * step));
+                }
+                String last = planned.remove(n - 1);
+                f.why.add("a dot started at " + deg(d.startDeg) + ", not at " + String.join(", ", planned) + " or " + last
+                        + " as planned: the screw's count does not match the plan");
+                return null;
+            }
+            if (!Double.isFinite(d.areaMm2)) {
+                f.why.add("the area of a dot at " + deg(d.startDeg) + " is not a number: the camera did not measure it");
+                return null;
+            }
+            if (d.joined) {
+                joined[j]++;
+            }
+            else if (!d.found && foundOnly) {
+                missed[j]++;
+            }
+            else {
+                g.get(j).add(d.found ? d.areaMm2 : 0);
+            }
+        }
+        for (int j = 0; j < n; j++) {
+            if (missed[j] > 0) {
+                notes.add(dots(missed[j]) + " not found at " + deg(p + j * step) + " (a half turn always lays paste): left "
+                        + "out");
+            }
+        }
+        for (int j = 0; j < n; j++) {
+            if (joined[j] > 0) {
+                notes.add(dots(joined[j]) + " joined to a neighbour (a thread or one blob) at " + deg(p + j * step)
+                        + ": left out");
+            }
         }
         return g;
+    }
+
+    private static String dots(int n) {
+        return n + (n == 1 ? " dot" : " dots");
     }
 
     private static double mean(List<Double> l) {
@@ -239,7 +317,10 @@ public final class ScrewPhaseFit {
     /** An angle in [0, 360). */
     public static double norm(double deg) {
         double d = deg % 360;
-        return d < 0 ? d + 360 : d >= 360 ? 0 : d;
+        if (d < 0) {
+            d += 360;
+        }
+        return d >= 360 ? 0 : d;
     }
 
     private static double round1(double x) {
