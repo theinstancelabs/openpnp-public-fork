@@ -193,7 +193,19 @@ def make_handler(web, api, fx, rf=None):
             self.end_headers()
             self.wfile.write(body)
 
+        def _cross_site(self):
+            # devproxy drops Origin and Sec-Fetch-Site, so the API's own guard never sees a page elsewhere in this
+            # browser writing through it: refuse such writes here (no Origin: a test or curl; the page's own: allowed)
+            if self.command in ("GET", "HEAD"):
+                return False
+            if self.headers.get("Sec-Fetch-Site", "") == "cross-site":
+                return True
+            origin, host = self.headers.get("Origin"), self.headers.get("Host", "")
+            return bool(origin) and origin not in ("http://" + host, "https://" + host)
+
         def _proxy(self):
+            if self._cross_site():
+                return self._send(403, b'{"error":"refused","reason":"a write from another site through devproxy"}', "application/json")
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else None
             spec = rf.find(self.command, self.path.split("?")[0]) if rf else None
