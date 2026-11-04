@@ -144,10 +144,85 @@ public class ControlApiSimTest {
         assertEquals(z, loc(sim.n1).getZ(), 1e-6, "nothing moved");
         // the camera has no Z
         refused(409, "Z", call("POST", "/api/jog", "{\"tool\":\"camera\",\"dz\":1}", UI));
-        // unhomed: only a raise
+        // unhomed: nothing moves (on the see-saw a raise lowers the other nozzle; OpenPnP refuses unhomed motion too)
         sim.machine.setHomed(false);
-        refused(409, "home", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-1}", UI));
-        refused(409, "home", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1}", UI));
+        refused(409, "Home first", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-1}", UI));
+        refused(409, "Home first", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1}", UI));
+        refused(409, "Home first", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
+    }
+
+    /** The needle's frame as the bench has it (ApiServerSimTest.setPlaces): contact over a 5.5 surface at Z 2.91. */
+    void needleFrameAndBlank() throws Exception {
+        ok(call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}",
+                UI));
+        ok(call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}", UI));
+        ok(call("PUT", "/api/surfaces/blank", "{\"points\":[[60,30,5.5],[200,30,5.5],[60,50,5.5],[200,50,5.5]]}",
+                UI));
+    }
+
+    /**
+     * #19 review of BR-49, BLOCKER 1: N1 and the needle share one Z (a see-saw): raising N1 lowers the needle, so the
+     * needle's floor holds for an N1 press too.
+     */
+    @Test
+    public void theSeeSawRaisingN1NeverPushesTheNeedleBelowItsFloor() throws Exception {
+        needleFrameAndBlank();
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        // the needle down, press by press, to its floor: the surface under it + its offset (5.5 - 2.59 = 2.91)
+        int presses = 0;
+        while (loc(sim.n2).getZ() - 2 >= 2.91 - 1e-9 && presses++ < 30) {
+            ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        }
+        double needleZ = loc(sim.n2).getZ();
+        refused(409, "floor 2.91", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        // raising N1 by 2 mm would lower the needle by 2 mm: refused, naming the needle
+        Res up = call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":2}", UI);
+        refused(409, "the needle", up);
+        assertTrue(up.body.contains("share one Z"), up.toString());
+        assertEquals(needleZ, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+        // a small N1 raise that keeps the needle above its floor passes
+        double room = needleZ - 2.91;
+        if (room > 0.2) {
+            ok(call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":0.1}", UI));
+        }
+    }
+
+    /**
+     * #19 review of BR-49, BLOCKER 2 and MAJOR 3: X/Y moves only with both nozzles at travel height, and a move-to
+     * ends with both inside their safe zones (never a tool left low at the new place).
+     */
+    @Test
+    public void xyMovesOnlyAtTravelHeightAndMoveToEndsBothInTheirZones() throws Exception {
+        double low = sim.n1.getSafeZ().convertToUnits(LengthUnit.Millimeters).getValue();
+        int presses = 0;
+        while (loc(sim.n1).getZ() >= low - 0.5 && presses++ < 30) {
+            ok(call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-2}", UI));
+        }
+        assertTrue(loc(sim.n1).getZ() < low, "N1 below its safe zone: " + loc(sim.n1));
+        refused(409, "travel height", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1}", UI));
+        refused(409, "travel height", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dy\":1}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":150,\"y\":120}", UI));
+        for (org.openpnp.spi.Nozzle n : new org.openpnp.spi.Nozzle[] {sim.n1, sim.n2}) {
+            org.openpnp.model.Length[] zone = n.getSafeZZone();
+            double z = loc(n).getZ();
+            assertTrue(z >= zone[0].convertToUnits(LengthUnit.Millimeters).getValue() - 1e-6
+                    && z <= zone[1].convertToUnits(LengthUnit.Millimeters).getValue() + 1e-6,
+                    n.getName() + " inside its safe zone after the move-to: " + z);
+        }
+    }
+
+    /** #19 review of BR-49, MINOR 7: a real unhomed state (STOP, then Start), not a faked flag. */
+    @Test
+    public void afterAStopAndStartNothingMovesUntilHomed() throws Exception {
+        ok(call("POST", "/api/stop", null, null));
+        long t0 = System.currentTimeMillis();
+        while (sim.machine.isEnabled() && System.currentTimeMillis() - t0 < 20000) {
+            Thread.sleep(50);
+        }
+        ok(call("POST", "/api/machine/enable", "{}", UI));
+        refused(409, "Home first", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
+        refused(409, "Home first", call("POST", "/api/move-to", "{\"tool\":\"n1\",\"x\":100,\"y\":100}", UI));
+        ok(call("POST", "/api/machine/home", "{\"wait\":true}", UI));
         ok(call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
     }
 

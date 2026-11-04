@@ -7,10 +7,13 @@ import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SurfacePlane;
+import org.openpnp.model.AxesLocation;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.spi.Camera;
@@ -18,6 +21,7 @@ import org.openpnp.spi.Head;
 import org.openpnp.spi.HeadMountable;
 import org.openpnp.spi.Machine;
 import org.openpnp.spi.MotionPlanner;
+import org.openpnp.spi.base.AbstractHeadMountable;
 import org.openpnp.util.MovableUtils;
 import org.pmw.tinylog.Logger;
 
@@ -28,12 +32,15 @@ import com.google.gson.JsonObject;
  * and move-to through OpenPnP's own motion on its machine thread (guarded writes: BR-72's lock), and the top and
  * bottom cameras read through OpenPnP's own capture (GETs, never locked).
  *
- * <p>Rules as the engine's moves: refused while the machine is off, busy (a task, a G-code batch, a pressure hold,
- * OpenPnP moving) or switching off; before a home only a raise; inside the soft limits (OpenPnP's own check); one press
- * at most {@value #MAX_XY_MM} mm in X/Y and {@value #MAX_Z_MM} mm in Z. Z floors where the engine knows the surface:
- * N1 not more than {@value #N1_BELOW_SURFACE_MM} mm below a probed surface under it (it may touch: the by-hand probe),
- * the needle not below its I4 floor ({@link DispenseConfig#needleFloorZMm()}); elsewhere the person lowers press by
- * press, watching. Move-to travels at safe Z and ends there: it never lowers. STOP ends either at once.</p>
+ * <p>Rules (#19 review of BR-49: N1 and the needle share one Z axis, a see-saw): nothing moves unhomed, off, busy
+ * (a task, a G-code batch, a pressure hold, a pad calibration) or switching off; one motion request at a time, checked
+ * again on OpenPnP's machine thread; one press at most {@value #MAX_XY_MM} mm in X/Y and {@value #MAX_Z_MM} mm in Z;
+ * X/Y only with both nozzles at travel height (their safe zones); a Z press puts BOTH nozzles where OpenPnP's
+ * transforms say and holds each to its floor at its own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed
+ * surface under it (it may touch: the by-hand probe), the needle with a current frame not below the surface under it
+ * (contact = surface + offset) nor its I4 floor, without one not below its safe zone. Move-to travels at safe Z and
+ * ends at the tool's safe Z (both nozzles at travel height). A STOP ends either at once; a move that saw one answers
+ * 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
@@ -46,6 +53,8 @@ final class ControlEndpoints {
 
     private final ApiContext ctx;
     private final MachineEndpoints machine;
+    /** One motion request at a time (#19 review of BR-49, MINOR 5). */
+    private final ReentrantLock motionLock = new ReentrantLock();
 
     ControlEndpoints(ApiContext ctx, MachineEndpoints machine) {
         this.ctx = ctx;
@@ -81,21 +90,19 @@ final class ControlEndpoints {
         }
         Machine m = ctx.machine();
         HeadMountable hm = tool(tool);
-        requireFree(m);
-        if (!m.isHomed() && (dx != 0 || dy != 0 || dz < 0)) {
-            throw ApiException.refused("the machine is not homed: Home first (only a raise works now)");
-        }
-        Location from = hm.getLocation().convertToUnits(LengthUnit.Millimeters);
-        Location to = from.add(new Location(LengthUnit.Millimeters, dx, dy, dz, 0));
-        if (dz < 0) {
-            double floor = floor(tool, to.getX(), to.getY());
-            if (Double.isFinite(floor) && to.getZ() < floor - 1e-9) {
-                throw ApiException.refused(String.format(Locale.ROOT, "%s would go to Z %.2f, below its floor %.2f "
-                        + "(%s): raise it, or jog in smaller steps", label(tool), to.getZ(), floor, floorWhy(tool)));
+        return motion(m, "jog", () -> {
+            Location from = mm(hm.getLocation());
+            Location to = from.add(new Location(LengthUnit.Millimeters, dx, dy, dz, 0));
+            if (dx != 0 || dy != 0) {
+                requireTravelHeight();
             }
-        }
-        move(m, hm, to, false);
-        return answer(tool, hm, from);
+            if (dz != 0) {
+                requireFloors(m, hm, to);
+            }
+            hm.moveTo(to);
+            m.getMotionPlanner().waitForCompletion(hm, MotionPlanner.CompletionType.WaitForStillstand);
+            return answer(tool, hm, from);
+        });
     }
 
     Object moveTo(ApiServer.Request r) throws Exception {
@@ -106,8 +113,7 @@ final class ControlEndpoints {
         Machine m = ctx.machine();
         HeadMountable hm = tool(tool);
         if (place != null) {
-            DispenseService svc = ctx.svc();
-            DispenseConfig.NamedLocation p = svc.getConfig().location(place);
+            DispenseConfig.NamedLocation p = ctx.svc().getConfig().location(place);
             if (p == null) {
                 throw ApiException.notFound("no place named '" + place + "' (GET /api/locations)");
             }
@@ -117,27 +123,91 @@ final class ControlEndpoints {
         if (x == null || y == null || !Double.isFinite(x) || !Double.isFinite(y)) {
             throw ApiException.badRequest("a place, or x and y");
         }
-        requireFree(m);
-        if (!m.isHomed()) {
-            throw ApiException.refused("the machine is not homed: Home first");
-        }
-        Location from = hm.getLocation().convertToUnits(LengthUnit.Millimeters);
-        // it ends at safe Z over the target: it never lowers (lowering is jog's, a press at a time)
-        double safeZ = hm.getSafeZ().convertToUnits(LengthUnit.Millimeters).getValue();
-        Location to = new Location(LengthUnit.Millimeters, x, y, Math.max(safeZ, from.getZ()), from.getRotation());
-        move(m, hm, to, true);
-        return answer(tool, hm, from);
+        double tx = x, ty = y;
+        return motion(m, "move-to", () -> {
+            Location from = mm(hm.getLocation());
+            // it ends at the tool's safe Z, the bottom of its safe zone: on the see-saw that is the other nozzle's
+            // zone too, so both end at travel height (#19 review of BR-49: never a tool left low at the new place)
+            double z = "camera".equals(tool) ? from.getZ() : safeLow(hm);
+            Location to = new Location(LengthUnit.Millimeters, tx, ty, z, from.getRotation());
+            MovableUtils.moveToLocationAtSafeZ(hm, to);
+            m.getMotionPlanner().waitForCompletion(hm, MotionPlanner.CompletionType.WaitForStillstand);
+            return answer(tool, hm, from);
+        });
     }
 
-    /** The checks every motion route makes before it queues anything. */
+    @FunctionalInterface
+    private interface Task {
+        Object run() throws Exception;
+    }
+
+    /**
+     * One motion request at a time (a double press, two tabs), on OpenPnP's machine thread where the state is checked
+     * again and the target and the floors are worked out (nothing else moves the machine meanwhile). A STOP while it
+     * ran answers 409 even when the move's last ok came (the STOP's flush is not the head arriving).
+     */
+    private Object motion(Machine m, String what, Task task) throws Exception {
+        if (!motionLock.tryLock()) {
+            throw ApiException.refused("another move is still running: wait for it");
+        }
+        try {
+            long stops = ctx.stops.get();
+            requireFree(m);
+            Future<Object> f = m.submit(() -> {
+                try {
+                    requireFree(m);
+                    return task.run();
+                }
+                catch (Exception e) {
+                    return e; // returned, not thrown: OpenPnP drops every task queued behind one that throws
+                }
+            }, null, true);
+            Object out;
+            try {
+                out = f.get(MOVE_TIMEOUT_S, TimeUnit.SECONDS);
+            }
+            catch (TimeoutException e) {
+                f.cancel(false); // queued and not begun: it never runs
+                throw ApiException.refused("the " + what + " did not start or end within " + MOVE_TIMEOUT_S + " s: "
+                        + "nothing more is sent for it; look at the machine");
+            }
+            catch (ExecutionException e) {
+                out = e.getCause();
+            }
+            if (out instanceof ApiException) {
+                throw (ApiException) out;
+            }
+            if (out instanceof Exception) {
+                String why = MachineEndpoints.rootMessage((Exception) out);
+                Logger.info("web {}: refused or stopped: {}", what, why);
+                throw ApiException.refused((m.isEnabled() ? "the move was refused: " : "the move was stopped: ") + why);
+            }
+            if (ctx.stops.get() != stops || !m.isEnabled() || ctx.switchOff.inProgress()) {
+                throw ApiException.refused("the move was stopped (STOP): the head may be short of its target; Start, "
+                        + "then Home");
+            }
+            return out;
+        }
+        finally {
+            motionLock.unlock();
+        }
+    }
+
+    /** The checks every motion makes, before it is queued and again on the machine thread. */
     private void requireFree(Machine m) throws ApiException {
         if (!m.isEnabled()) {
             throw ApiException.refused("the machine is not started: press Start first");
         }
         ctx.requireNotSwitchingOff();
+        if (!m.isHomed()) {
+            throw ApiException.refused("the machine is not homed: Home first");
+        }
         DispenseService svc = ctx.svcOrNull();
-        if (svc != null) {
-            ctx.requireEngineIdle(svc);
+        if (svc != null && svc.isBusy()) {
+            throw ApiException.refused("a dispense task is running: wait for it or press STOP");
+        }
+        if (ctx.padCalJobs.lockReason() != null) {
+            throw ApiException.refused(ctx.padCalJobs.lockReason());
         }
         if (ctx.passthrough.running()) {
             throw ApiException.refused("a G-code batch is running: wait for it or press STOP");
@@ -145,44 +215,128 @@ final class ControlEndpoints {
         if (ctx.pressure.isActive()) {
             throw ApiException.refused("the pressure is on: Pressure off first (nothing moves under pressure here)");
         }
-        ctx.requireMachineIdle();
     }
 
-    /** On OpenPnP's machine thread, waiting for the head to stop; STOP (a disable) ends it with a refusal. */
-    private void move(Machine m, HeadMountable hm, Location to, boolean atSafeZ) throws Exception {
-        long stops = ctx.stops.get();
-        Future<Object> f = m.submit(() -> {
+    /** X/Y moves only with both nozzles at travel height: nothing is dragged across the bed (#19 review of BR-49). */
+    private void requireTravelHeight() throws ApiException {
+        for (HeadMountable n : nozzles()) {
+            double z = mm(n.getLocation()).getZ(), low = safeLow(n);
+            if (Double.isFinite(low) && z < low - 1e-6) {
+                throw ApiException.refused(String.format(Locale.ROOT, "%s is below its safe zone (Z %.2f, the zone "
+                        + "starts at %.2f): raise it first; X and Y move only at travel height", name(n), z, low));
+            }
+        }
+    }
+
+    /**
+     * Both nozzles where they would be if {@code hm} went to {@code to} (N1 and the needle share one Z axis: a see-saw,
+     * lowering one raises the other), each against its own floor at its own X/Y (#19 review of BR-49, BLOCKER 1).
+     */
+    private void requireFloors(Machine m, HeadMountable hm, Location to) throws Exception {
+        AxesLocation target = new AxesLocation(m).put(((AbstractHeadMountable) hm).toRaw(hm.toHeadLocation(to)));
+        for (HeadMountable n : nozzles()) {
+            Location at = mm(n.toHeadMountableLocation(((AbstractHeadMountable) n).toTransformed(target)));
+            boolean needle = isNeedle(n);
+            double floor = needle ? needleFloor(n, at.getX(), at.getY()) : n1Floor(at.getX(), at.getY());
+            if (Double.isFinite(floor) && at.getZ() < floor - 1e-9) {
+                throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over (%.1f, %.1f), "
+                        + "below its floor %.2f (%s)%s", name(n), at.getZ(), at.getX(), at.getY(), floor,
+                        needle ? needleFloorWhy() : plain(N1_BELOW_SURFACE_MM) + " mm below the probed surface under it",
+                        n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
+            }
+        }
+    }
+
+    /** N1 at most 0.5 mm below a probed surface under it (it may touch: the by-hand probe); NaN: none known there. */
+    private double n1Floor(double x, double y) {
+        double s = surfaceUnder(x, y);
+        return Double.isFinite(s) ? s - N1_BELOW_SURFACE_MM : Double.NaN;
+    }
+
+    /**
+     * The needle: with its frame current (anchored and touched off since the last needle change), not below the
+     * surface under it (needle contact = surface + offset) nor its I4 floor; without, not below its safe zone.
+     */
+    private double needleFloor(HeadMountable needle, double x, double y) {
+        DispenseService svc = ctx.svcOrNull();
+        if (svc == null) {
+            return safeLow(needle);
+        }
+        DispenseConfig c = svc.getConfig();
+        if (!c.isNeedleAnchored() || !c.isNeedleTouchedOff()) {
+            return safeLow(needle);
+        }
+        double floor = c.needleFloorZMm();
+        double s = surfaceUnder(x, y);
+        if (Double.isFinite(s)) {
+            floor = Double.isFinite(floor) ? Math.max(floor, s + c.needleZOffsetMm) : s + c.needleZOffsetMm;
+        }
+        return floor;
+    }
+
+    private String needleFloorWhy() {
+        DispenseService svc = ctx.svcOrNull();
+        DispenseConfig c = svc == null ? null : svc.getConfig();
+        return c != null && c.isNeedleAnchored() && c.isNeedleTouchedOff()
+                ? "the surface under it, or its I4 floor"
+                : "its safe zone: its Z frame is not set for this needle";
+    }
+
+    /** The highest probed surface under (x, y) (N1-contact Z), NaN where none is known. */
+    private double surfaceUnder(double x, double y) {
+        DispenseService svc = ctx.svcOrNull();
+        DispenseConfig c = svc == null ? null : svc.getConfig();
+        if (c == null || c.surfaces == null) {
+            return Double.NaN;
+        }
+        double top = Double.NaN;
+        for (DispenseConfig.SurfaceMap sm : c.surfaces.values()) {
+            if (sm == null || sm.points == null || sm.points.size() < 3 || !covers(sm.points, x, y)) {
+                continue;
+            }
             try {
-                if (atSafeZ) {
-                    MovableUtils.moveToLocationAtSafeZ(hm, to);
-                }
-                else {
-                    hm.moveTo(to);
-                }
-                m.getMotionPlanner().waitForCompletion(hm, MotionPlanner.CompletionType.WaitForStillstand);
-                return null;
+                double z = SurfacePlane.fit(sm.points).z(x, y);
+                top = Double.isNaN(top) ? z : Math.max(top, z);
             }
-            catch (Exception e) {
-                return e; // returned, not thrown: OpenPnP drops every task queued behind one that throws
+            catch (RuntimeException e) {
+                // a degenerate surface (collinear points) gives no floor
             }
-        }, null, true);
-        Object out;
-        try {
-            out = f.get(MOVE_TIMEOUT_S, TimeUnit.SECONDS);
         }
-        catch (ExecutionException e) {
-            out = e.getCause();
+        return top;
+    }
+
+    /** N1 and the needle (the engine's), else the head's nozzles. */
+    private List<HeadMountable> nozzles() {
+        List<HeadMountable> l = new ArrayList<>();
+        DispenseService svc = ctx.svcOrNull();
+        if (svc != null) {
+            if (svc.getProbeNozzle() != null) {
+                l.add(svc.getProbeNozzle());
+            }
+            if (svc.getDispenserNozzle() != null) {
+                l.add(svc.getDispenserNozzle());
+            }
         }
-        if (out instanceof Exception) {
-            String why = MachineEndpoints.rootMessage((Exception) out);
-            Logger.info("web {}: refused or stopped: {}", atSafeZ ? "move-to" : "jog", why);
-            throw ApiException.refused((m.isEnabled() ? "the move was refused: " : "the move was stopped: ") + why);
-        }
-        // a STOP during the move: its last ok may be the STOP's flush (M410), not the head at its target
-        if (ctx.stops.get() != stops || !m.isEnabled() || ctx.switchOff.inProgress()) {
-            throw ApiException.refused("the move was stopped (STOP): the head may be short of its target; Start, then "
-                    + "Home");
-        }
+        return l;
+    }
+
+    private boolean isNeedle(HeadMountable n) {
+        DispenseService svc = ctx.svcOrNull();
+        return svc != null && n == svc.getDispenserNozzle();
+    }
+
+    private String name(HeadMountable n) {
+        return isNeedle(n) ? "the needle" : "N1";
+    }
+
+    /** The bottom of the tool's safe Z zone (OpenPnP's safe Z), NaN if none. */
+    private static double safeLow(HeadMountable hm) {
+        org.openpnp.model.Length z = hm.getSafeZ();
+        return z == null ? Double.NaN : z.convertToUnits(LengthUnit.Millimeters).getValue();
+    }
+
+    private static Location mm(Location l) {
+        return l.convertToUnits(LengthUnit.Millimeters);
     }
 
     private Map<String, Object> answer(String tool, HeadMountable hm, Location from) {
@@ -223,35 +377,6 @@ final class ControlEndpoints {
         return hm;
     }
 
-    /** The lowest Z the tool may go to at (x, y) (NaN: no floor known there; the soft limits still hold). */
-    private double floor(String tool, double x, double y) {
-        DispenseService svc = ctx.svcOrNull();
-        if (svc == null) {
-            return Double.NaN;
-        }
-        DispenseConfig c = svc.getConfig();
-        if ("needle".equals(tool)) {
-            return c.needleFloorZMm();
-        }
-        if (!"n1".equals(tool) || c.surfaces == null) {
-            return Double.NaN;
-        }
-        double floor = Double.NaN;
-        for (DispenseConfig.SurfaceMap sm : c.surfaces.values()) {
-            if (sm == null || sm.points == null || sm.points.size() < 3 || !covers(sm.points, x, y)) {
-                continue;
-            }
-            try {
-                double z = SurfacePlane.fit(sm.points).z(x, y) - N1_BELOW_SURFACE_MM;
-                floor = Double.isNaN(floor) ? z : Math.max(floor, z);
-            }
-            catch (RuntimeException e) {
-                // a degenerate surface (collinear points) gives no floor
-            }
-        }
-        return floor;
-    }
-
     private static boolean covers(List<DispenseConfig.SurfacePoint> pts, double x, double y) {
         double x0 = Double.POSITIVE_INFINITY, x1 = Double.NEGATIVE_INFINITY;
         double y0 = Double.POSITIVE_INFINITY, y1 = Double.NEGATIVE_INFINITY;
@@ -263,11 +388,6 @@ final class ControlEndpoints {
         }
         return x >= x0 - SURFACE_MARGIN_MM && x <= x1 + SURFACE_MARGIN_MM && y >= y0 - SURFACE_MARGIN_MM
                 && y <= y1 + SURFACE_MARGIN_MM;
-    }
-
-    private static String floorWhy(String tool) {
-        return "needle".equals(tool) ? "the needle's frame floor, I4" : plain(N1_BELOW_SURFACE_MM)
-                + " mm below the probed surface under it";
     }
 
     private static String label(String tool) {

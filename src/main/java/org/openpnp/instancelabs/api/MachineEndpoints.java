@@ -57,11 +57,8 @@ final class MachineEndpoints {
     static final long START_WAITS_FOR_SWITCH_OFF_MS = 20000;
 
     private final ApiContext ctx;
-    private final ExecutorService cameraExecutor = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "il-api-camera");
-        t.setDaemon(true);
-        return t;
-    });
+    /** One capture thread per camera: a hung camera never holds up the other (BR-53 review). */
+    private final Map<Camera, ExecutorService> cameraExecutors = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean noJpegLogged;
 
     MachineEndpoints(ApiContext ctx) {
@@ -459,11 +456,18 @@ final class MachineEndpoints {
         }
         BufferedImage img;
         long at;
+        ExecutorService ex = cameraExecutors.computeIfAbsent(cam, c -> Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "il-api-camera-" + c.getName());
+            t.setDaemon(true);
+            return t;
+        }));
+        Future<BufferedImage> f = ex.submit(cam::captureTransformed);
         try {
-            img = cameraExecutor.submit(cam::captureTransformed).get(10, TimeUnit.SECONDS);
+            img = f.get(10, TimeUnit.SECONDS);
             at = System.currentTimeMillis();
         }
         catch (TimeoutException e) {
+            f.cancel(true);
             throw ApiException.unavailable("the camera did not deliver a frame within 10 s");
         }
         catch (ExecutionException e) {
@@ -506,6 +510,8 @@ final class MachineEndpoints {
     }
 
     void shutdown() {
-        cameraExecutor.shutdownNow();
+        for (ExecutorService ex : cameraExecutors.values()) {
+            ex.shutdownNow();
+        }
     }
 }
