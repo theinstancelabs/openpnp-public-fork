@@ -234,7 +234,7 @@ final class CalibrationEndpoints {
             throw ApiException.badRequest(pitch);
         }
         double lowest = req.startGapMm - (req.steps - 1) * req.stepMm;
-        if (lowest < -0.1) {
+        if (lowest < -0.1 - 1e-9) { // F16: 0.30 - 8 x 0.05 is -0.10000000000000003 in doubles
             throw ApiException.badRequest(String.format(java.util.Locale.ROOT,
                     "the lowest gap would be %.3f mm, i.e. the needle %.3f mm into the surface if the current offset is right; "
                             + "keep it at -0.1 mm or above", lowest, -lowest));

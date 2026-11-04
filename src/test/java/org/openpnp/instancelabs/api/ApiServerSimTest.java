@@ -566,6 +566,22 @@ public class ApiServerSimTest {
         assertTrue(dl.body.contains("I4"), dl.toString());
     }
 
+    /**
+     * F16: the touch-off's lowest gap is checked with a float tolerance, as the web UI checks it. 0.30 in 8 steps of
+     * 0.05 is -0.1 mm (-0.10000000000000003 in doubles) and passes on to the run's checks (here: no blank, 409, nothing
+     * moves); -0.11 is still refused.
+     */
+    @Test
+    public void theTouchOffsLowestGapAllowsTheLaddersOwnRounding() throws Exception {
+        Res exact = post("/api/calibrations/touch-off", "{\"startGapMm\":0.30,\"stepMm\":0.05,\"steps\":9}");
+        assertEquals(409, exact.status, exact.toString());
+        assertFalse(exact.body.contains("lowest gap"), exact.toString());
+        Res deep = post("/api/calibrations/touch-off", "{\"startGapMm\":0.29,\"stepMm\":0.05,\"steps\":9}");
+        assertEquals(400, deep.status, deep.toString());
+        assertTrue(deep.json().get("reason").getAsString().startsWith("the lowest gap would be -0.110 mm"),
+                deep.toString());
+    }
+
     File writeBoard() throws Exception {
         return writeBoard(new double[][] {{2, 2, 0}, {8, 2, 90}, {14, 6, 0}});
     }
