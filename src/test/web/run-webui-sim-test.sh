@@ -79,6 +79,8 @@ SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.pl
 node "$HERE/tip-flow.playwright.cjs"
 # Machine › Control: jog, move to a place and the cameras (BR-49 + BR-53, stubbed until they land): nothing moves
 node "$HERE/jog.playwright.cjs"
+# the same against the engine's own BR-49 + BR-53 routes (skips on an OpenPnP without them)
+node "$HERE/jog-real.playwright.cjs"
 # who has the machine and Take control (P0, BR-72): the screens on a stubbed lock (the states a simulator cannot reach;
 # it presses STOP on the SIM), then against the engine's own lock with an agent that really holds it
 node "$HERE/lock.playwright.cjs"
