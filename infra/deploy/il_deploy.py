@@ -985,6 +985,12 @@ class SystemdUserService:
         return self._ctl("is-active", self.unit).stdout.strip() in ("active", "activating", "deactivating",
                                                                      "reloading")
 
+    def is_down(self):
+        """Read as stopped or failed. A read that fails (no user manager to ask, e.g. `su` without XDG_RUNTIME_DIR) is
+        not 'down': the run marker never turns into a hold on a unit nobody could read."""
+        p = self._ctl("show", "-p", "ActiveState", "--value", self.unit)
+        return p.returncode == 0 and p.stdout.strip() in ("inactive", "failed")
+
     def start(self):
         p = self._ctl("start", self.unit)
         if p.returncode != 0:
@@ -1190,9 +1196,10 @@ def boot_id():
 def normalise_origin(text):
     """(origin, authority) as OpenPnP's ApiSettings normalises a trusted origin (BR-73): lowercase, no trailing slash,
     the scheme's default port dropped. ValueError for anything but http(s)://host[:port]."""
-    t = text.strip().lower()
+    raw = text.strip(" \t\r\n\f\v")  # String.trim(): ASCII controls and space only
+    t = raw.lower()  # after the ASCII check below: U+212A KELVIN SIGN lowercases to an ASCII k
     t = t[:-1] if t.endswith("/") else t  # one, as ApiSettings
-    m = re.fullmatch(r"(https?)://([^/:?#@\[\]]+)(?::(\d+))?", t)
+    m = re.fullmatch(r"(https?)://([^/:?#@\[\]]+)(?::([0-9]+))?", t, re.ASCII) if raw.isascii() else None
     port = int(m.group(3)) if m and m.group(3) else None
     if not m or not _uri_host(m.group(2)) or port == 0 or (port or 0) > 65535:
         raise ValueError(f"not an origin (http(s)://host[:port]): {text!r}")
@@ -1206,7 +1213,7 @@ def normalise_origin(text):
 def _uri_host(h):
     """A host java.net.URI accepts (RFC 2396): an IPv4 address, or labels of letters, digits and inner hyphens whose
     last one starts with a letter. URI.getHost() is null otherwise, and ApiSettings drops the origin."""
-    if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", h):
+    if re.fullmatch(r"[0-9]{1,3}(\.[0-9]{1,3}){3}", h):
         return all(int(x) <= 255 for x in h.split("."))
     labels = h[:-1].split(".") if h.endswith(".") else h.split(".")
     return (all(re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", label) for label in labels)
@@ -1734,7 +1741,9 @@ class Deployer:
                 self._drop_claim_file()
                 self.claim = None
                 return 1 if handed is None else self.not_idle(reasons)
-            rc, note = fn(claim)
+            # OpenPnP may have died since main's check: a start would clear systemd's 'failed' and the marker
+            exited = None if self.svc.is_active() else self.check_openpnp_exit()
+            rc, note = (5, exited) if exited else fn(claim)
         except BaseException as e:
             rc, note = 1, self._after_exception(action, e)
         _defer_term(True)
@@ -1743,6 +1752,8 @@ class Deployer:
             # and an exit of OpenPnP then was il_deploy's to handle, not a crash for the next command to hold on
             self._note_own(claimed_at)
             self._note_exit_seen()
+            if self.held and not self.svc.is_active():
+                self._drop_run_marker()  # the hold carries what happened; no second hold for the same exit
             if self.held:
                 text = self.held_text(action, subject, note)
                 write_json(self.hold_path, dict(self.read_hold() or {}, holder=text, previous=prev))
@@ -1813,11 +1824,14 @@ class Deployer:
                 "it dies and no STOP was sent; a person must check the machine")
         self.record("openpnp-exit", exit=ex)
         self.set_hold(note)
-        if not ex["id"].startswith("marker@"):
-            self._note_exit_seen(ex)
+        # one exit, one hold: the systemd 'failed' too when the marker spoke first (re-read), and the marker after it
+        self._note_exit_seen(None if ex["id"].startswith("marker@") else ex)
+        self._drop_run_marker()
+        return note
+
+    def _drop_run_marker(self):
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.run_marker_path)  # the hold carries it now; the next start writes a new one
-        return note
 
     @property
     def run_marker_path(self):
@@ -1828,7 +1842,13 @@ class Deployer:
         clears the marker only then). Covers what systemd forgets at a reboot (a freeze, a power cut, an unconfirmed
         STOP at shutdown) and an exit between two state reads. Never while the unit runs, starts or stops."""
         m = read_json(self.run_marker_path)
-        if not isinstance(m, dict) or self.svc.is_active():
+        down = self.svc.is_down() if hasattr(self.svc, "is_down") else not self.svc.is_active()
+        if not isinstance(m, dict) or not down:
+            return None
+        if self.svc.exit_status() == LOCK_CONFLICT:
+            # flock refused the start (the serial lock was taken after mark-start's check): java never ran
+            self.record("run-marker-dropped", why="the start was refused on the serial lock (75)")
+            self._drop_run_marker()
             return None
         when = "before the last reboot" if m.get("boot_id") != boot_id() else "since"
         return {"id": f"marker@{m.get('at')}", "detail": f"it was started at {m.get('at')} and is down {when} with no "
@@ -3001,6 +3021,8 @@ class Deployer:
             return [f"STATE.md unreadable ({self.cfg.state_md}): {e.strerror}"]
         if not h.idle:
             return [h.reason]  # a bench session: its tools hold the port; nothing else to look at
+        if not os.path.exists(os.path.join(self.cfg.root, "current")):
+            return ["nothing deployed yet (no current build)"]
         reasons = self._lock_reasons(set()) + self._device_reasons(set())
         for pid, d, real in self.procs.openpnp_processes():
             if real:
@@ -3106,6 +3128,7 @@ class Deployer:
                           "hold": self.read_hold(), "bad": self.read_bad(), "staged": self.staged(),
                           "claim": read_json(self.claim_path), "shutdown_budget": self.shutdown_budget_reasons(),
                           "openpnp_exit": exited, "openpnp_exit_seen": read_json(self.exit_seen_path),
+                          "run_marker": read_json(self.run_marker_path),
                           "last_deploy": last}, indent=1, default=str))
         return 0
 
@@ -3186,9 +3209,14 @@ class Deployer:
         next command sets the hold (an exit it did not cause)."""
         ok, detail = self.stop_machine()
         self.say(f"stop-openpnp: {detail}")
+        if ok and detail != STOP_DONE and not os.environ.get("MAINPID"):
+            # systemd runs ExecStop also after the main process ended by itself with 0 or 143 (a kill from outside:
+            # never a STOP), with $MAINPID unset: no OpenPnP answered, so nothing confirmed the outputs off. The run
+            # marker stays and the unit ends 'failed': the next il_deploy sets the hold (an exit it did not cause).
+            self.say("stop-openpnp: OpenPnP had already ended by itself: no STOP confirmed, the run marker stays")
+            return 1
         if ok:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(self.run_marker_path)  # a confirmed STOP: this run ended as it should
+            self._drop_run_marker()  # a confirmed STOP (or a JVM stopped before its API was up): this run ended well
         return 0 if ok else 1
 
     def wait_display(self, timeout, x11_dir="/tmp/.X11-unix"):
@@ -3282,7 +3310,6 @@ def render_units(cfg, script, python):
         # the user's web UI and the one owner of the serial port: the lowest an unprivileged unit may go (the user
         # manager's own 100); agents' scopes run at 800, so the kernel's OOM killer takes their processes first
         "OOMScoreAdjust=100",
-        "ManagedOOMPreference=avoid",
         ""])
     xvfb = "\n".join([
         "[Unit]",

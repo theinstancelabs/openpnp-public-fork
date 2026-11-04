@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 
 # il_deploy is one level up: also when unittest imports this module by bare name (no -t)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -156,11 +157,80 @@ class KeepUp(unittest.TestCase):
         self.assertFalse(self.lab.service().is_active())
 
 
+    # --- review round 2 (11-03 17:55) -------------------------------------------------------------
+    def marker(self, **kw):
+        path = os.path.join(self.lab.root, il_deploy.RUN_MARKER)
+        il_deploy.write_json(path, dict({"boot_id": il_deploy.boot_id(), "at": "2026-11-03T17:00:00-08:00"}, **kw))
+        return path
+
+    def test_a_running_unit_with_its_marker_is_no_exit(self):
+        path = self.marker()
+        svc = StubService(active=[True], exits=[None])
+        self.assertEqual(self.lab.main("keep-up", deps=self.lab.deps(service=svc)), 0, self.lab.last_out)
+        self.assertTrue(os.path.exists(path))
+        self.assertFalse(il_deploy.read_json(os.path.join(self.lab.root, "hold.json")))
+
+    def test_an_unreadable_unit_state_is_no_exit(self):
+        """No user manager to ask (su without XDG_RUNTIME_DIR): never a hold on a unit nobody could read."""
+        path = self.marker()
+        svc = StubService(active=[False], exits=[None], down=False)
+        il_deploy.Deployer(il_deploy.config_from_args(self.lab.argv("status")),
+                           self.lab.deps(service=svc)).check_openpnp_exit()
+        self.assertTrue(os.path.exists(path))
+        self.assertFalse(il_deploy.read_json(os.path.join(self.lab.root, "hold.json")))
+
+    def test_a_start_the_serial_lock_refused_drops_the_marker_without_a_hold(self):
+        path = self.marker()
+        svc = StubService(active=[False], exits=[None], status=il_deploy.LOCK_CONFLICT)
+        d = il_deploy.Deployer(il_deploy.config_from_args(self.lab.argv("status")), self.lab.deps(service=svc))
+        self.assertIsNone(d.check_openpnp_exit())
+        self.assertFalse(os.path.exists(path))
+        self.assertFalse(il_deploy.read_json(os.path.join(self.lab.root, "hold.json")))
+
+    def test_an_exit_on_its_own_keeps_the_marker_through_exec_stop(self):
+        """systemd runs ExecStop also after the JVM ended by itself with 143 (a kill from outside), with $MAINPID unset:
+        'nothing to stop' then confirms nothing. The marker stays, stop-openpnp fails, keep-up sets the hold."""
+        path = self.marker()  # OpenPnP is down (setUp's deploy left it stopped): its API does not answer
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MAINPID", None)
+            self.assertEqual(self.lab.main("stop-openpnp"), 1, self.lab.last_out)
+        self.assertIn("no STOP confirmed", self.lab.last_out)
+        self.assertTrue(os.path.exists(path))
+        self.assertEqual(self.lab.main("keep-up"), 5, self.lab.last_out)
+        self.assertFalse(self.lab.service().is_active())
+
+    def test_a_stop_of_a_live_jvm_before_its_api_is_up_clears_the_marker(self):
+        path = self.marker()
+        with mock.patch.dict(os.environ, {"MAINPID": "4242"}):
+            self.assertEqual(self.lab.main("stop-openpnp"), 0, self.lab.last_out)
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_stop_that_is_not_confirmed_keeps_the_marker(self):
+        self.keep_up(0)
+        self.lab.machine(fail=["busy"])  # never idle: no STOP is sent (never inside a home)
+        self.lab.service().stop()
+        self.keep_up(0)  # the fake reads fake-machine.json at its start
+        path = self.marker()
+        with mock.patch.dict(os.environ, {"MAINPID": "4242"}):
+            self.assertEqual(self.lab.main("stop-openpnp", extra=["--home-busy-wait", "1"]), 1, self.lab.last_out)
+        self.assertTrue(os.path.exists(path))
+
+    def test_nothing_deployed_yet_keeps_it_stopped(self):
+        os.unlink(os.path.join(self.lab.root, "current"))
+        self.assertIn("nothing deployed yet", self.keep_up(3))
+
+
 class StubService:
     """systemd-shaped: is_active and last_exit answer in turn (the last answer repeats); start counts."""
 
-    def __init__(self, active, exits):
-        self.active, self.exits, self.starts = list(active), list(exits), 0
+    def __init__(self, active, exits, down=None, status=None):
+        self.active, self.exits, self.starts, self.down, self.status = list(active), list(exits), 0, down, status
+
+    def is_down(self):
+        return (not self.active[0]) if self.down is None else self.down
+
+    def exit_status(self):
+        return self.status
 
     def _next(self, seq):
         return seq.pop(0) if len(seq) > 1 else seq[0]

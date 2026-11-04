@@ -602,7 +602,8 @@ class TrustedOrigins(HealthLab, unittest.TestCase):
         self.assertEqual(n("http://127.0.0.1:18877"), ("http://127.0.0.1:18877", "127.0.0.1:18877"))
         for bad in ("https://x.ts.net/path", "ftp://x.ts.net", "x.ts.net:8877", "https://", "https://x:99999x",
                     "https://x..ts.net", "https://-x.ts.net", "https://x-.ts.net", "https://x.ts.net:0",
-                    "https://x.ts.net:99999", "https://1.2.3.999", "https://x.ts.net//", "https://u@x.ts.net"):
+                    "https://x.ts.net:99999", "https://1.2.3.999", "https://x.ts.net//", "https://u@x.ts.net",
+                    "\u00a0https://x.ts.net", "https://\u212aelvin.ts.net", "https://x.ts.net:\u0668877"):
             with self.assertRaises(ValueError, msg=bad):
                 n(bad)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

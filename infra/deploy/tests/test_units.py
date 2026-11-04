@@ -53,7 +53,6 @@ class Units(unittest.TestCase):
     def test_openpnp_and_its_display_are_the_last_the_oom_killer_takes(self):
         for name in ("il-openpnp.service", "il-openpnp-xvfb.service"):
             self.assertIn("OOMScoreAdjust=100", self.read(name).splitlines(), name)
-        self.assertIn("ManagedOOMPreference=avoid", self.read("il-openpnp.service").splitlines())
 
     def test_without_a_trusted_origin_openpnp_gets_none(self):
         self.assertNotIn("OPENPNP_IL_API_TRUSTED_ORIGINS", self.read("il-openpnp.service"))

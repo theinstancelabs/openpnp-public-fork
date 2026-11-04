@@ -6,6 +6,7 @@ import os
 import sys
 import threading
 import unittest
+from unittest import mock
 
 # il_deploy is one level up: also when unittest imports this module by bare name (no -t)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -228,13 +229,21 @@ class Decisions(unittest.TestCase):
                 self.assertFalse(self.deployer(api, "--poll-interval", "0.5")._wait_not_busy(2))
 
     def test_exec_stop_uses_the_same_rules(self):
-        """Exit 0 when the machine is off (or OpenPnP is gone); 1 when it may not be: systemd then marks the unit
-        failed, which il_deploy treats as an exit it did not cause (a hold)."""
-        for answer, posts, word, rc in ((lambda n: status(busy=True), [], "not sent", 1),
-                                        (lambda n: il_deploy.ApiTimeout("x"), [], "not sent", 1),
-                                        (lambda n: il_deploy.ApiDown("refused"), [], "nothing to stop", 0),
-                                        (lambda n: status(), ["/api/stop"], "disabled", 0)):
-            with self.subTest(posts=posts, word=word):
+        """Exit 0 when the machine is off (or a live JVM's API is not up yet: systemd sets $MAINPID); 1 when it may not
+        be: systemd then marks the unit failed, which il_deploy treats as an exit it did not cause (a hold). systemd
+        also runs ExecStop after the JVM ended by itself with 0 or 143 (a kill from outside), $MAINPID unset: nothing
+        answers then, and nothing confirmed a STOP (1, the run marker stays)."""
+        for answer, mainpid, posts, word, rc in (
+                (lambda n: status(busy=True), "4242", [], "not sent", 1),
+                (lambda n: il_deploy.ApiTimeout("x"), "4242", [], "not sent", 1),
+                (lambda n: il_deploy.ApiDown("refused"), "4242", [], "nothing to stop", 0),
+                (lambda n: il_deploy.ApiDown("refused"), None, [], "no STOP confirmed", 1),
+                (lambda n: status(), "4242", ["/api/stop"], "disabled", 0),
+                (lambda n: status(), None, ["/api/stop"], "disabled", 0)):
+            with self.subTest(posts=posts, word=word, mainpid=mainpid), \
+                    mock.patch.dict(os.environ, {"MAINPID": mainpid} if mainpid else {}):
+                if not mainpid:
+                    os.environ.pop("MAINPID", None)
                 api = StubApi(answer)
                 d = self.deployer(api)
                 d.out = io.StringIO()
