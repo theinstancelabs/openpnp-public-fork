@@ -52,8 +52,8 @@ public class PassthroughLinesTest {
                 "M107 P3", "M107 P2", "M107 P1", "M107 P0", "M107", "M106", "M106 P1 S180", "M106 P0 S128",
                 "M150 P255 R255 U255 B255", "M150 R0 U0 B0", "M204 S2000", "M204 S20000", "M201 B10000",
                 "M906 B580", "M906 B670", "M906", "M18 B", "M17 B", "M260 A112 B1 S1", "M260 A109",
-                "M260 B48", "M260 S1", "M261 A109 B3 S1", "M485 FFFF0001", "M42 I P44 T2", "M42 P44 T0",
-                "M43 P29", "M43 I P29")) {
+                "M260 B48", "M260 S1", "M261 A109 B3 S1", "M485 FFFF0001", "M42 I P53 T2", "M42 P53 T2",
+                "M42 P53 T0", "M42 P53 T3", "M43 P5", "M43 I P5")) {
             ok(l);
         }
     }
@@ -114,10 +114,16 @@ public class PassthroughLinesTest {
         // A (N1's rotation) has soft limits too: enforced like X/Y/Z
         assertTrue(refused("G1 A250").contains("A"));
         ok("G1 A90");
-        // #19 review MINOR 9: M42 only on BR-48's switch pin
+        // #19 review MINOR 9: M42 only on the switch pin
         refused("M42 I P45 T2");
         refused("M43 P12");
-        ok("M43 P29");
+        ok("M43 P5");
+        // 11-04: the switch is on PA5 (the HACK header's pin 3), not BR-48's PC0: PC0's numbers are refused, and each
+        // command takes its own number for PA5 (M42 the Arduino pin 53, M43 the pin table's entry 5)
+        refused("M42 I P44 T2");
+        refused("M43 P29");
+        refused("M43 P53");
+        refused("M42 P5 T2");
     }
 
     @Test
@@ -148,8 +154,8 @@ public class PassthroughLinesTest {
         refused("M990 S2000");
         refused("M43 T");
         refused("M43");
-        refused("M42 P44 S255");
-        refused("M42 P44 T1");
+        refused("M42 P53 S255");
+        refused("M42 P53 T1");
         refused("M201 X5000");
         refused("M203 X100");
         refused("G1 E5");

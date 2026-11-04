@@ -26,9 +26,13 @@ final class PassthroughLines {
     static final double MAX_DWELL_S = 60;
     /** Any number on a line: no Infinity, no 400-digit screw turn (#19 review MINOR 4). */
     static final double MAX_MAGNITUDE = 1_000_000;
-    /** BR-48's bed switch: M42 names its pin P44, M43 the same pin P29 (Process checked 11-02 on the machine). */
-    static final double SWITCH_PIN_M42 = 44;
-    static final double SWITCH_PIN_M43 = 29;
+    /**
+     * The bed's height switch on PA5 (the HACK header's pin 3, LUMEN_AUX_PWM1; wired 11-04): M42 names it P53 (the
+     * variant's Arduino pin), M43 the same pin P5 (its entry in the firmware's pin table). The same counts give BR-48's
+     * PC0 as M42 P44 and M43 P29, which Process checked on the machine 11-02.
+     */
+    static final double SWITCH_PIN_M42 = 53;
+    static final double SWITCH_PIN_M43 = 5;
     static final double MAX_SCREW_MA = 670;
     private static final Pattern WORD = Pattern.compile("([A-Z])\\s*([-+]?(?:\\d+\\.?\\d*|\\.\\d+))?\\s*");
 
@@ -245,14 +249,14 @@ final class PassthroughLines {
                 }
                 Double t = p.get('T');
                 if (p.get('P') == null || p.get('P') != SWITCH_PIN_M42) {
-                    return "M42 only on BR-48's switch pin here (M42 I P44 T2)";
+                    return "M42 only on the height switch's pin here (PA5: M42 P53 T2)";
                 }
                 return t == null || !(t == 0 || t == 2 || t == 3)
-                        ? "M42 only sets an input mode here (M42 I P44 T2): T0, T2 or T3" : null;
+                        ? "M42 only sets an input mode here (M42 P53 T2): T0, T2 or T3" : null;
             }
             case "M43":
                 if (only(word, p, "IP", false) != null || p.get('P') == null || p.get('P') != SWITCH_PIN_M43) {
-                    return "M43 only reads BR-48's switch pin here (M43 P29)";
+                    return "M43 only reads the height switch's pin here (PA5: M43 P5)";
                 }
                 return null;
             default:

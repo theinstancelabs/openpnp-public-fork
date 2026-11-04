@@ -548,7 +548,10 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   stopped while a line ran (its last line included): 409 `lock-lost` / `stopped` with that line in `results` marked
   `interrupted: true` (its `ok` may be the STOP's flush, not the move's end: never take it as done). Every line
   is checked first (`PassthroughLines`): the bench tools' commands; X/Y/Z inside the soft limits and only once
-  homed; pump P2 / valve P3 only full on; `M906 B` ≤ 670; `G4` ≤ 60 s; refused with the route to use: `G28`
+  homed; pump P2 / valve P3 only full on; `M906 B` ≤ 670; `G4` ≤ 60 s; the bed's height switch on PA5 only (the
+  HACK header's pin 3): `M42 [I] P53 T0|T2|T3` (an input mode; `T2` its pull-up) and `M43 [I] P5` (its read: M43
+  numbers the pin by the firmware's pin table, so not 53; send `M400` first, as M43 does not wait for moves); refused
+  with the route to use: `G28`
   (`POST /api/machine/home`), `G92` on X/Y/Z, bare `M18`/`M84`, `G91`, `M92`, EEPROM, `M112`/`M999`/`M997`, `M990`,
   anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before the next
   guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
