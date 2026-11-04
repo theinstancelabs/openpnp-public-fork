@@ -194,7 +194,9 @@ const CAMS = [{ id: 'top', name: 'Top', looking: 'down', width: 1920, height: 10
     const c8 = await page8.evaluate(() => ({ tag: document.getElementById('cam-tag').textContent, line: document.getElementById('cam-line').textContent }));
     check('(8) with BR-53 the bottom camera shows, read from /api/cameras/bottom/frame.jpg', stub.frames.includes('bottom') && /bottom camera · live/.test(c8.tag), { frames: stub.frames.slice(-4), c8 });
     check('(8) and its line says whose picture it is', /OpenPnP.s picture of the bottom camera/.test(c8.line), c8.line);
-    check('(8) the age is the frame\'s own (X-Frame-At: 5 s ago), not when it arrived', /\b[5-7](\.\d)? s old/.test(c8.line), c8.line);
+    // the page dates the frame on the server's clock (its skew estimate can be 0.1 s off this test's clock): ≈ 5 s, not ≈ 0
+    const age8 = Number(((c8.line || '').match(/\b(\d+(?:\.\d)?) s old/) || [])[1]);
+    check('(8) the age is the frame\'s own (X-Frame-At: 5 s ago), not when it arrived', age8 >= 4 && age8 < 8, c8.line);
     await page8.close();
     stub.br53 = false;
 
