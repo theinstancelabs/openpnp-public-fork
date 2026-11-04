@@ -70,18 +70,27 @@ export IL_API_URL="http://127.0.0.1:$IL_API_PORT/"
 export UINAV UINAV_SESSION="$SESSION"
 export SIM_SCENE="$SESSION_CONFIG/instancelabs/sim-scene.json"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/il-webui-pw-browsers}"
-node "$HERE/webui-sim.playwright.cjs"
-node "$HERE/board-import.playwright.cjs"
-# missing paste profiles and the pad calibration (PROFILE_CALIBRATION_DESIGN.md §14.4): moves the SIM, ≈ 6 min
-SHOTS_DIR="${PP_SHOTS_DIR:-$OUT_DIR/pad-profile-shots}" node "$HERE/pad-profile.playwright.cjs"
-SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.playwright.cjs"
-# the Tip flow of the agreed mockups (docs/ui-flows/tip-setup-flow.md): after tip-setups, on the tips it set up
-node "$HERE/tip-flow.playwright.cjs"
-# Machine › Control: jog, move to a place and the cameras (BR-49 + BR-53, stubbed until they land): nothing moves
-node "$HERE/jog.playwright.cjs"
-# the same against the engine's own BR-49 + BR-53 routes (skips on an OpenPnP without them)
-node "$HERE/jog-real.playwright.cjs"
-# who has the machine and Take control (P0, BR-72): the screens on a stubbed lock (the states a simulator cannot reach;
-# it presses STOP on the SIM), then against the engine's own lock with an agent that really holds it
-node "$HERE/lock.playwright.cjs"
-node "$HERE/lock-real.playwright.cjs"
+# The scripts in their order. WEBUI_SCRIPTS="pad-profile tip-setups" runs only the ones named (in this order, whatever
+# the order given): CI runs them as parallel jobs, each in a fresh session, and each passes alone with the same counts as
+# in the full run (Infra's ask, 10-31). A script that needs another's state makes it itself.
+# tip-flow: the Tip flow of the agreed mockups (docs/ui-flows/tip-setup-flow.md), after tip-setups, on the tips it set up
+# jog and jog-real: Machine › Control (jog, move to a place, the cameras: BR-49 + BR-53), stubbed, then against the
+# engine's own routes (jog-real skips on an OpenPnP without them; it presses STOP on the SIM at its end)
+# lock and lock-real: who has the machine and Take control (P0, BR-72), the stubbed states, then the engine's own lock
+# (lock presses STOP on the SIM at its end)
+ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups tip-flow jog jog-real lock lock-real"
+WEBUI_SCRIPTS="${WEBUI_SCRIPTS:-$ALL_SCRIPTS}"
+for name in $WEBUI_SCRIPTS; do
+  case " $ALL_SCRIPTS " in *" $name "*) ;; *) echo "WEBUI_SCRIPTS: unknown script '$name' (known: $ALL_SCRIPTS)" >&2; exit 2 ;; esac
+done
+run_script() {
+  case "$1" in
+    # missing paste profiles and the pad calibration (PROFILE_CALIBRATION_DESIGN.md §14.4): moves the SIM, ≈ 6 min
+    pad-profile) SHOTS_DIR="${PP_SHOTS_DIR:-$OUT_DIR/pad-profile-shots}" node "$HERE/pad-profile.playwright.cjs" ;;
+    tip-setups) SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.playwright.cjs" ;;
+    *) node "$HERE/$1.playwright.cjs" ;;
+  esac
+}
+for name in $ALL_SCRIPTS; do
+  case " $WEBUI_SCRIPTS " in *" $name "*) run_script "$name" ;; esac
+done
