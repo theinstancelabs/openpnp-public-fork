@@ -272,57 +272,71 @@
   /**
    * Calibrate › Test board (docs/ui-flows/clean-pads-flow.md): how many of a test board's pads are still clean, the used
    * ones on its drawing, an agent's whole-plan need, Board wiped and the camera check after it. The counts come with the
-   * status (status.padLedgers), the pads from GET /api/boards/{board}/pads, loaded again when the counts change.
+   * status (status.padLedgers; hidden while this OpenPnP has none, before BR-76), the pads from GET
+   * /api/boards/{board}/pads, loaded again when the counts change.
    */
   const TB = { board: null, sig: '', data: null, err: null, view: null, artId: null, art: null, fix: { fix: 'board-wiped', label: 'Board wiped', icon: 'i-wipe', arg: null } };
+  const KIND = { 'still-paste': 'paste left after the wipe check', dot: 'a dot', throwaway: 'a throwaway dot', drip: 'a drip test', manual: 'by hand' };
   function testBoardCard() {
-    const sel = el('select', { class: 'input', id: 'tb-board', hidden: true });
+    const sel = el('select', { class: 'input', id: 'tb-board' });
     sel.addEventListener('change', () => { TB.board = sel.value; TB.sig = ''; IL.render(); });
     const wiped = IL.fixButton(TB.fix);
     wiped.id = 'btn-tb-wiped';
+    const pick = pcr.field('tb-board', 'Board', null, sel);
+    pick.id = 'tb-pick';
     return card('cal-testboard', 'Test board', 'clean pads: wipe the board before a run needs them, never during one',
-      [sel, el('p', { class: 'pca-line', id: 'tb-sum' }), el('div', { class: 'notebox', id: 'tb-need', hidden: true }),
+      [pick, el('p', { class: 'pca-line', id: 'tb-sum' }), el('div', { class: 'notebox', id: 'tb-need', hidden: true }),
         el('div', { class: 'cal-live', id: 'tb-check', hidden: true, role: 'status' }), el('div', { class: 'pv-host', id: 'tb-map', hidden: true }),
+        el('p', { class: 'field__h', id: 'tb-key', hidden: true, text: 'Filled: used since the wipe. Outlined: clean. Dashed: not counted.' }),
         el('p', { class: 'field__h', id: 'tb-fixed', hidden: true }), reasonEl('tb-err')],
       el('div', { class: 'btn-row' }, wiped, el('span', { class: 'field__h', text: 'Wipe the pads by hand first. The camera then checks every pad; nothing touches the board.' })));
   }
   async function loadTestBoard(board) {
-    try { TB.data = await IL.api('GET', '/api/boards/' + encodeURIComponent(board) + '/pads'); TB.err = null; }
-    catch (e) { TB.err = IL.errorText(e); }
+    let data = null, err = null;
+    try { data = await IL.api('GET', '/api/boards/' + encodeURIComponent(board) + '/pads'); } catch (e) { err = IL.errorText(e); }
+    if (board !== TB.board) return;   // an answer for the board shown before
+    TB.data = data || TB.data;
+    TB.err = err;
     IL.render();
   }
+  /** A server time as hh:mm today, else with its date. */
+  function when(ms) {
+    const t = ms - S.skewMs;
+    return new Date(t).toDateString() === new Date().toDateString() ? IL.fmtTime(t) : IL.fmtDateTime(t);
+  }
   function renderTestBoard(s) {
-    const all = (s && s.padLedgers) || [];
+    const all = s && s.padLedgers;
+    IL.show($('cal-testboard'), Array.isArray(all));
+    if (!Array.isArray(all)) return;
     if (!all.some((x) => x.board === TB.board)) TB.board = all.length ? all[0].board : null;
     const sel = $('tb-board');
     IL.keyed(sel, all.map((x) => x.board + '|' + x.name).join(','), () => all.map((x) => el('option', { value: x.board, text: x.name || x.board })));
     if (sel.value !== (TB.board || '')) sel.value = TB.board || '';
-    IL.show(sel, all.length > 1);
+    IL.show($('tb-pick'), all.length > 1);
     const L = all.find((x) => x.board === TB.board) || null;
     TB.fix.arg = TB.board;
     IL.show($('btn-tb-wiped'), !!L);
     const ck = L && L.check;
     const sig = L ? [L.board, L.total, L.clean, L.wipedAtMs, ck && ck.state, ck && ck.atMs].join('|') : '';
     if (sig !== TB.sig) { TB.sig = sig; if (L) loadTestBoard(L.board); else TB.data = null; }
-    const at = (ms) => IL.fmtTime(ms - S.skewMs);
     IL.setText($('tb-sum'), !L ? 'No board keeps a pad count yet: the first run on a test board starts one.'
       : L.clean + ' of ' + L.total + ' pads clean' + ((L.sets || []).length ? ' (' + L.sets.map((x) => x.set + ' ' + x.clean).join(', ') + ')' : '')
-        + (L.wipedAtMs ? ' · wiped ' + at(L.wipedAtMs) : ''));
+        + (L.wipedAtMs ? ' · wiped ' + when(L.wipedAtMs) : ''));
     // an agent's whole test plan, stated before its first run, so the board is wiped once, up front
     const nd = L && L.need;
     const need = $('tb-need');
     IL.show(need, !!nd);
     if (nd) {
       const short = L.clean < nd.pads;
-      need.className = 'notebox notebox--' + (short ? 'need' : 'info');
+      IL.setClass(need, 'notebox notebox--' + (short ? 'need' : 'info'));
       IL.setText(need, (nd.by || 'An agent') + ' needs ' + IL.plural(nd.pads, 'clean pad') + (nd.what ? ' for ' + nd.what : '') + ': ' + L.clean + ' clean.'
         + (short ? ' Wipe the board before its first run.' : ' Enough.'));
     }
     // the camera check after Board wiped: the pads change only when it ends
     const ct = !ck ? null : ck.state === 'running' ? 'Checking every pad with the camera… The count changes when it ends.'
       : ck.state === 'failed' ? 'The camera check failed' + (ck.why ? ': ' + ck.why : '') + '. The pads it did not reach count as before: press Board wiped again.'
-      : ck.stillPaste ? ck.clean + ' clean, ' + ck.stillPaste + ' still have paste (marked): wipe those, then press Board wiped again.'
-      : ck.clean + ' clean: no paste left (checked ' + at(ck.atMs) + ').';
+      : ck.stillPaste ? ck.clean + ' clean, ' + IL.plural(ck.stillPaste, 'still has paste', 'still have paste') + ' (marked; checked ' + when(ck.atMs) + '): wipe those, then press Board wiped again.'
+      : ck.clean + ' clean: no paste left (checked ' + when(ck.atMs) + ').';
     IL.show($('tb-check'), !!ct);
     if (ct) IL.setText($('tb-check'), ct);
     const err = $('tb-err');
@@ -330,14 +344,21 @@
     IL.setText(err, TB.err || '');
     drawTestBoard(L && TB.data && TB.data.board === L.board ? TB.data : null);
   }
-  /** The board drawing with its pads: used ones marked (as paste found by a pad check), fixed ones apart and named. */
+  /** One pad's state for its tooltip. */
+  function padTitle(p) {
+    if (p.state === 'fixed') return p.id + ' · not counted' + (p.note ? ': ' + p.note : '');
+    if (p.state !== 'used') return p.id + ' · clean';
+    return p.id + ' · used' + (p.atMs ? ' ' + when(p.atMs) : '') + (p.by ? ' by ' + p.by : '') + (p.kind ? ' (' + (KIND[p.kind] || p.kind) + ')' : '');
+  }
+  /** The board drawing with its pads: used ones marked (as paste found by a pad check), fixed ones dashed and named. */
   function drawTestBoard(d) {
     const host = $('tb-map');
     const pads = (d && d.pads) || [];
     IL.show(host, pads.length > 0);
+    IL.show($('tb-key'), pads.length > 0);
     const fixed = pads.filter((p) => p.state === 'fixed');
     IL.show($('tb-fixed'), fixed.length > 0);
-    IL.setText($('tb-fixed'), fixed.length ? 'Not counted, a wipe does not clean them: ' + fixed.map((p) => p.id + (p.note ? ' · ' + p.note : '')).join(', ') + '.' : '');
+    IL.setText($('tb-fixed'), fixed.length ? 'Not counted: ' + fixed.map((p) => p.id + (p.note ? ' · ' + p.note : '')).join(', ') + '.' : '');
     if (!pads.length) return;
     if (!TB.view) TB.view = IL.boardview.create(host, { id: 'tb-svg', lite: true, aria: 'The test board: used pads marked' });
     const v = d.view || null;
@@ -347,9 +368,9 @@
       TB.art = null;
       if (artId) IL.boardart.get(artId).then((a) => { if (TB.artId === artId) { TB.art = a; IL.render(); } }, () => { /* drawn without the board */ });
     }
-    // built once per board and its fixed pads; the used ones only toggle a class
-    TB.view.setPlan({ planId: 'ledger:' + d.board + ':' + pads.length + ':' + fixed.map((p) => p.id).join(','), board: v, dots: [],
-      pads: pads.map((p) => ({ padId: p.id, x: p.x, y: p.y, w: p.w, h: p.h, rotation: p.rotation, blocked: p.state === 'fixed' })) });
+    // built again only when the board, its pads or their states change (setPlan returns at once for the same id)
+    TB.view.setPlan({ planId: 'ledger:' + d.board + ':' + JSON.stringify(v && v.toMachine) + ':' + pads.map((p) => p.id + '@' + p.x + ',' + p.y + ':' + p.state + ':' + (p.atMs || '')).join(';'),
+      board: v, dots: [], pads: pads.map((p) => ({ padId: p.id, x: p.x, y: p.y, w: p.w, h: p.h, rotation: p.rotation, blocked: p.state === 'fixed', title: padTitle(p) })) });
     TB.view.setArt(TB.art);
     TB.view.update({ dirty: new Map(pads.filter((p) => p.state === 'used').map((p) => [p.id, null])) });
   }
