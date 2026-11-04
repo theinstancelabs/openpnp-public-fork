@@ -193,7 +193,7 @@ public final class NeedleTouchOff {
             double x = blank.x + i * req.pitchMm, y = blank.y;
             double surface = plane == null ? blank.z : plane.z(x, y);
             double z = surface + cfg.needleZOffsetMm + g[i];
-            double hop = surface + cfg.needleZOffsetMm + Math.max(g[0], cfg.gapMm()) + cfg.hopHeightMm;
+            double hop = surface + cfg.needleZOffsetMm + Math.max(g[0], cfg.gapMm()) + cfg.liftMm();
             l.add(new GcodeStreamBuilder.DotSpec(x, y, z, hop, req.rotationDeg, i,
                     String.format(java.util.Locale.ROOT, "touch-off gap %.3f", g[i])));
         }

@@ -234,8 +234,9 @@ Pads of the same part whose openings overlap (AVX-9155 stacks pads 0.012 mm apar
 
 A **dose record** (§5.3) is fresh for the current setup when all of these hold:
 
-- same `steps`; same **dose fingerprint** (pressure, suck-back, rpm, screw acceleration, dwell, gap:
-  `DispenseProfile.doseFingerprint()`, §5.4; the start angle is handled below, purge count and name excluded);
+- same `steps`; same **dose fingerprint** (pressure, suck-back, rpm, screw acceleration, dwell, gap, and the pause
+  after the lift and the recipe's own lift when set: `DispenseProfile.doseFingerprint()`, §5.4; the start angle is
+  handled below, purge count and name excluded);
 - the regulator reading attested by the operator when the record was made equals the profile pressure (the job
   requires the attestation, W/core.js:590-605, and stores its psi and time on the record, §12.2);
 - same tip key (`DispenseConfig.tip.key`) and recorded after `needleChangedAtMs` (D/DispenseConfig.java:85);
@@ -677,9 +678,10 @@ naming them), `insertPadCalibration`, `padCalibrations(typeKey, limit)`. The exi
     60`, `weighTargetMg ≥ 50`.
   - `PROTECTED_NESTED` (A/DispenseEndpoints.java:56-57) gains `calibrationArea.usedMm`, `calibrationArea.resetAtMs`,
     `paste.loadedAtMs`; `NESTED_SETTINGS` (:48-49) gains the four objects.
-- **`DispenseProfile`** (D/DispenseProfile.java): `doseFingerprint()` = `psi suck rpm acc dwell gap` from
-  `fingerprint()` (:129-133) without net/start/purge; `phaseSteps(cfg, restCount, dotsAfter, stepsPerDot)` (the
-  existing 3-argument method calls it with `netStepsPerDot`, :119-126); `sustainedFeedMgS 2.6` (R7, §1.1).
+- **`DispenseProfile`** (D/DispenseProfile.java): `doseFingerprint()` = `psi suck rpm acc dwell gap` (+ `pause` and
+  `lift`, each only when set) from `fingerprint()` (:129-133) without net/start/purge;
+  `phaseSteps(cfg, restCount, dotsAfter, stepsPerDot)` (the existing 3-argument method calls it with
+  `netStepsPerDot`, :119-126); `sustainedFeedMgS 2.6` (R7, §1.1).
 
 ---
 

@@ -13,8 +13,8 @@ import java.util.Map;
  * work; the last purge dot leaves the screw at the profile's start angle), a cross to the work at
  * travel Z with no stop, then per dot: XY at the current (hop) height, Z down to the gap,
  * {@code M204 S<screw accel>}, B forward (net + suck-back), dwell, B back (suck-back),
- * {@code M204 S<XY/Z accel>}, Z up. Session end: M400, valve OFF, pump OFF, re-zero B (aborts:
- * the Stop sequence, see {@link #abortLines}).
+ * {@code M204 S<XY/Z accel>}, Z up, the pause after the lift (if any). Session end: M400, valve
+ * OFF, pump OFF, re-zero B (aborts: the Stop sequence, see {@link #abortLines}).
  *
  * <p>Dose blocks (profile calibration design §1.2 R2/R3, §6.2): the dots of one net turn are laid
  * together. Before every block after the first the needle goes back to the purge row: for a partial
@@ -210,8 +210,8 @@ public class GcodeStreamBuilder {
         }
         if (d.hopZ > cfg.travelSafeZMm + 1e-6) {
             throw new IllegalStateException(String.format(Locale.ROOT, "dot %d (%s): lift Z %.3f is above the travel Z "
-                    + "%.3f (hopHeightMm %.3f too large): on the see-saw that pushes N1 down", d.index, d.label, d.hopZ,
-                    cfg.travelSafeZMm, cfg.hopHeightMm));
+                    + "%.3f (%s %.3f too large): on the see-saw that pushes N1 down", d.index, d.label, d.hopZ,
+                    cfg.travelSafeZMm, cfg.profile.liftMm != null ? "profile liftMm" : "hopHeightMm", cfg.liftMm()));
         }
     }
 
@@ -591,7 +591,7 @@ public class GcodeStreamBuilder {
     /**
      * One dot turning the screw by {@code netSteps}: forward net + suck-back under the screw
      * acceleration, dwell, back by the suck-back, XY/Z acceleration again (M204 S caps B as well),
-     * lift.
+     * lift (the dot's end), then the profile's pause after the lift (if any).
      */
     public void dot(DotSpec d, long netSteps) throws Exception {
         if (!bZeroed) {
@@ -628,6 +628,9 @@ public class GcodeStreamBuilder {
         setAccel(cfg.travelAccelMmS2);
         markLast(GcodeProgram.Marker.DOT_END, d.index, d.label, d.rotationDeg);
         prog.dotCount += d.index >= 0 ? 1 : 0;
+        // the no-pause rule's one exception (plastic 25G, BR-82): pressure on at the lift height, the thread breaks;
+        // after the dot's end, so a STOP in it leaves the laid dot counted, and in settle pieces (its valve-off waits one)
+        settle(profile.liftPauseMs);
     }
 
     /** A dispense target moved by minus where the needle lands (landing + trim, §22.3). */
@@ -673,13 +676,16 @@ public class GcodeStreamBuilder {
     }
 
     /**
-     * The longest G4 of a pump or valve settle: the controller runs a G4 to its end before the lines behind it, so a
-     * STOP's valve-off waits at most one piece, with or without the host watchdog (review 10-31, a 3 s settle was one
-     * G4 P3000).
+     * The longest G4 of a pump or valve settle and of the pause after the lift: the controller runs a G4 to its end
+     * before the lines behind it, so a STOP's valve-off waits at most one piece, with or without the host watchdog
+     * (review 10-31, a 3 s settle was one G4 P3000).
      */
     public static final int MAX_SETTLE_PIECE_MS = 250;
 
-    /** A pump or valve settle, in pieces of at most {@link #MAX_SETTLE_PIECE_MS} (and the ping interval). */
+    /**
+     * A pump or valve settle and the profile's pause after the lift (the pressure on in all three), in pieces of at
+     * most {@link #MAX_SETTLE_PIECE_MS} (and the ping interval).
+     */
     private void settle(int ms) {
         int ping = Math.max(100, cfg.keepaliveIntervalMs);
         dwell(ms, keepalive ? Math.min(MAX_SETTLE_PIECE_MS, ping) : MAX_SETTLE_PIECE_MS);
