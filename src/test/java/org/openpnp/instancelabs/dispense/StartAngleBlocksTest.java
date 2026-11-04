@@ -1,6 +1,7 @@
 package org.openpnp.instancelabs.dispense;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -45,6 +46,57 @@ public class StartAngleBlocksTest {
             DoseBlocksResult o = svc.runDoseBlocks(own).get(120, TimeUnit.SECONDS);
             assertTrue(o.ok, o.message);
             assertEquals(298, angles(o)[0], 0.225);
+        }
+    }
+
+    /**
+     * A measure step (measuresStartAngle) lays the half and quarter turns a whole-turn recipe's tip does not take, and
+     * I11 does not stop it; any other step keeps both rules.
+     */
+    @Test
+    public void aMeasureStepIsWaivedI11AndTheTipsSmallestDose() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            svc.setDotImager(new LandingCheckBlocksTest.BandImager());
+            // the 25G 0603 recipe: whole turns only; then the screw's motor went off after the angle was set (I11)
+            svc.updateConfigAtomically(live -> {
+                live.profile.netStepsPerDot = 1600;
+                live.tip.minDotSteps = 1600;
+                return live;
+            });
+            svc.noteControllerLine("M18 B");
+            DoseBlocksRequest req = LandingCheckBlocksTest.ladder(svc, LandingCheckBlocksTest.row(98, 40, 4));
+            req.purgeXy = LandingCheckBlocksTest.row(98, 46, 2);
+            req.startAngleDeg = 100.0;
+            DoseBlocksResult refused = svc.runDoseBlocks(req).get(120, TimeUnit.SECONDS);
+            assertFalse(refused.ok);
+            assertTrue(refused.message.contains("PCAL: 800 steps is not a dot the"), refused.message);
+            req.measuresStartAngle = true;
+            DoseBlocksResult r = svc.runDoseBlocks(req).get(120, TimeUnit.SECONDS);
+            assertTrue(r.ok, r.message);
+            assertTrue(r.run.interlocks.notes.contains("I11: waived: this run measures the start angle"),
+                    r.run.interlocks.notes.toString());
+            assertEquals(100, angles(r)[0], 0.225 / 2);
+            assertEquals(1600, svc.getConfig().tip.minDotSteps, "the tip's own floor is unchanged");
+            DoseBlocksRequest quarters = LandingCheckBlocksTest.ladder(svc, LandingCheckBlocksTest.row(98, 42, 4));
+            quarters.blocks.get(0).netSteps = 400;
+            quarters.purgeXy = LandingCheckBlocksTest.row(98, 48, 2);
+            quarters.measuresStartAngle = true;
+            DoseBlocksResult q = svc.runDoseBlocks(quarters).get(120, TimeUnit.SECONDS);
+            assertTrue(q.ok, q.message);
+            assertEquals(298, angles(q)[0], 0.225);
+            assertEquals(28, angles(q)[1], 0.225);
+            // a step that measures nothing: I11 in force
+            svc.updateConfigAtomically(live -> {
+                live.tip.minDotSteps = 400;
+                return live;
+            });
+            DoseBlocksRequest plain = LandingCheckBlocksTest.ladder(svc, LandingCheckBlocksTest.row(98, 44, 2));
+            plain.purgeXy = LandingCheckBlocksTest.row(98, 50, 2);
+            DoseBlocksResult i11 = svc.runDoseBlocks(plain).get(120, TimeUnit.SECONDS);
+            assertFalse(i11.ok);
+            assertTrue(i11.message.contains("I11: the screw motor was switched off") && i11.message.contains("measure the "
+                    + "start angle again"), i11.message);
         }
     }
 }

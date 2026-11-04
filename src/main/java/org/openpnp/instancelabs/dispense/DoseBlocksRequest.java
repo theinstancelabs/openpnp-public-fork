@@ -49,6 +49,11 @@ public final class DoseBlocksRequest {
      * profile's. The stored angle does not change.
      */
     public Double startAngleDeg;
+    /**
+     * BR-77: this step measures the start angle: I11 is waived ({@link Interlocks.Scope#startAngleWaiver}), and its
+     * blocks may be smaller than the tip's smallest dose ({@code tip.minDotSteps}), as a quarter, half or whole turn.
+     */
+    public boolean measuresStartAngle;
 
     /** Dots of one dose, laid together. */
     public static final class Block {

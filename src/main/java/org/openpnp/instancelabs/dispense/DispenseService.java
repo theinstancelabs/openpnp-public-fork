@@ -5195,6 +5195,7 @@ public final class DispenseService {
         if (req.landingCheck) {
             scope.landingWaiver = Interlocks.Scope.LANDING_CHECK;
         }
+        scope.startAngleWaiver = req.measuresStartAngle;
         t.stage = "z check";
         res.zCheck = zCheckIfNeeded(s, null, scope, t::aborted);
         for (DoseBlocksRequest.Block b : req.blocks) {
@@ -5384,14 +5385,21 @@ public final class DispenseService {
 
     /**
      * The configuration a dose-blocks step runs on, its builder and its stream validator alike: the live one, or BR-77 a
-     * copy with the request's start angle (never saved).
+     * copy with the request's start angle and, for a measure, the tip's smallest dose lowered to the request's (never
+     * saved).
      */
     static DispenseConfig stepConfig(DispenseConfig live, DoseBlocksRequest req) {
-        if (req.startAngleDeg == null) {
+        if (req.startAngleDeg == null && !req.measuresStartAngle) {
             return live;
         }
         DispenseConfig c = live.copy();
-        c.profile.startAngleDeg = req.startAngleDeg;
+        if (req.startAngleDeg != null) {
+            c.profile.startAngleDeg = req.startAngleDeg;
+        }
+        for (int k = 0; req.measuresStartAngle && k < req.blocks.size(); k++) {
+            // R1 is about a dose's reliability: a phase map is no production dose
+            c.tip.minDotSteps = Math.min(c.tip.minDotSteps, req.blocks.get(k).netSteps);
+        }
         return c;
     }
 

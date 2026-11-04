@@ -85,6 +85,26 @@ public class InterlocksBlocksTest {
                 + "read at a connect) after the screw start angle was set"));
     }
 
+    /** BR-77: I11 is waived for the run that measures the start angle, and only for it (never a board run). */
+    @Test
+    public void i11IsWaivedOnlyForTheStartAngleMeasure() {
+        Interlocks.Inputs cal = InterlocksTest.ok();
+        cal.boardRun = false;
+        cal.plan = null;
+        cal.purgeDots = 0;
+        cal.partialTurn = true;
+        cal.cfg.profile.startAngleSetAtMs = null;
+        assertTrue(Interlocks.check(cal).has("I11"));
+        cal.scope.startAngleWaiver = true;
+        InterlockReport r = Interlocks.check(cal);
+        assertFalse(r.has("I11"), r.toString());
+        assertTrue(r.notes.contains("I11: waived: this run measures the start angle"), r.notes.toString());
+        Interlocks.Inputs board = threeDoses();
+        board.cfg.profile.startAngleSetAtMs = null;
+        board.scope.startAngleWaiver = true;
+        assertTrue(Interlocks.check(board).has("I11"), "a board run is never waived");
+    }
+
     /** One-turn dots on a 2 mm grid. */
     static DispensePlan oneTurnRow(DispenseConfig c, int parts) {
         List<PadGeometry> pads = new ArrayList<>();
