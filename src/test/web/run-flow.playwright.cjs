@@ -89,7 +89,7 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     check('(1) Run, while nothing runs, opens Start: its own main column and panel, not today\'s board picture', await shown(page, '#run-start')
       && !(await shown(page, '#run-hero')) && await shown(page, '#btn-rs-start') && (await page.textContent('#run-start .eyebrow')).trim() === 'Make a board', s1);
     check('(1) today\'s pages are one link away: Step by step', await shown(page, '#rs-step-by-step')
-      && (await page.getAttribute('#rs-step-by-step', 'href')) === '#run/checks');
+      && (await page.getAttribute('#rs-step-by-step', 'href')) === '#run/steps');
 
     // ---- (2) Design ---------------------------------------------------------------------------------------------------
     const boards = await page.evaluate(() => IL.api('GET', '/api/boards'));

@@ -3198,7 +3198,8 @@
     },
     show(route) {
       R.section = route && STEPS.includes(route.section) ? route.section : null;
-      R.steps = !!R.section;   // into Run from elsewhere: Start, unless a step of today's pages was asked for
+      // into Run from elsewhere: Start, unless today's pages were asked for (a step, or #run/steps: their own step now)
+      R.steps = !!R.section || !!(route && route.section === 'steps');
       if (R.bv) setTimeout(() => R.bv.relayout(), 0);
     },
     hide() {
@@ -3208,7 +3209,7 @@
     route(route) {
       const sec = route && STEPS.includes(route.section) ? route.section : null;
       if (sec !== R.section) { R.section = sec; }
-      if (sec) R.steps = true;
+      if (sec || (route && route.section === 'steps')) R.steps = true;
     },
     render(s) { renderMain(s); },
     panel(parts, s, first) {

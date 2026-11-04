@@ -378,7 +378,7 @@
             el('div', { class: 'ri__d', text: none ? 'It stopped before the first dot: nothing to keep or wipe.'
               : (d.run.dotsDone || 0) + ' of ' + (d.run.dotsPlanned || '?') + ' dots are on the board. The pads left get their paste; the dots there stay.' })),
           el('div', { class: 'ri__act' }, go, el('details', { class: 'rf-more', id: 'rv-need-more' }, el('summary', { text: 'Other choices…' }),
-            el('div', { class: 'btn-row' }, none ? null : all, el('a', { class: 'link', href: '#run/checks', text: 'Step by step' })))),
+            el('div', { class: 'btn-row' }, none ? null : all, el('a', { class: 'link', href: '#run/steps', text: 'Step by step' })))),
           el('div', { class: 'ri__note', text: 'Nothing moves until you press it. The run checks every pad first.' }));
       });
     } else {
@@ -439,7 +439,7 @@
       n.start.addEventListener('click', () => start(n.start));
       n.why = el('div', { class: 'reason', id: 'rs-start-why', hidden: true });
       n.cap = el('div', { class: 'rf-cap', id: 'rs-start-cap', text: 'Start also means: hands and tools are clear. Stay until the paste starts (about a minute); then you can leave.' });
-      parts.foot.append(n.why, n.start, n.cap, el('a', { class: 'link rf-steps', id: 'rs-step-by-step', href: '#run/checks', text: 'Step by step: today\'s Run page' }));
+      parts.foot.append(n.why, n.start, n.cap, el('a', { class: 'link rf-steps', id: 'rs-step-by-step', href: '#run/steps', text: 'Step by step: today\'s Run page' }));
     }
     // the answers
     let all = true;
