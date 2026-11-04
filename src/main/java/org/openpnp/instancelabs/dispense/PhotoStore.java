@@ -24,14 +24,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
 
-import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReadParam;
 import javax.imageio.ImageReader;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
 import javax.imageio.stream.ImageInputStream;
-import javax.imageio.stream.ImageOutputStream;
 
 /**
  * The pictures (tip setups design §22.4). Every photo is re-encoded by the engine (JPEG quality 0.85, at
@@ -408,19 +404,12 @@ public final class PhotoStore {
 
     /** JPEG of quality {@link #JPEG_QUALITY}, no metadata but the JFIF header. */
     static byte[] jpeg(BufferedImage img) throws IOException {
-        ImageWriter w = ImageIO.getImageWritersByFormatName("jpeg").next();
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (ImageOutputStream ios = ImageIO.createImageOutputStream(out)) {
-            w.setOutput(ios);
-            ImageWriteParam p = w.getDefaultWriteParam();
-            p.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            p.setCompressionQuality(JPEG_QUALITY);
-            w.write(null, new IIOImage(img, null, null), p);
+        // the shared encoder: ImageIO, else OpenCV (the deployed JVM has no ImageIO JPEG writer: next() threw, 11-03)
+        byte[] b = JpegEncoder.encode(img, JPEG_QUALITY);
+        if (b == null) {
+            throw new IOException("no JPEG encoder works in this JVM (neither ImageIO's nor OpenCV's)");
         }
-        finally {
-            w.dispose();
-        }
-        return out.toByteArray();
+        return b;
     }
 
     static String sha256(byte[] b) {
