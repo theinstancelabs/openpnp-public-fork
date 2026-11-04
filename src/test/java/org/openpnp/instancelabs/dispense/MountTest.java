@@ -243,11 +243,18 @@ public class MountTest {
                 return live;
             });
             svc.setStartAngle(120.0, "measured");
+            // BR-77: the feature of the measure the angle was set from goes with it
+            svc.updateConfigAtomically(live -> {
+                live.profile.startAngleFeature = new DispenseProfile.StartAngleFeature("halves", 300, 1000L, "pc-1");
+                return live;
+            });
             DispenseProfile live = svc.getConfig().profile;
             f.mount(K25);
             DispenseProfile now = svc.getConfig().profile;
             assertEquals(120, now.startAngleDeg, 0);
             assertEquals(live.startAngleSetAtMs, now.startAngleSetAtMs, "not stamped: no new measurement");
+            assertEquals("pc-1", now.startAngleFeature.runId);
+            assertEquals(300, now.startAngleFeature.deg, 0);
             // after a controller reset (BR-02) the angle is stale (I11); a mount leaves it as it was
             f.sim.machine.setEnabled(false);
             f.sim.server.powerCycle();
@@ -255,6 +262,27 @@ public class MountTest {
             f.mount(Tip.SEED_KEY);
             assertEquals(live.startAngleSetAtMs, svc.getConfig().profile.startAngleSetAtMs);
             assertTrue(svc.getConfig().profile.startAngleSetAtMs < svc.getControllerResetAtMs(), "I11 still asks");
+            assertEquals("pc-1", svc.getConfig().profile.startAngleFeature.runId);
+            // an undo keeps the live angle and its feature too (measured again: the screw turned since the reset)
+            svc.noteControllerLine("G1 B30 F600");
+            svc.setStartAngle(30.0, "measured");
+            svc.updateConfigAtomically(c -> {
+                c.profile.startAngleFeature = new DispenseProfile.StartAngleFeature("quarters", 250, 2000L, "pc-2");
+                return c;
+            });
+            f.mount(K25);
+            svc.undoMount("tester");
+            assertEquals(30, svc.getConfig().profile.startAngleDeg, 0);
+            assertEquals("pc-2", svc.getConfig().profile.startAngleFeature.runId);
+            // a set without a measure's feature drops it (the recipe's offset from it is unknown); a confirm keeps it
+            svc.updateConfigAtomically(c -> {
+                c.profile.startAngleFeature = new DispenseProfile.StartAngleFeature("quarters", 250, 2000L, "pc-2");
+                return c;
+            });
+            svc.setStartAngle(null, "confirmed");
+            assertEquals("pc-2", svc.getConfig().profile.startAngleFeature.runId);
+            svc.setStartAngle(30.0, "typed");
+            assertNull(svc.getConfig().profile.startAngleFeature, "a bare set, even of the same angle");
         }
     }
 

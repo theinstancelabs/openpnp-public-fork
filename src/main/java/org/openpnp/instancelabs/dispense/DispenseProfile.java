@@ -47,6 +47,11 @@ public class DispenseProfile {
     public double startAngleDeg = 298;
     /** When the start angle was set or confirmed (epoch ms); null = never. */
     public Long startAngleSetAtMs = null;
+    /**
+     * BR-77: what the measure the start angle was set from found, or null (never measured, or set without one): the
+     * recipe's own offset from it is {@link #startAngleDeg} - its {@code deg}, which an apply keeps. Changes no dot.
+     */
+    public StartAngleFeature startAngleFeature = null;
     /** Screw speed: G1 B feed = rpm x 360 deg/min (the bench's 180 rpm = F64800). */
     public double screwRpm = 180;
     /** Screw acceleration (deg/s²), sent as M204 S around the B moves only (M204 S also caps B). */
@@ -72,6 +77,27 @@ public class DispenseProfile {
     public double sustainedFeedMgS = 2.6;
     public String notes = "Window is narrow: 16 psi starved the screw, 20 psi drooled. Never run the screw "
             + "faster than the paste feeds it (it pulls in air; 30-50 turns to recover).";
+
+    /** BR-77: a feature of the screw's flow ripple a start-angle measure found (count angles). */
+    public static final class StartAngleFeature {
+        /** "halves": the flow's peak; "quarters": the start of the dead quarter. */
+        public String mode;
+        public double deg;
+        /** When its evidence was made (the measure's first dot step started), epoch ms. */
+        public Long measuredAtMs;
+        /** The measure's job id (its evidence). */
+        public String runId;
+
+        public StartAngleFeature() {
+        }
+
+        public StartAngleFeature(String mode, double deg, Long measuredAtMs, String runId) {
+            this.mode = mode;
+            this.deg = deg;
+            this.measuredAtMs = measuredAtMs;
+            this.runId = runId;
+        }
+    }
 
     /** True if a dot is not a whole number of revolutions (the start angle then matters). */
     public boolean isPartialTurn(DispenseConfig c) {
@@ -235,6 +261,7 @@ public class DispenseProfile {
         x.suckBackDeg = suckBackDeg;
         x.startAngleDeg = startAngleDeg;
         x.startAngleSetAtMs = startAngleSetAtMs;
+        x.startAngleFeature = startAngleFeature;
         x.screwRpm = screwRpm;
         x.screwAccelDegS2 = screwAccelDegS2;
         x.dwellMs = dwellMs;

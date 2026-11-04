@@ -1299,6 +1299,7 @@ public final class DispenseService {
         DispenseConfig c = cfg.copy();
         if (angleDeg != null) {
             c.profile.startAngleDeg = angleDeg;
+            c.profile.startAngleFeature = null; // BR-77: set without a measure, the recipe's offset from it is unknown
         }
         c.profile.startAngleSetAtMs = System.currentTimeMillis();
         updateConfig(c);
@@ -1631,12 +1632,14 @@ public final class DispenseService {
             // the start angle belongs to the controller's power-up and the screw, not to the needle (§22.3)
             prof.startAngleDeg = c.profile.startAngleDeg;
             prof.startAngleSetAtMs = c.profile.startAngleSetAtMs;
+            prof.startAngleFeature = c.profile.startAngleFeature;
             List<String> problems = prof.validate(c);
             if (!problems.isEmpty()) {
                 DispenseProfile reset = new DispenseProfile();
                 reset.name = in.name + " (reset: " + problems.get(0) + ")";
                 reset.startAngleDeg = c.profile.startAngleDeg;
                 reset.startAngleSetAtMs = c.profile.startAngleSetAtMs;
+                reset.startAngleFeature = c.profile.startAngleFeature;
                 r.warnings.add("The " + in.name + "'s dispense profile no longer validates (" + problems.get(0)
                         + "): it was reset to the default recipe.");
                 prof = reset;
@@ -1735,6 +1738,7 @@ public final class DispenseService {
             c.profile = b.profile.copy();
             c.profile.startAngleDeg = cfg.profile.startAngleDeg;
             c.profile.startAngleSetAtMs = cfg.profile.startAngleSetAtMs;
+            c.profile.startAngleFeature = cfg.profile.startAngleFeature;
             c.needleAnchor = b.needleAnchor;
             c.needleZOffsetMm = b.needleZOffsetMm;
             c.needleZOffsetSetAtMs = b.needleZOffsetSetAtMs;
