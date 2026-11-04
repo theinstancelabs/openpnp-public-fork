@@ -2839,7 +2839,10 @@ public final class DispenseService {
                 throw refused(pitch);
             }
             double dotMm = NeedleTouchOff.expectedDotDiameterMm(req, c);
-            double steadyMm = NeedleTouchOff.steadyDotMm(req, c);
+            // BR-85: the reference is judged against the mounted tip's own dots of the dose when it has them
+            Tip tip = mountedTip();
+            double steadyMm = NeedleTouchOff.steadyDotMm(req, c, tip);
+            String referenceFrom = NeedleTouchOff.referenceFrom(req, c, tip);
             Session s = new Session(c, r);
             SurfacePlane plane = planeOf(c, blankName);
             if (Double.isNaN(req.rotationDeg)) {
@@ -2861,7 +2864,9 @@ public final class DispenseService {
             }
             List<SpotDot> seen = s.imageSpots(specs, req.primeAtWaste, primeExtra, NeedleTouchOff.cutMm(dotMm),
                     req.pitchMm / 2);
-            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen, req.jumpRatio, steadyMm);
+            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen, req.jumpRatio, steadyMm,
+                    c.profile.touchOffSkipDots);
+            res.analysis.referenceFrom = referenceFrom;
             res.previousOffsetMm = c.needleZOffsetMm;
             java.util.Map<String, Object> det = new java.util.LinkedHashMap<>();
             det.put("analysis", res.analysis);

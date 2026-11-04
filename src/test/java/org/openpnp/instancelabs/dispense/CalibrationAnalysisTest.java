@@ -10,6 +10,8 @@ import java.util.Arrays;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.padprofile.DoseModel;
+import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.instancelabs.vision.Dot;
 import org.openpnp.instancelabs.vision.SpotDot;
 
@@ -181,6 +183,94 @@ public class CalibrationAnalysisTest {
         req.rotationDeg = 400 / c.bStepsPerDeg;
         assertEquals(org.openpnp.instancelabs.padprofile.DoseModel.dLoMm(400), NeedleTouchOff.steadyDotMm(req, c),
                 1e-9);
+    }
+
+    /**
+     * BR-85: a tip whose start blob lands on the first dots after the prime skips them (its recipe's
+     * touchOffSkipDots): with 2, dots 3 and 4 are the reference. Read against the blobs, the squash at 0.05 is missed
+     * and the missing last dot is taken for the contact, a step too low.
+     */
+    @Test
+    public void touchOffSkipsTheTipsStartDots() {
+        double[] g = {0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.00};
+        Double[] d = {1.80, 1.50, 1.20, 1.22, 1.21, 1.60, null};
+        String[] u = new String[g.length];
+        NeedleTouchOff.Analysis a = NeedleTouchOff.analyze(g, d, u, 0.25, 1.20, 2);
+        assertTrue(a.found(), a.reason);
+        assertEquals(2, a.skippedDots);
+        assertEquals(1.21, a.referenceDiameterMm, 1e-12, "dots 3 and 4");
+        assertEquals(0.075, a.contactGapMm, 1e-12);
+        assertEquals("dot squashed between 0.100 and 0.050 mm", a.reason);
+        NeedleTouchOff.Analysis blobs = NeedleTouchOff.analyze(g, d, u, 0.25, 1.20, 0);
+        assertEquals(0, blobs.skippedDots);
+        assertEquals(1.65, blobs.referenceDiameterMm, 1e-12);
+        assertEquals(0.025, blobs.contactGapMm, 1e-12);
+        // no skip is the analysis of before (the 22G's)
+        assertEquals(NeedleTouchOff.analyze(g, d, u, 0.25, 1.20).reason, blobs.reason);
+        // paste the skipped dots left (strung together) does not count; paste joined to dot 3 refuses
+        String[] strung = {"joined to the dot at gap 0.250 mm", "joined to the dot at gap 0.300 mm", null, null, null,
+            null, null};
+        assertEquals(0.075, NeedleTouchOff.analyze(g, new Double[] {null, null, 1.20, 1.22, 1.21, 1.60, null}, strung,
+                0.25, 1.20, 2).contactGapMm, 1e-12);
+        String[] third = {null, "joined to the dot at gap 0.200 mm", "joined to the dot at gap 0.250 mm", null, null,
+            null, null};
+        assertEquals("dots touch or are strung together: the paste at gap 0.200 mm is joined to the dot at gap "
+                + "0.250 mm; use a larger pitch", NeedleTouchOff.analyze(g, new Double[] {1.80, null, null, 1.22, 1.21,
+                    1.60, null}, third, 0.25, 1.20, 2).reason);
+        // the refusals name the dots after the skipped ones
+        java.util.function.Function<Double[], String> skip2 = x -> NeedleTouchOff.analyze(g, x, u, 0.25, 1.20, 2)
+                .reason;
+        assertEquals("no dot at gap 0.200 mm, the first after the 2 skipped: the needle is at or below the surface "
+                + "from there, or nothing dispensed; raise startGapMm", skip2.apply(new Double[] {1.80, 1.50, null,
+                    1.22, 1.21, 1.60, null}));
+        assertEquals("only the first dot after the 2 skipped formed before a missing one (1.200 mm at gap 0.200, none "
+                + "at gap 0.150): a contact needs two steady dots before it (the first may be a droplet from too "
+                + "high); run the ladder again from another start gap", skip2.apply(new Double[] {1.80, 1.50, 1.20,
+                    null, 1.21, 1.60, null}));
+        assertTrue(skip2.apply(new Double[] {1.80, 1.50, 1.20, 1.60, 1.21, 1.60, null}).startsWith("the first two dots "
+                + "after the 2 skipped differ too much to be the reference (1.200 mm at gap 0.200, 1.600 mm at gap "
+                + "0.150"));
+        assertTrue(skip2.apply(new Double[] {1.80, 1.50, 0.40, 0.42, 1.21, 1.60, null}).startsWith("the first two dots "
+                + "after the 2 skipped (0.400 mm at gap 0.200, 0.420 mm at gap 0.150) are under 60 % of the 1.20 mm"));
+        assertEquals("every dot of the ladder is skipped (touchOffSkipDots 2): lay at least 4", NeedleTouchOff
+                .analyze(new double[] {0.30, 0.25}, new Double[] {1.80, 1.50}, new String[2], 0.25, 1.20, 2).reason);
+    }
+
+    /**
+     * BR-85: the reference's smallest size is 60 % of the mounted tip's own dot of the touch-off's dose when its dot
+     * table has one, else of the 22G model's as before; referenceFrom says which.
+     */
+    @Test
+    public void touchOffReferenceFollowsTheTipsOwnDots() {
+        DispenseConfig c = new DispenseConfig();
+        c.profile.netStepsPerDot = 1600;
+        NeedleTouchOff.Request req = new NeedleTouchOff.Request();
+        Tip g22 = Tip.g22();
+        assertEquals(DoseModel.dLoMm(1600), NeedleTouchOff.steadyDotMm(req, c, g22), 1e-12, "the 22G: its model");
+        assertEquals("the 22G model", NeedleTouchOff.referenceFrom(req, c, g22));
+        long at = 1_800_000_000_000L;
+        Tip t25 = new Tip("25g-taper", "25G taper", 0.25, 0.51, 1600);
+        Tip.Measured m = new Tip.Measured();
+        m.dMeanMm = 1.20;
+        m.d95Mm = 1.28;
+        m.recordId = 7;
+        m.atMs = at;
+        t25.measured.put(1600, m);
+        assertEquals(1.20, NeedleTouchOff.steadyDotMm(req, c, t25), 1e-12);
+        assertEquals("the tip's dots at 1600 steps (" + ZCheck.dayClock(at) + ")", NeedleTouchOff.referenceFrom(req, c,
+                t25));
+        // its dots of another dose are not this dose's
+        req.rotationDeg = 800 / c.bStepsPerDeg;
+        assertEquals(DoseModel.dLoMm(800), NeedleTouchOff.steadyDotMm(req, c, t25), 1e-12);
+        assertEquals("the 22G model", NeedleTouchOff.referenceFrom(req, c, t25));
+        // 0.75 mm whole-turn dots: droplets against the 22G model's 1.345 mm, steady dots against the tip's 1.20 mm
+        req.rotationDeg = Double.NaN;
+        double[] g = {0.30, 0.25, 0.20, 0.15};
+        Double[] d = {0.75, 0.76, 0.75, 1.10};
+        assertFalse(NeedleTouchOff.analyze(g, d, new String[4], 0.25, NeedleTouchOff.steadyDotMm(req, c, g22), 0)
+                .found());
+        assertEquals(0.175, NeedleTouchOff.analyze(g, d, new String[4], 0.25, NeedleTouchOff.steadyDotMm(req, c,
+                t25), 0).contactGapMm, 1e-12);
     }
 
     /** What the camera saw at each spot, as the analysis reads it: the joined dots named by their gaps. */

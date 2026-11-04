@@ -250,6 +250,20 @@ public class DispenseProfileTest {
         assertEquals("renamed", p.copy().name);
     }
 
+    /** BR-85: the dots the touch-off skips after the prime are the recipe's: 0 to 5, copied, no part of a dot. */
+    @Test
+    public void touchOffSkipDotsIsTheRecipesAndNoPartOfADot() {
+        DispenseProfile p = new DispenseProfile();
+        assertEquals(0, p.touchOffSkipDots, "today's touch-off");
+        p.touchOffSkipDots = 5;
+        assertTrue(p.validate(C).isEmpty(), p.validate(C).toString());
+        assertEquals(5, p.copy().touchOffSkipDots);
+        assertEquals(new DispenseProfile().fingerprint(), p.fingerprint(), "plans stay fresh");
+        assertEquals(new DispenseProfile().doseFingerprint(), p.doseFingerprint(), "dose records stay fresh");
+        assertRefused(x -> x.touchOffSkipDots = 6, "touchOffSkipDots");
+        assertRefused(x -> x.touchOffSkipDots = -1, "touchOffSkipDots");
+    }
+
     @Test
     public void validateRefusesUnsafeOrUnmeasuredValues() {
         assertRefused(p -> p.pressurePsi = 22, "pressurePsi");

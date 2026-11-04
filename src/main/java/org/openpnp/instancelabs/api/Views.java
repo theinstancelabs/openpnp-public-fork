@@ -90,6 +90,7 @@ final class Views {
         m.put("gapMm", p.gapMm);
         m.put("purgeDots", p.purgeDots);
         m.put("notes", p.notes);
+        m.put("touchOffSkipDots", p.touchOffSkipDots);
         m.put("stepsPerRev", c.bStepsPerRev);
         m.put("stepsPerDeg", c.bStepsPerDeg);
         m.put("revolutionsPerDot", p.revolutionsPerDot(c));
@@ -606,7 +607,8 @@ final class Views {
         DispenseConfig.ParkedTip parked = cfg.parkedTips.get(s.key);
         DispenseProfile p = mounted ? cfg.profile : parked == null ? null : parked.profile;
         m.put("profile", p == null ? null : map("name", p.name, "pressurePsi", p.pressurePsi, "netStepsPerDot",
-                p.netStepsPerDot, "parked", !mounted, "from", parked == null ? null : parked.profileFrom));
+                p.netStepsPerDot, "touchOffSkipDots", p.touchOffSkipDots, "parked", !mounted, "from", parked == null
+                        ? null : parked.profileFrom));
         DispenseConfig.NeedleLanding l = mounted ? cfg.needleLanding : parked == null ? null : parked.needleLanding;
         m.put("landing", l == null ? null : map("dxMm", l.dxMm, "dyMm", l.dyMm, "setAtMs", l.setAtMs, "checked",
                 mounted && svc.isNeedleXyChecked(), "note", l.note, "jobId", l.jobId, "photoId", l.photoId));
