@@ -37,6 +37,8 @@ public final class BoardArtStore {
     public static final String NOTE_CHANGED = "The board file changed since the KiCad drawing was saved.";
     static final int FALLBACK_CACHE = 64;
     static final int PARSED_CACHE = 16;
+    /** BR-88: every board-list read looks at every current drawing's record. */
+    static final int RECORD_CACHE = 256;
 
     private static BoardArtStore current;
 
@@ -102,6 +104,20 @@ public final class BoardArtStore {
             return size() > PARSED_CACHE;
         }
     };
+    /**
+     * BR-88: art id → its source and import blocks (a BoardArt without the drawing). shortcut: past 256 current
+     * drawings each board-list read parses them again; index the records by board file if a machine keeps that many.
+     */
+    private final LinkedHashMap<String, BoardArt> records = new LinkedHashMap<String, BoardArt>(16, 0.75f, true) {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, BoardArt> e) {
+            return size() > RECORD_CACHE;
+        }
+    };
+    /** BR-88: the atMs of the last save, replace or attach of this run that succeeded; null before one. */
+    private volatile Long savedAtMs;
 
     private BoardArtStore(BoardArtIndex index) {
         this.index = index;
@@ -216,27 +232,43 @@ public final class BoardArtStore {
         verified.clear();
     }
 
+    /** BR-88: a save, replace or attach succeeded (its atMs): GET /api/status gives it as boardImport.savedAtMs. */
+    public void saved(long atMs) {
+        savedAtMs = atMs;
+    }
+
+    /** BR-88: the atMs of the last save, replace or attach of this run that succeeded, else null. */
+    public Long savedAtMs() {
+        return savedAtMs;
+    }
+
     // ---- what the KiCad art offers -------------------------------------------------------------------------------
 
-    /** The import record of a board with KiCad art, else null. */
+    /**
+     * The import record of a board with KiCad art, else null. BR-88: the record of the board's own upload when it has
+     * one ({@link #ownUpload}), else the drawing's (a byte copy; a board file whose drawing came by geometry only); the
+     * origin is always the drawing's.
+     */
     public synchronized Imported imported(Board b) {
         BoardArt a = kicadArt(b);
         if (a == null) {
             return null;
         }
+        BoardArt own = ownUpload(b);
+        BoardArt r = own == null ? a : own;
         Imported i = new Imported();
-        if (a.imported != null) {
-            i.slug = a.imported.slug;
-            i.name = a.imported.name;
-            i.atMs = a.imported.atMs;
-            i.how = a.imported.how;
-            i.board = a.imported.board;
-            i.skipped = a.imported.skipped;
-            i.pasteDnp = a.imported.pasteDnp;
+        if (r.imported != null) {
+            i.slug = r.imported.slug;
+            i.name = r.imported.name;
+            i.atMs = r.imported.atMs;
+            i.how = r.imported.how;
+            i.board = r.imported.board;
+            i.skipped = r.imported.skipped;
+            i.pasteDnp = r.imported.pasteDnp;
         }
-        if (a.source != null) {
-            i.sourceName = a.source.name;
-            i.kicadVersion = a.source.kicadVersion;
+        if (r.source != null) {
+            i.sourceName = r.source.name;
+            i.kicadVersion = r.source.kicadVersion;
         }
         i.origin = a.origin;
         return i;
@@ -289,19 +321,77 @@ public final class BoardArtStore {
         if (a != null) {
             return a;
         }
-        byte[] bytes = bytes(e.artId);
+        a = read(e.artId);
+        if (a != null) {
+            parsed.put(e.artId, a);
+        }
+        return a;
+    }
+
+    /**
+     * BR-88: the newest current drawing (not one a replace moved to history/) saved for this board file at its present
+     * geometry: an import's, whose board file is {@code <slug>/<slug>.board.xml} next to its {@code <slug>.art.json},
+     * or an attach's, which names the board file. Its source and import blocks only; null when there is none.
+     */
+    private BoardArt ownUpload(Board b) {
+        if (b.getFile() == null) {
+            return null;
+        }
+        String file = BoardArtIndex.canonical(b.getFile());
+        File root = new File(BoardArtIndex.canonical(index.root()));
+        String digest = BoardArtIndex.digest(b);
+        BoardArt own = null;
+        for (Map.Entry<String, String> e : index.arts().entrySet()) {
+            String slug = e.getValue() == null ? "" : e.getValue().split("/", 2)[0]; // null: an index edited by hand
+            if (!BoardStore.artPath(slug).equals(e.getValue())) {
+                continue; // history/: a replace displaced it
+            }
+            BoardArt r = record(e.getKey());
+            BoardArt.Import i = r == null ? null : r.imported;
+            if (i == null || !digest.equals(i.boardDigest)) {
+                continue;
+            }
+            String saved = i.board != null ? i.board : new File(new File(root, slug), slug + ".board.xml").getPath();
+            if (file.equals(saved) && (own == null || i.atMs > own.imported.atMs)) {
+                own = r;
+            }
+        }
+        return own;
+    }
+
+    /** BR-88: the source and import blocks of an art id (read once: the id is a content address), or null. */
+    private BoardArt record(String id) {
+        BoardArt r = records.get(id);
+        if (r != null) {
+            return r;
+        }
+        BoardArt a = parsed.get(id);
+        if (a == null) {
+            a = read(id);
+        }
+        if (a == null) {
+            return null;
+        }
+        r = new BoardArt();
+        r.source = a.source;
+        r.imported = a.imported;
+        records.put(id, r);
+        return r;
+    }
+
+    /** The art of an id, parsed; null when its file is gone, changed or not art. */
+    private BoardArt read(String id) {
+        byte[] bytes = bytes(id);
         if (bytes == null) {
             return null;
         }
         try {
-            a = BoardArt.parse(bytes);
+            return BoardArt.parse(bytes);
         }
         catch (IllegalArgumentException x) {
-            Logger.warn("board art {} cannot be read: {}", e.artId, x.getMessage());
+            Logger.warn("board art {} cannot be read: {}", id, x.getMessage());
             return null;
         }
-        parsed.put(e.artId, a);
-        return a;
     }
 
     // ---- helpers -------------------------------------------------------------------------------------------------

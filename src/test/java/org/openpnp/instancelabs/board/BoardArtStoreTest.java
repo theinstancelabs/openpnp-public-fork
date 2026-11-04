@@ -145,6 +145,18 @@ public class BoardArtStoreTest {
         assertNull(i.board);
     }
 
+    /** BR-88: a board lists its own upload only while it has that upload's geometry (else its drawing's upload). */
+    @Test
+    public void theOwnUploadCountsAtItsGeometryOnly() throws Exception {
+        BoardArtStore store = freshStore();
+        Saved ftp = save(store, ArtFixtures.FTP, "ftp");
+        Saved nano = save(store, ArtFixtures.NANO, "nano");
+        assertEquals("ftp", store.imported(ftp.board()).slug);
+        Board b = ArtFixtures.boardOf(nano.drawn.proposal, ftp.boardFile); // ftp's file, the nano's placements
+        assertEquals(nano.id, store.refFor(b, null).id);
+        assertEquals("nano", store.imported(b).slug);
+    }
+
     @Test
     public void historyFilesAreServedAndBadFilesAreNot() throws Exception {
         BoardArtStore store = freshStore();
