@@ -90,14 +90,17 @@ public final class BoardArt {
         public List<IdState> packages = new ArrayList<>();
         public List<IdState> parts = new ArrayList<>();
         public List<ImportWarning> warnings = new ArrayList<>();
-        /** BR-88: what gets no paste, as the upload's preview listed it; null in drawings saved before it. */
+        /** BR-88: the footprints the upload does not place, as its preview listed them; null in drawings before it. */
         public Skipped skipped;
+        /** BR-88: the upload's "paste do-not-place parts too" (its {@code dnp} parts then get paste); null before it. */
+        public Boolean pasteDnp;
 
         /** The counts, warnings and skipped parts of a proposal; the caller sets the rest (ids come from the id allocator). */
         public static Import from(ImportProposal p, List<ImportWarning> artWarnings) {
             Import i = new Import();
             i.counts = p.counts;
             i.skipped = Skipped.of(p);
+            i.pasteDnp = p.pasteDnp;
             i.warnings.addAll(p.warnings);
             if (artWarnings != null) {
                 i.warnings.addAll(artWarnings);
@@ -107,7 +110,11 @@ public final class BoardArt {
         }
     }
 
-    /** The parts an upload gives no paste: the preview's {@code skipped} (POST /api/boards/import), kept with the import. */
+    /**
+     * The footprints an upload does not place, the preview's {@code skipped} (POST /api/boards/import): {@code bottom}
+     * (the other side, not read), {@code artOnly} (drawn only), {@code dnp} (pasted only with pasteDnp) and
+     * {@code pasteOnly} (pasted, nothing placed). Kept with the import for the design's Set up page.
+     */
     public static final class Skipped {
         public List<String> bottom = new ArrayList<>();
         public List<ArtOnly> artOnly = new ArrayList<>();

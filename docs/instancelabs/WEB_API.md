@@ -262,9 +262,11 @@ name, `The file changed since the preview: upload it again.`), `not-kicad`, `kic
 
 **`GET /api/boards`** entries add `widthMm`, `heightMm`, `fiducials: [{id, bx, by}]`, `art: {id, kind (kicad |
 fallback), note}` (a note when the board changed since its KiCad drawing), `origin` and `imported: {slug, name, atMs,
-sourceName, kicadVersion, how, board, skipped}`; `skipped` (BR-88) = what the upload gives no paste, as its preview
-listed it: `{bottom, artOnly: [{ref, why}], dnp, pasteOnly}` (null for drawings saved before it). A board without KiCad
-art gets a drawing made from the board file (`imported: null`).
+sourceName, kicadVersion, how, board, skipped, pasteDnp}` (BR-88: `skipped` = the footprints the upload does not
+place, as its preview listed them: `{bottom` (the other side, not read), `artOnly: [{ref, why}]` (drawn only), `dnp`
+(do-not-place: pasted only when `pasteDnp`), `pasteOnly` (pasted, nothing placed)`}`; `pasteDnp` = the upload's choice;
+both null for drawings saved before them). A board without KiCad art gets a drawing made from the board file
+(`imported: null`).
 
 **The plan view** adds `board` `{name, file, widthMm, heightMm, side, toMachine (the board → machine affine, 6
 numbers), transformStatus, fiducials: [{id, partId, bx, by, x, y}], art: {id, kind, note} | null}` (the drawing is
