@@ -86,11 +86,17 @@ jobs:
             run=$(jq -r --arg sha "$GITHUB_SHA" '[.workflow_runs[] | select(.event == "merge_group"
                 and (.path | split("@")[0]) == ".github/workflows/ci.yml" and .head_sha == $sha
                 and (.head_branch | startswith("gh-readonly-queue/il/integration/"))
-                and .status == "completed" and .conclusion == "success") | .id] | max // empty' runs.json) || run=
-            if [ -n "$run" ] && timeout 120 gh run download "$run" -R "$GITHUB_REPOSITORY" -n gate-needs -D gate-needs
+                and (.status != "completed" or .conclusion == "success")) | .id] | max // empty' runs.json) || run=
+            # its gate job, not the run: GitHub can mark a run completed minutes after its last job (11-04: 12 min, in
+            # an incident), while the queue merges on the gate job's check, so that job has finished when this looks
+            if [ -n "$run" ] && timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs?filter=latest&per_page=100" \
+                  > jobs.json &&
+                jq -e '[.jobs[] | select(.name == "gate")] | length == 1 and .[0].status == "completed"
+                    and .[0].conclusion == "success"' jobs.json > /dev/null &&
+                timeout 120 gh run download "$run" -R "$GITHUB_REPOSITORY" -n gate-needs -D gate-needs
             then
               # a job counts only if it passed there: one skipped there (a partial run) runs here
-              passed=$(jq -c 'if type == "object" then [to_entries[] | select(.value.result == "success") | .key]
+              passed=$(jq -ce 'if type == "object" then [to_entries[] | select(.value.result == "success") | .key]
                   | sort else [] end' gate-needs/needs.json) || passed='[]'
             fi
           fi

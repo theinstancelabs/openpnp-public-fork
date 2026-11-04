@@ -72,9 +72,11 @@ class MergeQueue(unittest.TestCase):
         # a stalled API call must answer [] (every test job runs), not time the job out (every test job skipped)
         step = ci_wiring.step_run(next(s for s in ci_wiring.job_steps(block) if "run:" in s))
         calls = re.findall(r"(\S+\s+\S+\s+)?\bgh (api|run download)\b", step)
-        self.assertEqual(len(calls), 2, step)
+        self.assertEqual(len(calls), 3, step)  # the queue runs, their gate job, the artifact
         for prefix, _ in calls:
             self.assertRegex(prefix, r"^timeout \d+\s+$")
+        minutes = int(re.search(r"\n    timeout-minutes: (\d+)\n", block).group(1))
+        self.assertLess(sum(int(p.split()[1]) for p, _ in calls), 60 * minutes - 30)  # the calls end before the job
 
     def test_the_gate_is_bounded_and_pushes_keep_the_cache_prs_restore(self):
         js = ci_wiring.jobs(self.ci)
@@ -244,12 +246,13 @@ class GateBehaviour(unittest.TestCase):
         self.assertRegex(step, r"\n\s+shell: bash(\s+#[^\n]*)?\n")  # GitHub runs bash as -eo pipefail
 
 
-# A stand-in gh: `api` answers $FAKE/runs.json (none there: the call fails); `run download … -D dir` puts
-# $FAKE/needs.json into dir (none there: no artifact). Every call is logged to $FAKE/gh.log.
+# A stand-in gh: `api …/runs/N/jobs…` answers $FAKE/jobs-N.json, any other `api` $FAKE/runs.json (none there: the
+# call fails); `run download … -D dir` puts $FAKE/needs.json into dir (none there: no artifact). Every call is logged
+# to $FAKE/gh.log.
 FAKE_GH = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE/gh.log"
 case "$1" in
-  api) exec cat "$FAKE/runs.json" ;;
+  api) case "$2" in */jobs*) id=${2#*/runs/}; exec cat "$FAKE/jobs-${id%%/*}.json" ;; *) exec cat "$FAKE/runs.json" ;; esac ;;
   run) { [ "$2" = download ] && [ -f "$FAKE/needs.json" ]; } || { echo "no valid artifacts found" >&2; exit 1; }
        dir=.; while [ $# -gt 0 ]; do [ "$1" = -D ] && dir=$2; shift; done
        mkdir -p "$dir" && exec cp "$FAKE/needs.json" "$dir/needs.json" ;;
@@ -261,6 +264,8 @@ esac
 class QueueVerdict(unittest.TestCase):
     """The queued job's script under bash -e with a stand-in gh: which test jobs a push of this commit may skip."""
     NEEDS = {n: {"result": "success", "outputs": {}} for n in ("queued", "build") + TESTS}
+    GATE_OK = [{"name": "build", "status": "completed", "conclusion": "success"},
+               {"name": "gate", "status": "completed", "conclusion": "success"}]
 
     def setUp(self):
         with open(CI) as f:
@@ -280,15 +285,20 @@ class QueueVerdict(unittest.TestCase):
                      "head_branch": "gh-readonly-queue/il/integration/pr-29-" + "a" * 40, "status": "completed",
                      "conclusion": "success"}, **over)
 
-    def passed(self, runs, needs, event="push", ref="refs/heads/il/integration"):
-        """(the step's passed list, the gh calls) for these merge_group runs (None: the API call fails) and this
-        gate-needs artifact (None: none; a str: its raw text)."""
+    def passed(self, runs, needs, event="push", ref="refs/heads/il/integration", jobs=GATE_OK):
+        """(the step's passed list, the gh calls) for these merge_group runs (None: the API call fails), this
+        gate-needs artifact (None: none; a str: its raw text) and run 41's jobs (None: the API call fails; a dict:
+        the jobs by run id)."""
         fake = os.path.join(self.tmp, "fake")
         shutil.rmtree(fake, True)
         os.makedirs(fake)
         if runs is not None:
             with open(os.path.join(fake, "runs.json"), "w") as f:
                 json.dump({"total_count": len(runs), "workflow_runs": runs}, f)
+        for run_id, run_jobs in (jobs if isinstance(jobs, dict) else {41: jobs}).items():
+            if run_jobs is not None:
+                with open(os.path.join(fake, "jobs-%d.json" % run_id), "w") as f:
+                    json.dump({"total_count": len(run_jobs), "jobs": run_jobs}, f)
         if needs is not None:
             with open(os.path.join(fake, "needs.json"), "w") as f:
                 f.write(needs if isinstance(needs, str) else json.dumps(needs))
@@ -310,11 +320,18 @@ class QueueVerdict(unittest.TestCase):
     def test_a_push_skips_what_the_commits_queue_run_passed(self):
         passed, calls = self.passed([self.queue_run()], self.NEEDS)
         self.assertEqual(passed, sorted(("queued", "build") + TESTS))
-        self.assertEqual(len(calls), 2, calls)
+        self.assertEqual(len(calls), 3, calls)
         self.assertIn("api repos/o/r/actions/runs?event=merge_group&head_sha=" + SHA, calls[0])
-        self.assertRegex(calls[1], r"^run download 41 ")
-        self.assertIn("-R o/r", calls[1])
-        self.assertIn("-n gate-needs", calls[1])
+        self.assertIn("api repos/o/r/actions/runs/41/jobs?filter=latest", calls[1])
+        self.assertRegex(calls[2], r"^run download 41 ")
+        self.assertIn("-R o/r", calls[2])
+        self.assertIn("-n gate-needs", calls[2])
+
+    def test_the_queue_runs_gate_job_counts_before_github_marks_the_run_completed(self):
+        """11-04, in an Actions incident: #36's queue run read in_progress 12 min after its last job, so its push ran
+        every test job again. The queue merges on the gate job's check: that job has finished when the push looks."""
+        self.assertEqual(self.passed([self.queue_run(status="in_progress", conclusion=None)], self.NEEDS)[0],
+                         sorted(("queued", "build") + TESTS))
 
     def test_a_job_the_queue_run_did_not_run_runs_on_the_push(self):
         """A partial or label-dependent queue run (here: no UI end-to-end, no SIM acceptance): those jobs run here."""
@@ -328,6 +345,7 @@ class QueueVerdict(unittest.TestCase):
             "the API call fails": (None, self.NEEDS),
             "no artifact (an older workflow, or its upload failed)": ([self.queue_run()], None),
             "the artifact is not JSON": ([self.queue_run()], "{oops"),
+            "the artifact is empty": ([self.queue_run()], " \n"),
             "the artifact is not the gate's needs": ([self.queue_run()], '["infra"]'),
             "a need that is not an object": ([self.queue_run()], '{"infra": "success"}'),
             "no queue run of this commit": ([], self.NEEDS),
@@ -338,9 +356,31 @@ class QueueVerdict(unittest.TestCase):
             "another commit": ([self.queue_run(head_sha="f" * 40)], self.NEEDS),
             "not a queue run": ([self.queue_run(event="push")], self.NEEDS),
         }
+        running = [dict(self.GATE_OK[1], status="in_progress", conclusion=None)]
+        jobs_cases = {
+            "its gate job is still going": running,
+            "its gate job failed": [dict(self.GATE_OK[1], conclusion="failure")],
+            "its gate job was cancelled": [dict(self.GATE_OK[1], conclusion="cancelled")],
+            "no gate job in its jobs": self.GATE_OK[:1],
+            "two gate jobs (filter=all lists every attempt's)": self.GATE_OK + running,
+            "the jobs call fails": None,
+        }
+        for why, jobs in jobs_cases.items():
+            with self.subTest(why):
+                running_run = self.queue_run(status="in_progress", conclusion=None)
+                self.assertEqual(self.passed([running_run], self.NEEDS, jobs=jobs)[0], [])
         for why, (runs, needs) in cases.items():
             with self.subTest(why):
-                self.assertEqual(self.passed(runs, needs)[0], [])
+                self.assertEqual(self.passed(runs, needs, jobs=running if "still going" in why else self.GATE_OK)[0],
+                                 [])
+
+    def test_the_newest_queue_run_of_the_commit_counts(self):
+        """Two queue runs of one commit (an incident's retry): the newer one decides; still running, it answers []."""
+        runs = [self.queue_run(), self.queue_run(id=42, status="in_progress", conclusion=None)]
+        running = [dict(self.GATE_OK[1], status="in_progress", conclusion=None)]
+        self.assertEqual(self.passed(runs, self.NEEDS, jobs={41: self.GATE_OK, 42: running})[0], [])
+        self.assertEqual(self.passed(runs, self.NEEDS, jobs={41: running, 42: self.GATE_OK})[0],
+                         sorted(("queued", "build") + TESTS))
 
     def test_only_a_push_to_il_integration_asks(self):
         queue_ref = "refs/heads/gh-readonly-queue/il/integration/pr-7-" + "a" * 40
