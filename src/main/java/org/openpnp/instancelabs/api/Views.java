@@ -76,7 +76,7 @@ final class Views {
      * connection (I11).
      */
     /**
-     * @param controllerConnectedAtMs when OpenPnP last connected (shown)
+     * @param controllerConnectedAtMs when OpenPnP last connected (shown): an angle set before it needs a confirm at least
      * @param controllerResetAtMs when the B step count last restarted or may have (BR-02): the start angle older than
      *        it needs confirming
      */
@@ -104,8 +104,11 @@ final class Views {
         m.put("feedDegPerMin", p.feedDegS() * 60);
         m.put("partialTurn", p.isPartialTurn(c));
         m.put("startAngles", p.isPartialTurn(c) ? p.startAngles(c) : null);
+        // a confirm at least after every OpenPnP start or connect (the process engineer, 11-03), a measure after a reset
+        // or a switch-off (I11)
         boolean stale = p.isPartialTurn(c) && (p.startAngleSetAtMs == null
-                || (controllerResetAtMs != null && p.startAngleSetAtMs < controllerResetAtMs));
+                || (controllerResetAtMs != null && p.startAngleSetAtMs < controllerResetAtMs)
+                || (controllerConnectedAtMs != null && p.startAngleSetAtMs < controllerConnectedAtMs));
         m.put("startAngleNeedsConfirm", stale);
         m.put("controllerConnectedAtMs", controllerConnectedAtMs);
         m.put("controllerResetAtMs", controllerResetAtMs);

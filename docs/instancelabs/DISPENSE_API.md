@@ -100,7 +100,9 @@ Fields and defaults:
 - motion: `travelFeedMmS 200`, `travelAccelMmS2 2000`, `zDownFeedMmS 50`, `zLiftFeedMmS 50`, `zLiftAccelMmS2 2000`
   (each <= 5000), `bMaxFeedDegS 2400` (sent as `M203 B`; <= 400 rpm, the Vieweg maximum), `bStepsPerDeg 4.44`
   (Marlin `M92 B`; one screw revolution of 1600 steps is 360.36°), `bStepsPerRev 1600`, `bExtrudeSign +1`,
-  `honorBacklash true`, `commandTimeoutMs 10000`;
+  `honorBacklash true`, `commandTimeoutMs 10000`, `screwIdleOffS 3600` (> 0, <= 3600; BR-02: the controller
+  switches the screw's motor off after this long without a move, Marlin's `DEFAULT_STEPPER_DEACTIVE_TIME`: I11 then wants
+  the start angle measured again);
 - manual prime / test dot at the waste place and calibration primes: `primeRotationDeg 360.36`, `testDotOffsetXMm 2`,
   `testDotOffsetYMm 0` (board runs purge on the purge row instead);
 - keepalive: `keepaliveEnabled true`, `keepaliveWindowMs 3000` (>= 2 × interval), `keepaliveIntervalMs 1000`;

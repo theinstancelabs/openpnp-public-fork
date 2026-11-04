@@ -344,6 +344,59 @@ public class ApiServerSimTest {
         assertFalse(ApiServer.isLoopbackHost("127.0.0.1.evil.example"));
     }
 
+    /** The status line of a request written by hand (the JDK client cannot set Host). */
+    String rawStatusLine(String method, String path, String... headers) throws Exception {
+        try (Socket sock = new Socket(InetAddress.getLoopbackAddress(), api.getPort())) {
+            StringBuilder req = new StringBuilder(method + " " + path + " HTTP/1.1\r\n");
+            for (int i = 0; i + 1 < headers.length; i += 2) {
+                req.append(headers[i]).append(": ").append(headers[i + 1]).append("\r\n");
+            }
+            if (!"GET".equals(method)) {
+                req.append("Content-Type: application/json\r\nContent-Length: 2\r\n");
+            }
+            req.append("Connection: close\r\n\r\n").append("GET".equals(method) ? "" : "{}");
+            OutputStream out = sock.getOutputStream();
+            out.write(req.toString().getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            return new BufferedReader(new InputStreamReader(sock.getInputStream(), StandardCharsets.US_ASCII))
+                    .readLine();
+        }
+    }
+
+    /** BR-73: the real machine's UI through `tailscale serve`, which keeps the browser's Host and Origin. */
+    @Test
+    public void br73TheTrustedTailnetOriginReachesTheApi() throws Exception {
+        String origin = "https://lumen.example.ts.net:8877", host = "lumen.example.ts.net:8877";
+        // 7. nothing configured: the tailnet Host is refused as before
+        assertTrue(rawStatusLine("GET", "/", "Host", host).contains(" 403"));
+        api.stop();
+        ApiSettings s = new ApiSettings();
+        s.port = 0;
+        s.trustedOrigins = Arrays.asList(origin, "https://other.example.ts.net");
+        api = ApiServer.start(Configuration.get(), s);
+        // 1. the page itself; 2. a write with the page's Origin reaches the routing (404 for an unknown route, not 403)
+        String line = rawStatusLine("GET", "/", "Host", host);
+        assertTrue(line.contains(" 200"), line);
+        line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", origin, "Sec-Fetch-Site", "same-origin");
+        assertTrue(line.contains(" 404"), line);
+        // a real write from the page: STOP
+        line = rawStatusLine("POST", "/api/stop", "Host", host, "Origin", origin, "Sec-Fetch-Site", "same-origin");
+        assertTrue(line.contains(" 200"), line);
+        // 3. a foreign Origin; 4. a foreign Host; 5. the Host of one entry with the Origin of the other
+        line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", "https://evil.example");
+        assertTrue(line.contains(" 403"), line);
+        line = rawStatusLine("GET", "/", "Host", "evil.example");
+        assertTrue(line.contains(" 403"), line);
+        line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", "https://other.example.ts.net");
+        assertTrue(line.contains(" 403"), line);
+        // 6. plain http on the trusted name
+        line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", "http://lumen.example.ts.net:8877");
+        assertTrue(line.contains(" 403"), line);
+        // the deployer's health check reads the list
+        JsonArray listed = ok(get("/api/status")).getAsJsonObject("server").getAsJsonArray("trustedOrigins");
+        assertEquals("[\"https://lumen.example.ts.net:8877\",\"https://other.example.ts.net\"]", listed.toString());
+    }
+
     @Test
     public void padTypesAreGroupedAddableVersionedAndRetirable() throws Exception {
         JsonObject list = ok(get("/api/pad-types"));
@@ -743,9 +796,13 @@ public class ApiServerSimTest {
         ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
         reconnect();
         JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
-        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), "a reconnect keeps the screw count: " + p);
+        // every connect may have changed the phase (the process engineer, 11-03): a confirm is enough after it
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), "a reconnect asks a confirm: " + p);
         assertFalse(p.get("controllerConnectedAtMs").isJsonNull());
-        assertTrue(p.get("controllerResetAtMs").isJsonNull(), p.toString());
+        assertTrue(p.get("controllerResetAtMs").isJsonNull(), "a reconnect keeps the screw count: " + p);
+        ok(post("/api/screw/start-angle", "{}"));
+        p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
         powerCycle();
         p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
         assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
@@ -760,12 +817,17 @@ public class ApiServerSimTest {
         Res confirm = post("/api/screw/start-angle", "{}");
         assertEquals(409, confirm.status, confirm.toString());
         assertTrue(confirm.body.contains("measure it again"), confirm.toString());
-        // measured again, the same angle: the plan stays valid
+        // measured again (a dot pair turns the screw: no set before it, BR-02), the same angle: the plan stays valid
+        svc.noteControllerLine("G1 B30 F600");
         long t0 = System.currentTimeMillis();
         JsonObject conf = ok(post("/api/screw/start-angle", "{\"startAngleDeg\":298,\"note\":\"measured again\"}"));
         assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9);
         assertTrue(conf.get("startAngleSetAtMs").getAsLong() >= t0);
         assertFalse(conf.get("startAngleNeedsConfirm").getAsBoolean());
+        // and the reset's home moved the Z frame (the process engineer, 11-04): the needle frame, both tips touching,
+        // and its touch-off again
+        ok(post("/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactZ\":2.91}"));
+        ok(post("/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}"));
         assertTrue(ok(get("/api/plan/" + plan.get("planId").getAsString())).getAsJsonObject("interlocks").get("ok")
                 .getAsBoolean());
 
@@ -1017,7 +1079,12 @@ public class ApiServerSimTest {
                     .setPort(proxy.port());
             sim.machine.setEnabled(true);
             sim.machine.home();
-            ok(post("/api/screw/start-angle", "{}"));
+            // BR-02: that Stop's DISABLE_COMMAND switched the screw's motor off (M18 B): the angle is measured again (a dot
+            // pair turns the screw first)
+            svc.noteControllerLine("G1 B30 F600");
+            double angle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile")
+                    .get("startAngleDeg").getAsDouble();
+            ok(post("/api/screw/start-angle", "{\"startAngleDeg\":" + angle + "}"));
             JsonObject plan = planTied(board);
             assertEquals(202, post("/api/run", "{\"planId\":\"" + plan.get("planId").getAsString() + "\"}").status);
             long t0 = System.currentTimeMillis();

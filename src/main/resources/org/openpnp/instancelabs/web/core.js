@@ -42,8 +42,13 @@
     press2Ms: 4000, press2MinMs: 300, toastMs: 4000,
     needleDriftMm: 1.0, wasteNearMm: 3.0, attestMs: 8 * 3600 * 1000,
     planDebounceMs: 300, planEveryMs: 10000, eventsEveryMs: 5000,
+    // a take waits up to 120 s for a home in progress and 20 s for the STOP's confirmation (BR-72, #19 review)
+    lockWorkingMs: 10000, takeTimeoutMs: 240000,
   };
   const L = IL.LIMITS;
+  /** Every request this page sends says it is the UI's (X-IL-Client): the engine's machine lock tells the user's
+   *  requests from an agent's by it (BR-72). */
+  IL.CLIENT_HEADER = { 'X-IL-Client': 'ui' };
   /** Run phases during which the run holds the barrel under pressure (one pressure session per stream). */
   IL.PRESSURE_PHASES = new Set(['dispensing', 'shots', 'dispensing calibration dots']);
 
@@ -465,7 +470,7 @@
     const ms = o.timeoutMs || L.apiTimeoutMs;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), ms);
-    const init = { method, headers: {}, signal: ctl.signal, cache: 'no-store' };
+    const init = { method, headers: Object.assign({}, IL.CLIENT_HEADER), signal: ctl.signal, cache: 'no-store' };
     if (body !== undefined) {
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
@@ -737,6 +742,84 @@
   IL.n1LowText = function (status) {
     return IL.lowToolShort(status) + ': look at the board under it. Home ' + IL.lowTool(status).lift + ' first, then homes.';
   };
+  // ---------------------------------------------------------------------------------- a controller reset (BR-02)
+  /** A controller reset left the head position unknown (status machine.positionKnown false) until an attested home. */
+  IL.positionUnknown = (status) => { const m = (status || S.status || {}).machine; return !!m && m.positionKnown === false; };
+  IL.positionUnknownWhy = (status) => ((status || S.status || {}).machine || {}).positionUnknownWhy || 'The controller was reset: the head position is unknown';
+  /** What a control that needs the position says until that home. */
+  IL.positionUnknownReason = (status) => 'The position is unknown (' + IL.positionUnknownWhy(status).replace(/[.:]\s*$/, '') + '): Home first, after checking that nothing is under either tool';
+  /**
+   * The start angle's question (I11): 'off' (whole turns), 'never', 'measure' (after the angle was set the controller was
+   * reset, so its step count started again, or the screw motor was switched off, so the screw may have turned: a bare
+   * confirm is refused, BR-02), 'confirm' (a reconnect: was it switched off?) or 'ok'. Reads
+   * profile.startAngleNeedsConfirm, machine.powerCycle.atMs and machine.screwMotorOff.atMs, never powerCycle.detected (§7).
+   */
+  IL.angleState = function (status) {
+    const s = status || S.status || {};
+    const prof = (s.dispense && s.dispense.profile) || {};
+    const i11 = IL.interlock(s, 'I11');
+    if ((i11 && i11.state === 'off') || prof.partialTurn === false) return 'off';
+    if (!prof.startAngleSetAtMs) return 'never';
+    const m = s.machine || {};
+    if ([m.powerCycle, m.screwMotorOff].some((e) => e && isNum(e.atMs) && e.atMs > prof.startAngleSetAtMs)) return 'measure';
+    return prof.startAngleNeedsConfirm || (i11 && i11.state === 'blocked') ? 'confirm' : 'ok';
+  };
+  /** The later of the two (BR-02): the screw motor's switch-off ('motor') or the controller's reset ('reset'). */
+  IL.angleResetCause = function (status) {
+    const m = (status || S.status || {}).machine || {};
+    const off = m.screwMotorOff, pc = m.powerCycle;
+    return off && isNum(off.atMs) && !(pc && isNum(pc.atMs) && pc.atMs > off.atMs) ? 'motor' : 'reset';
+  };
+  /**
+   * Why the angle no longer holds: "The controller was switched off or reset at 16:20: the screw's step count started
+   * again", or the engine's why: "The screw motor was switched off at 16:20 (a STOP: …): the screw may have turned".
+   */
+  IL.angleResetText = function (status) {
+    const m = (status || S.status || {}).machine || {};
+    if (IL.angleResetCause(status) === 'motor') {
+      const off = m.screwMotorOff;
+      const why = off.why ? off.why.charAt(0).toUpperCase() + off.why.slice(1) : 'The screw motor was switched off at ' + IL.fmtTime(off.atMs - S.skewMs);
+      return why + ': the screw may have turned';
+    }
+    const pc = m.powerCycle || {};
+    return 'The controller was switched off or reset' + (isNum(pc.atMs) ? ' at ' + IL.fmtTime(pc.atMs - S.skewMs) : '') + ": the screw's step count started again";
+  };
+  /**
+   * Pressure on's body (BR-03): the hold parks the needle over the waste first unless I12 reads ok (the needle is over a
+   * sink); a backend before BR-03 ignores `park`. pump: the pump only, the valve stays closed (read the gauge).
+   */
+  IL.pressureStartBody = function (status, pump) {
+    if (pump) return { mode: 'pump' };
+    const i12 = IL.interlock(status || S.status, 'I12');
+    return i12 && i12.state === 'ok' ? {} : { park: 'waste' };
+  };
+  /** A backend with BR-03's zones (I12 in the status) knows `mode: 'pump'`; an older one would open the valve. */
+  IL.hasPumpOnly = (status) => !!IL.interlock(status || S.status, 'I12');
+
+  // ---------------------------------------------------------------------------------- who has the machine (P0, BR-72)
+  // One holder at a time: an agent role (Process, Backend, …), the user (every window of this page), or nobody. While
+  // an agent holds it this page watches: the engine refuses its guarded writes (409 locked) and the controls that act
+  // on the machine are locked with that reason (data-only writes, such as a board upload, pad types or a plan, stay
+  // free); Take control stops the agent's work and the machine stays the user's until Give back. While nobody holds
+  // it, the user's first guarded write makes it theirs (docs/backend-requests.md, "BR-72 API").
+  /** The lock in a status: {known (this OpenPnP reports one), holder, takenFrom, agent (an agent holds it), mine}. */
+  IL.lockOf = function (status) {
+    const lk = (status || S.status || {}).lock;
+    if (!lk || typeof lk !== 'object') return { known: false, holder: null, takenFrom: null, agent: false, mine: false };
+    const h = lk.holder && typeof lk.holder === 'object' ? lk.holder : null;
+    return { known: true, holder: h, takenFrom: lk.takenFrom || null, agent: !!h && h.kind !== 'user', mine: !!h && h.kind === 'user' };
+  };
+  /** The holder's name for people: "Process". */
+  IL.holderName = (h) => (h && (h.label || cap(h.who || ''))) || 'An agent';
+  /** Its last command under 10 s ago (the server's clock). */
+  IL.holderWorking = (h) => !!h && isNum(h.lastActiveMs) && IL.serverNow() - h.lastActiveMs < L.lockWorkingMs;
+  /** "Process has the machine (since 14:24): Take control to use it." while an agent holds it, else null. */
+  IL.heldReason = function (status) {
+    const lk = IL.lockOf(status);
+    if (!lk.agent) return null;
+    const h = lk.holder;
+    return IL.holderName(h) + ' has the machine' + (isNum(h.sinceMs) ? ' (since ' + IL.fmtTime(h.sinceMs - S.skewMs) + ')' : '') + ': Take control to use it.';
+  };
   /**
    * Why a control is locked now, or null. need: {connected, homed, idle (default true), pressureOff (default true),
    * engine, homes (the task homes by itself: it waits while N1 is low)}. Texts are the spec's (§13 "Locked control").
@@ -746,6 +829,10 @@
     const n = Object.assign({ idle: true, pressureOff: true }, need || {});
     if (S.online === false) return 'No answer from OpenPnP: nothing can be sent until it answers again.';
     if (!s) return 'Waiting for OpenPnP';
+    // an agent holds the machine (BR-72): a control that acts on it waits for Take control (data-only writes stay free;
+    // a guarded write without these needs answers 409 locked, whose refusal offers Take control)
+    const held = n.connected || n.homed || n.engine || n.homes ? IL.heldReason(s) : null;
+    if (held) return held;
     const m = s.machine || {}, d = s.dispense || {}, pr = s.pressure || {};
     if (n.idle && IL.taskRunning(s)) {
       const lab = s.run && s.run.running ? s.run.label : 'task';
@@ -759,6 +846,7 @@
     if (n.pressureOff && pr.state && pr.state !== 'off') return 'Pressure is held: switch it off first';
     if (n.connected && !m.enabled) return 'Not connected: connect first';
     if (n.homed && !m.homed) return 'Not homed: home first';
+    if ((n.homed || n.homes) && m.positionKnown === false) return IL.positionUnknownReason(s);
     // a task that homes by itself (Register board, Probe the blank, the pad calibration) waits, as Run does, while a STOP
     // left N1 low: an automatic home must not drag N1 across the board (AUTO_REGISTER_DESIGN.md §8.2)
     if (n.homes && IL.n1Low(s)) return IL.n1LowText(s);
@@ -805,12 +893,17 @@
     lsSet('il.planId', null);
     return IL.setPlan(null);
   };
-  /** Loads a plan by id (restore); 404 → S.planForgotten (plan chip "Plan forgotten (OpenPnP restarted)"). */
+  /**
+   * Loads a plan by id (restore); 404 → S.planForgotten (plan chip "Plan forgotten (OpenPnP restarted)"). An answer that
+   * comes after another plan was shown or asked for is dropped (null): a finished registration's plan (status.run.nextPlanId)
+   * loaded late must not replace the plan made meanwhile.
+   */
   IL.loadPlan = async function (id) {
     if (!id) return null;
     S.planId = id;
     try {
-      return IL.setPlan(await IL.api('GET', '/api/plan/' + encodeURIComponent(id)));
+      const q = await IL.api('GET', '/api/plan/' + encodeURIComponent(id));
+      return S.planId === id ? IL.setPlan(q) : null;
     } catch (e) {
       if (e.status === 404 && S.planId === id) {
         const prev = S.plan;
@@ -1071,6 +1164,11 @@
         detail: 'Not connected to the controller.', fixes: [{ fix: 'connect', label: 'Connect', primary: true }] });
     } else if (!m.homed && m.busy) {
       add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'live', value: 'homing', short: 'homing', detail: 'Homing…' });
+    } else if (m.positionKnown === false && !m.busy) {
+      // BR-02: a controller reset; nothing homes by itself, the person checks the way first (the Home confirm)
+      add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'block', value: 'position unknown', short: 'home',
+        detail: IL.positionUnknownWhy(s).replace(/[.:]\s*$/, '') + '. Home first, after checking that nothing is under either tool.',
+        fixes: [{ fix: 'home', label: 'Home', primary: true }] });
     } else if (IL.n1Low(s)) {
       const low = IL.lowTool(s).needle ? 'needle low' : 'N1 low';
       add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'need', value: low, short: low, detail: IL.n1LowText(s),
@@ -1108,6 +1206,9 @@
     } else if (!prof.startAngleSetAtMs) {
       add({ key: 'angle', code: 'I11', title: 'Start angle', state: 'block', value: 'not set', short: 'start angle',
         detail: 'The start angle was never set.', fixes: [{ href: '#calibrate/angle', label: 'Measure the angle' }] });
+    } else if (IL.angleState(s) === 'measure') {
+      add({ key: 'angle', code: 'I11', title: 'Start angle', state: 'need', value: 'measure again', short: 'start angle',
+        detail: IL.angleResetText(s) + ': measure the start angle again.', fixes: [{ href: '#calibrate/angle', label: 'Measure again', primary: true }] });
     } else if (prof.startAngleNeedsConfirm || (i11 && i11.state === 'blocked')) {
       add({ key: 'angle', code: 'I11', title: 'Start angle', state: 'need', value: 'confirm', short: 'start angle',
         detail: 'The controller reconnected after the start angle was set'
@@ -1719,7 +1820,15 @@
       fixes: m.enabled ? [] : [{ fix: 'connect', label: 'Connect', primary: true }] });
     const angleOk = !prof.startAngleNeedsConfirm;
     const angleSetAfter = rec && prof.startAngleSetAtMs && prof.startAngleSetAtMs - S.skewMs > rec.atMs;
-    steps.push({ key: 'angle', title: 'Was the controller switched off?', wait: !m.enabled, done: !!m.enabled && angleOk,
+    const knowsResets = !!m.powerCycle && prof.partialTurn !== false;   // BR-02: the engine detects a reset, nobody is asked
+    const angleSt = IL.angleState(s);
+    if (knowsResets && angleSt === 'measure') {
+      steps.push({ key: 'angle', title: IL.angleResetCause(s) === 'motor' ? 'The screw motor was switched off' : 'The controller was switched off', state: 'need', wait: !m.enabled, done: false,
+        detail: IL.angleResetText(s) + ': measure the start angle again (I11)', fixes: [{ href: '#calibrate/angle', label: 'Measure again', primary: true }] });
+    } else if (knowsResets && angleSt !== 'confirm') {
+      steps.push({ key: 'angle', title: 'Start angle', wait: !m.enabled, done: !!m.enabled,
+        detail: angleSt === 'never' ? 'not set yet (I11)' : 'no controller reset since it was set: ' + IL.fmtDeg(prof.startAngleDeg, 1) + ' holds (I11)', fixes: [] });
+    } else steps.push({ key: 'angle', title: 'Was the controller switched off?', wait: !m.enabled, done: !!m.enabled && angleOk,
       detail: m.enabled ? (angleOk ? 'start angle ' + IL.fmtDeg(prof.startAngleDeg, 1) + (angleSetAfter ? ', set ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) : ' holds')
         : 'STOP and Connect keep the screw step count; only switching the controller off loses it (I11)')
         : 'STOP keeps the screw step count; asked after Connect (I11)',
@@ -2060,7 +2169,7 @@
     if (!cells) return;
     // the room the cells have, not only the window: the brand's heartbeat age or the STOP bay can change it (rc1 review:
     // a verdict fitted before they did was cut, "Stopped 06:…", with no shorter form applied)
-    const sig = cells.clientWidth + '|' + $('btn-start').hidden + $('btn-home').hidden + '|' + cells.textContent.replace(/\d/g, '0');
+    const sig = cells.clientWidth + '|' + $('btn-start').hidden + $('btn-home').hidden + $('btn-take').hidden + '|' + cells.textContent.replace(/\d/g, '0');
     if (sig === fitSig) return;
     fitSig = sig;
     const over = () => {
@@ -2070,12 +2179,15 @@
       const limit = cells.getBoundingClientRect().right - parseFloat(getComputedStyle(cells).paddingRight || '0');
       return last.getBoundingClientRect().right > limit + 0.5;
     };
-    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2v', 'cells--t3', 'cells--t4', 'cells--t5');
+    cells.classList.remove('cells--t1', 'cells--t2', 'cells--t2l', 'cells--t2v', 'cells--t3', 'cells--t4', 'cells--t5');
     cells.classList.add('cells--fit');   // the verdict at its full width while measuring
     if (over()) {
       // the other cells' long parts first: the verdict keeps its own ("Stopped 14:19", a task's progress) while it fits
       cells.classList.add('cells--t1');
       if (over()) cells.classList.replace('cells--t1', 'cells--t2');
+      // In control, while it reads You or Nobody, shrinks to its mark before the verdict's own long part (the time of a
+      // stop) goes; an agent holding the machine keeps its words: the user must always see that
+      if (over()) cells.classList.add('cells--t2l');
       if (over()) cells.classList.add('cells--t2v');
       // still too long (1024 px after a STOP, the widest state): the verdict is never cut (UI_DESIGN §4), so the
       // pressure cell goes while it reads a plain "Off" (Recovery says "Pressure vented"), then the other cells' labels,
@@ -2110,6 +2222,38 @@
     }
     return { kind: 'off', v: ['Off', ' · vented'], t: pr.engineRunActive ? 'The running task switches the pressure on and off by itself.' : 'Valve closed, barrel vented. Set the regulator by hand.' };
   }
+  /**
+   * The In control cell (P0): who holds the machine, what it does and since when; Take control beside it while an agent
+   * holds it. Hidden while this OpenPnP reports no lock (before BR-72).
+   */
+  function renderLockCell(s, off, since) {
+    const lc = $('cell-lock'), bt = $('btn-take');
+    if (!lc) return;
+    const lk = IL.lockOf(s);
+    if (lk.known) S.lockSeen = true;
+    IL.show(lc, lk.known || (off && !!S.lockSeen));
+    IL.show(bt, !off && lk.agent);
+    const h = lk.holder;
+    const t = h && isNum(h.sinceMs) ? IL.fmtTime(h.sinceMs - S.skewMs) : null;
+    const k = lc.querySelector('.cell__k'), ks = t ? ' · since ' + t : '';
+    if (k.dataset.v !== ks) { k.dataset.v = ks; k.replaceChildren('In control', ks ? el('span', { class: 'long', 'data-l': 2, text: ks }) : ''); }
+    // while an agent holds it, a band at the top of the page says it all in a sentence, with Take control (the strip has
+    // no room for what it does at 1440 px); its text changes only with the holder, so its button is never rebuilt
+    // under a click
+    if (!s || off || !lk.agent) IL.msg('held', null);
+    if (!s || off) { setCell(lc, 'off', off ? 'Unknown' : '…', off ? cap(since) : null); return; }
+    if (!h) { setCell(lc, 'off', 'Nobody', 'Nobody has the machine. Its controls are yours: your first move makes it yours until you give it back. An agent may take it while nobody has it.'); return; }
+    if (lk.mine) { setCell(lc, 'ok', 'You', 'You have the machine' + (t ? ' since ' + t : '') + '. Agents cannot use it until you give it back (click here).'); return; }
+    const name = IL.holderName(h), working = h.busy === true || IL.holderWorking(h);
+    const last = isNum(h.lastActiveMs) ? 'its last command ' + IL.fmtAgo(h.lastActiveMs - S.skewMs) : 'no command yet';
+    setCell(lc, working ? 'live' : 'info', [name + (working ? ' · working' : ' · idle'), h.what ? ' · ' + h.what : '', 2],
+      name + ' (an agent) has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '. '
+      + (working ? 'Working' : 'Idle') + ': ' + last + '. Take control stops its work and makes the machine yours.');
+    IL.msg('held', { kind: working ? 'live' : 'info', alert: false,
+      text: name + ' has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '.',
+      sub: (working ? 'It is working now.' : 'It is idle (no command for a while).') + ' This page shows everything but cannot move the machine until you take control.',
+      actions: [IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true }, { cls: 'btn--sm' })] });
+  }
   function renderStrip() {
     const s = S.status;
     const off = S.online === false;
@@ -2141,6 +2285,13 @@
         IL.setText(homed, 'Not homed');
         homedVisible(false);
         showStart = true;
+      } else if (m.positionKnown === false && !m.busy) {
+        // BR-02: a controller reset; OpenPnP may still read homed, the engine knows better
+        setCell(mc, 'block', undefined, IL.positionUnknownWhy(s).replace(/[.:]\s*$/, '') + '. Home first, after checking that nothing is under either tool.');
+        IL.setText(conn, 'Connected');
+        IL.setText(homed, 'Position unknown');
+        homedVisible(true);
+        showHome = !IL.taskRunning(s) && (!s.pressure || s.pressure.state === 'off');
       } else if (!m.homed) {
         IL.setText(conn, 'Connected');
         homedVisible(true);
@@ -2165,9 +2316,13 @@
       }
     }
     const bs = $('btn-start'), bh = $('btn-home');
+    // while an agent holds the machine its controls are not the user's: Take control stands there instead
+    const agentHolds = !!s && !off && IL.lockOf(s).agent;
+    if (agentHolds) showStart = showHome = false;
     IL.show(bs, showStart);
     if (!showHome && armed && armed.btn === bh) disarm();
     IL.show(bh, showHome);
+    renderLockCell(s, off, since);
 
     // pressure, start angle, purge row
     const pc = $('pill-pressure'), ac = $('chip-angle'), uc = $('chip-purge');
@@ -2187,6 +2342,7 @@
       const i11 = IL.interlock(s, 'I11');
       if ((i11 && i11.state === 'off') || prof.partialTurn === false) setCell(ac, 'off', 'Whole turns', 'Whole turns per dot: the start angle does not matter (I11 off)');
       else if (!prof.startAngleSetAtMs) setCell(ac, 'block', 'Not set', 'The screw start angle was never set: measure it (Calibrate, I11)');
+      else if (IL.angleState(s) === 'measure') setCell(ac, 'need', 'Measure', IL.angleResetText(s) + ': measure the start angle again (I11)');
       else if (prof.startAngleNeedsConfirm) setCell(ac, 'need', 'Confirm', 'The controller reconnected after the angle was set: was it switched off? (I11)');
       else if (S.recovery && !(s.machine && s.machine.enabled)) setCell(ac, 'need', 'Confirm', 'After STOP: asked after Connect: was the controller switched off? (I11)');
       else setCell(ac, 'ok', IL.fmtDeg(prof.startAngleDeg, 1), 'Screw start angle ' + IL.fmtDeg(prof.startAngleDeg, 1) + ', confirmed ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) + ' for this controller power-up (I11)');
@@ -2242,6 +2398,7 @@
     if (name === 'setup' || name === 'calibrate') return running ? { sub: 'Locked · running' } : {};
     if (name === 'profile') {
       const p = d.profile || {};
+      if (p.partialTurn && IL.angleState(s) === 'measure') return { sub: 'Measure angle', kind: 'need' };
       if (p.startAngleNeedsConfirm) return { sub: 'Confirm angle', kind: 'need' };
       return { sub: p.name || '' };
     }
@@ -2696,6 +2853,11 @@
     const lines = viol.length ? viol : codeFromMessage(e && e.message);
     // a form filled before a mount or a needle change (409 tip-changed / needle-changed, §22.3): its values are another
     // tip's or needle's; Reload reads the page again (the values are taken again from the mounted tip)
+    // an agent holds the machine: Take control in the refusal; a take still stopping the agent (409 taking-over): its
+    // reason alone, the take under way answers for every window
+    if (e && e.code === 'locked') {
+      box.appendChild(el('div', { class: 'btn-row' }, IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true }, { cls: 'btn--sm' })));
+    }
     if (e && (e.code === 'tip-changed' || e.code === 'needle-changed'
       || /^(The tip changed while this was open|The needle was changed at \d\d:\d\d (while this was open|after these values were taken))/.test(String(e.message || '')))) {
       box.appendChild(el('div', { class: 'btn-row' }, IL.fixButton({ fix: 'reload-page', label: 'Reload' }, { cls: 'btn--sm' })));
@@ -2800,7 +2962,8 @@
     const msg = String(message || '');
     switch (code) {
       case 'MACHINE': return m.enabled ? [{ fix: 'home', label: 'Home' }] : [{ fix: 'connect', label: 'Connect' }];
-      case 'I11': return [{ fix: 'I11-confirm', label: 'Controller stayed on: confirm' }, { href: '#calibrate/angle', label: 'Measure again' }];
+      case 'I11': return IL.angleState(status) === 'measure' || /measure it again/i.test(String(msg || '')) ? [{ href: '#calibrate/angle', label: 'Measure again', primary: true }]
+        : [{ fix: 'I11-confirm', label: 'Controller stayed on: confirm' }, { href: '#calibrate/angle', label: 'Measure again' }];
       case 'I9': return row.defined && row.spots < IL.purgeNeed(row)
         ? [{ href: '#setup/purge', label: 'Purge row: more spots' }, { href: '#profile', label: 'Profile: purge dots' }]
         : [{ fix: 'purge-reset', label: 'Wiped: reset row', icon: 'i-wipe' }];
@@ -2863,12 +3026,39 @@
   // core fix-its
   IL.fix('reload-page', { run: async () => { location.reload(); } });
   IL.fix('connect', { run: () => IL.api('POST', '/api/machine/enable'), ok: 'Connecting to the controller…',
-    gate: (s) => (S.online === false ? IL.lockReason(s) : null) });
+    gate: (s) => (S.online === false ? IL.lockReason(s) : IL.heldReason(s)) });
   // the home's own answer (wait): a home that fails says why (`homing failed: …`, the pressure hold, a STOP before it
   // started), as the strip alone cannot; the engine waits up to 5 min for it
-  IL.fix('home', { press2: 'home', gate: (s) => IL.lockReason(s, { connected: true }),
-    run: () => { IL.toast('Homing…'); return IL.api('POST', '/api/machine/home', { wait: true }, { timeoutMs: 320000 }); },
-    ok: (r) => (r && isNum(r.n1RaisedFromZ) ? 'Homed: N1 was raised from Z ' + IL.fmt(r.n1RaisedFromZ, 2) + ' mm first.' : 'Homed.') });
+  IL.fix('home', { press2: (s) => (IL.positionUnknown(s) ? null : 'home'), gate: (s) => IL.lockReason(s, { connected: true }),
+    run: async () => {
+      if (IL.positionUnknown(S.status)) {
+        if (!(await askHomeUnknown())) return null;
+        IL.toast('Homing…');
+        return IL.api('POST', '/api/machine/home', { wait: true, clearBelowAttested: true }, { timeoutMs: 320000 });
+      }
+      IL.toast('Homing…');
+      return IL.api('POST', '/api/machine/home', { wait: true }, { timeoutMs: 320000 });
+    },
+    ok: (r) => (!r ? null : isNum(r.n1RaisedFromZ) ? 'Homed: N1 was raised from Z ' + IL.fmt(r.n1RaisedFromZ, 2) + ' mm first.' : 'Homed.') });
+  /**
+   * The home after a controller reset (BR-02, §7): the board's G28 has no Z clearance, so the person checks the path
+   * first. Resolves true for Home, false for Cancel (Esc, or the dialog closed).
+   */
+  function askHomeUnknown() {
+    return new Promise((resolve) => {
+      let answer = false;
+      const cancel = el('button', { type: 'button', class: 'btn', 'data-k': 'cancel', text: 'Cancel' });
+      const go = el('button', { type: 'button', class: 'btn btn--primary', 'data-k': 'home', text: 'Level and clear: Home' });
+      const h = IL.dialog.open({ id: 'dlg-home-unknown', size: 'sm', eyebrow: 'Home after a controller reset', title: 'Is the way to the homing corner clear?',
+        body: [el('p', { class: 'notebox notebox--need', text: IL.positionUnknownWhy(S.status).replace(/[.:]\s*$/, '') + '.' }),
+          el('p', { text: 'The home first drives the head to its homing corner (X, then Y) at the height the tools are at now, then homes Z there: a low tip would drag across whatever is under it.' }),
+          // Process (11-04): the see-saw (N1 and the needle on one Z) level, both tips up, before this home
+          el('p', {}, el('b', { text: 'The see-saw is level: N1 and the needle are both up (I levelled it by hand if one was low), and nothing is under them or in their way to that corner.' }))],
+        foot: [el('span', { class: 'spacer' }), cancel, go], initialFocus: null, onClose: () => resolve(answer) });
+      cancel.addEventListener('click', () => h.close('cancel'));
+      go.addEventListener('click', () => { answer = true; h.close('home'); });
+    });
+  }
   IL.fix('I11-confirm', {
     gate: (s) => IL.lockReason(s, { connected: true, pressureOff: false }),
     run: async () => { const p = await IL.api('POST', '/api/screw/start-angle', {}); IL.planRefreshSoon(); return p; },
@@ -2896,10 +3086,18 @@
   IL.fix('pressure-on', {
     gate: (s) => (s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
       : IL.lockReason(s, { connected: true, homed: true, engine: true })),
-    // two presses unless the needle is over the waste (≤ 3 mm)
-    press2: (s) => { const dist = IL.wasteDistance(s); return dist !== null && dist <= L.wasteNearMm ? null : 'pressure on'; },
-    run: () => IL.api('POST', '/api/pressure/start'),
+    // two presses unless the needle is over the waste (≤ 3 mm); BR-03: the needle parks over the waste first unless I12
+    // reads it over a sink
+    press2: (s) => { const dist = IL.wasteDistance(s); return dist !== null && dist <= L.wasteNearMm ? null : IL.pressureStartBody(s).park ? 'park, pressure on' : 'pressure on'; },
+    run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status)),
     ok: (r) => (r && (r.note || r.lastEvent)) || 'Pressure switching on',
+  });
+  // BR-03: the pump only, the valve stays closed (read the gauge), anywhere; offered only by a backend with I12
+  IL.fix('pressure-pump', {
+    gate: (s) => (s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
+      : IL.lockReason(s, { connected: true, engine: true })),
+    run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status, true)),
+    ok: (r) => (r && (r.note || r.lastEvent)) || 'Pump on, valve closed: read the gauge',
   });
   IL.fix('attest-regulator', {
     run: async (btn, arg, s) => {
@@ -2911,6 +3109,73 @@
   });
   IL.fix('attest-paste', { run: async () => IL.attest.set('paste-life', true), ok: 'Noted: paste within its working life.' });
   IL.fix('same-seat', { run: async () => IL.setNewSeat(null), ok: 'Same seat: the board surface still holds.' });
+
+  // ---------------------------------------------------------------------------------- Take control, Give back (P0, BR-72)
+  /**
+   * Take control: one POST. The engine revokes the agent at once, lets a home in progress finish, stops a working
+   * agent the way STOP does (the machine ends off and unhomed) or switches an idle one's outputs off (it stays started
+   * and homed), then makes the user the holder. A stop not confirmed (409 stop-not-confirmed) leaves the lock the
+   * user's: this page then presses STOP itself, with its retry band, as the STOP button would.
+   */
+  IL.takeControl = async function () {
+    const before = IL.lockOf(S.status).holder;
+    IL.log('Take control pressed' + (before && before.kind !== 'user' ? ': ' + IL.holderName(before) + ' had the machine' : ''), 'need');
+    let r;
+    try {
+      r = await IL.api('POST', '/api/lock/take', {}, { timeoutMs: L.takeTimeoutMs });
+    } catch (e) {
+      if (e.code !== 'stop-not-confirmed') throw e;
+      showTaken(e.data, before, true);
+      IL.stop('Take control: the stop was not confirmed');
+      return e.data;
+    }
+    showTaken(r, before, false);
+    return r;
+  };
+  /** The confirmation band: the machine is the user's, and what was stopped (BR-72's answer). */
+  function showTaken(r, before, unconfirmed) {
+    const st = r && r.stopped;
+    const at = IL.fmtTimeS(r && isNum(r.atMs) ? r.atMs - S.skewMs : Date.now());
+    const was = st && before && before.kind !== 'user' && isNum(before.sinceMs) ? ', since ' + IL.fmtTime(before.sinceMs - S.skewMs) : '';
+    const work = st ? st.label + "'s work (" + (st.what || 'no task named') + was + ')' : '';
+    const done = st && st.actions && st.actions.length ? ': ' + st.actions.join(', ') : '';
+    let sub;
+    if (unconfirmed) sub = 'The stop of ' + (work || 'the machine') + ' was NOT confirmed: STOP is being sent again. Look at the machine; switch it off at its power switch if it still moves.';
+    else if (!st) sub = 'Nobody had it. Agents cannot use it until you give it back (In control › Give back).';
+    else if (st.mode === 'outputs-off') sub = st.label + ' was idle. Its outputs are off' + done + '. The machine is still connected and homed: its controls work now. ' + st.label + ' cannot use it until you give it back.';
+    else sub = 'Stopped ' + work + ' the way STOP does' + done + '. ' + (st.machineOff === false ? '' : 'The machine is off now: Connect, then Home before moving it. ') + st.label + ' cannot use it until you give it back.';
+    IL.log('The machine is yours (' + at + '). ' + sub, unconfirmed ? 'block' : 'ok');
+    // a refusal that offered Take control is answered now
+    for (const b of document.querySelectorAll('.refusal')) if (b.querySelector('[data-fix="take-control"]')) b.remove();
+    S.lockTakenAt = Date.now();
+    IL.msg('lock', { kind: unconfirmed ? 'block' : 'ok', text: 'The machine is yours (' + at + ').', sub,
+      actions: [el('button', { type: 'button', class: 'btn btn--sm', text: 'Got it', onclick: () => IL.msg('lock', null) })] });
+  }
+  IL.fix('take-control', {
+    gate: () => (S.online === false ? 'No answer from OpenPnP: nothing can be sent until it answers again.' : null),
+    run: () => IL.takeControl(),
+  });
+  /** Give back: the user's hold ends (nobody holds the machine; an agent may take it from then on). */
+  IL.giveBack = async function () {
+    const r = await IL.api('POST', '/api/lock/release', {});
+    IL.msg('lock', null);
+    S.lockTakenAt = 0;
+    return r;
+  };
+  /** The lock's changes of hands this page did not cause itself: a line in the activity log, and a toast. */
+  IL.on('status', (s, prev) => {
+    const a = IL.lockOf(s), b = IL.lockOf(prev);
+    if (!a.known || !prev || !b.known) return;
+    const ah = a.holder, bh = b.holder;
+    if ((ah && ah.kind) === (bh && bh.kind) && (ah && ah.who) === (bh && bh.who) && (ah && ah.sinceMs) === (bh && bh.sinceMs)) return;
+    if (!ah) S.lockTakenAt = 0;
+    const justTook = S.lockTakenAt && Date.now() - S.lockTakenAt < 5000;   // Take control's own band says it
+    if (a.mine && !bh) { if (!justTook) IL.toast('The machine is yours now (your first move). Agents wait until you give it back: In control › Give back.', 'ok'); }
+    else if (a.mine && b.agent) { if (!justTook) IL.toast('You took control from ' + IL.holderName(bh) + ' (another window).', 'ok'); }
+    else if (a.agent) IL.log(IL.holderName(ah) + ' took the machine' + (ah.what ? ': ' + ah.what : '') + '.', 'need');   // its band says so
+    else if (!ah && b.mine) IL.log('Given back: nobody has the machine.', 'info');
+    else if (!ah && b.agent) IL.log(IL.holderName(bh) + ' gave the machine back: nobody has it.', 'info');
+  });
 
   // ================================================================================== dialogs (in-page, §11)
   const DLG = [];          // open dialogs, top last
@@ -3130,6 +3395,49 @@
     },
   };
 
+  viewDefs.lock = {
+    title: 'In control',
+    render(p, s, first) {
+      if (first) {
+        p.body.append(el('div', { id: 'pv-lock-head' }), el('dl', { class: 'kv kv--wrap', id: 'pv-lock-kv' }),
+          el('p', { class: 'panel__lead', text: 'One holder at a time: an agent, you (every window of this page), or nobody. '
+            + 'While an agent has the machine this page shows everything but cannot move it. Take control stops a working agent '
+            + 'the way STOP does (then Connect and Home), or only switches an idle one\'s outputs off; the machine then stays '
+            + 'yours until you give it back. While nobody has it, your first move makes it yours.' }));
+        const take = IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true });
+        take.dataset.k = 'take';
+        const give = el('button', { type: 'button', class: 'btn', 'data-k': 'release', text: 'Give back' });
+        IL.press2(give, 'give back', () => IL.giveBack(), { ok: 'Given back: nobody has the machine. An agent may take it now.' });
+        p.foot.append(el('div', { class: 'btn-row', id: 'pv-lock-act', 'data-refusals': '' }, take, give));
+      }
+      const lk = IL.lockOf(s), h = lk.holder, tf = lk.takenFrom;
+      const name = h ? (lk.mine ? 'You' : IL.holderName(h)) : 'Nobody';
+      const working = !!h && !lk.mine && (h.busy === true || IL.holderWorking(h));
+      const q = !lk.known ? 'Not reported by this OpenPnP' : lk.mine ? 'You have the machine' : h ? name + ' has the machine' : 'Nobody has the machine';
+      const kind = !lk.known ? 'off' : lk.mine ? 'ok' : h ? (working ? 'live' : 'info') : 'off';
+      IL.keyed($('pv-lock-head'), kind + q, () => el('div', { class: 'ready-head' },
+        el('div', { class: 'ready-head__t' }, el('div', { class: 'eyebrow', text: 'Who has the machine' }), el('div', { class: 'ready-head__q', text: q })),
+        IL.glyph(kind)));
+      const tm = (ms) => (isNum(ms) ? IL.fmtTime(ms - S.skewMs) : '—');
+      const agentRows = lk.agent ? [
+        ['Doing', h.what || 'not said'],
+        ['Last command', (isNum(h.lastActiveMs) ? IL.fmtAgo(h.lastActiveMs - S.skewMs) : 'none yet') + (working ? ' · working' : ' · idle')],
+        ['Lease', isNum(h.expiresAtMs) ? 'until ' + tm(h.expiresAtMs) + ' unless it sends more' : '—'],
+        ['Thread', h.thread || '—'],
+      ] : [];
+      IL.kv($('pv-lock-kv'), !lk.known ? [['Lock', 'this OpenPnP does not report who has the machine yet (BR-72)']] : [
+        ['Who', h ? (lk.mine ? 'you' : name + ' (an agent)') : 'nobody'],
+        h ? ['Since', tm(h.sinceMs) + (isNum(h.sinceMs) ? ' · ' + IL.fmtAgo(h.sinceMs - S.skewMs) : '')] : null,
+        ...agentRows,
+        tf ? ['Last take-over', 'You took it from ' + (tf.label || cap(tf.who || 'an agent')) + ' at ' + tm(tf.atMs) + (tf.what ? ' (it was doing: ' + tf.what + ')' : '')] : null,
+      ].filter(Boolean));
+      const [take, give] = $('pv-lock-act').children;
+      IL.show(take, lk.agent);
+      if (!lk.mine && IL.isArmed(give)) IL.disarm();
+      IL.show(give, lk.mine);
+    },
+  };
+
   viewDefs.machine = {
     title: 'Machine',
     render(p, s, first) {
@@ -3178,7 +3486,9 @@
         const on = IL.fixButton({ fix: 'pressure-on', label: 'Pressure on', icon: 'i-gauge' });
         const off = IL.fixButton({ fix: 'pressure-off', label: 'Pressure off', primary: true });
         const reads = IL.fixButton({ fix: 'attest-regulator', label: 'Reads … psi' });
-        p.foot.append(el('div', { class: 'btn-row', id: 'pv-pr-act', 'data-refusals': '', 'data-own-reason': '' }, on, off, reads),
+        const pump = IL.fixButton({ fix: 'pressure-pump', label: 'Pump only (read the gauge)', title: 'Switches the pump on with the valve closed, so the gauge shows the feed pressure. Nothing moves; nothing comes out.' });
+        pump.hidden = true;
+        p.foot.append(el('div', { class: 'btn-row', id: 'pv-pr-act', 'data-refusals': '', 'data-own-reason': '' }, on, off, reads, pump),
           el('div', { class: 'reason', id: 'pv-pr-reason', hidden: true }),
           el('div', { class: 'reason', text: 'Switches off by itself after the on-time limit (I7). Prime, test dot and runs are locked while it is on.' }));
       }
@@ -3202,7 +3512,8 @@
         ['Last error', pr.lastError || 'none'],
         ['Gauge read', reg ? 'you, ' + IL.fmtTime(reg.atMs) + ' (' + IL.fmtPsi(reg.value) + ' psi)' : 'not yet'],
       ]);
-      const [bOn, bOff, bReads] = $('pv-pr-act').children;
+      const [bOn, bOff, bReads, bPump] = $('pv-pr-act').children;
+      IL.show(bPump, IL.hasPumpOnly(s));
       const holding = pr.state && pr.state !== 'off';
       const lockOn = holding ? null : IL.lockReason(s, { connected: true, homed: true, engine: true });
       IL.gate(bOn, holding ? (pr.state === 'vent_failed' ? 'Pressure is NOT off: press Pressure off' : 'Pressure is already on') : lockOn);
@@ -3222,8 +3533,15 @@
       if (first) p.body.append(el('div', { id: 'pv-angle-q' }), el('dl', { class: 'kv kv--wrap', id: 'pv-angle-kv' }));
       const prof = (s.dispense && s.dispense.profile) || {};
       const a = IL.fmtDeg(prof.startAngleDeg, 1);
-      const state = !prof.partialTurn ? 'off' : !prof.startAngleSetAtMs ? 'never' : prof.startAngleNeedsConfirm ? 'confirm' : 'ok';
-      IL.keyed($('pv-angle-q'), state + a + prof.startAngleSetAtMs, () => {
+      const state = !prof.partialTurn ? 'off' : IL.angleState(s);
+      IL.keyed($('pv-angle-q'), state + a + prof.startAngleSetAtMs + (state === 'measure' ? IL.angleResetText(s) : ''), () => {
+        if (state === 'measure') {
+          return el('div', { class: 'ri ri--need' }, IL.glyph('need'),
+            el('div', {}, el('div', { class: 'ri__t', text: 'Measure the start angle again' }),
+              el('div', { class: 'ri__d', text: IL.angleResetText(s) + '. The angle set ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) + ' no longer holds.' })),
+            el('abbr', { class: 'icode', title: 'Interlock I11', text: 'I11' }),
+            fixRow([{ href: '#calibrate/angle', label: 'Measure again', primary: true }]));
+        }
         if (state === 'confirm') {
           return el('div', { class: 'ri ri--need', 'data-refusals': '' }, IL.glyph('need'),
             el('div', {}, el('div', { class: 'ri__t', text: 'Was the controller switched off since ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) + '?' }),
@@ -3315,7 +3633,7 @@
       snap.addEventListener('click', async () => {
         snap.disabled = true;
         try {
-          const r = await fetch('/api/camera/top.jpg?w=800&t=' + Date.now(), { cache: 'no-store' });
+          const r = await fetch('/api/camera/top.jpg?w=800&t=' + Date.now(), { cache: 'no-store', headers: IL.CLIENT_HEADER });
           if (!r.ok) {
             let reason = r.status === 404 ? 'no top camera' : r.status === 503 ? 'no frame within 10 s' : r.statusText;
             try { reason = (await r.json()).reason || reason; } catch (e) { /* not JSON */ }
@@ -3395,6 +3713,7 @@
     const tipCell = $('chip-tip');
     if (tipCell) tipCell.addEventListener('click', () => IL.go('#setup/tip'));
     $('btn-start').addEventListener('click', (ev) => IL.runFix('connect', ev.currentTarget, null, ev));
+    $('btn-take').addEventListener('click', (ev) => IL.runFix('take-control', ev.currentTarget, null, ev));
     $('btn-home').dataset.twoPress = 'home';
     $('btn-home').addEventListener('click', (ev) => IL.runFix('home', ev.currentTarget, null, ev));
     $('panel-back').addEventListener('click', () => IL.panel.close());

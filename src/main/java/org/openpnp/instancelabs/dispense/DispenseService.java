@@ -66,6 +66,8 @@ import com.google.gson.Gson;
  */
 public final class DispenseService {
     private static volatile DispenseService instance;
+    /** BR-44: why the last start threw; null after a start that succeeded. */
+    private static volatile String startError;
     /** Longest the Stop path waits for an engine line that passed its abort check to be written. */
     static final long STOP_WRITE_GRACE_MS = 50;
     /** The vacuum probe nozzle (name or id). */
@@ -138,7 +140,7 @@ public final class DispenseService {
     private MachineListener machineListener;
     private MachineListener identityListener;
     /**
-     * Whether the controller of the current connection said it is OpenPnP's simulator (M115 at the
+     * Whether the controller of the current connection said it is a simulator (GcodeServer or lumen-sim; M115 at the
      * connect or of the last task), null when not asked yet on this connection.
      */
     private volatile Boolean connectionSimulated;
@@ -146,6 +148,56 @@ public final class DispenseService {
     private final HomeTracker homeTracker;
     /** BR-02: a controller reset seen at a connect; the position is unknown until a home. */
     private final ControllerReset controllerReset;
+    /**
+     * BR-02: the screw driver's DISABLE_COMMANDs and OpenPnP moves seen so far
+     * ({@link GcodeDriver#getDisableCommandsSent}, {@link GcodeDriver#getMotionCommandsSent}): a count that moved on is
+     * a new one.
+     */
+    private final AtomicLong disablesSeen = new AtomicLong(), motionsSeen = new AtomicLong();
+    /** BR-02: the driver whose received lines this engine watches (the host watchdog's trip), or null. */
+    private volatile GcodeDriver watchedDriver;
+    private final java.util.function.Consumer<String> tripWatcher = this::watchForWatchdogTrip;
+    /**
+     * BR-02: writes the journal for the reader thread (a trip heard there): no "ok" behind it, a STOP's included, waits
+     * for an insert.
+     */
+    private final java.util.concurrent.ExecutorService journalWriter = java.util.concurrent.Executors
+            .newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "dispense-journal");
+                t.setDaemon(true);
+                return t;
+            });
+    /**
+     * BR-02: the passthrough's targets per axis letter since the last other motion (OpenPnP's, the engine's, a
+     * connect): a G0/G1 to where an axis already is queues no move. Machine thread.
+     */
+    private final Map<Character, Double> passthroughAt = new java.util.concurrent.ConcurrentHashMap<>();
+    /** BR-02: the engine's own moves (the controller's idle clock) and its stop sequence's M18 B. */
+    private final DispenseExecutor.ScrewWatch screwWatch = new DispenseExecutor.ScrewWatch() {
+        @Override
+        public void moved(boolean screw) {
+            passthroughAt.clear(); // the axes are no longer where the passthrough left them
+            if (screw) {
+                controllerReset.screwMoved();
+            }
+            else {
+                controllerReset.axisMoved();
+            }
+        }
+
+        @Override
+        public void watchdogArmed() {
+            controllerReset.watchdogArmed();
+        }
+
+        @Override
+        public void switchedOff(String line, boolean acknowledged) {
+            // a send that failed on a closed link put nothing on the wire (a stop that disconnects first)
+            if (acknowledged || screwDriverConnected()) {
+                controllerReset.screwMotorOff("the engine's stop sequence: " + line);
+            }
+        }
+    };
     /** BR-02: the CONNECT_COMMAND's G92 was warned about (once per engine). */
     private volatile boolean connectG92Warned;
     /** The last good open-air N1 baseline (the probe's part-on-N1 check across tasks). */
@@ -183,6 +235,16 @@ public final class DispenseService {
      * it there. Null in every other use.
      */
     static volatile java.util.function.Consumer<String> testHook;
+    /**
+     * Tests only: the clock of the controller reset journal and of the screw motor's idle timeout (BR-02), read at each
+     * call; null = the system clock.
+     */
+    static volatile java.util.function.LongSupplier testClock;
+
+    private static long resetClockMs() {
+        java.util.function.LongSupplier t = testClock;
+        return t != null ? t.getAsLong() : System.currentTimeMillis();
+    }
 
     private static void hook(String point) {
         java.util.function.Consumer<String> h = testHook;
@@ -234,21 +296,50 @@ public final class DispenseService {
         });
     }
 
-    /** Starts (or restarts) the service for a loaded configuration. */
+    /**
+     * Starts (or restarts) the service for a loaded configuration. A start that throws leaves no service ({@link #get}
+     * null, not the one it stopped) and {@link #startState} "failed".
+     */
     public static synchronized DispenseService start(Configuration configuration) throws SQLException, IOException {
         if (instance != null) {
-            instance.shutdown();
+            try {
+                instance.shutdown();
+            }
+            finally {
+                instance = null;
+            }
         }
-        instance = new DispenseService(configuration);
+        startError = null;
+        try {
+            instance = new DispenseService(configuration);
+        }
+        catch (Throwable t) {
+            startError = t.toString();
+            throw t;
+        }
         instance.askIdentityOnConnect();
         Logger.info("Instance Labs dispense service started: {}", instance.isAvailable() ? "available"
                 : "unavailable (" + instance.unavailableReason + ")");
         return instance;
     }
 
-    /** The running service, or null before the configuration has loaded. */
+    /** The running service, or null before the configuration has loaded (or when it failed to start). */
     public static DispenseService get() {
         return instance;
+    }
+
+    /**
+     * BR-44, for GET /api/status ({@code dispense.state}): "running", "failed" (the last start threw:
+     * {@link #startError}), or "starting" (not started yet: OpenPnP starts the web API and this service in no fixed
+     * order).
+     */
+    public static String startState() {
+        return instance != null ? "running" : startError != null ? "failed" : "starting";
+    }
+
+    /** Why the last start failed, or null. */
+    public static String startError() {
+        return instance != null ? null : startError;
     }
 
     private DispenseService(Configuration configuration) throws SQLException, IOException {
@@ -279,23 +370,46 @@ public final class DispenseService {
         }
         Machine machine = configuration.getMachine();
         homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
-        controllerReset = new ControllerReset(null, machine != null && machine.isEnabled(),
-                machine != null && machine.isHomed(), resetHistory(dbExisted), this::journalReset);
+        controllerReset = new ControllerReset(DispenseService::resetClockMs, machine != null && machine.isEnabled(),
+                machine != null && machine.isHomed(), resetHistory(dbExisted), this::journalReset,
+                () -> Math.round(cfg.screwIdleOffS * 1000));
+        stampZFrameMoved(); // BR-02: a reset's home on record (or homed at the start) that the settings miss
+        GcodeDriver screwDriver = screwDriver(machine);
+        if (screwDriver != null) {
+            // what it sent before this engine started is not this engine's to record
+            disablesSeen.set(screwDriver.getDisableCommandsSent());
+            motionsSeen.set(screwDriver.getMotionCommandsSent());
+            screwDriver.setReceivedLineWatcher(tripWatcher);
+            watchedDriver = screwDriver;
+        }
         if (machine != null) {
             machine.addListener(homeTracker);
             machineListener = new MachineListener.Adapter() {
                 @Override
                 public void machineHomed(Machine m, boolean isHomed) {
                     bZeroed.set(false);
-                    if (isHomed && m.isEnabled()) {
-                        controllerReset.homed();
+                    if (isHomed && m.isEnabled() && controllerReset.homed()) {
+                        stampZFrameMoved(); // BR-02: the first home after a detected reset moved the Z frame
                     }
                 }
 
                 @Override
                 public void machineEnabled(Machine m) {
                     bZeroed.set(false);
+                    passthroughAt.clear(); // BR-02: OpenPnP read where the axes are
                     readPositionAtConnect(m);
+                }
+
+                @Override
+                public void machineHeadActivity(Machine m, Head head) {
+                    noteOpenPnpMotion(m); // BR-02: the controller's idle clock (an actuator's activity is no move)
+                }
+
+                @Override
+                public void machineEnableFailed(Machine m, String reason) {
+                    // BR-02: OpenPnP rolls back a Start that failed after the driver connected: its DISABLE_COMMAND
+                    // went out, though no disable is announced
+                    journalSentDisable(m, "a Start that failed: OpenPnP switched the driver off again");
                 }
 
                 @Override
@@ -314,6 +428,14 @@ public final class DispenseService {
                 public void machineDisabled(Machine m, String reason) {
                     bZeroed.set(false);
                     abort("machine disabled: " + reason);
+                    // BR-02: after the DISABLE_COMMAND went out (no write held back its M410); none on a link closed
+                    // before (a stop that disconnects first)
+                    journalSentDisable(m, "a STOP");
+                }
+
+                @Override
+                public void machineDisableFailed(Machine m, String reason) {
+                    journalSentDisable(m, "a STOP"); // the lines before the failure, its M18 among them maybe, went out
                 }
             };
             machine.addListener(machineListener);
@@ -322,6 +444,17 @@ public final class DispenseService {
 
     public synchronized void shutdown() {
         abort("service shutdown");
+        GcodeDriver watched = watchedDriver;
+        if (watched != null && watched.getReceivedLineWatcher() == tripWatcher) {
+            watched.setReceivedLineWatcher(null);
+        }
+        journalWriter.shutdown(); // a trip handed on goes on record before the database closes
+        try {
+            journalWriter.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         Machine machine = configuration.getMachine();
         if (machine != null && machineListener != null) {
             machine.removeListener(machineListener);
@@ -356,9 +489,10 @@ public final class DispenseService {
                 return null;
             }
             OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
-            List<String> m115 = new DriverGcodeChannel(mapper.getDriver())
-                    .sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
+            DriverGcodeChannel ch = new DriverGcodeChannel(mapper.getDriver());
+            List<String> m115 = ch.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
             connectionSimulated = SimGuard.isSimulatorIdentity(m115);
+            readWatchdogTripAtConnect(ch, m115); // BR-02
             return m115;
         });
         identityListener = new MachineListener.Adapter() {
@@ -432,7 +566,8 @@ public final class DispenseService {
     /** BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. */
     private void journalReset(ControllerReset.Event e) {
         try {
-            String level = ControllerReset.EVENT_KNOWN.equals(e.code) ? "INFO" : "WARN";
+            String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
+                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code) ? "INFO" : "WARN";
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
         catch (SQLException ex) {
@@ -442,8 +577,9 @@ public final class DispenseService {
     }
 
     /**
-     * BR-02: what earlier engines journaled about controller resets (the newest of each kind), so a restart keeps the
-     * screw count's epoch and an unknown position. Unreadable, it counts as an unread connect: unknown until a home.
+     * BR-02: what earlier engines journaled about controller resets and the screw's motor (the newest of each kind),
+     * so a restart keeps the screw count's epoch, an unknown position and the controller's idle clock. Unreadable, it
+     * counts as an unread connect: unknown until a home.
      */
     private List<ControllerReset.Event> resetHistory(boolean dbExisted) {
         List<ControllerReset.Event> h = new ArrayList<>();
@@ -462,7 +598,9 @@ public final class DispenseService {
                         + "(BR-02)", now);
             }
             for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
-                    ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH)) {
+                    ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH, ControllerReset.EVENT_MOTOR_OFF,
+                    ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_WATCHDOG_TRIP,
+                    ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }
@@ -474,6 +612,221 @@ public final class DispenseService {
                     + "reset"));
         }
         return h;
+    }
+
+    /** The screw's axis (the configured auger axis) when it is a controller axis on a GcodeDriver, else null. */
+    private ReferenceControllerAxis screwAxis(Machine m) {
+        if (m == null) {
+            return null;
+        }
+        for (org.openpnp.spi.Axis a : m.getAxes()) {
+            if (a.getName().equals(cfg.bAxisName) && a instanceof ReferenceControllerAxis
+                    && ((ReferenceControllerAxis) a).getDriver() instanceof GcodeDriver) {
+                return (ReferenceControllerAxis) a;
+            }
+        }
+        return null;
+    }
+
+    /** BR-02: the link to the screw's controller is open (unknown counts as open: the safe side). */
+    private boolean screwDriverConnected() {
+        ReferenceControllerAxis b = screwAxis(configuration.getMachine());
+        return b == null || ((GcodeDriver) b.getDriver()).isConnected();
+    }
+
+    /**
+     * BR-02 (the process engineer, 11-04): the home after a detected reset moved the Z frame (K by twice the shift):
+     * stamps it in the settings, so the needle frame and its touch-off count as not current until recorded again after
+     * it (I4, {@link DispenseConfig#isNeedleAnchored}). A fact: never refused.
+     */
+    private void stampZFrameMoved() {
+        Long moved = controllerReset.frameMovedAtMs();
+        synchronized (this) {
+            DispenseConfig live = cfg;
+            if (moved == null || live.zFrameMovedAtMs != null && live.zFrameMovedAtMs >= moved) {
+                return;
+            }
+            DispenseConfig c = live.copy();
+            c.zFrameMovedAtMs = moved;
+            try {
+                writeConfig(c);
+            }
+            catch (IOException e) {
+                Logger.error(e, "dispense: the Z frame's move at a reset's home was not saved");
+                cfg = c; // this engine still asks for the needle frame
+            }
+        }
+        db.event(null, "WARN", "I4", "the controller was reset: the Z frame moved at the home of " + ZCheck.clock(moved)
+                + ": record the needle frame again (and touch off)");
+    }
+
+    /** The screw's GcodeDriver, or null. */
+    private GcodeDriver screwDriver(Machine m) {
+        ReferenceControllerAxis b = screwAxis(m);
+        return b == null ? null : (GcodeDriver) b.getDriver();
+    }
+
+    /** BR-02: the line of a DISABLE_COMMAND that switches the screw's motor off (an M18/M84 naming it or no axis). */
+    private static String screwOffLine(String command, String letter) {
+        for (String l : command == null ? new String[0] : command.split("\n")) {
+            if (ControllerCommands.switchesScrewOff(l, letter)) {
+                return ControllerCommands.normalize(l);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * BR-02: the screw's driver sent its DISABLE_COMMAND on an open link since the last look (a disable after a
+     * disconnect sends none): when it has the screw's M18, on record. Counted at the driver, so a second disable at the
+     * same time is no other one.
+     */
+    private void journalSentDisable(Machine m, String cause) {
+        ReferenceControllerAxis b = screwAxis(m);
+        if (b == null) {
+            return;
+        }
+        GcodeDriver d = (GcodeDriver) b.getDriver();
+        if (!advanced(disablesSeen, d.getDisableCommandsSent())) {
+            return;
+        }
+        String line = screwOffLine(d.getCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND), b.getLetter());
+        if (line != null) {
+            controllerReset.screwMotorOff(cause + ": its DISABLE_COMMAND sends " + line);
+        }
+    }
+
+    /**
+     * BR-02: OpenPnP's own moves and homes restart the controller's idle clock (counted where the driver sends them:
+     * a head's activity may be an actuator's, no move).
+     */
+    private void noteOpenPnpMotion(Machine m) {
+        GcodeDriver d = screwDriver(m);
+        if (d == null) {
+            return;
+        }
+        if (advanced(motionsSeen, d.getMotionCommandsSent())) {
+            passthroughAt.clear(); // the axes are no longer where the passthrough left them
+            controllerReset.axisMoved();
+            controllerReset.journalScrewMotion();
+        }
+    }
+
+    /**
+     * Whether a driver's count moved on past the one seen (and notes it): a count read late by one of two handlers at
+     * once never takes the seen one back (a second record of it later).
+     */
+    static boolean advanced(AtomicLong seen, long count) {
+        return seen.getAndAccumulate(count, Math::max) < count;
+    }
+
+    /**
+     * BR-02, on the screw driver's reader thread: the il/safety firmware's host watchdog tripped (the host was silent
+     * while it was armed): it switched the screw's driver off.
+     */
+    private void watchForWatchdogTrip(String line) {
+        if (ControllerCommands.isHostWatchdogTrip(line)) {
+            String cause = "the controller's host watchdog tripped: " + line.trim();
+            try {
+                journalWriter.execute(() -> controllerReset.watchdogTripped(cause, false)); // never this thread's insert
+            }
+            catch (java.util.concurrent.RejectedExecutionException e) {
+                Logger.warn("dispense: {} after the engine stopped: not on record", cause);
+            }
+        }
+    }
+
+    /**
+     * BR-02, at a connect, where M115 names the host watchdog: its M990 report keeps a trip until the next arm, also
+     * one while OpenPnP was gone (no one heard its error). Recorded once per arm (an engine run or the pressure hold
+     * arms it; a reset ends it). Without the capability, nothing.
+     */
+    private void readWatchdogTripAtConnect(GcodeChannel ch, List<String> m115) {
+        boolean capable = false;
+        for (String l : m115 == null ? Collections.<String> emptyList() : m115) {
+            capable = capable || l != null && l.contains(ControllerCommands.WATCHDOG_CAPABILITY);
+        }
+        if (!capable) {
+            return;
+        }
+        try {
+            List<String> report = ch.sendAndCollect(ControllerCommands.KEEPALIVE_PING, cfg.commandTimeoutMs);
+            if (ControllerCommands.reportsWatchdogTrip(report)) {
+                // once per arm: it reports the trip until the host arms it again (never, without the keepalive)
+                controllerReset.watchdogTripped("the controller's host watchdog tripped while no one listened: its "
+                        + "M990 reports it at the connect", true);
+            }
+        }
+        catch (Exception e) {
+            Logger.warn("dispense: the host watchdog's M990 report was not read at the connect: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * BR-02: a line sent to the controller outside the engine's streams (the API's G-code passthrough): a move restarts
+     * the controller's idle clock (a G0/G1 of the screw switches its motor on; on record now and then), an M18/M84 that
+     * names the screw or no axis switches its motor off. Call it once the line was sent.
+     */
+    public void noteControllerLine(String line) {
+        Machine m = configuration.getMachine();
+        ReferenceControllerAxis b = screwAxis(m);
+        String letter = b == null ? null : b.getLetter(); // unknown: only an M18 of every motor counts
+        if (ControllerCommands.switchesScrewOff(line, letter)) {
+            controllerReset.screwMotorOff("a G-code line: " + ControllerCommands.normalize(line));
+        }
+        else if (ControllerCommands.armsWatchdog(line)) {
+            controllerReset.watchdogArmed();
+        }
+        else if ("G92".equals(ControllerCommands.word(ControllerCommands.normalize(line)))) {
+            passthroughAt.putAll(ControllerCommands.axisWords(line)); // the axes are there now, without a move
+        }
+        else if (ControllerCommands.isMove(line)) {
+            boolean screw = false;
+            boolean moved = "G28".equals(ControllerCommands.word(ControllerCommands.normalize(line)));
+            for (Map.Entry<Character, Double> w : ControllerCommands.axisWords(line).entrySet()) {
+                char axis = w.getKey();
+                boolean isScrew = letter != null && Character.toUpperCase(letter.charAt(0)) == axis;
+                Double at = passthroughAt.containsKey(axis) ? passthroughAt.get(axis) : openPnpAt(m, axis);
+                double step = isScrew ? 0.5 / cfg.bStepsPerDeg : 1e-4; // a change less than a step queues nothing
+                // where the axis was unknown (no such axis): not counted, a line that queued nothing would date late
+                if (at != null && Math.abs(w.getValue() - at) >= step) {
+                    moved = true;
+                    screw = screw || isScrew;
+                }
+                passthroughAt.put(axis, w.getValue());
+            }
+            if (moved) {
+                if (screw) {
+                    controllerReset.screwMoved();
+                }
+                else {
+                    controllerReset.axisMoved();
+                }
+                controllerReset.journalScrewMotion();
+            }
+        }
+    }
+
+    /**
+     * Where OpenPnP has an axis of the screw's driver (driver coordinate, mm or degrees), by its letter; null when no such
+     * axis. OpenPnP's own moves and the resyncs after the engine's streams and the passthrough's batches keep it.
+     */
+    private Double openPnpAt(Machine m, char letter) {
+        GcodeDriver d = screwDriver(m);
+        if (d == null) {
+            return null;
+        }
+        for (org.openpnp.spi.Axis a : m.getAxes()) {
+            if (a instanceof ReferenceControllerAxis && ((ReferenceControllerAxis) a).getDriver() == d) {
+                ReferenceControllerAxis ra = (ReferenceControllerAxis) a;
+                String l = ra.getLetter();
+                if (l != null && !l.isEmpty() && Character.toUpperCase(l.charAt(0)) == letter) {
+                    return ra.getType() == org.openpnp.spi.Axis.Type.Rotation ? ra.getDriverCoordinate()
+                            : ra.getDriverLengthCoordinate().convertToUnits(LengthUnit.Millimeters).getValue();
+                }
+            }
+        }
+        return null;
     }
 
     /** The controller's M115 answer on the current connection. */
@@ -705,6 +1058,10 @@ public final class DispenseService {
         }
         refuseStaleTip(newCfg);
         DispenseConfig c = newCfg.copy();
+        if (cfg != null && cfg.zFrameMovedAtMs != null && (c.zFrameMovedAtMs == null
+                || c.zFrameMovedAtMs < cfg.zFrameMovedAtMs)) {
+            c.zFrameMovedAtMs = cfg.zFrameMovedAtMs; // BR-02, engine-stamped: a copy from before it cannot take it back
+        }
         long now = System.currentTimeMillis();
         if (cfg != null && c.profile.startAngleDeg != cfg.profile.startAngleDeg) {
             c.profile.startAngleSetAtMs = now;
@@ -769,15 +1126,40 @@ public final class DispenseService {
 
     /**
      * I11: sets (angle != null) or confirms the screw start angle for the current controller
-     * power-up (the B step count restarts at power-up).
+     * power-up (the B step count restarts at power-up). A confirm cannot keep an angle set before a detected reset or
+     * a switch-off of the screw's motor (BR-02): it must be measured again.
      */
     public synchronized DispenseProfile setStartAngle(Double angleDeg, String note) throws IOException {
+        return setStartAngle(angleDeg, note, null);
+    }
+
+    /**
+     * As above; {@code measuredAtMs}: when the evidence of the angle set (its dot pair, its picture) was made, or null.
+     * After a switch-off or a reset an angle is set only once the screw has turned since, from evidence made after it
+     * (BR-02: the angle shown before it, one click away, would clear I11).
+     */
+    public synchronized DispenseProfile setStartAngle(Double angleDeg, String note, Long measuredAtMs)
+            throws IOException {
         Long reset = controllerReset.detectedAtMs();
+        ControllerReset.Event off = controllerReset.lastScrewMotorOff();
         Long setAt = cfg.profile.startAngleSetAtMs;
         if (angleDeg == null && reset != null && (setAt == null || setAt < reset)) {
             // BR-02: the B step count restarted at that reset for sure, so the old angle cannot be confirmed
-            throw new EngineRefusal(409, "refused", "the controller was reset after the screw start angle was set, so "
-                    + "the angle is lost: measure it again and set it (a confirm cannot keep it)");
+            throw new EngineRefusal(409, "refused", setAt == null ? "the controller was reset and the screw start "
+                    + "angle was never set: measure it and set it (a confirm cannot set it)" : "the controller was reset "
+                    + "after the screw start angle was set, so the angle is lost: measure it again and set it (a "
+                    + "confirm cannot keep it)");
+        }
+        if (angleDeg == null && off != null && (setAt == null || setAt <= off.atMs)) {
+            // BR-02: unpowered, the screw may have turned with its step count unchanged: only a measure tells
+            throw new EngineRefusal(409, "refused", off.message + (setAt == null ? ": the screw start angle was never "
+                    + "set: measure it and set it (a confirm cannot set it)" : " after the screw start angle was set: "
+                    + "the screw may have turned, so the angle is lost: measure it again and set it (a confirm cannot "
+                    + "keep it)"));
+        }
+        String noSet = angleDeg == null ? null : controllerReset.whyNoAngle(measuredAtMs);
+        if (noSet != null) {
+            throw new EngineRefusal(409, "refused", noSet);
         }
         DispenseConfig c = cfg.copy();
         if (angleDeg != null) {
@@ -805,9 +1187,10 @@ public final class DispenseService {
     }
 
     /**
-     * When the B step count last restarted or may have (BR-02: a detected controller reset, or a connect whose
-     * position could not be read), or null: the screw start angle (I11) and partial-turn records are checked
-     * against it. A reconnect of a powered controller keeps the count.
+     * When the B step count last restarted or may have, or stopped giving the screw's phase (BR-02: a detected
+     * controller reset, a connect whose position could not be read, or the screw's motor switched off), or null: the
+     * screw start angle (I11) and partial-turn records are checked against it. A reconnect of a powered controller
+     * keeps the count.
      */
     public Long getControllerResetAtMs() {
         return controllerReset.countEpochMs();
@@ -874,6 +1257,17 @@ public final class DispenseService {
         return new double[] {at.getX() + l[0], at.getY() + l[1]};
     }
 
+    /**
+     * What dose records are checked against now (§1.7): the screw count's epoch with its motor's last switch-off (BR-02,
+     * the stale reason names it) and whether this is the simulator.
+     */
+    public DoseRecord.Epochs doseEpochs() {
+        Long epoch = getControllerResetAtMs();
+        ControllerReset.Event off = controllerReset.lastScrewMotorOff();
+        return new DoseRecord.Epochs(epoch, isSimulatorConfirmed(), off == null ? null : off.atMs,
+                off == null ? null : off.message);
+    }
+
     /** BR-02: the controller reset state (position known, the last detected reset and what it reported). */
     public ControllerReset getControllerReset() {
         return controllerReset;
@@ -929,7 +1323,7 @@ public final class DispenseService {
         writeConfig(c); // a fact: never refused, so never held back by a check of other settings
         lastChange = new Long[] {token, before.needleChangedAtMs};
         String at = ZCheck.clock(token);
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerResetAtMs(), isSimulatorConfirmed());
+        DoseRecord.Epochs ep = doseEpochs();
         List<DoseRecord> pending = new ArrayList<>();
         try {
             pending = db.pendingCoupons(now - (long) (before.padCalibration.doseRecordMaxAgeH * 3600e3));
@@ -1632,6 +2026,12 @@ public final class DispenseService {
                     + "and K moves by about twice that. Record the needle frame with both tips touching the same spot",
                     z.deltaMm, ZCheck.clock(z.homeAtMs));
         }
+        if (c.isZFrameMovedSinceAnchor()) {
+            // BR-02: the home after the controller's reset moved the Z frame
+            return "K was measured before the controller was reset: its home at " + ZCheck.clock(c.zFrameMovedAtMs)
+                    + " moved the Z frame, and K moves by about twice that. Record the needle frame with both tips "
+                    + "touching the same spot";
+        }
         if (c.needleAnchor != null && !c.isNeedleAnchored()) {
             return "K was measured with the needle before the change at " + ZCheck.clock(c.needleChangedAtMs)
                     + ": record the needle frame with both tips touching the same spot";
@@ -1982,7 +2382,7 @@ public final class DispenseService {
                     + (operator == null ? "you" : operator)));
         }
         else {
-            DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerResetAtMs(), isSimulatorConfirmed());
+            DoseRecord.Epochs ep = doseEpochs();
             List<DoseRecord> fresh = DoseRecords.fresh(db.doseRecords(null, now - (long) (c.padCalibration
                     .doseRecordMaxAgeH * 3600e3)), c, ep, now, db.flaggedJobs());
             int steps = stored.dotSteps != null ? stored.dotSteps : c.profile.netStepsPerDot;
@@ -2158,7 +2558,7 @@ public final class DispenseService {
         }
         DispenseConfig c = cfg;
         long now = System.currentTimeMillis();
-        DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerResetAtMs(), isSimulatorConfirmed());
+        DoseRecord.Epochs ep = doseEpochs();
         for (DoseRecord coupon : db.pendingCoupons(now - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3))) {
             if (coupon.jobId != null && jobs.contains(coupon.jobId)) {
                 skipCoupon(coupon, "the calibration was made with another tip", operator, coupon.jobId);
@@ -2490,6 +2890,10 @@ public final class DispenseService {
         in.scope = scope == null ? new Interlocks.Scope() : scope;
         in.controllerResetAtMs = controllerReset.countEpochMs();
         in.controllerResetDetectedAtMs = controllerReset.detectedAtMs();
+        in.controllerConnectedAtMs = homeTracker.getConnectedAtMs();
+        ControllerReset.Event off = controllerReset.lastScrewMotorOff();
+        in.screwMotorOffAtMs = off == null ? null : off.atMs;
+        in.screwMotorOffWhy = off == null ? null : off.message;
         in.positionUnknownWhy = controllerReset.unknownWhy();
         in.boardRun = plan != null;
         in.purgeDots = plan == null ? 0 : DoseBlocks.purgeSpotsNeeded(plan, c);
@@ -3080,12 +3484,14 @@ public final class DispenseService {
     }
 
     /**
-     * Every driver is loopback TCP and the controller identified itself as OpenPnP's simulator on this
-     * connection ({@link SimGuard#isSimulated}, or the answer this service noted at the connect).
+     * Every driver is on a simulator transport (loopback TCP, or lumen-sim's pseudo-terminal) and the controller
+     * identified itself as a simulator on this connection ({@link SimGuard#isSimulated}, or the answer this service
+     * noted at the connect).
      */
     public boolean isSimulatorConfirmed() {
         Machine m = configuration.getMachine();
-        return SimGuard.isSimulated(m) || (Boolean.TRUE.equals(connectionSimulated) && SimGuard.isLoopbackOnly(m));
+        return SimGuard.isSimulated(m)
+                || (Boolean.TRUE.equals(connectionSimulated) && SimGuard.isSimulatorTransport(m));
     }
 
     /** The API's manual pressure hold: engine tasks that move refuse to start while it is on. */
@@ -3270,7 +3676,7 @@ public final class DispenseService {
         DispenseConfig c = cfg;
         OpenPnpRawMapper mapper = new OpenPnpRawMapper(m, nozzle, c.bAxisName);
         DispenseExecutor exec = new DispenseExecutor(c, new DriverGcodeChannel(mapper.getDriver()), mapper.letterB(),
-                System::currentTimeMillis);
+                System::currentTimeMillis).watchScrew(screwWatch);
         HomeReport rep = HomeReport.of(homePlan());
         activeExecutor = exec;
         try {
@@ -3304,8 +3710,9 @@ public final class DispenseService {
         DispenseConfig c = cfg;
         String unknown = controllerReset.unknownWhy();
         if (unknown != null && !clearBelowAttested) {
-            throw refused("MACHINE: " + unknown + ". Check that nothing is under either tool (N1 or the needle), then "
-                    + "home saying so: the home is then G28 straight away, nothing moves before it.");
+            throw refused("MACHINE: " + unknown + ". " + Character.toUpperCase(ControllerReset.HOME_CHECK.charAt(0))
+                    + ControllerReset.HOME_CHECK.substring(1) + "; then home saying so: G28 is then the first line, "
+                    + "with no Z move before it.");
         }
         Nozzle n = unknown != null ? null : getProbeNozzle();
         if (unknown != null) {
@@ -4441,7 +4848,7 @@ public final class DispenseService {
         DispenseConfig c = cfg;
         long now = System.currentTimeMillis();
         try {
-            DoseRecord.Epochs ep = new DoseRecord.Epochs(getControllerResetAtMs(), isSimulatorConfirmed());
+            DoseRecord.Epochs ep = doseEpochs();
             for (DoseRecord r : db.pendingCoupons(now - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3))) {
                 if (place.equals(r.couponPlace) && weighable(r, now, c, ep)) {
                     return String.format(Locale.ROOT, "%s carries %d dots waiting to be weighed: type the readings or "
@@ -5276,8 +5683,8 @@ public final class DispenseService {
         int steps = v.dotSteps != null ? v.dotSteps : c.profile.netStepsPerDot;
         long now = System.currentTimeMillis();
         org.openpnp.instancelabs.padprofile.DoseEvidence e = DoseRecords.evidence(db.doseRecords(null, now
-                - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3)), c, new DoseRecord.Epochs(
-                        getControllerResetAtMs(), isSimulatorConfirmed()), now, db.flaggedJobs()).get(steps);
+                - (long) (c.padCalibration.doseRecordMaxAgeH * 3600e3)), c, doseEpochs(), now,
+                db.flaggedJobs()).get(steps);
         boolean optical = e != null && e.opticalFresh && e.opticalPass;
         boolean mass = e != null && e.massConfirmed;
         if (!optical || !mass) {
@@ -5929,7 +6336,7 @@ public final class DispenseService {
             m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
             mapper = new OpenPnpRawMapper(m, nozzle, c.bAxisName);
             channel = new DriverGcodeChannel(mapper.getDriver());
-            exec = new DispenseExecutor(c, channel, mapper.letterB(), System::currentTimeMillis);
+            exec = new DispenseExecutor(c, channel, mapper.letterB(), System::currentTimeMillis).watchScrew(screwWatch);
             activeExecutor = exec;
             boolean watchdog = probeKeepalive(); // also notes the simulator identity (M115) of this connection
             keepalive = c.keepaliveEnabled && watchdog;
@@ -6018,6 +6425,10 @@ public final class DispenseService {
                 r.message = String.valueOf(e.getMessage());
                 db.event(r.runId, "ERROR", "I1", "stream stopped, pneumatics off sent: " + r.message);
                 throw e;
+            }
+            finally {
+                // BR-02: the screw's last move on record once the stream has ended (never between its lines)
+                controllerReset.journalScrewMotion();
             }
             mapper.resync(p.finalPlanned, p.finalDriver, p.finalB);
             bZeroed.set(true);

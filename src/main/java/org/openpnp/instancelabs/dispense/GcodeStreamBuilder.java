@@ -527,10 +527,10 @@ public class GcodeStreamBuilder {
         add(ControllerCommands.PUMP_ON, GcodeProgram.Marker.PUMP_ON);
         pumpOn = true;
         pumpOnT = t;
-        dwell(cfg.pumpToValveSettleMs);
+        settle(cfg.pumpToValveSettleMs);
         add(ControllerCommands.VALVE_ON, GcodeProgram.Marker.VALVE_ON);
         valveOn = true;
-        dwell(cfg.valveSettleMs);
+        settle(cfg.valveSettleMs);
     }
 
     /**
@@ -667,11 +667,28 @@ public class GcodeStreamBuilder {
         add("M400", GcodeProgram.Marker.SYNC);
     }
 
+    /** The per-dot dwell (the profile's): one G4, or pieces of the watchdog's ping interval when it is armed. */
     public void dwell(int ms) {
+        dwell(ms, keepalive ? Math.max(100, cfg.keepaliveIntervalMs) : ms);
+    }
+
+    /**
+     * The longest G4 of a pump or valve settle: the controller runs a G4 to its end before the lines behind it, so a
+     * STOP's valve-off waits at most one piece, with or without the host watchdog (review 10-31, a 3 s settle was one
+     * G4 P3000).
+     */
+    public static final int MAX_SETTLE_PIECE_MS = 250;
+
+    /** A pump or valve settle, in pieces of at most {@link #MAX_SETTLE_PIECE_MS} (and the ping interval). */
+    private void settle(int ms) {
+        int ping = Math.max(100, cfg.keepaliveIntervalMs);
+        dwell(ms, keepalive ? Math.min(MAX_SETTLE_PIECE_MS, ping) : MAX_SETTLE_PIECE_MS);
+    }
+
+    private void dwell(int ms, int chunk) {
         if (ms <= 0) {
             return;
         }
-        int chunk = keepalive ? Math.max(100, cfg.keepaliveIntervalMs) : ms;
         int remaining = ms;
         while (remaining > 0) {
             int c = Math.min(chunk, remaining);

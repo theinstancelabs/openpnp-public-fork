@@ -23,10 +23,10 @@
  * correction), what the engine refuses since the final round (OpenPnP busy, an upload reading its file: locked; a
  * clean-pad check refused at its start: its reason on the card; the profile's dose a quarter, half or whole turn), a Z
  * that moved at a home and its remedy under the same home (Z check blocker: the needle frame, the blank, the touch-off,
- * Register board), a board top too far under the needle frame for the probe, fix round 2's Calibrate › Needle touch-off
- * (the Pitch field and the engine's 400 at it, a run that records nothing with its message word for word, dots the
- * camera could not measure) and probe only for a board without fiducials (the primary, the REG refusal's fix-it, the
- * result), no native dialogs, no JS errors.
+ * Register board), a board top too far under the needle frame for the probe (that plan kept when the registration's own
+ * plan answers after it), fix round 2's Calibrate › Needle touch-off (the Pitch field and the engine's 400 at it, a run
+ * that records nothing with its message word for word, dots the camera could not measure) and probe only for a board
+ * without fiducials (the primary, the REG refusal's fix-it, the result), no native dialogs, no JS errors.
  *
  * Env: IL_API_URL (http://127.0.0.1:PORT/), PLAYWRIGHT_DIR (dir with node_modules/playwright),
  *      UINAV (uinav CLI), UINAV_SESSION, OUT_DIR (screenshots + results.json), SIM_SCENE (the session's SIM scene file).
@@ -36,6 +36,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const { chromium } = require(path.join(process.env.PLAYWRIGHT_DIR, 'node_modules', 'playwright'));
+const { setStartAngle } = require(path.join(__dirname, 'start-angle.cjs'));
 
 const BASE = process.env.IL_API_URL;
 const UINAV = process.env.UINAV;
@@ -162,10 +163,10 @@ async function runFirstDots(page, n) {
     args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
   });
   // a context of its own: a second tab of this browser (shared localStorage) is opened in it below
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
   const jsErrors = [];
-  page.on('pageerror', (e) => jsErrors.push(String(e)));
+  page.on('pageerror', (e) => jsErrors.push(String((e && e.stack) || e)));
   page.on('console', (m) => { if (m.type() === 'error') jsErrors.push(m.text()); });
   // native confirm / alert / prompt block STOP: the UI must never open one (§1)
   const dialogs = [];
@@ -206,8 +207,8 @@ async function runFirstDots(page, n) {
     // ---- STOP keys, the offline state and STOP NOT CONFIRMED (§5, §15, §18) ------------------------
     // a second page whose /api/stop is answered by a stub (nothing reaches OpenPnP; its recovery is this tab's only)
     {
-      const aux = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-      aux.on('pageerror', (e) => jsErrors.push('aux: ' + e));
+      const aux = await browser.newPage({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 900 } });
+      aux.on('pageerror', (e) => jsErrors.push('aux: ' + ((e && e.stack) || e)));
       aux.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
       let stops = 0;
       let delays = [];   // ms per request from now on (the first slower than the page's 2 s STOP timeout)
@@ -517,7 +518,7 @@ async function runFirstDots(page, n) {
     // the answer counts in another tab of this browser at once
     {
       const twin = await context.newPage();
-      twin.on('pageerror', (e) => jsErrors.push('twin: ' + e));
+      twin.on('pageerror', (e) => jsErrors.push('twin: ' + ((e && e.stack) || e)));
       await twin.goto(BASE + '#run');
       const twinSurface = () => twin.evaluate(() => { const it = IL.S.plan && IL.ready().items.find((x) => x.key === 'surface'); return it ? it.state + ':' + (it.seat || '') : null; });
       await twin.waitForFunction(() => IL.S.plan && IL.ready().items.find((x) => x.key === 'surface').state === 'ok', null, { timeout: 20000 });
@@ -771,7 +772,7 @@ async function runFirstDots(page, n) {
     // next status: the new run id says a task ran meanwhile, and its "hands clear" tick was for the board before it
     {
       const twin = await context.newPage();
-      twin.on('pageerror', (e) => jsErrors.push('twin: ' + e));
+      twin.on('pageerror', (e) => jsErrors.push('twin: ' + ((e && e.stack) || e)));
       await twin.goto(BASE + '#run/checks');
       await twin.waitForSelector('#btn-run:enabled', { timeout: 20000 });
       await twin.click('#btn-run');
@@ -969,13 +970,20 @@ async function runFirstDots(page, n) {
       /** Waits for a Register board task to end; returns its status. */
       const regEnd = async (since, timeout) => waitStatus(page, (x) => x.run && x.run.label === 'board registration' && !x.run.running
         && x.run.startedAtMs > since, timeout || 300000);
-      // the start-angle answer of the recovery panel (other workspaces carry their own copy of the fix, hidden)
+      // the start-angle answer of the recovery panel (other workspaces carry their own copy of the fix, hidden): a
+      // reconnect asks whether the controller was switched off (its confirm); a reset or the screw motor switched off
+      // since the angle was set (BR-02: every STOP's M18 B) asks for it to be measured again, with no confirm: then the
+      // set-up's setStartAngle turns the screw and sets it. Returns what the page offered and how it was answered.
       const answerI11 = async () => {
         const sel = '#panel [data-fix="I11-confirm"]';
-        await page.waitForSelector(sel + ':enabled', { state: 'visible', timeout: 20000 }).catch(() => {});
-        if (await page.isVisible(sel)) await page.click(sel);
-        else if ((await status()).dispense.profile.startAngleNeedsConfirm) await post('api/screw/start-angle', { note: 'PW: the controller stayed on' });
+        await page.waitForFunction((q) => { const b = document.querySelector(q); return (!!b && !b.disabled && b.offsetParent !== null)
+          || ['measure', 'off'].includes(IL.angleState(IL.S.status)); }, sel, { timeout: 20000 }).catch(() => {});
+        const seen = await page.evaluate((q) => { const b = document.querySelector(q); return { state: IL.angleState(IL.S.status), confirm: !!b && b.offsetParent !== null }; }, sel);
+        let how = null;
+        if (seen.state !== 'measure' && seen.confirm) { await page.click(sel); how = 'confirm'; }
+        else if ((await status()).dispense.profile.startAngleNeedsConfirm) how = await setStartAngle(page, BASE, 'PW: STOP recovery');
         await waitStatus(page, (x) => !x.dispense.profile.startAngleNeedsConfirm, 15000).catch(() => {});
+        return Object.assign(seen, { how });
       };
       let r = await put('api/config', { vacuumProbe: { vacuumSettleMs: 300, readDelayMs: 0 } });
       check('register: fast simulator probe timings saved (FAST_TIMINGS)', r.ok(), r.status());
@@ -985,7 +993,12 @@ async function runFirstDots(page, n) {
       await nav(page, 'run');
       await page.click('#btn-start');
       await waitText(page, 'pill-conn', /^Connected$/, 60000);
-      await answerI11();
+      const ang0 = await answerI11();
+      // BR-02: the STOP's M18 B switched the screw motor off, so a partial turn's angle is measured again, never confirmed
+      const st0 = await status();
+      if (st0.machine.screwMotorOff && st0.machine.screwMotorOff.atMs && st0.dispense.profile.partialTurn) {
+        check('recovery: after the STOP (M18 B) the start angle is to be measured again, no confirm offered; set after a screw turn', ang0.state === 'measure' && !ang0.confirm && ang0.how === 'measured', ang0);
+      }
       const home0 = await recStep('home');
       check('recovery: the home step reads "home first" and is done (N1 in the safe zone)', home0 && /home first/i.test(home0.title) && home0.done, home0);
       await page.waitForFunction(() => !IL.recoveryActive(), null, { timeout: 15000 }).catch(() => {});
@@ -1309,7 +1322,7 @@ async function runFirstDots(page, n) {
         await page.waitForFunction(() => !IL.S.planPending && IL.S.plan && IL.S.plan.pasted, null, { timeout: 15000 }).catch(() => {});
         await page.waitForTimeout(1000);
         const mine = await page.evaluate(() => ({ done: IL.run.doneSet.size, board: IL.S.plan.pasted.board, plan: IL.S.plan.planId }));
-        const fresh = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+        const fresh = await browser.newContext({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 900 } });
         const tab = await fresh.newPage();
         tab.on('console', (m) => { if (m.type() === 'error') jsErrors.push('new tab: ' + m.text()); });
         await tab.goto(BASE + '#run/checks');
@@ -1756,11 +1769,29 @@ async function runFirstDots(page, n) {
       // it by hand; planned back at its Z, the reason goes
       {
         const src = await page.evaluate(() => IL.S.plan.source);
-        const anchorZ = (await status()).dispense.needle.anchor.surfaceZMm;
+        const s15 = await status();
+        const anchorZ = s15.dispense.needle.anchor.surfaceZMm;
         const lowZ = Number((anchorZ - 1.7).toFixed(3));
-        await page.evaluate((b) => IL.api('POST', '/api/plan', b).then((p) => IL.setPlan(p)), { source: 'file', file: src.file, x: src.x, y: src.y, z: lowZ, rotation: src.rotation || 0 });
+        // the page loads a finished registration's plan by itself (IL.loadPlan of status.run.nextPlanId); on a slow runner
+        // that answer came after the low Z was planned and replaced it (CI 11-02, 11-03): held here until the low Z shows
+        const next = s15.run.nextPlanId;
+        let asked = null;
+        let release = null;
+        const askedP = new Promise((r) => { asked = r; });
+        const held = new Promise((r) => { release = r; });
+        await page.route('**/api/plan/' + next, async (r) => { if (r.request().method() === 'GET') { asked(); await held; } await r.continue(); });
+        const late = page.evaluate((id) => IL.loadPlan(id).then((p) => (p ? p.planId : null)), next);
+        await Promise.race([askedP, late]);
+        const low = await page.evaluate((b) => IL.api('POST', '/api/plan', b).then((p) => IL.setPlan(p).planId), { source: 'file', file: src.file, x: src.x, y: src.y, z: lowZ, rotation: src.rotation || 0 });
+        release();
+        const lateId = await late;
+        await page.unroute('**/api/plan/' + next);
+        const shown = await page.evaluate(() => IL.S.plan.planId);
+        check('Register board: the registration\'s plan answering after the low Z was planned does not replace it', !!next && shown === low, { next, low, shown, lateId });
         await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); IL.go('#run/probe'); });
-        await page.waitForFunction(() => /cannot reach that height/.test(document.getElementById('register-why').textContent), null, { timeout: 20000 }).catch(() => {});
+        // from Checks the Probe step's foot is built a frame or two later: waitText waits for #register-why itself (a
+        // predicate reading the missing element throws in the page, a page error)
+        await waitText(page, 'register-why', /cannot reach that height/, 20000);
         await page.screenshot({ path: path.join(OUT, 'register-board-too-low.png') });
         const rw = await page.evaluate(() => ({ text: document.getElementById('register-why').textContent, shown: !document.getElementById('register-why').hidden,
           links: Array.from(document.querySelectorAll('#register-why button')).map((b) => b.textContent.trim()), locked: document.getElementById('btn-register').disabled }));
@@ -1768,7 +1799,7 @@ async function runFirstDots(page, n) {
           rw.shown && rw.locked && new RegExp('^the board top Z ' + lowZ.toFixed(3).replace('.', '\\.') + ' lies 1\\.700 mm under the needle-frame surface .*: it cannot reach that height\\. Set the board top Z to roughly the N1 contact height')
             .test(rw.text) && JSON.stringify(rw.links) === JSON.stringify(['Board step', 'Needle Z frame', 'Do it by hand']), rw);
         await page.evaluate((b) => IL.api('POST', '/api/plan', b).then((p) => IL.setPlan(p)), { source: 'file', file: src.file, x: src.x, y: src.y, z: src.z, rotation: src.rotation || 0 });
-        await page.waitForFunction(() => !/cannot reach that height/.test(document.getElementById('register-why').textContent), null, { timeout: 20000 }).catch(() => {});
+        await page.waitForFunction(() => !/cannot reach that height/.test((document.getElementById('register-why') || {}).textContent || ''), null, { timeout: 20000 }).catch(() => {});
         check('Register board: planned back at the board\'s Z, the reason goes', !/cannot reach that height/.test(await textOf(page, 'register-why')), await textOf(page, 'register-why'));
       }
     }

@@ -289,7 +289,16 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     private ReaderThread readerThread;
     volatile boolean disconnectRequested;
-    protected boolean connected;
+    /** Volatile (Instance Labs, BR-02): read without the lock {@link #connect} holds for seconds ({@link #isConnected}). */
+    protected volatile boolean connected;
+    /** Instance Labs (BR-02): DISABLE_COMMANDs sent on an open link (a Stop, the rollback of a failed Start). */
+    private final java.util.concurrent.atomic.AtomicLong disableCommandsSent =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Instance Labs (BR-02): moves and homes sent for OpenPnP (each restarts the controller's idle clock). */
+    private final java.util.concurrent.atomic.AtomicLong motionCommandsSent =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Instance Labs (BR-02): told of every line the controller sends, on the reader thread; or null. */
+    private volatile java.util.function.Consumer<String> receivedLineWatcher;
     
     static public class Line {
         final String line;
@@ -551,8 +560,27 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     @Override
     public void setEnabled(boolean enabled) throws Exception {
+        boolean relink = false;
+        if (enabled && connected && keptAliveLinkIsDead()) {
+            // Instance Labs (BR-44): a link kept open while the machine was off (connection-keep-alive) died meanwhile,
+            // e.g. the controller was switched off. Open it again, with the CONNECT_COMMAND a fresh controller needs,
+            // instead of failing on the dead port.
+            Logger.warn("[{}] the kept-alive link to the controller is dead: connecting again",
+                    getCommunications().getConnectionName());
+            disconnect();
+            relink = true;
+        }
         if (enabled && !connected) {
-            connect();
+            try {
+                connect();
+            }
+            catch (Exception e) {
+                if (!relink) {
+                    throw e;
+                }
+                throw new Exception("controller link lost: it was open while the machine was off and could not be "
+                        + "opened again (is the controller switched on?): " + e.getMessage(), e);
+            }
         }
         if (connected) {
             if (enabled) {
@@ -564,7 +592,11 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                 // Instance Labs (BR-66): the Stop's lines one by one, as the dispense engine's I1 shutdown. A controller
                 // error left pending, or a line that fails or gets no answer, no longer keeps the lines after it (M410
                 // first, then the valves and pumps off) from going out.
-                sendEveryLine(getCommand(null, CommandType.DISABLE_COMMAND));
+                String disable = getCommand(null, CommandType.DISABLE_COMMAND);
+                sendEveryLine(disable);
+                if (disable != null && !disable.trim().isEmpty()) {
+                    disableCommandsSent.incrementAndGet(); // BR-02: its M18 B may have switched the screw off
+                }
                 try {
                     drainCommandQueue(getTimeoutAtMachineSpeed());
                 }
@@ -654,6 +686,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
         long timeout = -1;
         sendGcode(command, timeout);
+        motionCommandsSent.incrementAndGet();
 
         // Check home complete response against user's regex
         String homeCompleteRegex = getCommand(null, CommandType.HOME_COMPLETE_REGEX);
@@ -1024,6 +1057,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             // We do actually send the command.
             motionPending = true;
             sendGcode(command);
+            motionCommandsSent.incrementAndGet();
         }
     }
 
@@ -1202,6 +1236,47 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         disconnectThreads();
 
         closeGcodeLogger();
+    }
+
+    /**
+     * Instance Labs (BR-02): the link to the controller is open, so a disable sends the DISABLE_COMMAND (a disable after
+     * {@link #disconnect} sends nothing).
+     */
+    public boolean isConnected() {
+        return connected;
+    }
+
+    /**
+     * Instance Labs (BR-02): how many times a disable sent the DISABLE_COMMAND on an open link: a Stop, and the rollback
+     * of a Start that failed after this driver connected (only machineEnableFailed tells of that one).
+     */
+    public long getDisableCommandsSent() {
+        return disableCommandsSent.get();
+    }
+
+    /** Instance Labs (BR-02): how many moves and homes this driver sent for OpenPnP (not raw lines). */
+    public long getMotionCommandsSent() {
+        return motionCommandsSent.get();
+    }
+
+    /**
+     * Instance Labs (BR-02): {@code w} is told of every line the controller sends (the il/safety firmware's
+     * "Error:host watchdog" arrives unasked), on the reader thread: it must be short. Null removes it.
+     */
+    public void setReceivedLineWatcher(java.util.function.Consumer<String> w) {
+        receivedLineWatcher = w;
+    }
+
+    public java.util.function.Consumer<String> getReceivedLineWatcher() {
+        return receivedLineWatcher;
+    }
+
+    /**
+     * Instance Labs (BR-44): the link kept open while the machine was off has died (its reader ended on the dead port),
+     * so Start opens it again.
+     */
+    protected boolean keptAliveLinkIsDead() {
+        return readerThread == null || !readerThread.isAlive();
     }
 
     /**
@@ -1613,6 +1688,15 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
      * @param line
      */
     protected void processResponse(Line line) {
+        java.util.function.Consumer<String> watcher = receivedLineWatcher;
+        if (watcher != null) {
+            try {
+                watcher.accept(line.getLine());
+            }
+            catch (RuntimeException e) {
+                Logger.warn(e, "{} received-line watcher failed", getName()); // never the reader thread's end
+            }
+        }
         String regex = getCommand(null, CommandType.COMMAND_CONFIRM_REGEX);
         if (regex != null && line.getLine().matches(regex)) {
             receivedConfirmationsQueue.add(line);

@@ -6,13 +6,18 @@ stubs are on the classpath). Everything is driven through the backend's web API 
 does. The config is a copy of ~/.openpnp2 (read only) with machine.xml from tools/instancelabs/make_machine_patch.py,
 the config the SIM acceptance uses, plus visual homing off (the SIM camera has no homing fiducial).
 
-  (a) enable + home through /api/machine/enable and /api/machine/home {"wait": true}: homed, and OpenPnP's axes
-      match lumen-sim's state;
+  (a) enable + home through /api/machine/enable and /api/machine/home {"wait": true, "clearBelowAttested": true}
+      (INF-10): homed, and OpenPnP's axes match lumen-sim's state;
   (b) STOP 4 s into a home (POST /api/stop): 'timeout waiting for response to M410' in OpenPnP's log, the home
       fails, lumen-sim is halted, a reconnect cannot talk to it until 'uinav controller power-cycle';
   (c) the 30-turn prime at 180 rpm through the engine (a needle touch-off with primeRotationDeg 10800 and the
       profile's dwellMs 250, RESEARCH.md section 6a): 'timeout waiting for response to G4 P250' while the engine
       streams it as one move; once the engine chunks primes (BR-30) a clean run passes too (CI's gate runs this).
+  (d) the machine lock (BR-72, the user's P0 "control the real machine from the UI at any time"): an agent takes the
+      lock and drives the board through POST /api/gcode; the UI's Take control during the agent's long move stops it
+      as the web STOP does (lumen-sim sees M410, M107 P3, P2, P1, P0, M18 B in that order; the machine ends off), the
+      user holds the lock and the agent's next call is refused as lock-lost; taken from an idle agent, only the four
+      M107 lines go out and the machine stays started and homed, so the user's Home works at once.
 
 Skipped unless LUMEN_SIM_E2E=1 and LUMEN_SIM_E2E_JAR names the OpenPnP jar. Takes about 5 minutes (OpenPnP's own
 60 s G28 timeout is part of (b)). One OpenPnP at a time, stopped at the end.
@@ -24,6 +29,7 @@ Skipped unless LUMEN_SIM_E2E=1 and LUMEN_SIM_E2E_JAR names the OpenPnP jar. Take
 Env: UINAV_DIR (openpnp-uinav with --controller pty), LUMEN_SIM_E2E_CONFIG (config dir to copy, default
 ~/.openpnp2), LUMEN_SIM_E2E_DISPENSE_CONFIG (engine config to stage, default the SIM acceptance's if present),
 LUMEN_SIM_E2E_PORTS (web API ports to try, default 18930-18939), LUMEN_SIM_E2E_OUT (keeps logs and results.json).
+UINAV_SIM_CONTROLLER_CAP is ignored: lumen-sim runs without its simulator line, so SimGuard sees the board (BR-47).
 """
 import json
 import os
@@ -108,6 +114,8 @@ class PtySession:
         self.port = free_api_port()
         env = dict(os.environ, OPENPNP_IL_API_PORT=str(self.port), LUMEN_SIM_DIR=LUMEN_SIM_DIR)
         env.setdefault("JAVA_TOOL_OPTIONS", "-Xmx1536m")
+        # The reproductions need the board's exact M115: never lumen-sim's simulator line (uinav's sim default)
+        env.pop("UINAV_SIM_CONTROLLER_CAP", None)
         cmd = [UINAV, "--session", name, "launch", "--controller", "pty", "--controller-park", PARK,
                "--config", stage(os.path.join(tmp, "stage-" + name)), "--openpnp-jar", os.path.abspath(JAR)]
         for x in XML_SETS:
@@ -135,12 +143,14 @@ class PtySession:
             self.stop()
             raise
 
-    def api(self, method, path, body=None, timeout=60):
-        """(HTTP status, JSON body)."""
+    def api(self, method, path, body=None, timeout=60, headers=None):
+        """(HTTP status, JSON body). headers: e.g. BR-72's X-IL-Lock (an agent's token) or X-IL-Client: ui (the user)."""
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.base + path, data=data, method=method)
         if data is not None:
             req.add_header("Content-Type", "application/json")
+        for k, v in (headers or {}).items():
+            req.add_header(k, v)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.status, json.loads(r.read() or b"{}")
@@ -206,6 +216,11 @@ class PtySession:
     def stop(self):
         subprocess.run([UINAV, "--session", self.name, "stop"], capture_output=True, timeout=120)
 
+
+# Every home here follows a sim start, i.e. a controller reset (lumen-sim boots at X/Y/Z 0, B 720 like
+# the board). After BR-02 the backend homes from there only with the operator's word that nothing is under N1 or
+# the needle (INF-10); CI's simulator has nothing under the tools. Older backends ignore the field.
+HOME = {"wait": True, "clearBelowAttested": True}
 
 def record(key, value):
     if not OUT:
@@ -276,9 +291,11 @@ class HomeAndPrimeTest(SessionTest):
         st = self.s.status()
         self.assertFalse(st["server"]["simulatorConfirmed"])  # SimGuard: a serial board, i.e. a real machine
         self.enable()
+        # SimGuard asked at the connect (M115): the board's own answer, without lumen-sim's simulator line (BR-47)
+        self.assertFalse(self.s.status()["server"]["simulatorConfirmed"])
         n0 = self.s.io()[1]
         t0 = time.time()
-        code, r = self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)
+        code, r = self.s.api("POST", "/api/machine/home", HOME, timeout=180)
         home_s = time.time() - t0
         self.assertEqual(code, 200, r)
         self.assertTrue(r.get("homed"), r)
@@ -310,7 +327,7 @@ class HomeAndPrimeTest(SessionTest):
         st = self.s.status()
         if not st["machine"]["homed"]:
             self.enable()
-            self.assertEqual(self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=180)[0], 200)
+            self.assertEqual(self.s.api("POST", "/api/machine/home", HOME, timeout=180)[0], 200)
         tip = st["dispense"]["tip"]["key"]
         token = st["dispense"]["needle"].get("changedAtMs")
         setup = [
@@ -351,7 +368,10 @@ class HomeAndPrimeTest(SessionTest):
         moves = [(t, l) for t, d, l in io if d == ">" and l.startswith("G1 B")]
         self.assertEqual(len(moves), 1, moves)
         self.assertRegex(moves[0][1], r"^G1 B108\d\d\.\d+ F64800$")
-        g4 = [i for i, (t, d, l) in enumerate(io) if d == ">" and l == "G4 P250"]
+        # the dwell after the screw move (the pump and valve settles before it also go out as G4 P250 pieces since
+        # PR #15: a STOP's valve-off waits behind at most one piece)
+        i_move = next(i for i, (t, d, l) in enumerate(io) if d == ">" and l.startswith("G1 B"))
+        g4 = [i for i, (t, d, l) in enumerate(io) if i > i_move and d == ">" and l == "G4 P250"]
         self.assertEqual(len(g4), 1)
         t_g4, after = io[g4[0]][0], io[g4[0] + 1:]  # by position: the G1's ok can share the G4's millisecond
         i_abort = next(i for i, (t, d, l) in enumerate(after) if d == ">" and l == "M410")
@@ -376,7 +396,7 @@ class StopDuringHomingTest(SessionTest):
 
         def home():
             t = time.time()
-            res["home"] = self.s.api("POST", "/api/machine/home", {"wait": True}, timeout=200)
+            res["home"] = self.s.api("POST", "/api/machine/home", HOME, timeout=200)
             res["home_s"] = time.time() - t
 
         th = threading.Thread(target=home)
@@ -433,6 +453,158 @@ class StopDuringHomingTest(SessionTest):
         self.assertTrue(boot_m114 and boot_m114[0].startswith("X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count"),
                         boot_m114)
         self.assertEqual(self.s.java_ttys(), {os.path.realpath(self.s.lumen["link"])})
+
+
+UI = {"X-IL-Client": "ui"}  # the web UI sends this on every request: the user (BR-72)
+STOP_LINES = ["M410", "M107 P3", "M107 P2", "M107 P1", "M107 P0", "M18 B"]  # the live config's DISABLE_COMMAND
+OUTPUT_LINES = STOP_LINES[1:5]  # a take from an idle agent: outputs off, no motion
+
+
+class MachineLockTest(SessionTest):
+    """(d) in its own session: the lock, Take control and the G-code passthrough (BR-72)."""
+    NAME = "lumen-e2e-lock"
+
+    def setUp(self):
+        """Each test starts with nobody holding the lock, whatever an earlier one left (a failure mid-test)."""
+        holder = self.s.status()["lock"]["holder"]
+        if holder and holder["kind"] == "agent":
+            self.assertEqual(self.s.api("POST", "/api/lock/take", {}, timeout=60, headers=UI)[0], 200)
+            holder = self.s.status()["lock"]["holder"]
+        if holder and holder["kind"] == "user":
+            self.assertEqual(self.s.api("POST", "/api/lock/release", {}, headers=UI)[0], 200)
+        self.assertIsNone(self.s.status()["lock"]["holder"])
+
+    def acquire(self, what):
+        code, r = self.s.api("POST", "/api/lock/acquire", {"who": "process", "label": "Process", "what": what,
+                                                           "ttlS": 300})
+        self.assertEqual(code, 200, r)
+        self.assertTrue(r.get("token"), r)
+        holder = r["lock"]["holder"]
+        self.assertEqual((holder["kind"], holder["who"]), ("agent", "process"), r)
+        return {"X-IL-Lock": r["token"]}
+
+    def gcode(self, agent, lines, timeout_ms=60000):
+        return self.s.api("POST", "/api/gcode", {"lines": lines, "timeoutMs": timeout_ms}, timeout=300, headers=agent)
+
+    def home(self, headers=None):
+        code, r = self.s.api("POST", "/api/machine/home", HOME, timeout=180, headers=headers)
+        self.assertEqual(code, 200, r)
+        self.s.wait_status(lambda x: x["machine"]["homed"] and not x["machine"]["busy"], 60, "homed and idle")
+
+    def holder(self):
+        code, r = self.s.api("GET", "/api/lock")
+        self.assertEqual(code, 200, r)
+        self.assertEqual(r, self.s.status()["lock"])  # one object, two routes
+        return r
+
+    def test_1_agent_lock_and_passthrough(self):
+        self.check_safe_copy()
+        self.assertIsNone(self.holder()["holder"])
+        self.enable()
+        self.home()  # anonymous while nobody holds it: as today (CI, the deployer)
+        self.assertIsNone(self.holder()["holder"], "an anonymous write made someone the holder")
+        agent = self.acquire("lumen-sim e2e: M114")
+        n0 = self.s.io()[1]
+        code, r = self.gcode(agent, ["M114"])
+        self.assertEqual(code, 200, r)
+        (res,) = r["results"]
+        self.assertEqual(res["line"], "M114")
+        self.assertTrue(res["replies"] and res["replies"][0].startswith("X:"), res)
+        io, _ = self.s.io(n0)
+        self.assertTrue(lines_sent(io, "M114"), "the passthrough's M114 never reached the board")
+        code, r = self.s.api("POST", "/api/lock/acquire", {"who": "backend", "label": "Backend", "what": "a second"})
+        self.assertEqual((code, r.get("error")), (409, "locked"), r)
+        for headers in (UI, None):  # the user without Take control, and an anonymous client
+            code, r = self.s.api("POST", "/api/machine/home", HOME, timeout=60, headers=headers)
+            self.assertEqual((code, r.get("error")), (409, "locked"), r)
+        code, r = self.gcode(agent, ["G28"])  # the engine's own home, never the passthrough's
+        self.assertEqual((code, r.get("error")), (400, "refused-line"), r)
+        code, r = self.s.api("POST", "/api/lock/release", {}, headers=agent)
+        self.assertEqual(code, 200, r)
+        self.assertIsNone(self.holder()["holder"])
+
+    def test_2_take_control_during_a_long_move_stops_it(self):
+        st = self.s.status()
+        if not (st["machine"]["enabled"] and st["machine"]["homed"]):
+            self.enable()
+            self.home()
+        agent = self.acquire("lumen-sim e2e: a 28 s move")
+        n0 = self.s.io()[1]
+        res = {}
+        th = threading.Thread(target=lambda: res.update(batch=self.gcode(agent, ["G1 X200 Y200 F600", "M400"],
+                                                                            timeout_ms=120000)))
+        th.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and not self.s.sim()["moving"]:
+            time.sleep(0.05)
+        self.assertTrue(self.s.sim()["moving"], "the agent's move did not start")
+        time.sleep(1.0)
+        t_take = time.time()
+        code, take = self.s.api("POST", "/api/lock/take", {}, timeout=60, headers=UI)
+        take_s = time.time() - t_take
+        th.join(60)
+        self.assertFalse(th.is_alive(), "the agent's batch did not end after the take")
+        sim = self.s.sim()
+        io, _ = self.s.io(n0)
+        record("d_take_working", {"take": [code, take], "take_s": round(take_s, 2), "batch": res.get("batch"),
+                                  "sim_moving": sim["moving"],
+                                  "io": ["%.3f %s %s" % x for x in io if not x[2].startswith("Cap:")]})
+        self.assertEqual(code, 200, take)
+        self.assertEqual((take["lock"]["holder"]["kind"], take["lock"]["holder"]["who"]), ("user", "user"), take)
+        self.assertEqual(take["stopped"]["mode"], "stop", take)
+        self.assertTrue(take["stopped"]["machineOff"], take)
+        self.assertFalse(sim["moving"], "the board still moves after Take control")
+        sent = [lines_sent(io, l) for l in STOP_LINES]
+        self.assertTrue(all(sent), dict(zip(STOP_LINES, sent)))
+        firsts = [t[0] for t in sent]
+        self.assertEqual(firsts, sorted(firsts), "the STOP lines out of DISABLE_COMMAND's order")
+        self.assertFalse([l for t, d, l in io if d == ">" and t > firsts[-1] and l.startswith(("G0", "G1"))],
+                         "a move went out after the STOP")
+        m = self.s.wait_status(lambda x: not x["machine"]["enabled"], 30, "the machine off")["machine"]
+        self.assertFalse(m["homed"], m)  # as after any STOP: Start, then Home
+        lock = self.holder()
+        self.assertEqual(lock["holder"]["kind"], "user", lock)
+        self.assertEqual((lock["takenFrom"]["who"], lock["takenFrom"]["by"]), ("process", "user"), lock)
+        code, r = self.gcode(agent, ["M114"])  # the agent sees it lost the lock and sends nothing more
+        self.assertEqual((code, r.get("error")), (409, "lock-lost"), r)
+        self.assertEqual(r["lost"]["how"], "taken", r)
+        # Last: the batch in flight. Its M400 got an ok because the take's M410 flushed the move, not because the
+        # head arrived: a 200 would tell the agent its move was done (BR-72: the batch ends lock-lost).
+        b_code, batch = res["batch"]
+        self.assertEqual((b_code, batch.get("error")), (409, "lock-lost"), batch)
+        code, r = self.s.api("POST", "/api/lock/acquire", {"who": "process", "label": "Process", "what": "again"})
+        self.assertEqual((code, r.get("error")), (409, "locked"), r)  # while the user holds it
+        code, r = self.s.api("POST", "/api/lock/release", {}, headers=UI)  # Give back
+        self.assertEqual(code, 200, r)
+        self.assertIsNone(self.holder()["holder"])
+
+    def test_3_take_control_from_an_idle_agent_keeps_the_machine_homed(self):
+        st = self.s.status()
+        if not (st["machine"]["enabled"] and st["machine"]["homed"]):
+            self.enable()
+            self.home()
+        agent = self.acquire("lumen-sim e2e: idle")
+        code, r = self.gcode(agent, ["G1 X50 Y50 F6000", "M400"])
+        self.assertEqual(code, 200, r)
+        n0 = self.s.io()[1]
+        code, take = self.s.api("POST", "/api/lock/take", {}, timeout=60, headers=UI)
+        io, _ = self.s.io(n0)
+        record("d_take_idle", {"take": [code, take],
+                               "io": ["%.3f %s %s" % x for x in io if not x[2].startswith("Cap:")]})
+        self.assertEqual(code, 200, take)
+        self.assertEqual(take["stopped"]["mode"], "outputs-off", take)
+        self.assertFalse(take["stopped"]["machineOff"], take)
+        sent = [l for t, d, l in io if d == ">" and not l.startswith("M114")]
+        self.assertEqual([l for l in sent if l in STOP_LINES], OUTPUT_LINES, sent)
+        self.assertFalse([l for l in sent if l.startswith(("G0", "G1", "M410", "M18"))], sent)
+        m = self.s.status()["machine"]
+        self.assertTrue(m["enabled"] and m["homed"], m)
+        self.home(UI)  # the user's controls work at once
+        self.assertEqual(self.holder()["holder"]["kind"], "user")
+        code, r = self.gcode(agent, ["M114"])
+        self.assertEqual((code, r.get("error")), (409, "lock-lost"), r)
+        code, r = self.s.api("POST", "/api/lock/release", {}, headers=UI)
+        self.assertEqual(code, 200, r)
 
 
 if __name__ == "__main__":

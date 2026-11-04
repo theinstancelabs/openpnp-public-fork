@@ -1,5 +1,6 @@
 """The health check against a fake OpenPnP: each failure mode, and never a STOP during a home."""
 import contextlib
+import io
 import json
 import os
 import sys
@@ -16,7 +17,9 @@ from fakes import Lab, sha_of  # noqa: E402
 SHA = sha_of("c")
 
 
-class Health(unittest.TestCase):
+class HealthLab:
+    """A fake OpenPnP and the health check against it (no tests of its own)."""
+
     def setUp(self):
         self.lab = Lab()
         self.rel = os.path.join(self.lab.dir, "release")
@@ -29,13 +32,13 @@ class Health(unittest.TestCase):
             self.fake.shutdown()
         self.lab.cleanup()
 
-    def start(self, jar_fail=(), sha=SHA, **machine):
+    def start(self, jar_fail=(), sha=SHA, trusted=(), **machine):
         with open(os.path.join(self.rel, "VERSION.txt"), "w") as f:
             f.write("il-build-5-" + SHA[:7] + "\n")
         with open(os.path.join(self.rel, "openpnp-il.jar"), "w") as f:
             json.dump({"sha": sha, "fail": list(jar_fail)}, f)
         self.fake = FakeOpenPnP(self.lab.port, self.rel, self.lab.config, machine=machine,
-                                requests=self.lab.requests_path).start_thread()
+                                requests=self.lab.requests_path, trusted_origins=list(trusted)).start_thread()
 
     def check(self, *extra, expect=SHA[:7]):
         argv = self.lab.argv("status") + list(extra)
@@ -51,6 +54,9 @@ class Health(unittest.TestCase):
 
     def violations(self):
         return [r["violation"] for r in self.lab.requests() if "violation" in r]
+
+
+class Health(HealthLab, unittest.TestCase):
 
     def test_healthy(self):
         self.start()
@@ -89,6 +95,37 @@ class Health(unittest.TestCase):
         rep = self.check()
         self.assertFalse(rep["ok"])
         self.assertEqual(rep["failure"].split(":")[0], "serial")
+
+    def test_controller_power_cycled_behind_a_kept_alive_link(self):
+        """The controller switched off and on while OpenPnP ran with its link kept open (a health check by hand later).
+        BR-44: Start finds the link dead and connects again (GcodeDriver.setEnabled), so the connect line is new after
+        the enable, and the controller reads Marlin's boot position: never homed, a machine problem."""
+        self.start()
+        self.fake.enable()
+        self.fake.stop()
+        self.fake.power_cycle()
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine", rep)
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"])
+        serial = rep["steps"][2]["detail"]
+        self.assertIn("S/N 387932683335", serial)
+        self.assertNotIn("kept open", serial, "the enable connected again")
+        self.assertTrue(rep["failure"].startswith("axes: controller was reset"), rep)
+        self.assertNotIn(("POST", "/api/machine/home"), self.paths())
+        self.assertEqual(self.posts()[-1], ("POST", "/api/stop"))
+
+    def test_controller_power_cycled_behind_a_kept_alive_link_before_br44(self):
+        """A build before BR-44 (a rollback can land on one): the enable fails on the dead port. No home."""
+        self.start(jar_fail=["old-status"])
+        self.fake.enable()
+        self.fake.stop()
+        self.fake.power_cycle()
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertTrue(rep["failure"].startswith("enable: HTTP 409"), rep)
+        self.assertIn("IO Error", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/home"), self.paths())
 
     def test_each_enable_connects_without_keep_alive(self):
         self.start(keep_alive=False)
@@ -152,6 +189,49 @@ class Health(unittest.TestCase):
         axes[3]["driverCoordinate"] = 720.0
         axes[0]["driverCoordinate"] = 0.5
         self.assertFalse(il_deploy.reset_signature(axes))
+
+    def test_reset_signature_after_a_quick_stop(self):
+        """Marlin's M410 (every STOP's DISABLE_COMMAND) recomputes the logical position from the step counts: at boot,
+        3197 counts at 4.44 steps/deg read A and B 720.05 (lumen-sim RESEARCH.md, M410). A power-cycled controller that
+        was STOPped once (the first health check's own STOP after it found the reset) still reads as reset: within a
+        step or two of 720, never homed. Found by the deploy e2e's test_3 (a health check by hand homed it)."""
+        def axes(b):
+            return [{"letter": "X", "driverCoordinate": 0.0}, {"letter": "Y", "driverCoordinate": 0.0},
+                    {"letter": "Z", "driverCoordinate": 0.0}, {"letter": "B", "driverCoordinate": b}]
+        for b in (720.05, 719.82, 720.27):
+            self.assertTrue(il_deploy.reset_signature(axes(b)), b)
+        for b in (721.0, 719.0, 0.05):
+            self.assertFalse(il_deploy.reset_signature(axes(b)), b)
+
+    def test_reset_controller_stopped_once_is_still_never_homed(self):
+        """The controller reset, the first check finds it and STOPs (M410: B now reads 720.05); a person runs the health
+        check again (after `resume`): still the reset controller, still no home."""
+        self.start(fail=["reset"])
+        self.assertIn("controller was reset", self.check()["failure"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "machine")
+        self.assertEqual([s["step"] for s in rep["steps"]][-1], "axes")
+        self.assertEqual(rep["steps"][-1]["detail"][:20], "controller was reset")
+        self.assertNotIn(("POST", "/api/machine/home"), self.paths())
+
+    def test_reset_signature_is_A_or_B_at_720(self):
+        """BR-02's rule (INF-10): X, Y, Z at 0 with A or B at 720. Marlin boots both rotation axes at 720; a G92 B0 alone
+        (what a dry run once did) leaves A at 720 and the controller still unhomed."""
+        def axes(a, b):
+            out = [{"letter": "X", "driverCoordinate": 0.0}, {"letter": "Y", "driverCoordinate": 0.0},
+                   {"letter": "Z", "driverCoordinate": 0.0}, {"letter": "B", "driverCoordinate": b}]
+            return out if a is None else out + [{"letter": "A", "driverCoordinate": a}]
+        self.assertTrue(il_deploy.reset_signature(axes(720.0, 0.0)))
+        self.assertTrue(il_deploy.reset_signature(axes(0.0, 720.0)))
+        self.assertTrue(il_deploy.reset_signature(axes(720.0, 720.0)))
+        self.assertTrue(il_deploy.reset_signature(axes(None, 720.0)))
+        self.assertFalse(il_deploy.reset_signature(axes(0.0, 0.0)))
+        self.assertFalse(il_deploy.reset_signature(axes(None, 0.0)))
+        homed = axes(0.0, 0.0)
+        homed[2]["driverCoordinate"] = 31.5  # Z after G28 (Z_AFTER_HOMING)
+        homed[4]["driverCoordinate"] = 720.0
+        self.assertFalse(il_deploy.reset_signature(homed), "a homed head is not a reset, whatever A reads")
 
     def test_controller_position_not_read_is_never_homed(self):
         """reset_signature needs B too: a power-cycled controller (X/Y/Z 0) whose B is not reported (its letter changed
@@ -257,13 +337,39 @@ class Health(unittest.TestCase):
         self.assertGreaterEqual(len([p for p in self.paths() if p == ("GET", "/api/status")]), 2)
 
     def test_engine_that_never_starts_fails_at_the_status_timeout(self):
-        self.start(jar_fail=["engine"])
+        """A build before BR-44 cannot tell a failed engine from one still starting: the 200 without it is waited out
+        up to --status-timeout."""
+        self.start(jar_fail=["engine", "old-status"])
         t = time.monotonic()
         rep = self.check("--status-timeout", "1")
         self.assertGreaterEqual(time.monotonic() - t, 1.0)
         self.assertFalse(rep["ok"])
         self.assertEqual(rep["kind"], "build")
         self.assertIn("the dispense engine is not usable (dispense.running False, available False", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
+
+    def test_engine_that_failed_to_start_fails_at_once(self):
+        """BR-44: dispense.state 'failed' (DispenseService.start threw; startError says what) is final: no wait for
+        --status-timeout, and the reason names the error."""
+        self.start(jar_fail=["engine"])
+        t = time.monotonic()
+        rep = self.check("--status-timeout", "60")
+        self.assertLess(time.monotonic() - t, 10)
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("build", "status"))
+        self.assertIn("the dispense engine failed to start", rep["failure"])
+        self.assertIn("SQLITE_CORRUPT", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
+
+    def test_engine_still_starting_at_the_status_timeout_says_so(self):
+        """dispense.state 'starting' is waited for, up to --status-timeout."""
+        self.start(engine_start_s=600)
+        t = time.monotonic()
+        rep = self.check("--status-timeout", "1")
+        self.assertGreaterEqual(time.monotonic() - t, 1.0)
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "build")
+        self.assertIn("did not start within 1 s (dispense.state starting)", rep["failure"])
         self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
 
     def test_dispense_engine_must_run(self):
@@ -296,36 +402,58 @@ class Health(unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertIn("stop", rep["failure"])
 
+    # The home waits (Deployer._wait_not_busy) on each /api/status shape a deploy can meet: BR-44's (machine.homing true
+    # while a home runs) and a build before it, where a rollback can land: no machine.homing, so machine.busy alone
+    # shows the home
+    STATUS_SHAPES = (("BR-44", ()), ("before BR-44", ("old-status",)))
+
+    @contextlib.contextmanager
+    def status_shape(self, name, jar_fail, **machine):
+        """A subtest against a fresh fake of that shape, with a request log of its own."""
+        with self.subTest(status=name):
+            self.start(jar_fail=jar_fail, **machine)
+            try:
+                yield
+            finally:
+                self.fake.shutdown()
+                self.fake = None
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.lab.requests_path)
+
     def test_slow_home_finishes_late_without_a_stop(self):
-        self.start(home_s=1.0)
-        rep = self.check("--home-timeout", "0.3", "--home-busy-wait", "5")
-        self.assertTrue(rep["ok"], rep)
-        self.assertEqual(self.violations(), [])
+        for shape in self.STATUS_SHAPES:
+            with self.status_shape(*shape, home_s=1.0):
+                rep = self.check("--home-timeout", "0.3", "--home-busy-wait", "5")
+                self.assertTrue(rep["ok"], rep)
+                self.assertEqual(self.violations(), [])
 
     def test_home_that_never_ends_is_left_alone(self):
-        self.start(home_s=2.0)
-        rep = self.check("--home-timeout", "0.3", "--home-busy-wait", "0.5")
-        self.assertFalse(rep["ok"])
-        self.assertEqual(rep["kind"], "home-stuck")
-        self.assertNotIn(("POST", "/api/stop"), self.paths())
-        self.assertEqual(self.violations(), [])
+        for shape in self.STATUS_SHAPES:
+            with self.status_shape(*shape, home_s=2.0):
+                rep = self.check("--home-timeout", "0.3", "--home-busy-wait", "0.5")
+                self.assertFalse(rep["ok"])
+                self.assertEqual(rep["kind"], "home-stuck", rep)
+                self.assertNotIn(("POST", "/api/stop"), self.paths())
+                self.assertEqual(self.violations(), [])
 
     # --- the real server's own 5 min limit (MachineEndpoints.home: f.get(5, MINUTES), then 409 while the home runs on)
     def test_a_home_the_server_gave_up_on_is_waited_out_and_passes(self):
-        self.start(home_s=1.5, home_cap_s=0.3)
-        rep = self.check("--home-timeout", "5", "--home-busy-wait", "5")
-        self.assertTrue(rep["ok"], rep)
-        self.assertIn("ended after", [s for s in rep["steps"] if s["step"] == "home"][0]["detail"])
-        self.assertEqual(self.violations(), [])
-        self.assertEqual(len([p for p in self.paths() if p == ("POST", "/api/machine/home")]), 1)
+        for shape in self.STATUS_SHAPES:
+            with self.status_shape(*shape, home_s=1.5, home_cap_s=0.3):
+                rep = self.check("--home-timeout", "5", "--home-busy-wait", "5")
+                self.assertTrue(rep["ok"], rep)
+                self.assertIn("ended after", [s for s in rep["steps"] if s["step"] == "home"][0]["detail"])
+                self.assertEqual(self.violations(), [])
+                self.assertEqual(len([p for p in self.paths() if p == ("POST", "/api/machine/home")]), 1)
 
     def test_a_home_the_server_gave_up_on_that_never_ends_is_left_alone(self):
-        self.start(home_s=3.0, home_cap_s=0.3)
-        rep = self.check("--home-timeout", "5", "--home-busy-wait", "0.5")
-        self.assertFalse(rep["ok"])
-        self.assertEqual(rep["kind"], "home-stuck", rep)
-        self.assertNotIn(("POST", "/api/stop"), self.paths())
-        self.assertEqual(self.violations(), [])
+        for shape in self.STATUS_SHAPES:
+            with self.status_shape(*shape, home_s=3.0, home_cap_s=0.3):
+                rep = self.check("--home-timeout", "5", "--home-busy-wait", "0.5")
+                self.assertFalse(rep["ok"])
+                self.assertEqual(rep["kind"], "home-stuck", rep)
+                self.assertNotIn(("POST", "/api/stop"), self.paths())
+                self.assertEqual(self.violations(), [])
 
     def test_a_home_dropped_by_openpnp_is_the_machines(self):
         """The same 409 when OpenPnP dropped the home (a task of its own ahead of it failed): not busy, not homed."""
@@ -385,6 +513,145 @@ class Health(unittest.TestCase):
         self.assertIn("not idle", self.lab.last_out)
         self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
 
+
+
+class HealthLock(HealthLab, unittest.TestCase):
+    """BR-72: a lock taken between the idle check and the health check's enable is someone at the machine."""
+
+    def test_a_lock_taken_after_the_idle_check_is_the_machines_not_the_builds(self):
+        self.start(lock={"holder": {"kind": "agent", "who": "process", "label": "Process", "what": "a bench session"},
+                         "takenFrom": None})
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "claim-lost")  # their session: left alone (no rollback over it), a hold
+        self.assertTrue(rep["failure"].startswith("enable: someone took the machine lock: Process has the machine"),
+                        rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/home"), self.posts())
+        self.assertNotIn(("POST", "/api/stop"), self.posts())  # STOP would end the new holder's work
+
+    def test_a_lock_taken_between_the_enable_and_the_home_is_left_alone_too(self):
+        self.start(jar_fail=["lock-at-home"])
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "claim-lost")
+        self.assertTrue(rep["failure"].startswith("home: someone took the machine lock"), rep["failure"])
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_taking_over_is_a_lock_refusal_too(self):
+        """An anonymous caller hears 'locked' or, while the web UI's Take control runs, 'taking-over'."""
+        self.start(jar_fail=["taking-over-enable"])
+        rep = self.check()
+        self.assertEqual(rep["kind"], "claim-lost", rep)
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_a_holder_who_keeps_the_machine_on_after_the_last_stop_is_theirs(self):
+        self.start(jar_fail=["lock-at-stop"])
+        rep = self.check("--stop-timeout", "2")
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "claim-lost")  # never the bad list for someone else's session
+        self.assertTrue(rep["failure"].startswith("stop: "), rep["failure"])
+        self.assertIn("User holds the machine lock", rep["failure"])
+
+    def test_a_refused_enable_that_is_not_the_lock_stays_the_builds(self):
+        self.start(jar_fail=["enable"])
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "build")
+
+
+ORIGIN = "https://lumen.example.ts.net:8877"
+
+
+class TrustedOrigins(HealthLab, unittest.TestCase):
+    """BR-73: the real machine's web UI through `tailscale serve`, checked on every deploy before anything is enabled."""
+
+    def origins(self, *flags):
+        return self.check(*[x for o in flags for x in ("--trusted-origin", o)])
+
+    def probes(self):
+        return [r.get("origin") for r in self.lab.requests() if r.get("path") == il_deploy.ORIGIN_PROBE]
+
+    def test_its_own_origin_is_accepted_and_a_foreign_one_refused(self):
+        self.start(trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertTrue(rep["ok"], rep)
+        self.assertEqual([s["step"] for s in rep["steps"]][:3], ["status", "origins", "enable"])
+        # every build: a foreign Origin on its own Host (CSRF) and a foreign Host (DNS rebinding); then the tailnet's
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST] + [ORIGIN, il_deploy.FOREIGN_ORIGIN])
+        self.assertEqual(rep["trusted_origins"], [ORIGIN])
+
+    def test_without_the_flag_there_is_no_origins_step(self):
+        self.start(trusted=[ORIGIN])
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertNotIn("origins", [s["step"] for s in rep["steps"]])
+        self.assertEqual(self.probes(), [])
+
+    def test_a_build_from_before_br73_passes_with_a_note(self):
+        """A rollback to it stays possible; the tailnet URL is refused there and the report says so."""
+        self.start(jar_fail=["old-origins"])
+        rep = self.origins(ORIGIN)
+        self.assertTrue(rep["ok"], rep)
+        step = next(s for s in rep["steps"] if s["step"] == "origins")
+        self.assertIn("before BR-73", step["detail"])
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST])  # its guards are still checked
+        self.assertIsNone(rep["trusted_origins"])
+
+    def test_a_build_that_refuses_its_origin_fails_before_the_enable(self):
+        self.start(jar_fail=["origins-refused"], trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "build")
+        self.assertTrue(rep["failure"].startswith("origins: "), rep["failure"])
+        self.assertIn("its own origin is refused", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.posts())
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_an_origin_that_did_not_reach_openpnp_is_the_units_not_the_builds(self):
+        """The same for every build (the unit's environment): never a reason to bad-list a build."""
+        self.start(trusted=[])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "config")
+        self.assertIn("lacks https://lumen.example.ts.net:8877", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.posts())
+
+    def test_a_foreign_host_accepted_fails(self):
+        self.start(jar_fail=["hosts-open"], trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "build")
+        self.assertIn("a foreign Host is accepted", rep["failure"])
+
+    def test_a_foreign_origin_accepted_fails(self):
+        self.start(jar_fail=["origins-open"], trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertIn("a foreign Origin is accepted", rep["failure"])
+
+    def test_the_flag_is_normalised_as_openpnp_does(self):
+        self.start(trusted=[ORIGIN])
+        rep = self.origins("HTTPS://Lumen.Example.ts.net:8877/")
+        self.assertTrue(rep["ok"], rep)
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST] + [ORIGIN, il_deploy.FOREIGN_ORIGIN])
+
+    def test_normalise_origin(self):
+        n = il_deploy.normalise_origin
+        self.assertEqual(n("HTTPS://Lumen.example.ts.net:8877/"),
+                         ("https://lumen.example.ts.net:8877", "lumen.example.ts.net:8877"))
+        self.assertEqual(n("https://x.ts.net:443"), ("https://x.ts.net", "x.ts.net"))
+        self.assertEqual(n("http://x.ts.net:80"), ("http://x.ts.net", "x.ts.net"))
+        # as java.net.URI and ApiSettings.normalizeOrigin (PR #18): the port as a number, RFC 2396 host names
+        self.assertEqual(n("https://x.ts.net:08877"), ("https://x.ts.net:8877", "x.ts.net:8877"))
+        self.assertEqual(n("http://127.0.0.1:18877"), ("http://127.0.0.1:18877", "127.0.0.1:18877"))
+        for bad in ("https://x.ts.net/path", "ftp://x.ts.net", "x.ts.net:8877", "https://", "https://x:99999x",
+                    "https://x..ts.net", "https://-x.ts.net", "https://x-.ts.net", "https://x.ts.net:0",
+                    "https://x.ts.net:99999", "https://1.2.3.999", "https://x.ts.net//", "https://u@x.ts.net",
+                    "\u00a0https://x.ts.net", "https://\u212aelvin.ts.net", "https://x.ts.net:\u0668877"):
+            with self.assertRaises(ValueError, msg=bad):
+                n(bad)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            il_deploy.config_from_args(self.lab.argv("status") + ["--trusted-origin", "https://x.ts.net/path"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -340,4 +340,135 @@ public class DispenseExecutorTest {
         assertEquals(stop(false), critical);
         assertTrue(r.warnings.contains("cleared a pending error"), r.warnings.toString());
     }
+
+    /** BR-02: what the watch of the screw's motor hears (the controller's idle clock, the stop sequence's M18). */
+    static class Watch implements DispenseExecutor.ScrewWatch {
+        /** Per acknowledged move: true when it turned the screw. */
+        final List<Boolean> moved = new ArrayList<>();
+        final List<String> off = new ArrayList<>();
+        int armed;
+        final FakeChannel ch;
+
+        Watch(FakeChannel ch) {
+            this.ch = ch;
+        }
+
+        @Override
+        public void moved(boolean screw) {
+            moved.add(screw);
+        }
+
+        @Override
+        public void watchdogArmed() {
+            armed++;
+        }
+
+        @Override
+        public void switchedOff(String line, boolean acknowledged) {
+            off.add(line + (acknowledged ? "" : " (failed)"));
+        }
+    }
+
+    /**
+     * BR-02: every acknowledged move restarts the controller's idle clock (Marlin's, on any queued move), a screw move
+     * also switches the motor on; a stream sends no M18.
+     */
+    @Test
+    public void theWatchHearsEveryMoveOfAStream() throws Exception {
+        DispenseConfig c = GcodeStreamTest.toyConfig();
+        GcodeProgram p = program(c, false);
+        FakeChannel ch = new FakeChannel();
+        Watch w = new Watch(ch);
+        DispenseExecutor ex = new DispenseExecutor(c, ch, "B", () -> ch.now).watchScrew(w);
+        ex.stream(p, run(3), null);
+        long bMoves = ch.sent.stream().filter(l -> l.startsWith("G1 B")).count();
+        long others = ch.sent.stream().filter(l -> (l.startsWith("G0 ") || l.startsWith("G1 ")) && !l.startsWith("G1 B"))
+                .count();
+        assertTrue(bMoves > 0 && others > 0);
+        assertEquals(bMoves, w.moved.stream().filter(b -> b).count(), "one per G1 B line");
+        assertEquals(others, w.moved.stream().filter(b -> !b).count(), "one per X/Y/Z move");
+        assertEquals(new ArrayList<String>(), w.off);
+        assertEquals(0, w.armed, "no keepalive: the watchdog stays as it was");
+        Watch k = new Watch(ch);
+        new DispenseExecutor(c, ch, "B", () -> ch.now).watchScrew(k).stream(program(c, true), run(3), null);
+        assertEquals(1, k.armed, "M990 S3000: the firmware forgets a trip it kept");
+    }
+
+    /** BR-02: the I1 shutdown's M18 B switches the screw's motor off: heard also when its send failed. */
+    @Test
+    public void theWatchHearsTheStopSequencesM18() throws Exception {
+        DispenseConfig c = GcodeStreamTest.toyConfig();
+        GcodeProgram p = program(c, false);
+        FakeChannel ch = new FakeChannel();
+        ch.failAt = 20;
+        Watch w = new Watch(ch);
+        DispenseExecutor ex = new DispenseExecutor(c, ch, "B", () -> ch.now).watchScrew(w);
+        assertThrows(Exception.class, () -> ex.stream(p, run(3), null));
+        assertEquals(Arrays.asList("M18 B"), w.off);
+        FakeChannel dead = new FakeChannel() {
+            @Override
+            public void send(String line, long timeoutMs) throws Exception {
+                throw new Exception("link closed");
+            }
+        };
+        Watch w2 = new Watch(dead);
+        new DispenseExecutor(c, dead, "B", () -> dead.now).watchScrew(w2).shutdown(run(0));
+        assertEquals(Arrays.asList("M18 B (failed)"), w2.off);
+    }
+
+    /** BR-02: the lines that switch the screw's motor off (Marlin's M18 / M84) and the lines that turn it. */
+    @Test
+    public void whichLinesSwitchTheScrewMotorOffOrTurnTheScrew() {
+        for (String l : new String[] {"M18 B", "m18 b ; screw off", "M84 B", "M18", "M84", "M018 B", "M18B", "M18 S60",
+            "M18 X Y B"}) {
+            assertTrue(ControllerCommands.switchesScrewOff(l, "B"), l);
+        }
+        for (String l : new String[] {"M18 X Y Z", "M18 A", "M17 B", "M180", "M410", "G1 B10", "; M18 B", "",
+            "M107 P3"}) {
+            assertFalse(ControllerCommands.switchesScrewOff(l, "B"), l);
+        }
+        assertTrue(ControllerCommands.switchesScrewOff("M18 A", "A"), "the screw's configured letter");
+        for (String l : new String[] {"G1 B12.3456 F10800", "G0 X5 B1", "g1 b-3"}) {
+            assertTrue(ControllerCommands.turnsScrew(l, "B"), l);
+        }
+        for (String l : new String[] {"G1 X10 F3000", "G92 B0", "M201 B10000", "M203 B2400", "G4 P100", "M18 B",
+            "G1 A5"}) {
+            assertFalse(ControllerCommands.turnsScrew(l, "B"), l);
+        }
+        for (String l : new String[] {"G0 X1", "G1 Z10 F600", "g1 b3", "G28", "G28 X Y"}) {
+            assertTrue(ControllerCommands.isMove(l), l);
+        }
+        for (String l : new String[] {"G92 X0", "G4 P100", "M400", "M18 B", "G280", "", "G1 F600", "G0"}) {
+            assertFalse(ControllerCommands.isMove(l), l + ": names no axis, queues no move");
+        }
+        java.util.Map<Character, Double> w = ControllerCommands.axisWords("G1 X10 B-2.5 F600 ; to the waste");
+        assertEquals(2, w.size(), w.toString());
+        assertEquals(10, w.get('X'), 1e-9);
+        assertEquals(-2.5, w.get('B'), 1e-9);
+        assertTrue(ControllerCommands.axisWords("G1 F600").isEmpty());
+        assertEquals(0, ControllerCommands.axisWords("G92 B0").get('B'), 1e-9);
+        assertTrue(ControllerCommands.armsWatchdog("M990 S3000"));
+        assertFalse(ControllerCommands.armsWatchdog("M990 S0"), "a disarm keeps the trip");
+        assertFalse(ControllerCommands.armsWatchdog("M990"), "the report");
+        assertFalse(ControllerCommands.armsWatchdog("M99 S3000"));
+    }
+
+    /**
+     * BR-02: the il/safety firmware's host watchdog (M990) switches the screw's motor off when it trips: its
+     * "Error:host watchdog", and the "tripped" its M990 report keeps until the next arm.
+     */
+    @Test
+    public void theHostWatchdogsTripAndItsReport() {
+        assertTrue(ControllerCommands.isHostWatchdogTrip("Error:host watchdog"));
+        assertTrue(ControllerCommands.isHostWatchdogTrip("error: Host watchdog"));
+        assertFalse(ControllerCommands.isHostWatchdogTrip("echo:Host watchdog: off tripped"), "the report is no trip");
+        assertFalse(ControllerCommands.isHostWatchdogTrip("Error:M990 S must be 0 or 100..3600000"));
+        assertFalse(ControllerCommands.isHostWatchdogTrip(null));
+        assertTrue(ControllerCommands.reportsWatchdogTrip(Arrays.asList("echo:Host watchdog: off tripped", "ok")));
+        assertTrue(ControllerCommands.reportsWatchdogTrip(Arrays.asList("echo:Host watchdog: armed S3000 tripped")));
+        assertFalse(ControllerCommands.reportsWatchdogTrip(Arrays.asList("echo:Host watchdog: armed S3000", "ok")));
+        assertFalse(ControllerCommands.reportsWatchdogTrip(Arrays.asList("echo:Host watchdog: off", "ok")));
+        assertFalse(ControllerCommands.reportsWatchdogTrip(Arrays.asList("ok")));
+        assertFalse(ControllerCommands.reportsWatchdogTrip(null));
+    }
 }

@@ -63,7 +63,7 @@ final class DispenseEndpoints {
     static final java.util.Set<String> PROTECTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "needleZOffsetMm", "needleZOffsetSetAtMs", "needleZOffsetHomeAtMs", "needleChangedAtMs", "needleAnchor",
             "surfaces", "schemaVersion", "boardRegistrations", "newSeatAtMs", "tip", "parkedTips", "needleLanding",
-            "needleXyTrim"));
+            "needleXyTrim", "zFrameMovedAtMs"));
     /** Protected settings that Register board and POST /api/board/new-seat stamp (not the needle's). */
     static final java.util.Set<String> REGISTRATION_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "boardRegistrations", "newSeatAtMs"));
@@ -134,14 +134,21 @@ final class DispenseEndpoints {
     // Status (polled by the UI)
     // ------------------------------------------------------------------------------------------
 
+    /** BR-44: when this JVM started (epoch ms), so a status reader can tell OpenPnP's start-up stamps from its own. */
+    static final long JVM_STARTED_AT_MS = java.lang.management.ManagementFactory.getRuntimeMXBean().getStartTime();
+
     Object status(ApiServer s) throws Exception {
         Map<String, Object> out = new LinkedHashMap<>();
         Machine mach = ctx.configuration.getMachine();
         DispenseService svc = ctx.svcOrNull();
-        out.put("server", Views.map("version", Main.getVersion(), "timeMs", System.currentTimeMillis(), "port",
-                s.getPort(), "lanAccess", s.getSettings().lanAccess, "simulated", SimGuard.isLoopbackOnly(mach),
-                "simulatorConfirmed", svc != null ? svc.isSimulatorConfirmed() : SimGuard.isSimulated(mach)));
+        out.put("server", Views.map("version", Main.getVersion(), "timeMs", System.currentTimeMillis(), "startedAtMs",
+                JVM_STARTED_AT_MS, "port", s.getPort(), "lanAccess", s.getSettings().lanAccess, "trustedOrigins",
+                new ArrayList<>(s.getTrustedOrigins()), "simulated",
+                SimGuard.isLoopbackOnly(mach), "simulatorConfirmed",
+                svc != null ? svc.isSimulatorConfirmed() : SimGuard.isSimulated(mach)));
         out.put("machine", machine.machineStatus());
+        // BR-72: who holds the machine, what it does, since when
+        out.put("lock", ctx.lock.view());
         Map<String, Object> d = new LinkedHashMap<>();
         out.put("dispense", d);
         Map<String, Object> pressure = ctx.pressure.snapshot();
@@ -157,12 +164,19 @@ final class DispenseEndpoints {
         // an upload holds the import pipeline: every engine endpoint refuses until it has read the file
         out.put("boardImport", Views.map("reading", BoardImporter.reading()));
         if (svc == null) {
+            String state = DispenseService.startState();
+            d.put("state", state);
+            d.put("startError", DispenseService.startError());
             d.put("running", false);
             d.put("available", false);
-            d.put("unavailableReason", "the dispense engine is not running");
+            d.put("unavailableReason", "failed".equals(state)
+                    ? "the dispense engine failed to start: " + DispenseService.startError()
+                    : "the dispense engine is not running yet (starting)");
             return out;
         }
         DispenseConfig cfg = svc.getConfig();
+        d.put("state", "running");
+        d.put("startError", null);
         d.put("running", true);
         d.put("available", svc.isAvailable());
         d.put("unavailableReason", svc.getUnavailableReason());
@@ -825,6 +839,10 @@ final class DispenseEndpoints {
             return "The tips that are not mounted keep their recipe and needle values here: mounting a tip sets them "
                     + "(Setup › Dispenser & tip).";
         }
+        if ("zFrameMovedAtMs".equals(key)) {
+            return "'zFrameMovedAtMs' is stamped by the engine at the home after a controller reset (BR-02): record the "
+                    + "needle frame again to clear I4";
+        }
         if ("needleLanding".equals(key) || "needleXyTrim".equals(key)) {
             return "Where the needle lands is set by Check where it lands and the trim panel (POST /api/needle/landing, "
                     + "/api/needle/xy-trim).";
@@ -1283,7 +1301,8 @@ final class DispenseEndpoints {
 
     /**
      * I11: set ({"startAngleDeg": a}) or confirm ({} or {"confirm": true}) the screw start angle for
-     * the current controller power-up (the B step count restarts at power-up).
+     * the current controller power-up (the B step count restarts at power-up). {@code measuredAtMs}: when the evidence
+     * of a set angle was made (BR-02: refused when it is from before the screw's motor last went off).
      */
     Object startAngle(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
@@ -1295,7 +1314,8 @@ final class DispenseEndpoints {
         if (a != null && !(a >= 0 && a < 360)) {
             throw ApiException.badRequest("startAngleDeg must be 0 to < 360");
         }
-        svc.setStartAngle(a, Json.str(b, "note", null));
+        Double measured = Json.num(b, "measuredAtMs", null); // BR-02: when its evidence (the dot pair) was made
+        svc.setStartAngle(a, Json.str(b, "note", null), measured == null ? null : measured.longValue());
         return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs(),
                 svc.getControllerResetAtMs());
     }

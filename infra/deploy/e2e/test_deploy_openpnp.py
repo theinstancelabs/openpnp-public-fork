@@ -32,6 +32,9 @@ jar, which connects over its real serial stack (jSerialComm) to lumen-sim's pty.
      hand is taken to have left (person.json dated back past the quiet period).
      test_2: lumen-sim power-cycled and a third build: the deploy must not home the reset controller (exit 5, the
      previous build back unchecked, the hold set), then `resume`.
+     test_3 (BR-44): the controller power-cycled again while OpenPnP runs with its link kept open; a health check by
+     hand: Start finds the link dead and connects again (a new connect line for the serial step), and the reset
+     controller is not homed.
 
 Checked: rc of each step, the current/previous links, deployed.json, bad.json, the server.version each health check
 saw, STATE.md's "Deployed on the machine" line and Holder, the deploy.jsonl records, and lumen-sim's I/O log. The
@@ -41,7 +44,9 @@ must end with no model errors and not halted. And the real /api/status has every
 (il_deploy.STATUS_FIELDS; a missing time is skipped there, so a backend rename would silently turn a check off), with
 the health check's home in machine.zCheck.homeAtMs, inside il_deploy's own window. The paths it could not check
 (il_deploy.unchecked_status_fields: behind a null, or in an empty map) must be exactly ENGINE_TASK_FIELDS, which only an
-engine run or a pad calibration fills in; this test drives neither (Backend's contract test covers them).
+engine run or a pad calibration fills in; this test drives neither (Backend's contract test covers them). BR-44's
+fields: dispense.state 'running', machine.homing false, and the pressure hold's first stamp within
+il_deploy.STARTUP_STAMP_S of server.startedAtMs (results.json keeps the gap measured).
 
 Why the cameras are swapped. With no camera device, OpenPnP would start with the fixture's OpenPnpCaptureCameras:
 open() only logs "No camera found with ID ..." and returns (OpenPnpCaptureCamera.java:174), and the native library
@@ -50,7 +55,7 @@ cameras, so on the lab computer OpenPnP would open the real cameras, which anoth
 swap, the test opens no camera on any host.
 
 Skipped unless IL_DEPLOY_E2E=1, and IL_DEPLOY_E2E_JAR and IL_DEPLOY_E2E_LIB name a built jar and its lib/
-directory. Run as a script (CI), a skip then exits 1. About 2 minutes. From the repository root:
+directory. Run as a script (CI), a skip then exits 1. About 3 minutes. From the repository root:
 
     mvn -B -T1 -DskipTests package
     IL_DEPLOY_E2E=1 IL_DEPLOY_E2E_JAR=target/openpnp-gui-0.0.1-alpha-SNAPSHOT.jar IL_DEPLOY_E2E_LIB=target/lib \\
@@ -240,6 +245,14 @@ def jar_build_sha7(jar):
 # ------------------------------------------------------------------------------------------------
 # Processes and ports
 # ------------------------------------------------------------------------------------------------
+
+ORIGIN = "https://deploy-e2e.example.ts.net:8877"  # the real machine's tailnet origin's stand-in (BR-73)
+
+
+def step(report, name):
+    return next(x for x in report["steps"] if x["step"] == name)
+
+
 class ScopedProcs(il_deploy.Procs):
     """The host's /proc, but only OpenPnPs whose config is under this test's directory count: another role's
     OpenPnP on the lab computer must not make this test 'not idle' (it is only read, never touched)."""
@@ -366,6 +379,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         if reason:
             raise unittest.SkipTest(reason)
         cls.timings = {}
+        cls.measured = {}
         cls.dir = tempfile.mkdtemp(prefix="il-deploy-e2e-")
         cls.xvfb = cls.sim = cls.svc_cfg = None
         atexit.register(cls._kill_leftovers)
@@ -392,11 +406,14 @@ class DeployRealOpenPnP(unittest.TestCase):
         cls.xvfb_log = open(os.path.join(d, "xvfb.log"), "ab")
         cls.xvfb, cls.display = start_xvfb(cls.xvfb_log)
         cls.sim = LumenSim(d)
-        # Marlin boots at X/Y/Z 0, B 720: il_deploy reads that as a power cycle and never homes it (test_2). The lab
-        # controller at deploy time has run since its power-on; G92 B0 makes lumen-sim so.
+        # Marlin boots at X/Y/Z 0, A and B 720: il_deploy (and BR-02) read that as a power cycle and never home it
+        # (test_2). The lab controller at deploy time has run since its power-on and was homed by an earlier session:
+        # G28 then G92 A0 B0, as the lab's patched HOME_COMMAND does (lumen-sim RESEARCH.md section 1; INF-10: a G92 B0
+        # alone left it unhomed at Z 0).
         c = DriverClient(cls.sim.link)
         try:
-            c.send("G92 B0")
+            c.send("G28", timeout_ms=60000)
+            c.send("G92 A0 B0")
         finally:
             c.close()
         cls.io_start = cls.sim.io_count()
@@ -442,7 +459,7 @@ class DeployRealOpenPnP(unittest.TestCase):
             "--serial-match", "connecting to " + re.escape(cls.sim.link) + " by ",
             "--service-manager", "subprocess", "--java", JAVA, "--display", cls.display,
             "--status-timeout", "180", "--home-timeout", "150", "--home-busy-wait", "90", "--stop-timeout", "20",
-            "--poll-interval", "0.25"]
+            "--poll-interval", "0.25", "--trusted-origin", ORIGIN]
 
     @classmethod
     def service(cls):
@@ -491,7 +508,8 @@ class DeployRealOpenPnP(unittest.TestCase):
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(OUT, name))
         with open(os.path.join(OUT, "results.json"), "w") as f:
-            json.dump({"timings_s": cls.timings, "sha7": getattr(cls, "sha7", None)}, f, indent=1)
+            json.dump({"timings_s": cls.timings, "sha7": getattr(cls, "sha7", None),
+                       "measured": getattr(cls, "measured", {})}, f, indent=1)
 
     # --- helpers --------------------------------------------------------------------------------
     def main(self, *cmd, expect=0):
@@ -581,6 +599,15 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertEqual(len(homes), 1, il_deploy.api_activity_times(st))
         since, until = il_deploy.read_json(os.path.join(self.root, "own-activity.json"))[-1]
         self.assertTrue(since * 1000 <= homes[0] <= until * 1000, (since, homes[0], until))
+        # BR-44 on the real build: the engine runs, no home runs, and the pressure hold's first value was stamped while
+        # this OpenPnP started (pressure_start_up_stamp: its text, 'pressure off', within STARTUP_STAMP_S of
+        # server.startedAtMs)
+        self.assertEqual((st["dispense"]["state"], st["dispense"]["startError"], st["machine"]["homing"]),
+                         ("running", None, False))
+        gap_ms = st["pressure"]["lastEventAtMs"] - st["server"]["startedAtMs"]
+        self.measured["pressure first stamp after the JVM start (s)"] = round(gap_ms / 1000, 2)
+        self.assertTrue(0 <= gap_ms <= il_deploy.STARTUP_STAMP_S * 1000, gap_ms)
+        self.assertTrue(il_deploy.pressure_start_up_stamp(st), st["pressure"])
 
     def person_left(self):
         """The person who ran il_deploy by hand has left the machine: their note (person.json) is dated back past the
@@ -600,9 +627,10 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertTrue(rep["ok"], rep)
         version = rep["report"]["version"]
         self.assertTrue(version.startswith(tag + "_") and version.endswith("." + self.sha7), version)
-        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "enable", "serial", "axes", "home",
-                                                                        "homed", "stop"])
-        self.assertIn("Serial port: connecting to %s by " % self.sim.link, rep["report"]["steps"][2]["detail"])
+        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "origins", "enable", "serial", "axes",
+                                                                        "home", "homed", "stop"])
+        self.assertIn("Serial port: connecting to %s by " % self.sim.link, step(rep["report"], "serial")["detail"])
+        self.assert_origins(rep["report"])
         text = self.state_text()
         self.assertIn("- **Deployed on the machine:** %s (%s, %s, CI https://github.com/%s/actions/runs/%d)"
                       % (tag, self.sha7, BRANCH, GH_REPO, 9000 + int(tag.split("-")[2])), text)
@@ -611,6 +639,16 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertTrue(h.value.startswith("nobody (released by Infra %s at " % action), h.value)
         self.assertFalse(os.path.exists(os.path.join(self.root, "hold.json")))
         self.assertEqual(self.service().is_active(), running)
+
+    def assert_origins(self, report):
+        """BR-73 on the real jar: its own origin passes the API's Host and Origin guards, a foreign Origin is refused.
+        A jar from before BR-73 reports no trusted origins and passes with a note (a rollback to it stays possible)."""
+        detail = step(report, "origins")["detail"]
+        if report["trusted_origins"] is not None:
+            self.assertEqual(report["trusted_origins"], [ORIGIN])
+            self.assertEqual(detail, ORIGIN + ": accepted with its Host and Origin; a foreign Origin and Host refused")
+        else:
+            self.assertIn("before BR-73", detail)
 
     # --- the steps ------------------------------------------------------------------------------
     def test_1_poll_deploy_redeploy_rollback(self):
@@ -653,9 +691,9 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.main("health")
         rep = self.last_health()
         self.assertTrue(rep["ok"], rep)
-        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "enable", "serial", "axes", "home",
-                                                                        "homed", "stop"])
-        serial = rep["report"]["steps"][2]["detail"]
+        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "origins", "enable", "serial", "axes",
+                                                                        "home", "homed", "stop"])
+        serial = step(rep["report"], "serial")["detail"]
         self.assertIn("Serial port: connecting to %s by " % self.sim.link, serial)
         self.assertIn("the link is kept open", serial)
         self.assertTrue(self.service().is_active())
@@ -680,6 +718,16 @@ class DeployRealOpenPnP(unittest.TestCase):
         lines = sent(io_rows)
         homes = [i for i, line in lines if line == "G28"]
         self.assertEqual(len(homes), 4, [line for _, line in lines])
+        # BR-02's hazard (INF-10): motion while the position is only believed, e.g. a Z raise before the home. After
+        # each connect (CONNECT_COMMAND's G21) no G0/G1 before that connection's first G28; moves after a home are fine
+        connects = [i for i, line in lines if line.split(";")[0].strip() == "G21"]
+        self.assertEqual(len(connects), 3, "three OpenPnP starts: deploy, deploy over it, rollback")
+        for k, c in enumerate(connects):
+            first = next((g for g in homes if g > c), None)
+            end = connects[k + 1] if k + 1 < len(connects) else len(io_rows)
+            self.assertTrue(first is not None and first < end, "no home after connect #%d" % (k + 1))
+            moves = [line for i, line in lines if c < i < first and line.split(" ")[0] in ("G0", "G1")]
+            self.assertEqual(moves, [], "motion before the home of connect #%d" % (k + 1))
         for k, g in enumerate(homes):
             ok = next((j for j in range(g + 1, len(io_rows)) if io_rows[j][1] == "<" and io_rows[j][2] == "ok"), None)
             self.assertIsNotNone(ok, "G28 #%d never answered" % (k + 1))
@@ -694,7 +742,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         type(self).deployed_ok = True
 
     def test_2_a_power_cycled_controller_is_never_homed(self):
-        """lumen-sim power-cycled (Marlin's boot position: X/Y/Z 0, B 720) while a newer green build lands: the deploy
+        """lumen-sim power-cycled (Marlin's boot position: X/Y/Z 0, A and B 720) while a newer green build lands: the deploy
         reads the controller after the enable and does not home it. The previous build goes back with its config,
         unchecked (it ran before: it runs again, not enabled), the new build is not marked bad, and the hold is set
         until a person runs `resume`. Nothing moves."""
@@ -712,7 +760,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         rep = self.last_health()["report"]
         self.assertEqual((rep["ok"], rep["kind"]), (False, "machine"), rep)
         self.assertTrue(rep["version"].startswith(tag_c + "_"), rep["version"])
-        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"])
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "origins", "enable", "serial", "axes"])
         self.assertEqual(rep["steps"][-1]["detail"][:24], "controller was reset; a ")
 
         self.assertEqual(self.link("current"), self.tag_a)
@@ -736,6 +784,46 @@ class DeployRealOpenPnP(unittest.TestCase):
         h = self.holder()
         self.assertTrue(h.idle and h.value.startswith("nobody (released by Infra resume at "), h.value)
         self.assertFalse(os.path.exists(os.path.join(self.root, "hold.json")))
+        type(self).power_cycled_ok = True
+
+    def test_3_a_link_kept_alive_through_a_power_cycle_reconnects_and_is_never_homed(self):
+        """BR-44: OpenPnP runs with its controller link kept open (connection-keep-alive) and the controller is switched
+        off and on. A health check by hand: Start finds the link dead and connects again (GcodeDriver.setEnabled), so
+        the serial step reads the new connect line, not the kept-open fallback, and the controller's boot position stops
+        the check before any home. Before BR-44 that enable failed on the dead port."""
+        if not getattr(type(self), "power_cycled_ok", False):
+            self.skipTest("needs test_2's power cycle")
+        start = self.sim.io_count()
+        # The previous build runs since test_2, never enabled. A health check by hand connects it: the controller still
+        # reads its boot position (not homed since the power cycle; A and B 720.05, as test_2's STOP's M410 recomputed
+        # them from the step counts), so no home; the STOP leaves the link open.
+        self.main("health", "--no-claim", expect=1)
+        rep = json.loads(self.last_stdout)
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "origins", "enable", "serial", "axes"], rep)
+        self.assertNotIn("kept open", step(rep, "serial")["detail"])
+        self.assertIn("controller was reset", rep["failure"])
+        self.assertTrue(rep["stopped"]["ok"], rep)
+        log = os.path.join(self.root, "state", "config", "log", "OpenPnP.log")
+        with open(log, errors="replace") as f:
+            connects = f.read().count("Serial port: connecting to ")
+
+        self.assertTrue(self.sim.ctl({"cmd": "power_cycle"})["ok"])  # the link OpenPnP keeps open dies
+        self.main("health", "--no-claim", expect=1)
+        rep = json.loads(self.last_stdout)
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "origins", "enable", "serial", "axes"], rep)
+        self.assertNotIn("kept open", step(rep, "serial")["detail"], "Start connected again")
+        self.assertIn("Serial port: connecting to %s by " % self.sim.link, step(rep, "serial")["detail"])
+        self.assertIn("controller was reset", rep["failure"])
+        self.assertTrue(rep["stopped"]["ok"], rep)
+        with open(log, errors="replace") as f:
+            text = f.read()
+        self.assertIn("the kept-alive link to the controller is dead: connecting again", text)
+        self.assertEqual(text.count("Serial port: connecting to "), connects + 1)
+
+        lines = [line for _, line in sent(self.sim.io(start))]
+        self.assertEqual([x for x in lines if x.split(" ")[0] in ("G0", "G1", "G28")], [], "something moved")
+        st = self.sim.state()
+        self.assertEqual((st["halted"], st["sim_errors"]), (False, []))
 
 if __name__ == "__main__":
     # CI runs this file directly: with IL_DEPLOY_E2E=1 a skip means a miswired job (no jar, no Xvfb), not a pass

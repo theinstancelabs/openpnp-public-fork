@@ -202,6 +202,8 @@ kbd {
 .cell-act:hover { background: var(--accent-hover); }
 .cell-act:disabled { background: var(--disabled-bg); color: var(--ink-disabled); }
 .cells .sep { width: 1px; height: 36px; background: var(--line); flex: none; margin: 0 2px; }
+/* In control (P0, BR-72): what an agent does can be long: the value ends in "…", the title and the panel have it all */
+#cell-lock .cell__v { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
 /* too narrow for the full values (IL measures after each change): the other cells shorten before the verdict. t1 drops
    their level-1 .long parts ("Connected · ", " · vented", " · wipe"), t2 all their .long parts (" · set 18 psi") and
    tightens spacing, t2v then the verdict's own (" · homes first (≈ 25 s)", the time of a stop, a task's progress);
@@ -214,9 +216,14 @@ kbd {
    labels, t5 the tip cell while it is ok (Setup, the run confirm and the pad-cal view name the tip; 1024 px after a
    STOP with the tip cell: PROFILE_CALIBRATION_DESIGN §22.13); the verdict keeps its label and value (cells never
    truncate, §4) */
+/* t2l: In control, while it reads You or Nobody, keeps only its mark (still the click to its panel) before the verdict
+   gives up anything; an agent's holder keeps its words */
+.cells--t2l #cell-lock.cell--ok .cell__txt, .cells--t2l #cell-lock.cell--off .cell__txt { display: none; }
+.cells--t2l #cell-lock.cell--ok, .cells--t2l #cell-lock.cell--off { padding: 0 10px; }
 .cells--t3 #pill-pressure.cell--off { display: none; }
 .cells--t4 .cell:not(.cell--verdict) .cell__k { display: none; }
 .cells--t5 #chip-tip.cell--ok { display: none; }
+.cells--t5 #cell-lock.cell--ok, .cells--t5 #cell-lock.cell--off { display: none; }
 
 /* ---------- STOP ---------- */
 .stop-bay { order: 99; flex: none; width: calc(var(--stop-w) + 21px); height: calc(100% + 1px); align-self: flex-start; padding-left: 20px; border-left: 1px solid var(--line); background: var(--surface); position: relative; z-index: 2; }
@@ -323,6 +330,7 @@ h3 { font: 650 15.5px/1.25 var(--font-ui); margin: 0; }
 .msg--block { background: var(--block-bg); color: var(--block); border-color: var(--block-line); }
 .msg--need { background: var(--need-bg); color: var(--need); border-color: var(--need-line); }
 .msg--info { background: var(--info-bg); color: var(--info); border-color: var(--info-line); }
+.msg--ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-line); }
 .msg--live { background: var(--live-tint); color: var(--live); border-color: var(--live-line); }
 
 /* placeholder for a workspace or view that is not built yet */

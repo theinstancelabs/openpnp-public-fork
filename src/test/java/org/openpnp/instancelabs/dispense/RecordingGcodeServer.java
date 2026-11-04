@@ -76,6 +76,17 @@ public class RecordingGcodeServer implements AutoCloseable {
     /** Where stock Marlin believes A and B are at power-up (J_MAX_POS, no G92 yet). */
     public static final double BOOT_AB_DEG = 720;
 
+    /** The connection being served, or null (dropLink closes it). */
+    private volatile Socket client;
+    /** Its output, and the lock of every write to it (a reply and {@link #say} never interleave). */
+    private volatile OutputStream clientOut;
+    private final Object writeLock = new Object();
+    /**
+     * The answer to a bare M990 before its "ok", as the il/safety firmware reports its host watchdog ("echo:Host
+     * watchdog: off tripped"); null = "ok" alone.
+     */
+    public volatile String watchdogReport;
+
     public RecordingGcodeServer() throws Exception {
         server = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
         for (char c : "XYZAB".toCharArray()) {
@@ -90,11 +101,40 @@ public class RecordingGcodeServer implements AutoCloseable {
         return server.getLocalPort();
     }
 
+    /**
+     * The link drops, as when the controller is switched off under a USB connection: the connection being served is
+     * closed (OpenPnP's reader then ends); the next connect is served as usual.
+     */
+    public void dropLink() throws Exception {
+        Socket s = client;
+        if (s != null) {
+            s.close();
+        }
+    }
+
+    /**
+     * The controller prints a line of its own, unasked: the il/safety firmware's "Error:host watchdog" when its host
+     * watchdog trips while the host is silent.
+     */
+    public void say(String line) throws Exception {
+        OutputStream o = clientOut;
+        if (o == null) {
+            throw new IllegalStateException("no connection to say '" + line + "' on");
+        }
+        synchronized (writeLock) {
+            o.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            o.flush();
+        }
+    }
+
     private void run() {
         while (!server.isClosed()) {
             try (Socket s = server.accept()) {
+                // dropLink() closes it; a reconnect keeps every position and count (BR-02: powerCycle() resets them)
+                client = s;
                 BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
                 OutputStream out = s.getOutputStream();
+                clientOut = out;
                 String line;
                 while ((line = in.readLine()) != null) {
                     line = line.trim();
@@ -131,6 +171,9 @@ public class RecordingGcodeServer implements AutoCloseable {
                             reply.append("Cap:HOST_WATCHDOG:1\n");
                         }
                     }
+                    else if (line.equals("M990") && watchdogReport != null) {
+                        reply.append(watchdogReport).append('\n');
+                    }
                     else if (line.startsWith("M114")) {
                         synchronized (this) {
                             boolean model = p != null && p.isActive();
@@ -156,8 +199,10 @@ public class RecordingGcodeServer implements AutoCloseable {
                         }
                     }
                     reply.append("ok\n");
-                    out.write(reply.toString().getBytes(StandardCharsets.UTF_8));
-                    out.flush();
+                    synchronized (writeLock) {
+                        out.write(reply.toString().getBytes(StandardCharsets.UTF_8));
+                        out.flush();
+                    }
                 }
             }
             catch (Exception e) {

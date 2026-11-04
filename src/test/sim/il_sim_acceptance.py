@@ -96,13 +96,15 @@ sys.path.insert(0, os.path.join(UINAV_DIR, "python"))
 import uinav  # noqa: E402
 
 HOME = os.path.expanduser("~")
-RUNS = "/home/lumen/instancelabs/runs"
+# The lab computer's paths by default; CI points these into infra/fixtures (BR-40): IL_RUNS_DIR (bench runs),
+# IL_LIVE_CONFIG (the lab's OpenPnP config, only read), IL_PATCHED_MACHINE_XML, IL_DISPENSE_CONFIG, IL_TEST_BOARD.
+RUNS = os.environ.get("IL_RUNS_DIR") or "/home/lumen/instancelabs/runs"
 DEF = {
     "jar": os.path.join(REPO, "target", "openpnp-gui-0.0.1-alpha-SNAPSHOT.jar"),
-    "live": os.path.join(HOME, ".openpnp2"),
-    "patched": "/home/lumen/instancelabs/config/machine.xml.patched",
-    "dispense_config": "/home/lumen/instancelabs/config/dispense-config.json",
-    "board": os.path.join(HOME, "Desktop", "ftp.board.xml"),
+    "live": os.environ.get("IL_LIVE_CONFIG") or os.path.join(HOME, ".openpnp2"),
+    "patched": os.environ.get("IL_PATCHED_MACHINE_XML") or "/home/lumen/instancelabs/config/machine.xml.patched",
+    "dispense_config": os.environ.get("IL_DISPENSE_CONFIG") or "/home/lumen/instancelabs/config/dispense-config.json",
+    "board": os.environ.get("IL_TEST_BOARD") or os.path.join(HOME, "Desktop", "ftp.board.xml"),
     "out": "/home/lumen/instancelabs/sim-acceptance/" + time.strftime("%Y%m%d-%H%M%S"),
 }
 # Board where the top camera found it on the real machine: runs/board_registration.json r7 (re-seated
@@ -473,15 +475,21 @@ def scenario_load(a):
         res["saved_on_exit"] = os.stat(mx).st_mtime != before
         saved = open(mx).read()
         m906 = patch.CONNECT_EXTRA.split(" ;")[0]
-        checks = {
-            "usb-serial-number": 'usb-serial-number="387932683335"' in saved,
-            "usb-description": 'usb-description="MARLIN_OPULO_LUMEN_REV5"' in saved,
+        # uinav --controller pty strips the board's USB identity from the session copy on purpose, so a SIM can never
+        # match the real Lumen: there both must be absent (BR-43)
+        pty = s.info.get("controller") == "pty"
+        res["controller"] = s.info.get("controller")
+        usb = {"usb-serial-number": 'usb-serial-number="387932683335"',
+               "usb-description": 'usb-description="MARLIN_OPULO_LUMEN_REV5"'}
+        checks = {("%s absent (pty)" % k if pty else k): ((k + "=") not in saved if pty else v in saved)
+                  for k, v in usb.items()}
+        checks.update({
             "DISABLE_COMMAND": all(x in saved for x in ["<![CDATA[%s]]>" % l for l in DISABLE_SEQ]),
             "HOME G92 A0 B0": "G92 A0 B0" in saved,
             "CONNECT %s" % m906: m906 in saved and "M906 B540" not in saved,
             "VAC2 S255, OFF valve first": "{True:M106 P2 S255}{False:M107 P3};" in saved
                                            and "{True:M106 P3 S255}{False:M107 P2};" in saved and "M106 P3 S180" not in saved,
-        }
+        })
         root = ET.fromstring(saved)
         for name in ("VAC1", "VAC2"):
             el = [e for e in root.iter("actuator") if e.get("name") == name][0]
@@ -496,7 +504,9 @@ def scenario_load(a):
         checks["homing fiducial %s, %s" % patch.HOMING_FIDUCIAL] = \
             (float(hf.get("x")), float(hf.get("y"))) == tuple(float(v) for v in patch.HOMING_FIDUCIAL)
         res["saved_config_keeps_patch"] = checks
-        res["sim_rewrites_in_saved_copy"] = "communications=tcp (uinav sim), cameras ImageCamera/SimulatedUpCamera (uinav sim)"
+        res["sim_rewrites_in_saved_copy"] = (
+            "USB identity removed, cameras ImageCamera/SimulatedUpCamera (uinav sim, lumen-sim pty)" if pty else
+            "communications=tcp (uinav sim), cameras ImageCamera/SimulatedUpCamera (uinav sim)")
         ok = (not res["log_errors"] and not res["dialogs_at_start"] and patch.CONNECT_EXTRA in res["connect_gcode"]
               and find_seq(res["home_gcode"], ["G28", "G92 A0 B0"]) >= 0 and res["home_moves_to_homing_fiducial"]
               and find_seq(res["stop_gcode"], DISABLE_SEQ) >= 0 and res["saved_on_exit"] and all(checks.values()))

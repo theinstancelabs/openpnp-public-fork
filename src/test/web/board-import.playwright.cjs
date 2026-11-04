@@ -161,10 +161,10 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const context = await browser.newContext({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const jsErrors = [];
-  page.on('pageerror', (e) => jsErrors.push(String(e)));
+  page.on('pageerror', (e) => jsErrors.push(String((e && e.stack) || e)));
   page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) jsErrors.push(m.text()); });
   const dialogs = [];
   page.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
@@ -306,10 +306,14 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
     await page.waitForFunction((n) => new RegExp('/' + n + '/' + n + '\\.board\\.xml$').test(document.getElementById('board-select').value), name6, { timeout: 15000 }).catch(() => {});
     const sel6 = await page.evaluate(() => document.getElementById('board-select').value);
     check('(6) Use this board: the Board step has it chosen', new RegExp('/' + name6 + '/' + name6 + '\\.board\\.xml$').test(sel6), sel6);
-    await page.waitForFunction(() => { const i = document.querySelector('#board-thumbs button.board-thumb[aria-pressed="true"] img'); return !!(i && i.complete && i.naturalWidth > 0); }, null, { timeout: 15000 }).catch(() => {});
-    check('(6) its picture in the board row is pressed and loaded', await page.evaluate(() => {
-      const i = document.querySelector('#board-thumbs button.board-thumb[aria-pressed="true"] img');
-      return !!(i && i.complete && i.naturalWidth > 0);
+    // the row is rebuilt when the board list reloads after the save (its new pictures decode again, even from the
+    // cache): the check is the wait's own answer, not a second read that can land in a rebuild (#18's gate, 11-04)
+    const pic6 = await page.waitForFunction(() => { const i = document.querySelector('#board-thumbs button.board-thumb[aria-pressed="true"] img'); return !!(i && i.complete && i.naturalWidth > 0); }, null, { timeout: 15000 })
+      .then(() => true, () => false);
+    check('(6) its picture in the board row is pressed and loaded', pic6, await page.evaluate(() => {
+      const b = document.querySelector('#board-thumbs button.board-thumb[aria-pressed="true"]');
+      const i = b && b.querySelector('img');
+      return { pressed: b ? b.dataset.board : null, src: i ? i.getAttribute('src') : null, complete: !!(i && i.complete), w: i ? i.naturalWidth : null };
     }));
     const file6 = sel6.slice(5);
     // every picture says the board's size and parts (§5.9 "75 × 75 mm · 80 parts"), each line inside the picture

@@ -109,10 +109,10 @@ async function recordsArt(page) {
 
 (async () => {
   const browser = await chromium.launch({ headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const context = await browser.newContext({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const jsErrors = [];
-  page.on('pageerror', (e) => jsErrors.push(String(e)));
+  page.on('pageerror', (e) => jsErrors.push(String((e && e.stack) || e)));
   page.on('console', (m) => { if (m.type() === 'error') jsErrors.push(m.text()); });
   const dialogs = [];
   page.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });

@@ -130,10 +130,98 @@ class Idle(unittest.TestCase):
         self.start_fake()
         self.assertEqual(self.reasons(), [])
 
+    def test_someone_holding_the_machine_lock_is_not_idle(self):
+        """BR-72: an agent role or the user holds the machine lock: they are working at it, also when it looks quiet."""
+        since = int(time.time() * 1000) - 600000
+        self.start_fake(lock={"holder": {"kind": "agent", "who": "process", "label": "Process", "what": "27G quarter map",
+                                         "sinceMs": since}, "takenFrom": None})
+        r = self.reasons()
+        hhmm = time.strftime("%H:%M", time.localtime(since / 1000))
+        self.assertEqual(r, [f"Process holds the machine lock (27G quarter map, since {hhmm})"])
+
+    def test_the_users_hold_and_a_malformed_holder_are_not_idle(self):
+        for holder, word in (({"kind": "user", "who": "user", "label": "User", "what": "using the web UI"}, "User holds"),
+                             ("someone", "someone holds")):
+            with self.subTest(holder=holder):
+                if self.fake:
+                    self.fake.shutdown()
+                self.start_fake(lock={"holder": holder, "takenFrom": None})
+                self.assertTrue(any(word in x for x in self.reasons()), self.reasons())
+
+    def test_a_lock_field_nobody_can_read_is_not_idle(self):
+        for value in ("held", [], {}, {"owner": "process"}):
+            with self.subTest(lock=value):
+                if self.fake:
+                    self.fake.shutdown()
+                self.start_fake(lock=value)
+                self.assertTrue(any("does not explain" in r for r in self.reasons()), self.reasons())
+
+    def test_nobody_holding_the_lock_and_a_build_without_one_are_idle(self):
+        self.start_fake(lock={"holder": None, "takenFrom": {"label": "Process", "by": "user"}})
+        self.assertEqual(self.reasons(), [])
+        self.fake.shutdown()
+        self.start_fake(fail=["old-lock"])
+        self.assertEqual(self.reasons(), [])
+
     def test_pressure_initial_value_is_not_activity(self):
         # PressureHold sets lastEventAtMs when OpenPnP starts ("pressure off"): not machine activity
         self.start_fake()
         self.assertEqual(self.reasons(), [])
+
+    def test_pressure_start_up_stamp_is_its_text_at_the_start(self):
+        """The pressure hold's first value is exactly 'pressure off' (PressureHold.java:77; every event after it has
+        more text), stamped while OpenPnP starts. BR-44's server.startedAtMs (the JVM's start) narrows it: also within
+        STARTUP_STAMP_S of it (the API is up within --status-timeout's 120 s, or il_deploy calls the start failed). A
+        person's event early after the start is an event, and so is a first value whose text changed (that fails
+        closed: the quiet period then runs from OpenPnP's start)."""
+        self.start_fake()  # 'pressure off', 1 s after the JVM start
+        self.assertEqual(self.reasons(), [])
+        for name, machine in (("a person's event 70 s after the JVM start", dict(jvm_start_s=100,
+                                                                                    pressure_event_s_ago=30)),
+                              ("the first value's text changed", dict(pressure_initial_event="off")),
+                              ("'pressure off' long after the JVM start", dict(jvm_start_s=il_deploy.STARTUP_STAMP_S
+                                                                                + 60))):
+            with self.subTest(name):
+                self.fake.shutdown()
+                self.start_fake(**machine)
+                r = self.reasons()
+                self.assertTrue(any("a pressure event" in x and "ago" in x for x in r), r)
+
+    def test_pressure_start_up_stamp_rule(self):
+        """pressure_start_up_stamp on its own: the text and, with server.startedAtMs, the time; both must hold."""
+        t0 = 1_800_000_000_000
+        real = "pressure off (valve, then pump): API request"
+        window = il_deploy.STARTUP_STAMP_S * 1000
+        for text, at, started, stamp in (("pressure off", t0 + 2000, t0, True),
+                                         ("pressure off", t0 + window, t0, True),
+                                         ("pressure off", t0 + window + 1, t0, False),
+                                         ("pressure off", t0 - 1, t0, False),
+                                         ("pressure off", None, t0, False),
+                                         (real, t0 + 100_000, t0, False),
+                                         ("off", t0 + 2000, t0, False),
+                                         ("pressure off", t0 + 10 * window, None, True),
+                                         (real, t0 + 2000, None, False)):
+            with self.subTest(text=text, at=at, started=started):
+                st = {"server": {} if started is None else {"startedAtMs": started},
+                      "pressure": {"lastEvent": text, "lastEventAtMs": at}}
+                self.assertIs(il_deploy.pressure_start_up_stamp(st), stamp)
+                events = [ms for what, ms in il_deploy.api_activity_times(st) if what == "a pressure event"]
+                self.assertEqual(events, [] if stamp or at is None else [at])
+
+    def test_pressure_start_up_stamp_of_a_build_before_br44(self):
+        """No server.startedAtMs (a rollback to an older build): the first value is told by its text, as before."""
+        self.start_fake(fail=["old-status"], jvm_start_s=il_deploy.STARTUP_STAMP_S + 60)
+        self.assertEqual(self.reasons(), [])
+        self.fake.shutdown()
+        self.start_fake(fail=["old-status"], pressure_initial_event="off")
+        r = self.reasons()
+        self.assertTrue(any("a pressure event" in x for x in r), r)
+
+    def test_machine_homing_is_busy(self):
+        st = {"machine": {"busy": False, "homing": True, "enabled": False}}
+        self.assertEqual(il_deploy.api_busy_reasons(st), ["OpenPnP is homing (machine.homing)"])
+        st["machine"]["homing"] = False
+        self.assertEqual(il_deploy.api_busy_reasons(st), [])
 
     def test_recent_activity_in_openpnp(self):
         for key, word in (("last_run_ended_s_ago", "run"), ("run_finished_s_ago", "run"),
@@ -219,6 +307,16 @@ class Idle(unittest.TestCase):
         st = {"run": None, "lastRun": None, "padCalibration": None}  # null where null is allowed: nothing deeper read
         self.assertNotIn("run.finishedAtMs", il_deploy.status_field_problems(st))
         self.assertIn("machine.enabled", il_deploy.status_field_problems(st))
+
+    def test_status_fields_of_br44(self):
+        """BR-44's fields are always in the new build's status (the e2e checks them on the real jar); a build before it
+        lacks exactly these, and il_deploy falls back to its older rules there."""
+        br44 = ["server.startedAtMs", "machine.homing", "dispense.state", "dispense.startError"]
+        for p in br44:
+            self.assertIn(p, il_deploy.STATUS_FIELDS)
+        self.start_fake(fail=["old-status"])
+        st = il_deploy.Api(self.lab.port).get("/api/status")[1]
+        self.assertEqual(sorted(il_deploy.status_field_problems(st)), sorted(br44))
 
     def test_status_fields_inside_places_and_surfaces_and_behind_nulls(self):
         """A place or surface without setAtMs is a rename (status_field_problems). What a null 'key?' or an empty map

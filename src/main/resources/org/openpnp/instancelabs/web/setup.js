@@ -406,7 +406,13 @@
       }
       case 'angle': {
         const a = IL.fmtDeg(prof.startAngleDeg, 1);
-        if (x.state === 'need') {
+        if (x.state === 'need' && IL.angleState(s) === 'measure') {
+          // a controller reset (BR-02): only a new measurement clears it; a bare confirm is refused then
+          q = 'Measure the start angle again';
+          code = 'I11 · screw start angle ' + a;
+          dd = IL.angleResetText(s) + '. The angle set ' + tm(prof.startAngleSetAtMs) + ' no longer holds.';
+          acts = [IL.fixButton({ href: '#calibrate/angle', label: 'Measure again', primary: true }, { cls: 'btn--lg answer' })];
+        } else if (x.state === 'need') {
           const stop = S.recovery || S.lastStop;
           q = 'Was the controller switched off since ' + tm(prof.startAngleSetAtMs) + '?';
           code = 'I11 · screw start angle ' + a;
@@ -1436,7 +1442,7 @@
     c.foot.remove();
     const opts = { refusalIn: c.ref };
     IL.press2(c.bOn, (s) => { const dist = IL.wasteDistance(s); return dist !== null && dist <= L.wasteNearMm ? null : 'pressure on'; },
-      () => IL.api('POST', '/api/pressure/start'), Object.assign({ ok: (r) => (r && (r.note || r.lastEvent)) || 'Pressure switching on' }, opts));
+      () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status)), Object.assign({ ok: (r) => (r && (r.note || r.lastEvent)) || 'Pressure switching on' }, opts));
     c.bOff.addEventListener('click', () => IL.act(c.bOff, () => IL.api('POST', '/api/pressure/stop'), Object.assign({ ok: (r) => (r && (r.note || r.lastEvent)) || 'Pressure off' }, opts)));
     IL.press2(c.bPrime, 'prime', async () => {
       const rot = need(F.prime, 'the prime rotation in degrees');
@@ -1905,7 +1911,7 @@
     if (user) { c.bSnap.disabled = true; c.bSnap.setAttribute('aria-busy', 'true'); }
     const cam = IL.positions(S.status).cam;
     try {
-      const r = await fetch('/api/camera/top.jpg?w=800&t=' + Date.now(), { cache: 'no-store' });
+      const r = await fetch('/api/camera/top.jpg?w=800&t=' + Date.now(), { cache: 'no-store', headers: IL.CLIENT_HEADER });
       if (!r.ok) {
         let reason = r.status === 404 ? 'no top camera' : r.status === 503 ? 'no frame within 10 s' : r.status + ' ' + r.statusText;
         try { const j = await r.json(); reason = j.reason || reason; } catch (e) { /* not JSON */ }

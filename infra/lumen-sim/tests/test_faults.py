@@ -422,6 +422,8 @@ class MalformedRequests(unittest.TestCase):
         {"cmd": "set", "homing_move_delay_s": None},
         {"cmd": "set", "rs485": DEEP},                                # its repr in the error recurses too deep
         {"cmd": "power_cycle", "link": "ttyLUMEN1"},                  # relative: whose working directory?
+        {"cmd": "set", "sim_cap": "true"},                            # BR-47's line: a flag, true or false
+        {"cmd": "set", "sim_cap": True, "vacuum": "x"},
     ]
 
     def test_each_is_refused_and_the_controller_keeps_answering(self):
@@ -435,6 +437,7 @@ class MalformedRequests(unittest.TestCase):
             self.assertEqual(b.sim.state(b.t)["boots"], 1, req)
             self.assertIsNone(b.sim.state(b.t)["surface_z"], req)
             self.assertFalse(b.sim.state(b.t)["kill_messages"], req)
+            self.assertFalse(b.sim.state(b.t)["sim_cap"], req)
             self.assertEqual(b.sim.state(b.t)["homing_move_delay_s"], 0.0, req)
             self.assertEqual(b.sim.machine.rs485, {}, req)
             self.assertEqual(b.sim.machine.vacuum, OPEN_AIR_VACUUM, req)

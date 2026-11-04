@@ -217,7 +217,9 @@
     set.addEventListener('click', () => IL.act(set, setAngle, { ok: (p) => 'Start angle set to ' + IL.fmtDeg(p.startAngleDeg, 1)
       + (p.changed && S.plan ? ': plan the board again (Run).' : p.changed ? '.' : ' (unchanged), confirmed for this controller power-up.') }));
     const input = pcr.numInput('pf-angle', null, '0.1', { min: '0', max: '359.9' });
-    input.addEventListener('input', checkAngle);
+    // when the operator typed the value: its set says so (measuredAtMs), and after a reset or a switch-off it counts as
+    // a measurement only if typed after it (BR-02)
+    input.addEventListener('input', () => { C.angleTypedAt = Date.now(); checkAngle(); });
     return card('cal-angle', 'Screw start angle', [abbr('I11', 'Interlock I11: partial turns depend on where the screw starts'), ' · measured with dot pairs'],
       [el('dl', { class: 'kv kv--wrap', id: 'cal-angle-kv' }),
         el('div', { id: 'cal-angle-ask' }),
@@ -524,7 +526,9 @@
     const c = checkAngle();
     if (c.err) throw new Error('Start angle: ' + c.err);
     const before = S.status && S.status.dispense && S.status.dispense.profile ? S.status.dispense.profile.startAngleDeg : null;
-    const p = await IL.api('POST', '/api/screw/start-angle', { startAngleDeg: c.v, note: 'set in Calibrate (web UI)' });
+    // a typed value says when it was measured (server time): the engine refuses evidence older than a switch-off
+    const typed = isNum(C.angleTypedAt) ? Math.round(C.angleTypedAt + S.skewMs) : undefined;
+    const p = await IL.api('POST', '/api/screw/start-angle', { startAngleDeg: c.v, note: 'set in Calibrate (web UI)', measuredAtMs: typed });
     p.changed = !(isNum(before) && Math.abs(Number(before) - Number(p.startAngleDeg)) < 0.05);
     // the field is the operator's: only mark it synced if it still shows what was sent (never overwrite a newer edit)
     if (Number($('pf-angle').value) === Number(c.v)) C.angleShown = p.startAngleDeg;
@@ -638,24 +642,39 @@
   }
   function renderAngle(s) {
     const p = (s.dispense && s.dispense.profile) || {};
-    const state = !p.partialTurn ? 'off' : !p.startAngleSetAtMs ? 'never' : p.startAngleNeedsConfirm ? 'confirm' : 'ok';
-    setState('cal-angle', { ok: 'ok', confirm: 'need', never: 'block', off: 'off' }[state], { ok: IL.fmtDeg(p.startAngleDeg, 1), confirm: 'Confirm', never: 'Not set', off: 'Whole turns' }[state]);
+    const state = !p.partialTurn ? 'off' : IL.angleState(s);
+    setState('cal-angle', { ok: 'ok', confirm: 'need', measure: 'need', never: 'block', off: 'off' }[state],
+      { ok: IL.fmtDeg(p.startAngleDeg, 1), confirm: 'Confirm', measure: 'Measure again', never: 'Not set', off: 'Whole turns' }[state]);
     IL.kv($('cal-angle-kv'), [
       ['Start angle', IL.fmtDeg(p.startAngleDeg, 1) + (p.partialTurn && p.startAngles ? ' · dots alternate ' + IL.startAnglesText(p) : '')],
       ['Set or confirmed', p.startAngleSetAtMs ? IL.fmtDateTime(p.startAngleSetAtMs - S.skewMs) : 'never'],
       ['Controller connected', p.controllerConnectedAtMs ? IL.fmtDateTime(p.controllerConnectedAtMs - S.skewMs) : '—'],
     ]);
-    IL.keyed($('cal-angle-ask'), state + p.startAngleDeg, () => (state === 'confirm' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),
+    // after a controller reset (BR-02) only a new measurement clears it: a bare confirm is refused then
+    IL.keyed($('cal-angle-ask'), state + p.startAngleDeg + (state === 'measure' ? IL.angleResetText(s) : ''), () => (state === 'measure' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),
+      el('div', {}, el('div', { class: 'ri__t', text: 'Measure the start angle again' }),
+        el('div', { class: 'ri__d', text: IL.angleResetText(s) + '. Measure it below.' })),
+      el('abbr', { class: 'icode', title: 'Interlock I11', text: 'I11' })) : state === 'confirm' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),
       el('div', {}, el('div', { class: 'ri__t', text: 'Was the controller switched off since ' + IL.fmtTime(p.startAngleSetAtMs - S.skewMs) + '?' }),
         el('div', { class: 'ri__d', text: 'If it stayed on, the angle still holds. If it was off, measure again below.' })),
       el('abbr', { class: 'icode', title: 'Interlock I11', text: 'I11' }),
       el('div', { class: 'ri__act' }, IL.fixButton({ fix: 'I11-confirm', label: 'No, it stayed on: ' + IL.fmtDeg(p.startAngleDeg, 1) + ' still holds' }))) : null));
-    // refill #pf-angle from the server unless focused or edited
+    // refill #pf-angle from the server unless focused or edited. While I11 asks for a new measurement (a reset or the
+    // screw motor switched off since the angle was set, BR-02) the old angle is not offered: one click on it would clear
+    // I11 unmeasured. The field waits for the measured value; one typed before that event is dropped too.
     const e = $('pf-angle');
-    if (document.activeElement !== e && (e.value === '' || Number(e.value) === Number(C.angleShown)) && isNum(p.startAngleDeg) && Number(e.value) !== Number(p.startAngleDeg)) {
-      e.value = IL.inputNum(p.startAngleDeg);
+    if (state === 'measure') {
+      const typedAt = isNum(C.angleTypedAt) ? C.angleTypedAt + S.skewMs : null;
+      const fresh = typedAt !== null && !(isNum(p.controllerResetAtMs) && typedAt <= p.controllerResetAtMs);
+      if (document.activeElement !== e && !fresh && e.value !== '') { e.value = ''; C.angleTypedAt = null; C.angleShown = null; }
+    } else {
+      if (document.activeElement !== e && (e.value === '' || Number(e.value) === Number(C.angleShown)) && isNum(p.startAngleDeg) && Number(e.value) !== Number(p.startAngleDeg)) {
+        e.value = IL.inputNum(p.startAngleDeg);
+        C.angleTypedAt = null;
+      }
+      if (document.activeElement !== e && (e.value === '' || Number(e.value) === Number(C.angleShown))) C.angleShown = p.startAngleDeg;
     }
-    if (document.activeElement !== e && (e.value === '' || Number(e.value) === Number(C.angleShown))) C.angleShown = p.startAngleDeg;
+    IL.setAttr(e, 'placeholder', state === 'measure' ? 'measured' : null);
     e.classList.toggle('input--dirty', e.value !== '' && Number(e.value) !== Number(p.startAngleDeg));
     const c = checkAngle();
     IL.gate($('btn-pf-angle-set'), IL.lockReason(s, { pressureOff: false }) || (IL.num('pf-angle') === undefined ? 'Enter the angle in degrees.' : c.err ? 'Start angle: ' + c.err : null), $('cal-angle-reason'));
