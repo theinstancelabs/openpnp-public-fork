@@ -140,6 +140,14 @@ public class OutputZonesTest {
         OutputZones z = OutputZones.of(c, CAMERA);
         assertNull(z.refusal(100, 50), "the waste");
         assertNull(z.refusal(140, 50), "the cup");
+        // the scale shots' picker (calibrate.js) offers any place named like a cup or a scale
+        c.locations.put("cup2", new DispenseConfig.NamedLocation(140, 80, 5));
+        c.locations.put("Scale", new DispenseConfig.NamedLocation(140, 110, 5));
+        c.locations.put("oven", new DispenseConfig.NamedLocation(110, 110, 5));
+        OutputZones named = OutputZones.of(c, CAMERA);
+        assertNull(named.refusal(140, 80), "a second cup");
+        assertNull(named.refusal(140, 110), "the scale's cup");
+        assertNotNull(named.refusal(110, 110), "the oven spot is no sink");
         assertNull(z.refusal(85, 230), "the purge row");
         assertNull(z.refusal(30, 170), "the calibration area");
         String board = z.refusal(310, 268);

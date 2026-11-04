@@ -176,10 +176,17 @@ public final class OutputZones {
         return z;
     }
 
-    /** The places that take the hold's drool: the waste (by its setting), the towel and the cup. */
+    /**
+     * The places that take the hold's drool: the waste (by its setting), the towel, and a cup: any place named like a
+     * cup or a scale, as the scale shots' picker offers them (calibrate.js).
+     */
     static boolean isSinkPlace(DispenseConfig c, String name) {
-        return name != null && (name.equalsIgnoreCase(c.wasteLocationName) || name.equalsIgnoreCase("towel")
-                || name.equalsIgnoreCase("cup"));
+        if (name == null) {
+            return false;
+        }
+        String n = name.toLowerCase(Locale.ROOT);
+        return name.equalsIgnoreCase(c.wasteLocationName) || n.equals("towel") || n.contains("cup")
+                || n.contains("scale");
     }
 
     /** "forbidden: <name>", the name of the allowed zone the point is in, or null when it is in none. */
