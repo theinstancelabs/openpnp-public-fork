@@ -2426,6 +2426,8 @@
         detail.push('. Wipe them in place; clean copper reads ' + IL.fmt(cc.minBrightFraction, 2) + ' or more.');
       }
     } else detail = [it.detail];
+    // a ledger board (BR-76): its numbers lead, also over the camera's result
+    if (it.ledger && (checking || cc)) detail.unshift(it.ledger.line + ' ');
     if (refLine) detail.unshift(refLine);
     const posWrong = !checking && IL.cleanPositionWrong(cc);
     const btn = fixBtn({ fix: 'clean-check', label: posWrong ? 'Check again' : cc && !cc.ok ? 'Wiped: check again' : 'Check pads', icon: 'i-refresh', title: 'The top camera looks at every pad (≈ ' + IL.fmtClock(tourSeconds(plan().pads.length)) + '), the pressure stays off. Press twice.' }, null, 'btn-clean-check');
@@ -2450,7 +2452,8 @@
     return tp.text + ' · ' + IL.fmtClock(tp.left) + ' left.';
   }
   function needCard(it, first, s) {
-    if (it.key === 'clean') return cleanCard(it, first, s);
+    // too few clean pads on a ledger board (BR-76): its own fix-its (Board wiped, Test board), not the camera's
+    if (it.key === 'clean' && !(it.ledger && it.ledger.short)) return cleanCard(it, first, s);
     const kind = it.state === 'block' ? 'block' : it.state === 'live' ? 'live' : it.state === 'checking' ? 'checking' : 'need';
     const glyph = it.state === 'live' ? IL.glyph('live') : it.state === 'checking' ? IL.glyph('checking') : IL.glyph(kind === 'block' ? 'block' : 'need');
     const fixes = (it.fixes || []).map((f) => fixBtn(Object.assign({}, f, { primary: false })));
@@ -2465,7 +2468,7 @@
       const btn = fixBtn({ fix: 'clean-check', label: 'Check pads', title: 'The top camera looks at every pad, the pressure stays off. Works with the check switched off too. Press twice.' }, 'btn--sm', 'btn-clean-check');
       return el('div', { class: 'rt rt--wide rt--clean', id: 'clean-result', title: it.tip || it.detail, 'data-refusals': '' },
         IL.glyph(it.state, 'xs'), el('span', { class: 'rt__t', text: it.title + (it.state === 'off' ? ' · off' : '') }), btn,
-        el('span', { class: 'rt__d', text: ccRefusedText(cc) || (cc ? IL.cleanSummary(cc) : it.detail) }));
+        el('span', { class: 'rt__d', text: ccRefusedText(cc) || (cc ? (it.ledger ? it.ledger.line + ' ' : '') + IL.cleanSummary(cc) : it.detail) }));
     }
     // a note that counts ready ("homes first, checks Z") takes the whole row: its value is longer than a tile
     return el('button', { type: 'button', class: 'rt rt--one' + (it.state === 'info' ? ' rt--wide rt--note' : ''), title: it.tip || it.detail, 'data-key': it.key, onclick: () => tileGo(it.key) },
