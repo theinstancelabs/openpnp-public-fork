@@ -15,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.imageio.ImageIO;
 
@@ -56,6 +57,10 @@ final class MachineEndpoints {
      * reader join (3 s), with room to spare.
      */
     static final long START_WAITS_FOR_SWITCH_OFF_MS = 20000;
+    /** BR-75: how long the planned stop waits for its machine task to start and end; tests shorten it. */
+    static volatile long plannedStopWaitMs = START_WAITS_FOR_SWITCH_OFF_MS;
+    /** Tests only (BR-75 review): runs between the planned stop's checks and its task's submit (the task checks again). */
+    static volatile Runnable plannedStopHook;
 
     private final ApiContext ctx;
     /** One capture thread per camera: a hung camera never holds up the other (BR-53 review). */
@@ -131,19 +136,20 @@ final class MachineEndpoints {
         }
         if (m.isEnabled()) {
             Runnable task = () -> ctx.switchOff.stop(m);
+            String sends = sendsDisableCommand(svc) ? "sends the driver's DISABLE_COMMAND" : SCREW_LINK_CLOSED;
             if (m.isBusy()) {
                 // As OpenPnP's own Stop button: bypass the busy machine thread (emergency path).
                 Thread t = new Thread(task, "il-api-stop");
                 t.setDaemon(true);
                 t.start();
-                actions.add("OpenPnP Stop (emergency path: the machine thread was busy); sends the driver's DISABLE_COMMAND");
+                actions.add("OpenPnP Stop (emergency path: the machine thread was busy); " + sends);
             }
             else {
                 m.submit(() -> {
                     task.run();
                     return null;
                 }, null, true);
-                actions.add("OpenPnP Stop; sends the driver's DISABLE_COMMAND");
+                actions.add("OpenPnP Stop; " + sends);
             }
             while (m.isEnabled() && System.currentTimeMillis() < answerBy) {
                 sleep(20);
@@ -167,6 +173,18 @@ final class MachineEndpoints {
         }
     }
 
+    /** What a STOP's answer says when a planned stop closed the screw's link (BR-75 review). */
+    static final String SCREW_LINK_CLOSED = "the screw's controller link is closed (a planned stop): no DISABLE_COMMAND "
+            + "goes out, and nothing can switch the screw's motor off until the next Start";
+
+    /**
+     * BR-75 review: whether OpenPnP's Stop sends the DISABLE_COMMAND to the screw's controller: not once a planned stop
+     * closed its link (unknown, without the engine: it does).
+     */
+    static boolean sendsDisableCommand(DispenseService svc) {
+        return svc == null || svc.screwDriverConnected();
+    }
+
     // ------------------------------------------------------------------------------------------
     // The planned stop (BR-75): the deployer's, never the STOP button's
     // ------------------------------------------------------------------------------------------
@@ -174,8 +192,9 @@ final class MachineEndpoints {
     /**
      * BR-75: as STOP the outputs go off and the machine is disabled, but without the screw's M18 B, so its motor stays
      * powered and after the next Start its start angle needs a confirm, not a measure. Refused unless nothing works.
-     * One OpenPnP machine task: the DISABLE_COMMAND's other lines, the link closed, then OpenPnP's Stop on the closed
-     * link (it sends no DISABLE_COMMAND).
+     * One OpenPnP machine task, in STOP's order: OpenPnP's disable listeners on the open link (outputs off), the
+     * DISABLE_COMMAND's other lines, then the link closes. Afterwards nothing can switch the screw's motor off until the
+     * next Start (no link).
      */
     Object plannedStop() throws Exception {
         Machine m = ctx.configuration.getMachine();
@@ -188,25 +207,36 @@ final class MachineEndpoints {
         if (working != null) {
             throw refusedWhile(working);
         }
+        Runnable hook = plannedStopHook;
+        if (hook != null) {
+            hook.run();
+        }
         List<String> actions = new ArrayList<>();
         List<String> sent = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        // claimed by the task when it begins, or by the timeout first: then it does nothing (as ControlEndpoints.motion)
+        AtomicBoolean claimed = new AtomicBoolean();
         Future<Object> f = m.submit(() -> {
+            if (!claimed.compareAndSet(false, true)) {
+                return null; // the request timed out before this began: nothing is done
+            }
             // again on the machine thread; returned, not thrown: OpenPnP drops every task queued behind one that throws
             String now = working(svc, m);
             if (now != null) {
                 return now;
             }
             try {
-                if (!m.isEnabled()) {
-                    svc.plannedStop(m);
+                GcodeDriver.PlannedStop p = svc.plannedStop(m, () -> ctx.switchOff.stop(m));
+                if (p == null) {
                     actions.add("machine was already stopped");
                     return null;
                 }
-                sent.addAll(svc.plannedStop(m));
-                actions.add("planned stop: " + (sent.isEmpty() ? "no line sent" : String.join(", ", sent)) + " (the "
-                        + "DISABLE_COMMAND without its screw-off line: the screw's motor stays powered); the link closed");
-                ctx.switchOff.stop(m);
-                actions.add("OpenPnP Stop on the closed link: no DISABLE_COMMAND");
+                sent.addAll(p.acknowledged);
+                failed.addAll(p.failed);
+                actions.add("planned stop: OpenPnP Stop, its DISABLE_COMMAND without the screw-off line: "
+                        + (sent.isEmpty() ? "no line acknowledged" : String.join(", ", sent))
+                        + (failed.isEmpty() ? "" : " (no ok for " + String.join(", ", failed) + ")")
+                        + "; the link closed, the screw's motor stays powered");
                 return null;
             }
             catch (Exception e) {
@@ -214,13 +244,17 @@ final class MachineEndpoints {
                 return e;
             }
         }, null, true);
+        long waitS = plannedStopWaitMs / 1000;
         Object out;
         try {
-            out = f.get(START_WAITS_FOR_SWITCH_OFF_MS, TimeUnit.MILLISECONDS); // as long as a switch-off may take
+            out = f.get(plannedStopWaitMs, TimeUnit.MILLISECONDS); // as long as a switch-off may take
         }
         catch (TimeoutException e) {
-            throw ApiException.refused("the planned stop has not ended after " + START_WAITS_FOR_SWITCH_OFF_MS / 1000
-                    + " s: the machine may still be switching off. The real STOP is POST /api/stop");
+            // no f.cancel: a task a timeout claimed does nothing when it runs (a cancelled one keeps OpenPnP busy)
+            throw ApiException.refused(claimed.compareAndSet(false, true) ? "the planned stop did not start within "
+                    + waitS + " s (OpenPnP was busy): it will not run. The real STOP is POST /api/stop"
+                    : "the planned stop has not ended after " + waitS + " s: the machine may still be switching off. "
+                            + "The real STOP is POST /api/stop");
         }
         if (out instanceof String) {
             throw refusedWhile((String) out);
@@ -230,7 +264,7 @@ final class MachineEndpoints {
                     + "POST /api/stop");
         }
         return Views.map("stopped", true, "machineEnabled", m.isEnabled(), "actions", actions, "planned", true,
-                "linesSent", sent);
+                "linesSent", sent, "linesFailed", failed);
     }
 
     /** BR-75: what works now, in words, or null. On the machine thread OpenPnP reads busy for the planned stop itself. */
@@ -251,9 +285,15 @@ final class MachineEndpoints {
         if (ctx.passthrough.running() || ctx.passthrough.motionPending()) {
             return "a G-code batch runs, or its moves have not ended";
         }
-        if (!m.isTask(Thread.currentThread())
-                && (m.isBusy() || m instanceof ReferenceMachine && ((ReferenceMachine) m).isHoming())) {
+        if (m instanceof ReferenceMachine && ((ReferenceMachine) m).isHoming()
+                || !m.isTask(Thread.currentThread()) && m.isBusy()) {
             return "OpenPnP is busy (a home, a jog or a move)";
+        }
+        // OpenPnP's tasks end without waiting for their moves: its window's jog of the screw (N2's rotation) may run on
+        GcodeDriver d = svc.screwDriver(m);
+        if (d != null && d.isMotionPending()) {
+            return "OpenPnP's last move was not waited for (a jog in its window): the screw may still turn; wait for it, "
+                    + "then Home";
         }
         return null;
     }

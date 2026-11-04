@@ -453,6 +453,7 @@ public class MountTest {
         try (TipFixture f = new TipFixture()) {
             DispenseService svc = f.svc;
             f.add25();
+            String parked25 = new Gson().toJson(svc.getConfig().parkedTips.get(K25));
             f.mount(K25);
             svc.setStartAngle(200.0, "measured");
             DispenseProfile set = svc.getConfig().profile;
@@ -462,6 +463,8 @@ public class MountTest {
             assertEquals(200, now.startAngleDeg, 0);
             assertEquals(set.startAngleSetAtMs, now.startAngleSetAtMs);
             assertEquals(set.startAngleChangedAtMs, now.startAngleChangedAtMs);
+            // the angle is the machine's, no recipe: the 25G's entry is back as it was (review MINOR 5, BR-85's undo)
+            assertEquals(parked25, new Gson().toJson(svc.getConfig().parkedTips.get(K25)));
         }
     }
 

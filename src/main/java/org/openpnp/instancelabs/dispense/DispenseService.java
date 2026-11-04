@@ -760,7 +760,7 @@ public final class DispenseService {
     }
 
     /** BR-02: the link to the screw's controller is open (unknown counts as open: the safe side). */
-    private boolean screwDriverConnected() {
+    public boolean screwDriverConnected() {
         ReferenceControllerAxis b = screwAxis(configuration.getMachine());
         return b == null || ((GcodeDriver) b.getDriver()).isConnected();
     }
@@ -792,7 +792,7 @@ public final class DispenseService {
     }
 
     /** The screw's GcodeDriver, or null. */
-    private GcodeDriver screwDriver(Machine m) {
+    public GcodeDriver screwDriver(Machine m) {
         ReferenceControllerAxis b = screwAxis(m);
         return b == null ? null : (GcodeDriver) b.getDriver();
     }
@@ -822,27 +822,29 @@ public final class DispenseService {
     }
 
     /**
-     * BR-75: a planned stop's part on the screw's controller, on the machine thread before OpenPnP's Stop. With the
-     * machine started and the link open, {@link #plannedStopLines} of the driver's DISABLE_COMMAND go out as OpenPnP's
-     * Stop sends its own, then the link closes, so the Stop after it sends no DISABLE_COMMAND: the screw's motor stays
-     * powered, and no switch-off goes on record. With the machine off, a link kept open (connection-keep-alive) closes
-     * without a line: OpenPnP's next disable (its quit) would send the DISABLE_COMMAND on it. Returns the lines sent;
-     * throws, sending nothing, when the screw's axis is not a controller axis of a G-code driver.
+     * BR-75: a planned stop on the machine thread. With the machine started, {@code disable} (OpenPnP's Stop) runs with
+     * the screw driver's disable a planned stop's ({@link GcodeDriver#disableAsPlannedStop}): STOP's order, its disable
+     * listeners on the open link, then {@link #plannedStopLines} instead of the DISABLE_COMMAND, and the link closes, so
+     * the screw's motor stays powered and no switch-off goes on record. With the machine off, a link kept open
+     * (connection-keep-alive) closes without a line: OpenPnP's quit would send the DISABLE_COMMAND on it. Returns what
+     * the screw's controller acknowledged, or null with the machine off; throws, sending nothing, when the screw's axis
+     * is not a controller axis of a G-code driver.
      */
-    public List<String> plannedStop(Machine m) {
+    public GcodeDriver.PlannedStop plannedStop(Machine m, Runnable disable) {
         ReferenceControllerAxis b = screwAxis(m);
         if (b == null) {
             throw new IllegalStateException("the screw's axis '" + cfg.bAxisName + "' is not a controller axis of a "
                     + "G-code driver: which line switches its motor off is not known");
         }
         GcodeDriver d = (GcodeDriver) b.getDriver();
-        if (!d.isConnected()) {
-            return Collections.emptyList();
+        if (!m.isEnabled()) {
+            if (d.isConnected()) {
+                d.disconnect();
+            }
+            return null;
         }
-        List<String> lines = m.isEnabled() ? plannedStopLines(d.getCommand(null,
-                GcodeDriver.CommandType.DISABLE_COMMAND), b.getLetter()) : Collections.emptyList();
-        d.sendStopLinesThenDisconnect(String.join("\n", lines));
-        return lines;
+        return d.disableAsPlannedStop(String.join("\n", plannedStopLines(d.getCommand(null,
+                GcodeDriver.CommandType.DISABLE_COMMAND), b.getLetter())), disable);
     }
 
     /**
@@ -1677,16 +1679,12 @@ public final class DispenseService {
             c.parkedTips.put(fromKey, park);
             DispenseProfile prof = e.profile == null ? new DispenseProfile() : e.profile.copy();
             // the start angle belongs to the controller's power-up and the screw, not to the needle (§22.3)
-            prof.startAngleDeg = c.profile.startAngleDeg;
-            prof.startAngleSetAtMs = c.profile.startAngleSetAtMs;
-            prof.startAngleChangedAtMs = c.profile.startAngleChangedAtMs;
+            prof.withStartAngleOf(c.profile);
             List<String> problems = prof.validate(c);
             if (!problems.isEmpty()) {
                 DispenseProfile reset = new DispenseProfile();
                 reset.name = in.name + " (reset: " + problems.get(0) + ")";
-                reset.startAngleDeg = c.profile.startAngleDeg;
-                reset.startAngleSetAtMs = c.profile.startAngleSetAtMs;
-                reset.startAngleChangedAtMs = c.profile.startAngleChangedAtMs;
+                reset.withStartAngleOf(c.profile);
                 r.warnings.add("The " + in.name + "'s dispense profile no longer validates (" + problems.get(0)
                         + "): it was reset to the default recipe.");
                 prof = reset;
@@ -1784,10 +1782,7 @@ public final class DispenseService {
             DispenseConfig c = cfg.copy();
             DispenseConfig b = u.before;
             c.tip = b.tip;
-            c.profile = b.profile.copy();
-            c.profile.startAngleDeg = cfg.profile.startAngleDeg;
-            c.profile.startAngleSetAtMs = cfg.profile.startAngleSetAtMs;
-            c.profile.startAngleChangedAtMs = cfg.profile.startAngleChangedAtMs;
+            c.profile = b.profile.copy().withStartAngleOf(cfg.profile);
             c.needleAnchor = b.needleAnchor;
             c.needleZOffsetMm = b.needleZOffsetMm;
             c.needleZOffsetSetAtMs = b.needleZOffsetSetAtMs;
@@ -1798,9 +1793,7 @@ public final class DispenseService {
             DispenseConfig.ParkedTip nowParked = c.parkedTips.get(b.tip.key);
             DispenseConfig.DoseAnchor nowOn = c.doseAnchor;
             // the recipe set for the incoming tip while it was on (the start angle aside: the machine's, it stays on)
-            DispenseProfile recipe = cfg.profile.copy();
-            recipe.startAngleDeg = u.after.profile.startAngleDeg;
-            recipe.startAngleSetAtMs = u.after.profile.startAngleSetAtMs;
+            DispenseProfile recipe = cfg.profile.copy().withStartAngleOf(u.after.profile);
             boolean recipeSet = !new Gson().toJson(recipe).equals(new Gson().toJson(u.after.profile));
             // the undo puts back the mount, nothing else: the two entries it changed; the other tips keep theirs as
             // they are now (a setup added since, BR-85 an anchor or a recipe set since)
@@ -1823,9 +1816,7 @@ public final class DispenseService {
             if (off != null) {
                 off.doseAnchor = nowOn;
                 if (recipeSet) {
-                    recipe.startAngleDeg = off.profile.startAngleDeg;
-                    recipe.startAngleSetAtMs = off.profile.startAngleSetAtMs;
-                    off.profile = recipe;
+                    off.profile = recipe.withStartAngleOf(off.profile);
                 }
             }
             writeConfig(c);

@@ -372,6 +372,7 @@ final class LockEndpoints {
         if (padCal) {
             actions.add("its pad calibration stopped");
         }
+        boolean sends = MachineEndpoints.sendsDisableCommand(svc); // BR-75: not once a planned stop closed the link
         Map<String, Object> stop = machine.stop(why);
         @SuppressWarnings("unchecked")
         List<String> stopActions = (List<String>) stop.get("actions");
@@ -382,7 +383,9 @@ final class LockEndpoints {
         }
         boolean off = !m.isEnabled();
         if (off) {
-            actions.add("the machine switched off (quick stop; valve, pump and screw off)");
+            actions.add(sends ? "the machine switched off (quick stop; valve, pump and screw off)" : "the machine "
+                    + "switched off; a planned stop had closed the controller link, so nothing was sent and the screw's "
+                    + "motor stays on until the next Start");
         }
         else {
             actions.add("the machine is still switching off");

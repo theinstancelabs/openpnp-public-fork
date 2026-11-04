@@ -30,8 +30,13 @@ import org.openpnp.instancelabs.dispense.DoseBlocksRequest;
 import org.openpnp.instancelabs.dispense.DoseBlocksResult;
 import org.openpnp.instancelabs.dispense.DoseRecord;
 import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.machine.reference.ReferenceActuator;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.LengthUnit;
+import org.openpnp.model.Location;
+import org.openpnp.model.Motion;
+import org.openpnp.spi.MotionPlanner;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -76,7 +81,10 @@ public class PlannedStopSimTest {
     public void after() throws Exception {
         TipSim.hook(null);
         engineClock(null);
+        MachineEndpoints.plannedStopHook = null;
+        MachineEndpoints.plannedStopWaitMs = MachineEndpoints.START_WAITS_FOR_SWITCH_OFF_MS;
         sim.server.holdOkUntil.clear();
+        sim.server.mute.clear();
         api.stop();
         svc.shutdown();
         sim.close();
@@ -115,6 +123,19 @@ public class PlannedStopSimTest {
             l.add(e.getAsString());
         }
         return l;
+    }
+
+    /**
+     * The lines since the mark are a planned stop's: OpenPnP's disable listeners switch the outputs off on the open link
+     * first (the live VAC1/VAC2 ActuateOff), then {@link #PLANNED}; no M18 B.
+     */
+    void assertPlannedStopSent() {
+        List<String> l = sim.server.sinceMark();
+        int n = l.size() - PLANNED.size();
+        assertTrue(n >= 0 && PLANNED.equals(l.subList(n, l.size())), l.toString());
+        for (String s : l.subList(0, n)) {
+            assertTrue(s.startsWith("M107") || "M400".equals(s), "only outputs off before them: " + l);
+        }
     }
 
     /** The journal's screw motor switch-offs. */
@@ -209,9 +230,10 @@ public class PlannedStopSimTest {
         assertTrue(r.get("stopped").getAsBoolean(), r.toString());
         assertFalse(r.get("machineEnabled").getAsBoolean(), r.toString());
         assertEquals(PLANNED, strings(r.getAsJsonArray("linesSent")), r.toString());
-        assertEquals(PLANNED, sim.server.sinceMark(), "the DISABLE_COMMAND without its M18 B, nothing else");
+        assertEquals(Collections.emptyList(), strings(r.getAsJsonArray("linesFailed")), r.toString());
+        assertPlannedStopSent(); // the DISABLE_COMMAND without its M18 B
         assertFalse(sim.machine.isEnabled());
-        assertFalse(sim.driver.isConnected(), "the link closed first: OpenPnP's Stop sent no DISABLE_COMMAND");
+        assertFalse(sim.driver.isConnected(), "the link closed after its lines: no DISABLE_COMMAND");
         assertEquals(0, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
         assertTrue(ok("GET", "/api/machine", null).getAsJsonObject("screwMotorOff").get("atMs").isJsonNull());
 
@@ -220,6 +242,104 @@ public class PlannedStopSimTest {
         ok("POST", "/api/screw/start-angle", "{}");
         assertEquals("ok", i11().get("state").getAsString());
         assertEquals(118, profile().get("startAngleDeg").getAsDouble(), 0);
+    }
+
+    /**
+     * Review MAJOR: STOP's order, M18 B aside. OpenPnP's disable listeners act on the open link (the live machine.xml
+     * switches VAC1 and VAC2 off at every disable: on a closed link each planned stop failed them with an IO error and
+     * left OpenPnP's record of them on), then the lines without M18 B go out, then the link closes.
+     */
+    @Test
+    public void openPnpsDisableListenersSwitchTheOutputsOffOnTheOpenLink() throws Exception {
+        ReferenceActuator vac1 = (ReferenceActuator) sim.machine.getDefaultHead().getActuatorByName("VAC1");
+        ReferenceActuator vac2 = (ReferenceActuator) sim.machine.getDefaultHead().getActuatorByName("VAC2");
+        sim.machine.execute(() -> {
+            vac1.actuate(true);
+            vac2.actuate(true);
+            return null;
+        });
+        assertEquals(Boolean.TRUE, vac2.getLastActuationValue());
+        sim.server.mark();
+        ok("POST", "/api/stop/planned", null);
+        assertEquals(Boolean.FALSE, vac1.getLastActuationValue(), "VAC1 off: its lines went out on the open link");
+        assertEquals(Boolean.FALSE, vac2.getLastActuationValue(), "VAC2 off: its lines went out on the open link");
+        assertPlannedStopSent();
+        assertTrue(sim.server.sinceMark().indexOf("M410") > 0, "the outputs' lines first: " + sim.server.sinceMark());
+        assertFalse(sim.driver.isConnected());
+    }
+
+    /** Review MINOR 1: a planned stop whose task did not start in time says so, and never runs later. */
+    @Test
+    public void aPlannedStopThatDidNotStartInTimeNeverRuns() throws Exception {
+        CountDownLatch out = new CountDownLatch(1);
+        MachineEndpoints.plannedStopWaitMs = 500;
+        // a task of OpenPnP's own starts after the route's checks: the planned stop queues behind it
+        MachineEndpoints.plannedStopHook = () -> sim.machine.submit(() -> {
+            out.await(30, TimeUnit.SECONDS);
+            return null;
+        });
+        sim.server.mark();
+        JsonObject r = call("POST", "/api/stop/planned", null);
+        assertEquals(409, lastStatus, lastBody);
+        String reason = r.get("reason").getAsString();
+        assertTrue(reason.contains("did not start") && reason.contains("it will not run"), reason);
+        MachineEndpoints.plannedStopHook = null;
+        out.countDown();
+        sim.machine.submit(() -> null).get(30, TimeUnit.SECONDS); // the planned stop's task has had its turn
+        assertEquals(Collections.emptyList(), sim.server.sinceMark(), "nothing sent, then or later");
+        assertTrue(sim.machine.isEnabled());
+        assertTrue(sim.driver.isConnected());
+    }
+
+    /** Review MINOR 2: linesSent are the lines the controller acknowledged; one without its ok is in linesFailed. */
+    @Test
+    public void linesSentAreTheOnesTheControllerAcknowledged() throws Exception {
+        sim.server.mute.add("M107 P1"); // its ok never comes
+        JsonObject r = ok("POST", "/api/stop/planned", null);
+        assertEquals(Arrays.asList("M410", "M107 P3", "M107 P2", "M107 P0"), strings(r.getAsJsonArray("linesSent")),
+                r.toString());
+        assertEquals(Collections.singletonList("M107 P1"), strings(r.getAsJsonArray("linesFailed")), r.toString());
+        assertFalse(sim.machine.isEnabled());
+        assertFalse(sim.driver.isConnected());
+    }
+
+    /**
+     * Review MINOR 3: once a planned stop has closed the screw's link, a real STOP sends nothing, and its answer says so:
+     * nothing can switch the screw's motor off until the next Start.
+     */
+    @Test
+    public void aStopOnTheClosedLinkSaysItSendsNothing() throws Exception {
+        sim.driver.disconnect(); // as a planned stop leaves it, here with the machine still reading started
+        sim.server.mark();
+        String acts = ok("POST", "/api/stop", null).getAsJsonArray("actions").toString();
+        assertFalse(acts.contains("sends the driver's DISABLE_COMMAND"), acts);
+        assertTrue(acts.contains("no DISABLE_COMMAND") && acts.contains("until the next Start"), acts);
+        assertEquals(Collections.emptyList(), sim.server.sinceMark());
+    }
+
+    /** Review MINOR 6: the machine task checks again: work that began after the route's checks refuses it. */
+    @Test
+    public void theTaskChecksAgainWhatBeganAfterTheRoutesChecks() throws Exception {
+        sim.server.hostWatchdogCapability = false;
+        sim.towelUnderNeedle(svc);
+        MachineEndpoints.plannedStopHook = () -> {
+            try {
+                api.getContext().pressure.start(svc); // the pressure hold comes on after the route's checks
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        sim.server.mark();
+        JsonObject r = call("POST", "/api/stop/planned", null);
+        MachineEndpoints.plannedStopHook = null;
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(r.get("reason").getAsString().contains("the pressure hold"), lastBody);
+        assertTrue(api.getContext().pressure.isActive());
+        sim.machine.submit(() -> null).get(30, TimeUnit.SECONDS); // nothing of the planned stop is left to run
+        assertFalse(sim.server.sinceMark().contains("M410"), "the planned stop sent nothing: " + sim.server.sinceMark());
+        assertTrue(sim.machine.isEnabled());
+        ok("POST", "/api/pressure/stop", null);
     }
 
     /**
@@ -242,7 +362,7 @@ public class PlannedStopSimTest {
         assertConfirmAsked();
         sim.server.mark();
         ok("POST", "/api/stop/planned", null);
-        assertEquals(PLANNED, sim.server.sinceMark());
+        assertPlannedStopSent();
         quitAndRestartOpenPnp();
         ok("POST", "/api/machine/enable", null);
         assertConfirmAsked();
@@ -288,7 +408,8 @@ public class PlannedStopSimTest {
 
     /**
      * A set of the angle, even to the value it had, is a measure, and so is a settings change of it: the partial-turn
-     * records made before it are stale.
+     * records made before it are stale. The change time is the engine's alone: a forged one in PUT /api/config (0) is
+     * refused, and cannot make them evidence again (review MINOR 6).
      */
     @Test
     public void aSetOrASettingsChangeOfTheAngleMakesThePartialTurnRecordsStale() throws Exception {
@@ -305,6 +426,11 @@ public class PlannedStopSimTest {
             live.profile.startAngleDeg = 298;
             return live;
         });
+        assertEquals("made before the screw start angle was set again", whyStale(later));
+        call("PUT", "/api/config", "{\"forTip\":\"" + svc.getConfig().tip.key + "\",\"profile\":"
+                + "{\"startAngleChangedAtMs\":0}}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("profile.startAngleChangedAtMs"), lastBody);
         assertEquals("made before the screw start angle was set again", whyStale(later));
     }
 
@@ -380,6 +506,18 @@ public class PlannedStopSimTest {
         out.countDown();
         held.get(30, TimeUnit.SECONDS);
 
+        // review MINOR 4: OpenPnP's last move was not waited for (its window's jog): the controller may still turn
+        sim.machine.execute(() -> {
+            sim.n1.moveTo(sim.n1.getLocation().add(new Location(LengthUnit.Millimeters, 1, 0, 0, 0)),
+                    Motion.MotionOption.JogMotion);
+            return null;
+        });
+        refusedWith("OpenPnP's last move");
+        sim.machine.execute(() -> {
+            sim.machine.getMotionPlanner().waitForCompletion(null, MotionPlanner.CompletionType.WaitForStillstand);
+            return null;
+        });
+
         // an engine task, held on the machine thread at the start of a dose-blocks step
         CountDownLatch stepIn = new CountDownLatch(1);
         CountDownLatch stepOut = new CountDownLatch(1);
@@ -423,6 +561,34 @@ public class PlannedStopSimTest {
         refusedWith("a G-code batch");
         okLater.countDown();
         assertEquals(200, batch.get(30, TimeUnit.SECONDS).statusCode());
+
+        // a home under way (its G28 waits for the controller's ok)
+        CountDownLatch g28 = new CountDownLatch(1);
+        sim.server.holdOkUntil.put("G28", g28);
+        sim.server.mark();
+        CompletableFuture<HttpResponse<String>> home = http.sendAsync(request("POST", "/api/machine/home",
+                "{\"wait\":true}"), HttpResponse.BodyHandlers.ofString());
+        until = System.currentTimeMillis() + 10_000;
+        while (sim.server.sinceMark().stream().noneMatch(l -> l.startsWith("G28")) && System.currentTimeMillis() < until) {
+            Thread.sleep(10);
+        }
+        refusedWith("OpenPnP is busy");
+        g28.countDown();
+        assertEquals(200, home.get(60, TimeUnit.SECONDS).statusCode());
+
+        // a STOP still switching off (its M410 waits for the controller's ok): only the STOP's own lines go out
+        sim.server.holdOkUntil.put("M410", new CountDownLatch(1));
+        sim.server.mark();
+        ok("POST", "/api/stop", null);
+        JsonObject r = call("POST", "/api/stop/planned", null);
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(r.get("reason").getAsString().contains("switching the machine off"), lastBody);
+        assertEquals(1, Collections.frequency(sim.server.sinceMark(), "M410"), sim.server.sinceMark().toString());
+        sim.server.holdOkUntil.get("M410").countDown();
+        until = System.currentTimeMillis() + 20_000;
+        while (sim.machine.isEnabled() && System.currentTimeMillis() < until) {
+            Thread.sleep(20);
+        }
     }
 
     @Test
@@ -467,7 +633,7 @@ public class PlannedStopSimTest {
         who = ok("POST", "/api/lock/acquire", "{\"who\":\"infra\",\"what\":\"deploy\"}").get("token").getAsString();
         sim.server.mark();
         assertEquals(PLANNED, strings(ok("POST", "/api/stop/planned", null).getAsJsonArray("linesSent")));
-        assertEquals(PLANNED, sim.server.sinceMark());
+        assertPlannedStopSent();
     }
 
     @Test

@@ -271,6 +271,17 @@ public class DispenseProfile {
         return p;
     }
 
+    /**
+     * The start angle and its set and change times from {@code from}: they belong to the controller's power-up and the
+     * screw, not to a tip's recipe (§22.3), so a mount and its undo keep the live ones (BR-75 review). Returns this.
+     */
+    public DispenseProfile withStartAngleOf(DispenseProfile from) {
+        startAngleDeg = from.startAngleDeg;
+        startAngleSetAtMs = from.startAngleSetAtMs;
+        startAngleChangedAtMs = from.startAngleChangedAtMs;
+        return this;
+    }
+
     public DispenseProfile copy() {
         DispenseProfile x = new DispenseProfile();
         x.name = name;
