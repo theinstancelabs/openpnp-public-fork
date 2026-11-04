@@ -777,6 +777,44 @@ public class PowerCycleSimTest {
     }
 
     /**
+     * #11 review (11-04), the gap the catch-up leaves: a Start and a Home through the API while the engine starts would
+     * skip its reset checks (it is not watching the connect yet, and a home made then cannot move the Z frame): both are
+     * refused until it runs. OpenPnP's own Start (its window) is still caught up at the engine's start.
+     */
+    @Test
+    public void startAndHomeThroughTheApiWaitForTheEngine() throws Exception {
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        List<String> answers = new ArrayList<>();
+        TipSim.hook(p -> {
+            if ("listeners".equals(p)) {
+                try {
+                    call("POST", "/api/machine/enable", "{}");
+                    answers.add(lastStatus + " " + lastBody);
+                    sim.machine.setEnabled(true); // OpenPnP's own Start
+                    call("POST", "/api/machine/home", "{\"clearBelowAttested\":true}");
+                    answers.add(lastStatus + " " + lastBody);
+                }
+                catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        });
+        try {
+            svc = DispenseService.start(Configuration.get());
+        }
+        finally {
+            TipSim.hook(null);
+        }
+        assertEquals(2, answers.size(), answers.toString());
+        for (String a : answers) {
+            assertTrue(a.startsWith("409 ") && a.contains("still starting"), a);
+        }
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.get("positionKnown").getAsBoolean(), "the refused home moved nothing: " + m);
+    }
+
+    /**
      * #11 review (11-04): Start and Home both before the engine started: the home followed the connect, so the position
      * is known; the connect is dated at the engine's start, so an angle set before it is confirmed (every OpenPnP start,
      * the process engineer 11-03).
