@@ -272,8 +272,20 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     if (!['characterized', 'validated'].includes(chip0.current.status)) await api(page, 'PUT', '/api/pad-types/chip-0603', { status: 'characterized', forSetup: 'ad22tta-b' });
     const chipBefore = (await api(page, 'GET', '/api/pad-types/chip-0603')).current;
     await ticks(page);
-    const boards = await api(page, 'GET', '/api/boards');
-    const padcal = (boards.files || []).find((f) => /padcal/i.test(f.file || '') || /padcal/i.test(f.name || ''));
+    let boards = await api(page, 'GET', '/api/boards');
+    let padcal = (boards.files || []).find((f) => /padcal/i.test(f.file || '') || /padcal/i.test(f.name || ''));
+    if (!padcal) {
+      // run alone (WEBUI_SCRIPTS="tip-setups", a fresh session): pad-profile's board, saved here through the same import
+      const buf = fs.readFileSync(path.join(REPO, 'src', 'test', 'resources', 'padprofile', 'padcal.kicad_pcb'));
+      const hdr = { 'Content-Type': 'application/octet-stream', 'X-IL-Client': 'ui' };
+      const pv = await (await page.request.post(BASE + 'api/boards/import?file=padcal.kicad_pcb', { data: buf, headers: hdr, timeout: 60000 })).json();
+      const q = 'file=padcal.kicad_pcb&name=' + encodeURIComponent('padcal tip-setups') + '&replace=1'
+        + (pv.file && pv.file.sha256 ? '&sha256=' + encodeURIComponent(pv.file.sha256) : '') + (pv.decisions ? '&decisions=' + encodeURIComponent(pv.decisions) : '');
+      const sv = await page.request.post(BASE + 'api/boards/import/save?' + q, { data: buf, headers: hdr, timeout: 60000 });
+      if (!sv.ok()) throw new Error('the padcal board could not be saved: ' + sv.status() + ' ' + (await sv.text()).slice(0, 300));
+      boards = await api(page, 'GET', '/api/boards');
+      padcal = (boards.files || []).find((f) => /padcal/i.test(f.file || '') || /padcal/i.test(f.name || ''));
+    }
     const planPadcal = async () => page.evaluate((p) => IL.setPlan(p), await api(page, 'POST', '/api/plan', { source: 'file', file: padcal.file, x: 200, y: 120, z: Number(bzMid.toFixed(2)), rotation: 0 }));
     if (padcal) await planPadcal();
     // a 25G straight from an earlier run: the dialog would refuse its name; it is used as it is
