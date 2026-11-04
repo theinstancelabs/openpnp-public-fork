@@ -2201,14 +2201,16 @@
     if (!s || off) { setCell(lc, 'off', off ? 'Unknown' : '…', off ? cap(since) : null); return; }
     if (!h) { setCell(lc, 'off', 'Nobody', 'Nobody has the machine. Its controls are yours: your first move makes it yours until you give it back. An agent may take it while nobody has it.'); return; }
     if (lk.mine) { setCell(lc, 'ok', 'You', 'You have the machine' + (t ? ' since ' + t : '') + '. Agents cannot use it until you give it back (click here).'); return; }
-    const name = IL.holderName(h), waits = (s.padLedgers || []).some((x) => x.waiting), working = !waits && (h.busy === true || IL.holderWorking(h));
+    // an agent that waits for clean pads (BR-76 (b)) is not working, unless it runs something again (a stale record)
+    const name = IL.holderName(h), waits = (s.padLedgers || []).some((x) => x.waiting);
+    const working = h.busy === true || (!waits && IL.holderWorking(h)), waiting = waits && !working;
     const last = isNum(h.lastActiveMs) ? 'its last command ' + IL.fmtAgo(h.lastActiveMs - S.skewMs) : 'no command yet';
-    setCell(lc, working ? 'live' : 'info', [name + (working ? ' · working' : waits ? ' · waiting' : ' · idle'), h.what ? ' · ' + h.what : '', 2],
+    setCell(lc, working ? 'live' : 'info', [name + (working ? ' · working' : waiting ? ' · waiting' : ' · idle'), h.what ? ' · ' + h.what : '', 2],
       name + ' (an agent) has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '. '
-      + (working ? 'Working' : waits ? 'Waiting for clean pads' : 'Idle') + ': ' + last + '. Take control stops its work and makes the machine yours.');
+      + (working ? 'Working' : waiting ? 'Waiting for clean pads' : 'Idle') + ': ' + last + '. Take control stops its work and makes the machine yours.');
     IL.msg('held', { kind: working ? 'live' : 'info', alert: false,
       text: name + ' has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '.',
-      sub: waits ? 'It waits for clean pads: Board wiped (below) works without taking control. Anything else needs Take control.'
+      sub: waiting ? 'It waits for clean pads: Board wiped (below) works without taking control. Anything else needs Take control.'
         : (working ? 'It is working now.' : 'It is idle (no command for a while).') + ' This page shows everything but cannot move the machine until you take control.',
       actions: [IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true }, { cls: 'btn--sm' })] });
   }
