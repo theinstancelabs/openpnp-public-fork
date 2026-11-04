@@ -299,6 +299,23 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             new java.util.concurrent.atomic.AtomicLong();
     /** Instance Labs (BR-02): told of every line the controller sends, on the reader thread; or null. */
     private volatile java.util.function.Consumer<String> receivedLineWatcher;
+    /** Instance Labs (BR-93): the open link's loss, or null; a connect that opens the link again clears it. */
+    private final java.util.concurrent.atomic.AtomicReference<LinkLoss> linkLoss =
+            new java.util.concurrent.atomic.AtomicReference<>();
+    /** Instance Labs (BR-93): told once of each loss, on the thread that found it (the reader's); or null. */
+    private volatile java.util.function.Consumer<LinkLoss> linkLossWatcher;
+
+    /** Instance Labs (BR-93): the open link to the controller was lost unasked: when (epoch ms), and why. */
+    public static final class LinkLoss {
+        public final long atMs;
+        /** In plain words: "the link ended", "a read failed (Read error.)", "the controller left USB: … is gone". */
+        public final String cause;
+
+        LinkLoss(long atMs, String cause) {
+            this.atMs = atMs;
+            this.cause = cause;
+        }
+    }
     
     static public class Line {
         final String line;
@@ -514,6 +531,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         getCommunications().setDriverName(getName());
         Logger.debug("[{}] Connect", getCommunications().getConnectionName());
         getCommunications().connect();
+        linkLoss.set(null); // Instance Labs (BR-93): the link is open again
         connected = false;
 
         connectThreads();
@@ -1271,6 +1289,63 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         return receivedLineWatcher;
     }
 
+    /** Instance Labs (BR-93): {@code w} is told once of each lost link, on the thread that found it. Null removes it. */
+    public void setLinkLossWatcher(java.util.function.Consumer<LinkLoss> w) {
+        linkLossWatcher = w;
+    }
+
+    public java.util.function.Consumer<LinkLoss> getLinkLossWatcher() {
+        return linkLossWatcher;
+    }
+
+    /**
+     * Instance Labs (BR-93): the open link to the controller was lost (its reader ended on an IO error or on the link's
+     * end, a write failed, or the serial port's device path is gone), or null. OpenPnP itself still reads started and
+     * homed until a Stop, so whatever moves the machine asks here first. A connect that opens the link again clears it.
+     */
+    public LinkLoss getLinkLoss() {
+        if (linkLoss.get() == null && connected && devicePathGone(serialPortName())) {
+            linkLost(null); // the reader may not have failed yet
+        }
+        return linkLoss.get();
+    }
+
+    /** Instance Labs (BR-93): a loss goes on record once, unless the link is being closed on purpose. */
+    private void linkLost(String cause) {
+        if (disconnectRequested) {
+            return; // a disconnect on purpose ends the reader too
+        }
+        String port = serialPortName();
+        String usb = devicePathGone(port) ? "the controller left USB: " + port + " is gone" : null;
+        LinkLoss l = new LinkLoss(System.currentTimeMillis(), usb == null ? cause : cause == null ? usb
+                : usb + "; " + cause);
+        if (linkLoss.compareAndSet(null, l)) {
+            Logger.warn("[{}] the link to the controller is lost: {}", getCommunications().getConnectionName(), l.cause);
+            java.util.function.Consumer<LinkLoss> w = linkLossWatcher;
+            if (w != null) {
+                try {
+                    w.accept(l);
+                }
+                catch (RuntimeException e) {
+                    Logger.warn(e, "{} link-loss watcher failed", getName()); // never the reader thread's end
+                }
+            }
+        }
+    }
+
+    /** Instance Labs (BR-93): the serial port's name (machine.xml's /dev/serial/by-id/… path), or null for other links. */
+    private String serialPortName() {
+        return getCommunicationsType() == CommunicationsType.serial ? getSerial().getPortName() : null;
+    }
+
+    /**
+     * Instance Labs (BR-93): a port named by its device path whose path is gone: the board left USB (udev removes its
+     * /dev/serial/by-id link at once). A name without a path ("COM3", "ttyACM0") is never checked.
+     */
+    static boolean devicePathGone(String port) {
+        return port != null && new File(port).isAbsolute() && !new File(port).exists();
+    }
+
     /**
      * Instance Labs (BR-44): the link kept open while the machine was off has died (its reader ended on the dead port),
      * so Start opens it again.
@@ -1399,6 +1474,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             }
             catch (IOException ex) {
                 Logger.error(ex, "{} failed to write command {}", getCommunications().getConnectionName(), command);
+                linkLost("a write failed (" + ex.getMessage() + ")"); // Instance Labs (BR-93)
                 disconnect();
                 Configuration.get().getMachine().setEnabled(false);
             }
@@ -1651,6 +1727,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                     if (receivedLine == null) {
                         // Line read failed eg. due to socket closure
                         Logger.error("[{}] Failed to read gcode response", connectionName);
+                        linkLost("the link ended"); // Instance Labs (BR-93)
                         return;
                     }
                     receivedLine = receivedLine.trim();
@@ -1665,6 +1742,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                     }
                     else {
                         Logger.error(e, "[{}] Read error", connectionName);
+                        linkLost("a read failed (" + e.getMessage() + ")"); // Instance Labs (BR-93)
                         return;
                     }
                 }

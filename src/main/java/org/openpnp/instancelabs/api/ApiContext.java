@@ -8,11 +8,14 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
 import org.openpnp.instancelabs.board.BoardImporter;
+import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispensePlan;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.InterlockReport;
 import org.openpnp.instancelabs.dispense.Interlocks;
+import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
+import org.openpnp.spi.Driver;
 import org.openpnp.spi.Machine;
 
 /** State and helpers shared by the endpoint groups. */
@@ -131,8 +134,37 @@ final class ApiContext {
      */
     void requireMachineIdle() throws ApiException {
         requireNotSwitchingOff();
+        requireLink();
         if (machine().isBusy()) {
             throw ApiException.refused("OpenPnP is busy (homing or moving): wait for it to finish");
+        }
+    }
+
+    /**
+     * BR-93: a G-code driver's lost link to the controller ({@link GcodeDriver#getLinkLoss}), or null. The engine puts
+     * it on record as it is read, so the status and the refusals show the same state.
+     */
+    GcodeDriver.LinkLoss linkLoss() {
+        Machine m = configuration.getMachine();
+        for (Driver d : m == null ? java.util.Collections.<Driver> emptyList() : m.getDrivers()) {
+            GcodeDriver.LinkLoss l = d instanceof GcodeDriver ? ((GcodeDriver) d).getLinkLoss() : null;
+            if (l != null) {
+                DispenseService s = svcOrNull();
+                if (s != null) {
+                    s.noteLinkLoss(l);
+                }
+                return l;
+            }
+        }
+        return null;
+    }
+
+    /** BR-93: nothing that moves or sends a line starts on a lost link (STOP still runs: it switches off what it can). */
+    void requireLink() throws ApiException {
+        GcodeDriver.LinkLoss l = linkLoss();
+        if (l != null) {
+            throw ApiException.refused("MACHINE: " + ControllerReset.linkLostWhy(l.atMs, l.cause) + ": "
+                    + ControllerReset.LINK_LOST_REMEDY);
         }
     }
 

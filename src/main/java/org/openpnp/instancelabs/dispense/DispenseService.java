@@ -165,6 +165,8 @@ public final class DispenseService {
     /** BR-02: the driver whose received lines this engine watches (the host watchdog's trip), or null. */
     private volatile GcodeDriver watchedDriver;
     private final java.util.function.Consumer<String> tripWatcher = this::watchForWatchdogTrip;
+    /** BR-93: hears the watched driver's lost link on its reader thread. */
+    private final java.util.function.Consumer<GcodeDriver.LinkLoss> linkLossWatcher = this::noteLinkLoss;
     /**
      * BR-02: writes the journal for the reader thread and the streams (a trip heard there, a stream's arm): no "ok"
      * behind it, a STOP's included, and no line waits for an insert.
@@ -394,6 +396,7 @@ public final class DispenseService {
             disablesSeen.set(screwDriver.getDisableCommandsSent());
             motionsSeen.set(screwDriver.getMotionCommandsSent());
             screwDriver.setReceivedLineWatcher(tripWatcher);
+            screwDriver.setLinkLossWatcher(linkLossWatcher);
             watchedDriver = screwDriver;
         }
         if (machine != null) {
@@ -476,6 +479,9 @@ public final class DispenseService {
             GcodeDriver watched = watchedDriver;
             if (watched != null && watched.getReceivedLineWatcher() == tripWatcher) {
                 watched.setReceivedLineWatcher(null);
+            }
+            if (watched != null && watched.getLinkLossWatcher() == linkLossWatcher) {
+                watched.setLinkLossWatcher(null);
             }
             journalWriter.shutdown(); // a write handed on goes on record before the database closes
             try {
@@ -864,6 +870,16 @@ public final class DispenseService {
     }
 
     /** BR-02: the journal's pending changes are written on the journal thread (no insert on a stream's thread). */
+    /**
+     * BR-93: the controller's link was lost (heard on the driver's reader thread, or found by a status read or a route):
+     * on record once as a possible reset ({@link ControllerReset#linkLost}), written soon after (no I/O on that thread).
+     */
+    public void noteLinkLoss(GcodeDriver.LinkLoss l) {
+        if (controllerReset.linkLost(l.atMs, ControllerReset.linkLostWhy(l.atMs, l.cause))) {
+            flushLater();
+        }
+    }
+
     private void flushLater() {
         try {
             journalWriter.execute(controllerReset::flush);
