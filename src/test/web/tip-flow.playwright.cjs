@@ -326,7 +326,8 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
       await page.setInputFiles('#board-import-file', { name: name + '.kicad_pcb', mimeType: 'application/octet-stream', buffer: pcb });
       await page.waitForSelector('#dlg-board-import[data-state="preview"]', { timeout: 60000 });
       await page.fill('#board-import-name', name);
-      const saveP = page.waitForResponse((r) => /\/api\/boards\/import\/save$/.test(r.url()), { timeout: 60000 }).catch(() => null);
+      // the save's URL carries its query (file, name, sha256, decisions): match the path
+      const saveP = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/boards/import/save', { timeout: 60000 }).catch(() => null);
       await page.click('#btn-board-import-save');
       const saveRes = await saveP;
       const saved = saveRes ? await saveRes.json().catch(() => null) : null;
