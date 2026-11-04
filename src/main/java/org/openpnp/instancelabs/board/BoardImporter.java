@@ -28,7 +28,6 @@ import org.openpnp.instancelabs.dispense.PadTypeStatus;
 import org.openpnp.instancelabs.kicad.BoardFrame;
 import org.openpnp.instancelabs.kicad.Deadline;
 import org.openpnp.instancelabs.kicad.ImportProposal;
-import org.openpnp.instancelabs.kicad.ImportProposal.FootprintP;
 import org.openpnp.instancelabs.kicad.ImportProposal.PackageP;
 import org.openpnp.instancelabs.kicad.ImportProposal.PadP;
 import org.openpnp.instancelabs.kicad.ImportProposal.PlacementP;
@@ -393,14 +392,7 @@ public final class BoardImporter {
             }
             map.put("placements", placements);
             map.put("fiducials", fiducials);
-            List<Map<String, Object>> artOnly = new ArrayList<>();
-            for (FootprintP f : p.footprints) {
-                if (FootprintP.ART.equals(f.kind)) {
-                    artOnly.add(map("ref", f.ref, "why", f.why));
-                }
-            }
-            map.put("skipped", map("bottom", p.skipped.get(ImportProposal.SKIP_BOTTOM), "artOnly", artOnly, "dnp",
-                    p.skipped.get(ImportProposal.SKIP_DNP), "pasteOnly", p.skipped.get(ImportProposal.SKIP_PASTE_ONLY)));
+            map.put("skipped", BoardArt.Skipped.of(p));
             map.put("packages", packages);
             List<Map<String, Object>> parts = new ArrayList<>();
             for (IdAllocator.PartId x : ids.parts) {
