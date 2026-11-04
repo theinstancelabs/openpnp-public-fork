@@ -362,10 +362,18 @@ class FakeOpenPnP:
         return 200, {"homed": True, "n1RaisedFromZ": None}
 
     def journal(self, code, message):
-        """BR-02's journal (#12: ControllerReset.EVENT_* rows through DispenseDb.insertEvent, run_uuid NULL)."""
+        """BR-02's journal (#12: ControllerReset.EVENT_* rows through DispenseDb.insertEvent, run_uuid NULL), written
+        "journal_delay_s" later on a thread, as the engine's writer."""
         path = os.path.join(self.config, "instancelabs", "dispense.db")
         if not self.jar.get("journal") or not os.path.exists(path):
             return
+        delay = float(self.jar.get("journal_delay_s", 0))
+        if delay > 0:
+            threading.Timer(delay, self._journal, (path, code, message)).start()
+        else:
+            self._journal(path, code, message)
+
+    def _journal(self, path, code, message):
         import sqlite3
         c = sqlite3.connect(path, timeout=5)
         try:

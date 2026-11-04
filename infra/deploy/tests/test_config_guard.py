@@ -11,9 +11,12 @@ journal must not be lost to a rollback's old database.
 import json
 import os
 import shutil
+import signal
 import sqlite3
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 import il_deploy
 from fakes import Lab
@@ -30,6 +33,7 @@ def engine_db(path):
               " level TEXT NOT NULL, code TEXT, message TEXT)")
     c.execute("CREATE TABLE tip_setups (id TEXT PRIMARY KEY, name TEXT)")
     c.execute("INSERT INTO tip_setups VALUES ('25g', '25G plastic taper')")
+    c.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT)")
     c.execute("INSERT INTO events(ts, level, code, message) VALUES (1000, 'INFO', 'POSITION_KNOWN', 'homed')")
     c.commit()
     return c
@@ -57,7 +61,8 @@ class Manifest(unittest.TestCase):
         return il_deploy.manifest_changes(self.base, live)
 
     def test_the_database_is_compared_by_its_rows_one_entry_per_table(self):
-        self.assertEqual(sorted(k for k in self.base if k.startswith(DB)), [DB + "#events", DB + "#tip_setups"])
+        self.assertEqual(sorted(k for k in self.base if k.startswith(DB)),
+                         [DB + "#events", DB + "#runs", DB + "#schema", DB + "#sqlite_sequence", DB + "#tip_setups"])
         self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # the rows move from the WAL into the db file
         self.assertEqual(self.changes(), [])
         with open(os.path.join(self.cfg, "machine.xml"), "a") as f:
@@ -96,11 +101,14 @@ class Manifest(unittest.TestCase):
             "an old journal row changed": "UPDATE events SET message = 'y' WHERE id = 1",
             "an old journal row deleted": "DELETE FROM events WHERE id = 1",
             "a table added": "CREATE TABLE places (name TEXT)",
+            "a column added": "ALTER TABLE tip_setups ADD COLUMN note TEXT",
+            "an index added": "CREATE INDEX ix ON tip_setups(name)",
+            "a run added and deleted (its id is used up)": "INSERT INTO runs(uuid) VALUES ('r'); DELETE FROM runs",
         }
         for why, sql in cases.items():
             with self.subTest(why):
                 self.setUp()
-                self.db.execute(sql)
+                self.db.executescript(sql)
                 self.db.commit()
                 newest = il_deploy.engine_db_newest_event(self.cfg) or 1
                 self.assertNotEqual(self.changes([(1, max(newest, 99))]), [], why)
@@ -132,8 +140,39 @@ class Manifest(unittest.TestCase):
                       {"event": "claim"}, {"event": "release"},  # a build without a database
                       {"event": "claim", "events_id": 20}):  # never released (a hard kill): no range
                 f.write(json.dumps(r) + "\n")
-        self.assertEqual(il_deploy.claim_ranges(log), [(4, 9), (0, 12)])
+        self.assertEqual(il_deploy.claim_ranges(log), [(4, 9)], "no events id at the claim: no range")
         self.assertEqual(il_deploy.claim_ranges(os.path.join(self.cfg, "missing.jsonl")), [])
+        with open(log, "w") as f:  # the deployer's health check without a claim (the caller holds the machine)
+            for r in ({"ts": "2026-11-04T07:00:00-08:00", "event": "claim", "events_id": 4},
+                      {"ts": "2026-11-04T07:01:00-08:00", "event": "release", "events_id": 9},
+                      {"ts": "2026-11-04T07:10:00-08:00", "event": "health-window", "phase": "begin", "events_id": 9},
+                      {"ts": "2026-11-04T07:11:00-08:00", "event": "health-window", "phase": "end", "events_id": 15}):
+                f.write(json.dumps(r) + "\n")
+        self.assertEqual(il_deploy.claim_ranges(log), [(4, 9), (9, 15)])
+        self.assertEqual(il_deploy.claim_ranges(log, since="2026-11-04T07:05:00-08:00"), [(9, 15)],
+                         "a claim released before the baseline (another database, maybe) does not count")
+
+    def test_a_locked_database_does_not_hang_the_deployer(self):
+        """A writer holding an exclusive lock: the read gives up (None: compared by bytes), it does not wait forever."""
+        path = os.path.join(self.cfg, "instancelabs", "locked.db")
+        w = sqlite3.connect(path, isolation_level=None)
+        self.addCleanup(w.close)
+        w.execute("PRAGMA locking_mode=EXCLUSIVE")
+        w.execute("CREATE TABLE events (id INTEGER PRIMARY KEY)")
+        w.execute("BEGIN EXCLUSIVE")
+        got = []
+        with mock.patch.object(il_deploy, "ENGINE_DB", os.path.join("instancelabs", "locked.db")), \
+                mock.patch.object(il_deploy, "ENGINE_DB_TIMEOUT_S", 0.2):
+            t = threading.Thread(target=lambda: got.append(il_deploy.engine_db_newest_event(self.cfg)), daemon=True)
+            t.start()
+            t.join(10)
+        self.assertFalse(t.is_alive(), "it hung")
+        self.assertEqual(got, [None])
+
+    def test_the_baseline_and_its_newest_id_come_from_one_read(self):
+        newest = []
+        m = il_deploy.config_manifest(self.cfg, newest=newest)
+        self.assertEqual((m, newest), (self.base, [1]))
 
 
 class RollbackFlow(unittest.TestCase):
@@ -185,6 +224,92 @@ class RollbackFlow(unittest.TestCase):
         self.assertEqual(self.lab.main("rollback"), 2, self.lab.last_out + self.lab.last_err)
         self.assertIn(DB + "#tip_setups changed", self.lab.last_out)
         self.assertIn("--discard-config-changes", self.lab.last_out)
+
+    def test_a_persons_routine_rows_between_two_claims_still_refuse_it(self):
+        """A home and a STOP by a person after the deploy, before a health check by hand: not the deployer's."""
+        a = self.release(4, self.lab.b)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        self.release(5, self.lab.c)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        event(self.live_db(), "POSITION_KNOWN")
+        event(self.live_db(), "SCREW_MOTOR_OFF")
+        self.lab.start_service()
+        self.assertEqual(self.lab.main("health"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.main("rollback"), 2, self.lab.last_out + self.lab.last_err)
+        self.assertIn(DB + "#events changed", self.lab.last_out)
+        self.assertNotEqual(self.lab.link("current"), a)
+
+    def test_the_engines_late_journal_rows_count_as_the_claims(self):
+        """The engine writes its journal on a thread: the release waits for it to settle (before handing back)."""
+        a = self.release(4, self.lab.b, journal_delay_s=0.4)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        self.release(5, self.lab.c, journal_delay_s=0.4)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        self.lab.start_service()
+        self.assertEqual(self.lab.main("health"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.main("rollback"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), a)
+
+    def test_a_baseline_kept_by_bytes_still_lets_an_unchanged_config_roll_back(self):
+        a = self.release(4, self.lab.b)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        self.release(5, self.lab.c)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        path = os.path.join(self.lab.root, "deployed.json")
+        dep = il_deploy.read_json(path, {})
+        dep["current"]["post_manifest"] = il_deploy.config_manifest(self.lab.config, rows=False)  # an older deployer's
+        dep["current"].pop("post_events_id")
+        il_deploy.write_json(path, dep)
+        self.assertEqual(self.lab.main("rollback"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), a)
+
+    def test_ranges_from_before_a_restored_database_do_not_count(self):
+        """A rollback puts an older database back and its ids are handed out again: a claim released before the current
+        build's baseline covers ids of another database (the review's 40..80 case), so it does not count."""
+        self.release(4, self.lab.b)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        self.release(5, self.lab.c)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        rec = il_deploy.read_json(os.path.join(self.lab.root, "deployed.json"), {})["current"]
+        before = il_deploy.datetime.datetime.fromisoformat(rec["deployed_at"]) - il_deploy.datetime.timedelta(hours=1)
+        with open(os.path.join(self.lab.root, "log", "deploy.jsonl"), "a") as f:  # a claim over another database's ids
+            for kind, i in (("claim", 0), ("release", 10 ** 6)):
+                f.write(json.dumps({"ts": before.isoformat(timespec="seconds"), "event": kind, "events_id": i}) + "\n")
+        event(self.live_db(), "SCREW_MOTOR_OFF")  # a person's STOP: an id that old range covers
+        self.assertEqual(self.lab.main("rollback"), 2, self.lab.last_out + self.lab.last_err)
+        self.assertIn(DB + "#events changed", self.lab.last_out)
+
+    def test_a_health_check_without_a_claim_is_the_deployers_too(self):
+        """`health --no-claim` (the caller holds the machine): its own journal rows are no change either."""
+        a = self.release(4, self.lab.b)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        self.release(5, self.lab.c)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        self.lab.start_service()
+        self.assertEqual(self.lab.main("health", "--no-claim"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.main("rollback"), 0, self.lab.last_out + self.lab.last_err)
+        self.assertEqual(self.lab.link("current"), a)
+
+    def test_a_claim_killed_before_its_release_gets_no_range(self):
+        """recover_stale_claim hands the Holder back: what happened since the kill is no deployer's."""
+        self.release(4, self.lab.b)
+        self.assertEqual(self.lab.main("deploy"), 0, self.lab.last_out + self.lab.last_err)
+        self.lab.start_service()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                with mock.patch.object(il_deploy.Deployer, "health_check",
+                                       lambda *a, **kw: os.kill(os.getpid(), signal.SIGKILL)):
+                    self.lab.main("health")
+            finally:
+                os._exit(99)
+        _, status = os.waitpid(pid, 0)
+        self.assertTrue(os.WIFSIGNALED(status), status)
+        self.lab.main("poll")  # finds the killed claim, hands the Holder back, sets the hold
+        recs = self.lab.journal()
+        stale = max(i for i, r in enumerate(recs) if r.get("event") == "stale-claim")
+        release = next(r for r in recs[stale:] if r.get("event") == "release")
+        self.assertIsNone(release.get("events_id"))
 
     def test_a_reset_journaled_in_use_still_refuses_it(self):
         self.deployed_then_checked_by_hand()
