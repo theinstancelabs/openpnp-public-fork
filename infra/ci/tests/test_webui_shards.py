@@ -26,13 +26,20 @@ class Shards(unittest.TestCase):
         self.assertEqual(legs["rest"], ["lock", "lock-real"])
 
     def test_a_new_script_runs_in_the_rest_without_a_ci_change(self):
-        self.assertEqual(webui_shards.scripts_for(self.ALL + ["tip-flow", "jog"], "rest"),
-                         ["lock", "lock-real", "tip-flow", "jog"])
+        self.assertEqual(webui_shards.scripts_for(self.ALL + ["jog", "reflow-flag"], "rest"),
+                         ["lock", "lock-real", "jog", "reflow-flag"])
 
     def test_a_named_script_gone_from_all_scripts_fails_loudly(self):
         """A rename in run-webui-sim-test.sh must not drop a script from CI: the leg fails, it does not shrink."""
         with self.assertRaisesRegex(ValueError, "pad-profile"):
             webui_shards.scripts_for([s for s in self.ALL if s != "pad-profile"], "main")
+
+    def test_an_optional_script_joins_its_leg_once_it_exists_never_the_rest(self):
+        """tip-flow needs tip-setups' state (its needle frame): calib, after tip-setups, whichever PR lands first."""
+        self.assertEqual(webui_shards.scripts_for(self.ALL, "calib"), ["pad-profile", "tip-setups"])
+        with_flow = self.ALL + ["tip-flow", "jog"]
+        self.assertEqual(webui_shards.scripts_for(with_flow, "calib"), ["pad-profile", "tip-setups", "tip-flow"])
+        self.assertEqual(webui_shards.scripts_for(with_flow, "rest"), ["lock", "lock-real", "jog"])
 
     def test_full_runs_every_script_in_one_session_as_before(self):
         self.assertEqual(webui_shards.scripts_for(self.ALL, "full"), self.ALL)

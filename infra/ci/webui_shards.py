@@ -12,8 +12,10 @@ import re
 import sys
 
 RUNNER = "src/test/web/run-webui-sim-test.sh"
-# webui-sim and board-import share a session's state; pad-profile and tip-setups pass alone with BR-74's paste seed
-SHARDS = {"main": ["webui-sim", "board-import"], "calib": ["pad-profile", "tip-setups"]}
+# webui-sim and board-import share a session's state; pad-profile and tip-setups pass alone with BR-74's paste seed.
+# A name ending in "?" joins its leg once it is in ALL_SCRIPTS (never the rest): tip-flow needs tip-setups' needle
+# frame, whichever PR lands first.
+SHARDS = {"main": ["webui-sim", "board-import"], "calib": ["pad-profile", "tip-setups", "tip-flow?"]}
 KEYS = tuple(SHARDS) + ("rest",)  # ci.yml's legs
 FULL = "full"  # every script in one session, as before the shards: for a comparison run, not a leg of the gate
 
@@ -30,13 +32,13 @@ def scripts_for(all_, key):
         return list(all_)
     if key not in KEYS:
         raise ValueError(f"unknown shard {key!r} (known: {', '.join(KEYS)})")
-    missing = [s for names in SHARDS.values() for s in names if s not in all_]
+    missing = [s for names in SHARDS.values() for s in names if not s.endswith("?") and s not in all_]
     if missing:
         raise ValueError(f"shard scripts not in ALL_SCRIPTS ({' '.join(all_)}): {' '.join(missing)}")
     if key == "rest":
-        named = {s for names in SHARDS.values() for s in names}
+        named = {s.rstrip("?") for names in SHARDS.values() for s in names}
         return [s for s in all_ if s not in named]
-    return list(SHARDS[key])
+    return [s.rstrip("?") for s in SHARDS[key] if not s.endswith("?") or s.rstrip("?") in all_]
 
 
 def main(argv=None):
