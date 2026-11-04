@@ -332,6 +332,30 @@ public class SimPasteTest {
         assertNotEquals(phase, p.offsetSteps(), "11 s idle: the motor timed out before this move");
     }
 
+    /**
+     * INF-06 (PM 04:4x): for a tip whose sub-turn dots the SIM does not model (the 25G: a threshold and the contacts'
+     * history, not a cosine; Process §2-3) only whole net turns lay paste; any other contact lays nothing and is
+     * counted, so no test can pass on it.
+     */
+    @Test
+    public void wholeTurnsOnlyRefusesAPartialTurn() {
+        SimScene s = exact();
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.dot(300, 240, BLANK_Z, 800);
+        assertEquals(1, p.deposits(null).size(), "off by default: a half turn lays its dot");
+        s.paste.wholeTurnsOnly = true;
+        n.dot(303, 240, BLANK_Z, 800);
+        n.dot(306, 240, BLANK_Z, 400);
+        assertEquals(1, p.deposits(null).size(), "a half and a quarter turn: nothing laid");
+        assertEquals(2, p.unmodelledContacts());
+        n.dot(309, 240, BLANK_Z, 1600);
+        n.dot(312, 240, BLANK_Z, 3200);
+        assertEquals(3, p.deposits(null).size(), "one and two whole net turns (after the suck-back) are laid");
+        assertEquals(2, p.unmodelledContacts());
+    }
+
     @Test
     public void theScrewPhaseIsTheTipsOwn() {
         SimScene s = scene();

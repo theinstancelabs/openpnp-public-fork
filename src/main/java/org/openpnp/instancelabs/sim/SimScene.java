@@ -165,6 +165,8 @@ public final class SimScene {
         public Integer offsetSteps;
         /** Every motor-off (M18/M84 of B, the idle timeout, a power cycle) draws a new screw angle (INF-06 §4). */
         public boolean newPhaseOnMotorOff;
+        /** Only whole net turns lay paste; other contacts lay nothing, counted (sub-turns not modelled, INF-06). */
+        public boolean wholeTurnsOnly;
         /**
          * BR-74: the seed of the dose and thread noise on every connection (null: seed + the connection's number, as
          * before), so a scene's paste is the same however often the controller reconnected (a test alone in a fresh
@@ -206,6 +208,7 @@ public final class SimScene {
             p.reportCount = reportCount;
             p.offsetSteps = offsetSteps;
             p.newPhaseOnMotorOff = newPhaseOnMotorOff;
+            p.wholeTurnsOnly = wholeTurnsOnly;
             p.noiseSeed = noiseSeed;
             p.byTip = new LinkedHashMap<>(byTip);
             return p;
@@ -588,6 +591,7 @@ public final class SimScene {
         p.reportCount = o.has("reportCount") ? o.get("reportCount").getAsBoolean() : p.reportCount;
         p.newPhaseOnMotorOff = o.has("newPhaseOnMotorOff") ? o.get("newPhaseOnMotorOff").getAsBoolean()
                 : p.newPhaseOnMotorOff;
+        p.wholeTurnsOnly = o.has("wholeTurnsOnly") ? o.get("wholeTurnsOnly").getAsBoolean() : p.wholeTurnsOnly;
         if (o.has("noiseSeed")) {
             p.noiseSeed = o.get("noiseSeed").isJsonNull() ? null : Long.valueOf(o.get("noiseSeed").getAsLong());
         }

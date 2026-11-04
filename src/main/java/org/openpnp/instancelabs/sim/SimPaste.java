@@ -72,6 +72,8 @@ public final class SimPaste {
     static final double THREAD_MAX_LIFT_MM = 2.0;
     /** A needle below the surface smears its dot to this axis ratio (counted as a string). */
     static final double SMEAR_RATIO = 2;
+    /** A whole net turn within this many steps (the motor turns whole steps, 4.44 per degree): wholeTurnsOnly. */
+    static final int WHOLE_TURN_TOLERANCE_STEPS = 2;
     /** Marlin's stepper idle timeout after boot (s) until an M18/M84 S changes it (lumen-sim's bench firmware). */
     static final double DEFAULT_MOTOR_TIMEOUT_S = 3600;
     /** A round dot's axis ratio is 1 + |N(0, 0.05)|. */
@@ -294,6 +296,9 @@ public final class SimPaste {
     // A motor-off's new screw phase (newPhaseOnMotorOff, INF-06), the motor-offs this connection, the idle timeout.
     private Integer jumped;
     private int motorOffs;
+    // Contacts a wholeTurnsOnly tip refused (not modelled), and whether that was said in the log.
+    private int unmodelled;
+    private boolean unmodelledWarned;
     private double motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
     private Double lastMotionS;
     // The screw and the pneumatics.
@@ -645,6 +650,18 @@ public final class SimPaste {
         if (p == null || !pr || ex <= 1e-9) {
             return; // net zero, or no pressure: no paste
         }
+        long net = count() - dotStartCount;
+        if (p.wholeTurnsOnly && !wholeTurns(net)) {
+            unmodelled++;
+            if (!unmodelledWarned) {
+                unmodelledWarned = true;
+                Logger.warn("SIM paste: a contact of {} steps on tip {}, not a whole number of turns: this tip's "
+                        + "sub-turn dots are not modelled (INF-06: a threshold and the contacts' history, not a "
+                        + "cosine), so it lays nothing; later ones are counted (SimPaste.unmodelledContacts)", net,
+                        physicalTip(sc));
+            }
+            return;
+        }
         double t = store.timeS();
         int n = sessionDots++;
         if (n == 0) {
@@ -745,6 +762,16 @@ public final class SimPaste {
             offset = new Random(p.seed + connection).nextInt(STEPS_PER_REV);
         }
         return offset;
+    }
+
+    static boolean wholeTurns(long net) {
+        long rem = Math.floorMod(net + WHOLE_TURN_TOLERANCE_STEPS, STEPS_PER_REV);
+        return net >= STEPS_PER_REV - WHOLE_TURN_TOLERANCE_STEPS && rem <= 2 * WHOLE_TURN_TOLERANCE_STEPS;
+    }
+
+    /** Contacts a wholeTurnsOnly tip refused: sub-turn dots the SIM does not model for it. */
+    public synchronized int unmodelledContacts() {
+        return unmodelled;
     }
 
     /** Marlin switches the motors off after motorTimeoutS without motion (0: never): a motor-off before this one. */
