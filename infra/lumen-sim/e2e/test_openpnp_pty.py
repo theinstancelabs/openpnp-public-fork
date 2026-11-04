@@ -323,6 +323,29 @@ class HomeAndPrimeTest(SessionTest):
         for i, axis in enumerate("XYZ"):
             self.assertAlmostEqual(sim["physical"][i], lg[axis], delta=0.01, msg="physical " + axis)
 
+    def set_start_angle(self, note):
+        """I11: confirm the start angle. After a reset (lumen-sim boots in the power-on state) or a screw motor-off, a
+        confirm is refused (BR-02): then turn the screw 3.6 deg through the passthrough under the lock and set the
+        profile's angle, as the UI's start-angle.cjs and the SIM acceptance do."""
+        code, r = self.s.api("POST", "/api/screw/start-angle", {"note": note})
+        if code == 200:
+            return
+        self.assertTrue(code == 409 and "measure" in json.dumps(r), json.dumps(r)[:600])
+        st = self.s.status()
+        b = next(a["driverCoordinate"] for a in st["machine"]["axes"] if a.get("letter") == "B")
+        code, r = self.s.api("POST", "/api/lock/acquire", {"who": "process", "label": "Process", "what": note})
+        self.assertEqual(code, 200, r)
+        lock = {"X-IL-Lock": r["token"]}
+        try:
+            code, r = self.s.api("POST", "/api/gcode", {"lines": ["G1 B%.3f F36000" % (float(b) + 3.6), "M400"]},
+                                 timeout=60, headers=lock)
+            self.assertEqual(code, 200, r)
+        finally:
+            self.s.api("POST", "/api/lock/release", {}, headers=lock)
+        deg = self.s.status()["dispense"]["profile"]["startAngleDeg"]
+        code, r = self.s.api("POST", "/api/screw/start-angle", {"startAngleDeg": deg, "note": note + " (measured again)"})
+        self.assertEqual(code, 200, r)
+
     def test_2_prime_30_turns_times_out_on_G4(self):
         st = self.s.status()
         if not st["machine"]["homed"]:
@@ -342,11 +365,11 @@ class HomeAndPrimeTest(SessionTest):
             ("PUT", "/api/locations/waste", WASTE),
             ("PUT", "/api/config", {"cleanPadCheck": {"enabled": False}, "primeRotationDeg": PRIME_DEG}),
             ("PUT", "/api/config", {"profile": {"screwRpm": 180.0, "dwellMs": 250}, "forTip": tip}),
-            ("POST", "/api/screw/start-angle", {"note": "lumen-sim e2e: confirmed after connect"}),
         ]
         for method, path, body in setup:
             code, r = self.s.api(method, path, body)
             self.assertEqual(code, 200, "%s %s -> %s" % (method, path, json.dumps(r)[:600]))
+        self.set_start_angle("lumen-sim e2e: after connect")
         n0 = self.s.io()[1]
         code, r = self.s.api("POST", "/api/calibrations/touch-off", {"primeAtWaste": True, "wait": True}, timeout=300)
         self.assertEqual(code, 200, r)
