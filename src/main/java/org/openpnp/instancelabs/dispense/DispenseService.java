@@ -1275,6 +1275,15 @@ public final class DispenseService {
      */
     public synchronized DispenseProfile setStartAngle(Double angleDeg, String note, Long measuredAtMs)
             throws IOException {
+        return setStartAngle(angleDeg, note, measuredAtMs, null);
+    }
+
+    /**
+     * As above; BR-77: a set from a measure stores the feature it found ({@code feature}), a set without one drops the
+     * stored feature, a confirm keeps it.
+     */
+    public synchronized DispenseProfile setStartAngle(Double angleDeg, String note, Long measuredAtMs,
+            DispenseProfile.StartAngleFeature feature) throws IOException {
         Long reset = controllerReset.detectedAtMs();
         ControllerReset.Event off = controllerReset.lastScrewMotorOff();
         Long setAt = cfg.profile.startAngleSetAtMs;
@@ -1299,7 +1308,7 @@ public final class DispenseService {
         DispenseConfig c = cfg.copy();
         if (angleDeg != null) {
             c.profile.startAngleDeg = angleDeg;
-            c.profile.startAngleFeature = null; // BR-77: set without a measure, the recipe's offset from it is unknown
+            c.profile.startAngleFeature = feature; // null: set without a measure, the recipe's offset from it is unknown
         }
         c.profile.startAngleSetAtMs = System.currentTimeMillis();
         updateConfig(c);

@@ -2,6 +2,8 @@ package org.openpnp.instancelabs.dispense;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -97,6 +99,33 @@ public class StartAngleBlocksTest {
             assertFalse(i11.ok);
             assertTrue(i11.message.contains("I11: the screw motor was switched off") && i11.message.contains("measure the "
                     + "start angle again"), i11.message);
+        }
+    }
+
+    /** A set from a measure stores its feature, under BR-02's rules: evidence from before a switch-off is refused. */
+    @Test
+    public void aSetFromAMeasureStoresItsFeatureUnderBr02() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            long before = System.currentTimeMillis();
+            Thread.sleep(5);
+            svc.noteControllerLine("M18 B");
+            Thread.sleep(5);
+            svc.noteControllerLine("G1 B30 F600"); // the screw turned since
+            DispenseProfile.StartAngleFeature old = new DispenseProfile.StartAngleFeature("halves", 179.1, before,
+                    "pc-1");
+            EngineRefusal e = assertThrows(EngineRefusal.class, () -> svc.setStartAngle(359.1, "measure pc-1", before,
+                    old));
+            assertTrue(e.getMessage().contains("measure it again"), e.getMessage());
+            assertNull(svc.getConfig().profile.startAngleFeature);
+            Thread.sleep(5);
+            long now = System.currentTimeMillis();
+            DispenseProfile p = svc.setStartAngle(359.1, "measure pc-2", now, new DispenseProfile.StartAngleFeature(
+                    "halves", 179.1, now, "pc-2"));
+            assertEquals(359.1, p.startAngleDeg, 0);
+            assertEquals("pc-2", p.startAngleFeature.runId);
+            assertEquals(179.1, svc.getConfig().profile.startAngleFeature.deg, 0);
+            assertTrue(svc.getConfig().profile.startAngleSetAtMs >= now);
         }
     }
 }
