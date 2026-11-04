@@ -380,7 +380,9 @@ Pad types share their pad fields across setups and keep their dose plan per setu
 measured for a needle names the needle change it was taken after (`needleChangedAtMs`, the **needle token**:
 `status.dispense.needle.changedAtMs`, null when none is recorded); pad-type writes name the setup they were made for
 (`forSetup`), a profile patch too (`forTip`). The engine refuses a value of another needle or setup (409
-`needle-changed`, `tip-changed`, `pad-changed`), so a form opened before a mount can never save into the new tip.
+`needle-changed`, `tip-changed`, `pad-changed`), so a form opened before a mount can never save into the new tip. A
+`needle-changed` of an `/api/needle/*` route carries the needle token now (`needleChangedAtMs`): newer than a page's
+status when the change came after its last poll.
 
 | Method + path | Body / query | Does |
 |---|---|---|
