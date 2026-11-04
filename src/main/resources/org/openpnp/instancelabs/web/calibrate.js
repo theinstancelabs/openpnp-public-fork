@@ -704,9 +704,9 @@
       + ' · one profile dot each' + (IL.num('to-rot') ? ' (here ' + IL.fmt(IL.num('to-rot'), 2) + '°)' : '') + ' · ' + pitchLine(s, p.body.pitchMm) : 'Enter the gaps to see the dots.');
     const blockers = renderPrereqs($('to-pre'), prereqs(s, { machine: true, engine: true, frame: true, zmoved: true, place: true, surface: true, pressure: true }, place));
     const first = Object.values(p.errs).find(Boolean);
-    // the long refusals (the engine's pitch, the recipe's smallest ladder) stand at their fields: the line under the button points there
+    // the long refusals (the engine's pitch, too few steps) stand at their fields: the line under the button points there
     const own = (first && C.pitchErr && first === C.pitchErr.text ? 'The pitch is too small for these dots: see the Pitch field.'
-      : first && first === minStepsText(skipDots()) ? 'Too few steps for this tip’s recipe: see the Steps field.' : first) || (!place ? 'Choose the place.' : null);
+      : first && first === minStepsText(skipDots()) ? 'Too few steps: see the Steps field.' : first) || (!place ? 'Choose the place.' : null);
     IL.gate($('btn-to-run'), runReason(s, blockers, own), $('to-reason'));
     renderLive($('to-live'), s, 'needle touch-off', (run) => {
       const g = C.toReq && C.toReq.gaps;

@@ -56,7 +56,10 @@ async function stubRoutes(context) {
       if (ST.anchor === undefined) delete tip.doseAnchor; else tip.doseAnchor = ST.anchor;
       if (body.dispense) body.dispense.tip = tip;
       // BR-85: the dots the mounted tip's recipe leaves out after the prime, before the touch-off's reference pair
-      if (ST.skip !== undefined && body.dispense) body.dispense.profile = Object.assign({}, body.dispense.profile, { touchOffSkipDots: ST.skip });
+      if (ST.skip !== undefined && body.dispense) {
+        body.dispense.profile = Object.assign({}, body.dispense.profile, { touchOffSkipDots: ST.skip });
+        if (ST.skip === 'missing') delete body.dispense.profile.touchOffSkipDots;
+      }
       return route.fulfill({ response: resp, json: body });
     }
     if (url.pathname === '/api/calibrations' && req.method() === 'GET' && ST.touchOff) {
@@ -175,7 +178,7 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     ST.skip = 0;
     await unitIs('3 to 20');
     await page.waitForFunction(() => document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
-    check('(2b) the recipe now counts every dot: the typed 4 is no longer refused', (await stepsField()).err === '', await stepsField());
+    check('(2b) the recipe now counts every dot: the typed 4 stays and is no longer refused', (await stepsField()).err === '' && (await stepsField()).value === '4', await stepsField());
     ST.skip = 1;
     await unitIs('4 to 20');
     await page.fill('#to-steps', '3');
@@ -185,6 +188,26 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     await page.fill('#to-steps', '4');
     await page.waitForFunction(() => document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
     check('(2b) 4 steps pass', (await stepsField()).err === '', await stepsField());
+    // the field left, then the recipe changes: the typed 4 stays (now refused), it is not filled again
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    ST.skip = 5;   // its default (8) differs from the field's last one (6): a refill on a changed default would show here
+    await unitIs('8 to 20');
+    await page.waitForFunction(() => !document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    const kept = await stepsField();
+    check('(2b) a typed 4, the field left, the recipe now does not count 5: the 4 stays, refused (at least 8)', kept.value === '4' && /^At least 8:/.test(kept.err), kept);
+    // an engine without the field, or a null one: every dot counts (from 2, so the minimum visibly drops)
+    ST.skip = null;
+    await unitIs('3 to 20');
+    await page.waitForFunction(() => document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    const fNull = await stepsField();
+    check('(2b) touchOffSkipDots null: Steps "3 to 20", the typed 4 passes', fNull.min === '3' && fNull.value === '4' && fNull.err === '', fNull);
+    ST.skip = 2;
+    await unitIs('5 to 20');
+    ST.skip = 'missing';
+    await unitIs('3 to 20');
+    await page.waitForFunction(() => document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    const fMissing = await stepsField();
+    check('(2b) no touchOffSkipDots at all: Steps "3 to 20", the typed 4 passes', fMissing.min === '3' && fMissing.value === '4' && fMissing.err === '', fMissing);
     ST.skip = 0;
     await unitIs('3 to 20');
     await page.fill('#to-steps', '2');
@@ -192,9 +215,6 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     const f2 = await stepsField();
     check('(2b) every dot counted: Steps "3 to 20", and 2 is refused (the pair that sets the normal dot and one more)', f2.unit === '3 to 20' && f2.min === '3'
       && f2.err === 'At least 3: the first two dots after the prime set the normal dot size, and one more shows the contact.', f2);
-    ST.skip = null;   // an engine without the field (or a null one): every dot counts
-    await page.waitForFunction(() => document.getElementById('to-steps').getAttribute('min') === '3' && !document.getElementById('to-steps-err').hidden, null, { timeout: 8000 }).catch(() => null);
-    check('(2b) no touchOffSkipDots: Steps "3 to 20", 2 still refused', (await stepsField()).unit === '3 to 20' && /^At least 3:/.test((await stepsField()).err), await stepsField());
     await page.fill('#to-steps', '6');
     ST.skip = undefined;
 
