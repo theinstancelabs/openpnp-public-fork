@@ -30,6 +30,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const { chromium } = require(path.join(process.env.PLAYWRIGHT_DIR, 'node_modules', 'playwright'));
+const { setStartAngle } = require(path.join(__dirname, 'start-angle.cjs'));
 
 const BASE = String(process.env.IL_BASE || process.env.IL_API_URL || '').replace(/\/?$/, '/');
 const OUT = process.env.OUT_DIR || '/tmp/il-tip-setups-test-out';
@@ -250,7 +251,8 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
       await api(page, 'POST', '/api/needle/anchor', { surfaceZ: bzMid, needleContactRawSum: 65.59, note: 'tip-setups test: the 22G bent taper\'s K (SIM)', needleChangedAtMs: tok(nd) });
       await api(page, 'POST', '/api/needle/offset', { offsetMm: -2.59, note: 'tip-setups test (SIM)', needleChangedAtMs: tok(nd) });
     }
-    await api(page, 'POST', '/api/screw/start-angle', { note: 'tip-setups test (SIM)' });
+    // BR-02: after webui-sim's STOPs (M18 B) the angle is measured again, not confirmed: setStartAngle turns the screw first
+    await setStartAngle(page, BASE, 'tip-setups test (SIM)');
     await ticks(page);
     // the 22G mounted again by this set-up (an earlier run): where it lands, checked again (its bend: no Keep)
     await page.waitForFunction(() => IL.S.status.dispense.needle.anchored && IL.S.status.dispense.needle.touchedOff, null, { timeout: 15000 });
