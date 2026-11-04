@@ -334,6 +334,12 @@ so a crash is never restarted over a machine a person must check. It runs under 
 Before a bench session stops OpenPnP, write the Holder first, or keep-up starts it again within a minute: the UI comes
 back while you work (a second person could press Start), and the bench tool refuses on the serial lock.
 
+**BR-72's machine lock:** no deploy while `status.lock.holder` is set (an agent role, or the user, whose hold never
+expires: automatic deploys wait for Give back in the web UI); a lock field it cannot read counts as held. A lock
+taken during a health check (refusals `locked` or `taking-over`, or the machine kept on after the last STOP) is that
+person's session: no STOP, no rollback over it, the build stays installed unverified, with the hold. `health` by
+hand refuses while the lock is held.
+
 **The run marker** (`<root>/openpnp-run.json`): the unit's second ExecStartPre, `mark-start`, refuses a taken serial
 lock (java never starts then) and writes it with this boot's id; only `stop-openpnp` (the ExecStop) clears it, and only
 after a confirmed STOP, or when a live JVM is stopped before its API is up. OpenPnP down with the marker standing ran

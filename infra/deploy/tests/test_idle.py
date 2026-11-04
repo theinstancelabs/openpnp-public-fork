@@ -148,6 +148,14 @@ class Idle(unittest.TestCase):
                 self.start_fake(lock={"holder": holder, "takenFrom": None})
                 self.assertTrue(any(word in x for x in self.reasons()), self.reasons())
 
+    def test_a_lock_field_nobody_can_read_is_not_idle(self):
+        for value in ("held", [], {}, {"owner": "process"}):
+            with self.subTest(lock=value):
+                if self.fake:
+                    self.fake.shutdown()
+                self.start_fake(lock=value)
+                self.assertTrue(any("does not explain" in r for r in self.reasons()), self.reasons())
+
     def test_nobody_holding_the_lock_and_a_build_without_one_are_idle(self):
         self.start_fake(lock={"holder": None, "takenFrom": {"label": "Process", "by": "user"}})
         self.assertEqual(self.reasons(), [])

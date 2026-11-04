@@ -283,6 +283,8 @@ class FakeOpenPnP:
     def enable(self):
         if self.locked():
             return self.locked()
+        if "taking-over-enable" in self.fail:  # the web UI's Take control is under way (BR-72)
+            return 409, {"error": "taking-over", "reason": "The user is taking control: wait for it to finish."}
         if "enable" in self.fail:
             return 409, {"error": "refused", "reason": "could not start the machine: fake port not found"}
         with self.lock:
@@ -377,7 +379,10 @@ class FakeOpenPnP:
                     threading.Thread(target=end_run, daemon=True).start()
             if self.enabled and ("reset" in self.fail or self.booted):
                 self.quick_stopped = True  # the DISABLE_COMMAND's M410 at the boot position
-            if "stop" not in self.fail:
+            if "lock-at-stop" in self.fail:  # the user took the lock and switched the machine on again (BR-72)
+                self.machine["lock"] = {"holder": {"kind": "user", "who": "user", "label": "User",
+                                                   "what": "using the web UI"}, "takenFrom": None}
+            elif "stop" not in self.fail:
                 self.enabled = False
                 self.homed = False
                 # connection-keep-alive="true" (the lab machine.xml): a disable leaves the link open

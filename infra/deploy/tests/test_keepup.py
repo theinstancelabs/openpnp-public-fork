@@ -6,6 +6,7 @@ import http.server
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -261,6 +262,50 @@ class KeepUp(unittest.TestCase):
     def test_nothing_deployed_yet_keeps_it_stopped(self):
         os.unlink(os.path.join(self.lab.root, "current"))
         self.assertIn("nothing deployed yet", self.keep_up(3))
+
+
+    # --- review round 3 (11-03 18:45): pin what mutations left unpinned ---------------------------
+    def test_is_down_reads_a_failed_systemctl_as_unknown_not_down(self):
+        def runner(out, rc):
+            return lambda args, **kw: subprocess.CompletedProcess(args, rc, stdout=out, stderr="")
+        for out, rc, down in (("inactive\n", 0, True), ("failed\n", 0, True), ("active\n", 0, False),
+                              ("activating\n", 0, False), ("", 1, False)):
+            with self.subTest(out=out, rc=rc):
+                self.assertEqual(il_deploy.SystemdUserService("il-openpnp.service", runner=runner(out, rc)).is_down(),
+                                 down)
+
+    def test_one_exit_one_hold_when_the_marker_speaks_before_systemd(self):
+        self.marker()
+        svc = StubService(active=[False], exits=[None, {"id": "9@1", "detail": "il-openpnp.service failed (signal)"}])
+        d = il_deploy.Deployer(il_deploy.config_from_args(self.lab.argv("status")), self.lab.deps(service=svc))
+        self.assertTrue(d.check_openpnp_exit())  # the marker (systemd's 'failed' read only after it)
+        self.assertEqual(il_deploy.read_json(d.exit_seen_path)["id"], "9@1")  # noted: never a second hold for it
+        self.assertIsNone(d.check_openpnp_exit())
+
+    def test_a_hold_set_during_a_deploy_takes_the_marker_with_it(self):
+        """A deploy whose new build hits a machine problem: the hold carries it, so the marker left by its start must
+        not raise a second hold (resume works the first time)."""
+        d_sha = self.lab.gh.commit("d", self.lab.c)
+        self.lab.gh.head = d_sha
+        self.lab.gh.add_release(6, d_sha, jar={"sha": d_sha, "fail": ["home"]})
+        self.assertEqual(self.lab.main("poll"), 0, self.lab.last_out + self.lab.last_err)
+        self.lab.age_openpnp_log()
+        path = self.marker()  # as the unit's mark-start of the new build
+        self.assertEqual(self.lab.main("deploy"), 5, self.lab.last_out + self.lab.last_err)
+        self.assertFalse(self.lab.service().is_active())  # the previous build put back, not started
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(self.lab.main("resume"), 0, self.lab.last_out)
+
+
+    def test_the_health_check_by_hand_waits_for_the_lock_to_be_given_back(self):
+        """Its writes are anonymous: under someone's lock they would be refused (and read as the build's)."""
+        self.lab.machine(lock={"holder": {"kind": "user", "who": "user", "label": "User", "what": "using the web UI"},
+                               "takenFrom": None})
+        self.keep_up(0)
+        n = len(self.lab.requests())
+        self.assertEqual(self.lab.main("health", "--no-claim"), 2, self.lab.last_out + self.lab.last_err)
+        self.assertIn("give the machine back first", self.lab.last_out + self.lab.last_err)
+        self.assertEqual([r.get("path") for r in self.lab.requests()[n:] if r.get("method") == "POST"], [])
 
 
 class StubService:

@@ -658,14 +658,18 @@ def api_enabled_reasons(st):
     return []
 
 
-LOCK_REFUSALS = ("locked", "lock-lost", "no-lock")  # BR-72: someone else holds the machine lock
+LOCK_REFUSALS = ("locked", "taking-over", "lock-lost", "no-lock")  # BR-72: someone else has the machine lock
 
 
 def api_lock_reasons(st):
     """BR-72: someone holds the machine lock (an agent role or the user): they are working at it, also when it looks
     quiet. A build from before BR-72 has no lock field."""
-    lock = st.get("lock")
-    if not isinstance(lock, dict) or lock.get("holder") is None:
+    if "lock" not in st:
+        return []  # a build from before BR-72
+    lock = st["lock"]
+    if not isinstance(lock, dict) or "holder" not in lock:
+        return [f"OpenPnP reports a machine lock it does not explain ({json.dumps(lock)[:80]}): taken as held"]
+    if lock["holder"] is None:
         return []
     h = lock["holder"] if isinstance(lock["holder"], dict) else {}  # anything else: held by someone (fail closed)
     since = _ms(h.get("sinceMs"))
@@ -1794,8 +1798,9 @@ class Deployer:
             # and an exit of OpenPnP then was il_deploy's to handle, not a crash for the next command to hold on
             self._note_own(claimed_at)
             self._note_exit_seen()
-            if self.held and not self.svc.is_active():
+            if self.held and not self.svc.is_active() and os.path.exists(self.run_marker_path):
                 self._drop_run_marker()  # the hold carries what happened; no second hold for the same exit
+                self.record("run-marker-dropped", why="the hold set during the claim carries the exit")
             if self.held:
                 text = self.held_text(action, subject, note)
                 write_json(self.hold_path, dict(self.read_hold() or {}, holder=text, previous=prev))
@@ -2226,6 +2231,14 @@ class Deployer:
         finally:
             self._note_own(since)
 
+    def _lock_taken(self):
+        """Why someone else has BR-72's machine lock now (one status read), or None."""
+        try:
+            code, st = self.api.get("/api/status", timeout=10)
+        except ApiDown:
+            return None
+        return "; ".join(api_lock_reasons(st)) or None if code == 200 else None
+
     def _origins_check(self, server):
         """(ok, detail, kind): OpenPnP answers each --trusted-origin as the user's browser reaches it through `tailscale
         serve` (its Host and Origin, a POST), and every build still refuses a foreign Origin on its own Host (CSRF) and
@@ -2417,7 +2430,12 @@ class Deployer:
 
         ok, d = api_stop_and_wait(self.api, cfg.stop_timeout, cfg.poll_interval, self.clock)
         if not ok:
-            return gone("stop", d) if self._gone(watch_service) else fail("stop", d, stop=False)
+            if self._gone(watch_service):
+                return gone("stop", d)
+            taken = self._lock_taken()
+            if taken:  # the machine re-enabled under someone else's lock (BR-72): their session, left alone
+                return fail("stop", f"{d}; {taken}", "claim-lost", stop=False)
+            return fail("stop", d, stop=False)
         step("stop", d)
         rep.update(ok=True, finished_at=self.iso())
         return rep
@@ -3124,6 +3142,10 @@ class Deployer:
 
     def _health(self, sha7, no_claim):
         self.out = sys.stderr
+        taken = self._lock_taken() if self.svc.is_active() else None
+        if taken:
+            return self.refuse(f"{taken}: give the machine back first (Give back in the web UI, or the agent releases "
+                               "it), then run the health check")
         sha7 = sha7 or (self.build_info(self.current_tag()).get("sha") or "")[:7] or None
         if no_claim:
             try:

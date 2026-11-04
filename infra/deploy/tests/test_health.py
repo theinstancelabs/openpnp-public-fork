@@ -537,6 +537,21 @@ class HealthLock(HealthLab, unittest.TestCase):
         self.assertTrue(rep["failure"].startswith("home: someone took the machine lock"), rep["failure"])
         self.assertNotIn(("POST", "/api/stop"), self.posts())
 
+    def test_taking_over_is_a_lock_refusal_too(self):
+        """An anonymous caller hears 'locked' or, while the web UI's Take control runs, 'taking-over'."""
+        self.start(jar_fail=["taking-over-enable"])
+        rep = self.check()
+        self.assertEqual(rep["kind"], "claim-lost", rep)
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_a_holder_who_keeps_the_machine_on_after_the_last_stop_is_theirs(self):
+        self.start(jar_fail=["lock-at-stop"])
+        rep = self.check("--stop-timeout", "2")
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "claim-lost")  # never the bad list for someone else's session
+        self.assertTrue(rep["failure"].startswith("stop: "), rep["failure"])
+        self.assertIn("User holds the machine lock", rep["failure"])
+
     def test_a_refused_enable_that_is_not_the_lock_stays_the_builds(self):
         self.start(jar_fail=["enable"])
         rep = self.check()
