@@ -282,6 +282,38 @@ public class DispenseServiceSimTest {
         assertTrue(phases.contains("dispensing"));
     }
 
+    /** The journal's arms of the host watchdog (BR-02). */
+    int watchdogArms() throws Exception {
+        return svc.getDb().query("SELECT * FROM events WHERE code = ?", ControllerReset.EVENT_WATCHDOG_ARMED).size();
+    }
+
+    /**
+     * #11 re-review (11-04): a stream's arm of the host watchdog is on record while the stream runs (the journal thread
+     * writes it): nothing stops the engine when OpenPnP exits, so an arm kept in memory would die with it, and the trip
+     * the firmware reports after it would be taken for the one before the arm.
+     */
+    @Test
+    public void aStreamsArmIsOnRecordWhileTheStreamRuns() throws Exception {
+        svc.getControllerReset().watchdogTripped("a trip reported at the connect", true); // an arm ends it
+        java.util.concurrent.CountDownLatch pump = new java.util.concurrent.CountDownLatch(1);
+        sim.server.holdOkUntil.put(ControllerCommands.PUMP_ON, pump); // the stream waits there, after its arm
+        Future<RunResult> shots = svc.runShots("waste", 360, 1, true);
+        try {
+            long t0 = System.currentTimeMillis();
+            while (watchdogArms() == 0 && System.currentTimeMillis() - t0 < 5000) {
+                Thread.sleep(20);
+            }
+            assertEquals(1, watchdogArms(), "on record while the stream waits at its pump");
+            assertFalse(shots.isDone());
+        }
+        finally {
+            pump.countDown();
+        }
+        RunResult r = shots.get(60, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);
+        assertTrue(r.keepaliveActive, r.toString());
+    }
+
     /** I10: a pad that still carries paste refuses the run before the pressure goes on. */
     @Test
     public void dirtyPadRefusesBeforeAnythingIsStreamed() throws Exception {

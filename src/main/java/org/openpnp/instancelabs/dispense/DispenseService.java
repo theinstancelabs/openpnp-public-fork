@@ -150,7 +150,10 @@ public final class DispenseService {
     private final ControllerReset controllerReset;
     /** BR-02: guards {@link #connection} and {@link #connectHandled} ({@link #claimConnect}). */
     private final Object connectLock = new Object();
-    /** BR-02: the current connection's number (the Stops and failed Starts seen), and the one whose connect was read. */
+    /**
+     * BR-02: the current connection's number (the Starts, Stops and failed Starts seen), and the one whose connect was
+     * read.
+     */
     private long connection, connectHandled = -1;
     /**
      * BR-02: the screw driver's DISABLE_COMMANDs and OpenPnP moves seen so far
@@ -310,6 +313,10 @@ public final class DispenseService {
             try {
                 instance.shutdown();
             }
+            catch (Throwable t) {
+                startError = t.toString(); // "failed", not "starting" (the web Start and Home refuse while it starts)
+                throw t;
+            }
             finally {
                 instance = null;
             }
@@ -403,6 +410,9 @@ public final class DispenseService {
                 public void machineEnabled(Machine m) {
                     bZeroed.set(false);
                     passthroughAt.clear(); // BR-02: OpenPnP read where the axes are
+                    // BR-02: every Start is a new connection, also one before this engine heard the Stop (OpenPnP's own
+                    // Stop may run its last machineDisabled listeners after the next Start)
+                    connectionEnded();
                     if (claimConnect(m) >= 0) {
                         readPositionAtConnect(m, false);
                     }
@@ -455,34 +465,40 @@ public final class DispenseService {
         }
     }
 
+    /** Stops the engine; its database is closed also when a step before that throws. */
     public synchronized void shutdown() {
-        abort("service shutdown");
-        GcodeDriver watched = watchedDriver;
-        if (watched != null && watched.getReceivedLineWatcher() == tripWatcher) {
-            watched.setReceivedLineWatcher(null);
-        }
-        journalWriter.shutdown(); // a write handed on goes on record before the database closes
         try {
-            journalWriter.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
+            hook("shutdown");
+            abort("service shutdown");
+            GcodeDriver watched = watchedDriver;
+            if (watched != null && watched.getReceivedLineWatcher() == tripWatcher) {
+                watched.setReceivedLineWatcher(null);
+            }
+            journalWriter.shutdown(); // a write handed on goes on record before the database closes
+            try {
+                journalWriter.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            Machine machine = configuration.getMachine();
+            if (machine != null && machineListener != null) {
+                machine.removeListener(machineListener);
+                machine.removeListener(homeTracker);
+            }
+            if (machine != null && identityListener != null) {
+                machine.removeListener(identityListener);
+                SimGuard.askAtConnect(machine, null);
+            }
+            controllerReset.flush(); // BR-02: what is only in memory yet (a stream's arm) goes on record
         }
-        catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        Machine machine = configuration.getMachine();
-        if (machine != null && machineListener != null) {
-            machine.removeListener(machineListener);
-            machine.removeListener(homeTracker);
-        }
-        if (machine != null && identityListener != null) {
-            machine.removeListener(identityListener);
-            SimGuard.askAtConnect(machine, null);
-        }
-        controllerReset.flush(); // BR-02: what is only in memory yet (a stream's arm) goes on record
-        try {
-            db.close();
-        }
-        catch (SQLException e) {
-            Logger.warn(e);
+        finally {
+            try {
+                db.close();
+            }
+            catch (SQLException e) {
+                Logger.warn(e);
+            }
         }
     }
 
@@ -554,7 +570,7 @@ public final class DispenseService {
         }
     }
 
-    /** BR-02: a Stop (or a failed Start) ended the connection: the next Start is another one. */
+    /** BR-02: a Start, a Stop or a failed Start ended the connection: a claim made before it is of another one. */
     private void connectionEnded() {
         synchronized (connectLock) {
             connection++;

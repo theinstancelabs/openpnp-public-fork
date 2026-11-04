@@ -680,6 +680,10 @@ public class ControllerResetTest {
         run(false, false).connected(null, 'B', "timeout"); // unread, then OpenPnP restarted before the home
         now = 10000;
         assertTrue(run(false, false).homed(), "an unread connect read back");
+        now = 11000;
+        ControllerReset caughtUp = run(false, false);
+        caughtUp.startedUnhomed(); // a connect made before the engine's start: its read may never come (#11 re-review)
+        assertTrue(caughtUp.homed(), "a connect not read yet");
     }
 
     @Test

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -13,15 +14,21 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.ControllerReset;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
+import org.openpnp.spi.Machine;
+import org.openpnp.spi.MachineListener;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -115,10 +122,19 @@ public class PowerCycleSimTest {
      * "catch-up" right after they do.
      */
     void startOpenPnpWithStartPressedAt(String point) throws Exception {
+        startEngineWith(point, () -> {
+            sim.machine.setEnabled(true);
+            return null;
+        });
+        assertTrue(sim.machine.isEnabled(), "Start was pressed at " + point);
+    }
+
+    /** The engine starts afresh, and at its start's {@code point} OpenPnP does {@code what} (its Start, its Home). */
+    void startEngineWith(String point, Callable<?> what) throws Exception {
         TipSim.hook(p -> {
             if (point.equals(p)) {
                 try {
-                    sim.machine.setEnabled(true);
+                    what.call();
                 }
                 catch (Exception e) {
                     throw new IllegalStateException(e);
@@ -131,7 +147,6 @@ public class PowerCycleSimTest {
         finally {
             TipSim.hook(null);
         }
-        assertTrue(sim.machine.isEnabled(), "Start was pressed at " + point);
     }
 
     /** The journal's events of one code. */
@@ -876,9 +891,11 @@ public class PowerCycleSimTest {
     }
 
     /**
-     * #11 review (11-04): the pressure hold's arm of the host watchdog is on record at once, and an engine that stops
-     * writes one its stream left in memory: OpenPnP may die right after an arm, the keepalive stops and the firmware
-     * trips again, and the trip reported at the next connect is a new switch-off, not the one before the arm.
+     * #11 review (11-04): the pressure hold's arm of the host watchdog is on record at once: OpenPnP may die right
+     * after an arm, the keepalive stops and the firmware trips again, and the trip reported at the next connect is a
+     * new switch-off, not the one before the arm. An engine restarted inside OpenPnP writes an arm still in memory as
+     * it stops; nothing stops it when OpenPnP exits, so a stream's arm is written while the stream runs
+     * (DispenseServiceSimTest.aStreamsArmIsOnRecordWhileTheStreamRuns).
      */
     @Test
     public void anArmIsOnRecordSoATripReportedAfterARestartIsNew() throws Exception {
@@ -894,7 +911,7 @@ public class PowerCycleSimTest {
         restartOpenPnp(); // OpenPnP died with the watchdog armed: it tripped again
         assertEquals(2, motorOffs().size(), "a trip reported after the arm is a new one");
         Thread.sleep(5);
-        svc.getControllerReset().watchdogArmed(); // a stream's arm, until the journal thread writes it
+        svc.getControllerReset().watchdogArmed(); // an arm in memory (a stream's, before the journal thread writes it)
         restartOpenPnp();
         assertEquals(3, motorOffs().size(), "the engine wrote the arm when it stopped");
     }
@@ -946,5 +963,174 @@ public class PowerCycleSimTest {
         JsonObject f = ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,"
                 + "\"needleContactZ\":1.41}");
         assertTrue(f.get("question").isJsonNull(), f.toString());
+    }
+
+    /** The engine's connection number (private): it moves on once the engine has heard a Stop. */
+    long connection() throws Exception {
+        java.lang.reflect.Field f = DispenseService.class.getDeclaredField("connection");
+        f.setAccessible(true);
+        return f.getLong(svc);
+    }
+
+    /**
+     * #11 re-review (11-04) MAJOR: OpenPnP fires its listeners from a set, its own Stop on its own thread, so the next
+     * Start can come before the engine has heard the Stop. That Start is a new connection all the same: its M114 is
+     * read, and after a power cycle the home waits for the operator's word, with no Z move on the boot belief.
+     */
+    @Test
+    public void aStartBeforeTheEngineHeardTheStopIsANewConnection() throws Exception {
+        for (int attempt = 0; attempt < 400; attempt++) {
+            if (attempt > 0 && attempt % 20 == 0) {
+                restartOpenPnp(); // the engine's listener at another place in the set
+                sim.machine.home();
+            }
+            long before = connection();
+            boolean[] raced = {false};
+            MachineListener racer = new MachineListener.Adapter() {
+                @Override
+                public void machineDisabled(Machine m, String reason) {
+                    try {
+                        if (!raced[0] && connection() == before) { // the engine's machineDisabled is still to come
+                            raced[0] = true;
+                            sim.server.powerCycle();
+                            m.setEnabled(true); // Start, inside the Stop's listener loop
+                        }
+                    }
+                    catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                }
+            };
+            sim.machine.addListener(racer); // a new object: another place in the set
+            try {
+                sim.machine.setEnabled(false);
+            }
+            finally {
+                sim.machine.removeListener(racer);
+            }
+            if (raced[0]) {
+                assertTrue(sim.machine.isEnabled());
+                JsonObject m = ok("GET", "/api/machine", null);
+                assertFalse(m.get("positionKnown").getAsBoolean(), "its M114 was read: " + m);
+                assertTrue(m.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), m.toString());
+                sim.server.mark();
+                call("POST", "/api/machine/home", "{\"wait\":true}");
+                assertEquals(409, lastStatus, lastBody);
+                assertEquals(new ArrayList<String>(), motionAndOutputs(), "no Z move on the boot belief before G28");
+                return;
+            }
+            sim.enableAndHome();
+        }
+        fail("no Start came before the engine heard the Stop in 400 tries");
+    }
+
+    /**
+     * OpenPnP, stopped while the controller was power-cycled, starts again: Start is pressed before the engine's
+     * listeners exist, and a task of OpenPnP's holds the machine thread until {@code busy} opens, with {@code queued}
+     * (null: nothing) behind it, ahead of the engine's read. The engine's start waits its command timeout for that
+     * read.
+     */
+    void startEngineWithTheMachineThreadBusy(CountDownLatch busy, Callable<Object> queued) throws Exception {
+        DispenseConfig c = svc.getConfig();
+        c.commandTimeoutMs = 1500;
+        svc.updateConfig(c);
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        startEngineWith("listeners", () -> {
+            sim.machine.setEnabled(true);
+            sim.machine.submit(() -> busy.await(30, TimeUnit.SECONDS));
+            return queued == null ? null : sim.machine.submit(queued);
+        });
+    }
+
+    /**
+     * #11 re-review (11-04): the engine's start ends without the catch-up's read when a task holds the machine thread:
+     * the position counts as unknown meanwhile, and the read, once the thread is free, finds the power cycle.
+     */
+    @Test
+    public void aCatchUpsReadHeldBehindABusyMachineThreadStillFindsTheReset() throws Exception {
+        CountDownLatch busy = new CountDownLatch(1);
+        try {
+            startEngineWithTheMachineThreadBusy(busy, null);
+            ControllerReset cr = svc.getControllerReset();
+            assertFalse(cr.isPositionKnown(), "unknown while the read waits");
+            assertTrue(cr.unknownWhy().contains("its position was never checked"), cr.unknownWhy());
+        }
+        finally {
+            busy.countDown();
+        }
+        sim.machine.submit(() -> null).get(30, TimeUnit.SECONDS); // the read has run
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.get("positionKnown").getAsBoolean(), m.toString());
+        assertTrue(m.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), "read once the thread ran: " + m);
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
+    }
+
+    /**
+     * #11 re-review (11-04): OpenPnP's own Home queued ahead of the catch-up's read makes the read skip (the machine is
+     * homed by then): that home followed a connect never read, maybe a power cycle, so it moved the Z frame.
+     */
+    @Test
+    public void aHomeQueuedAheadOfTheCatchUpsReadMovesTheZFrame() throws Exception {
+        CountDownLatch busy = new CountDownLatch(1);
+        try {
+            startEngineWithTheMachineThreadBusy(busy, () -> {
+                sim.machine.home();
+                return null;
+            });
+            assertFalse(svc.getControllerReset().isPositionKnown(), "unknown while the read waits");
+        }
+        finally {
+            busy.countDown();
+        }
+        sim.machine.submit(() -> null).get(30, TimeUnit.SECONDS); // the home, then the read, have run
+        assertTrue(svc.getControllerReset().isPositionKnown(), "homed");
+        assertNotNull(svc.getConfig().zFrameMovedAtMs, "the home after a connect never read moved the Z frame");
+    }
+
+    /**
+     * #11 re-review (11-04): a reset seen before OpenPnP quit, then OpenPnP's Start and Home both before the engine
+     * started again: that home followed the reset, so the engine's start stamps the Z frame it moved.
+     */
+    @Test
+    public void aResetHomedBeforeTheEngineStartedMovesTheZFrameAtItsStart() throws Exception {
+        powerCycle();
+        sim.machine.setEnabled(false); // OpenPnP quits before the home
+        startEngineWith("listeners", () -> {
+            sim.machine.setEnabled(true);
+            sim.machine.home();
+            return null;
+        });
+        assertTrue(svc.getControllerReset().isPositionKnown(), "homed after the reset");
+        assertNotNull(svc.getConfig().zFrameMovedAtMs, "the home after the reset moved the Z frame");
+    }
+
+    /**
+     * #11 re-review (11-04): a restart whose old engine fails to stop reads "failed" with the reason, not "starting"
+     * (the web Start and Home refuse while the engine starts), and the old engine's database is closed all the same.
+     */
+    @Test
+    public void aRestartWhoseOldEngineFailsToStopReadsFailed() throws Exception {
+        DispenseService old = svc;
+        TipSim.hook(p -> {
+            if ("shutdown".equals(p)) {
+                throw new IllegalStateException("the old engine did not stop");
+            }
+        });
+        try {
+            assertThrows(IllegalStateException.class, () -> DispenseService.start(Configuration.get()));
+        }
+        finally {
+            TipSim.hook(null);
+        }
+        assertEquals("failed", ok("GET", "/api/status", null).getAsJsonObject("dispense").get("state").getAsString());
+        assertTrue(DispenseService.startError().contains("the old engine did not stop"), DispenseService.startError());
+        assertThrows(java.sql.SQLException.class, () -> old.getDb().query("SELECT 1"), "its database is closed");
+        old.shutdown(); // the rest of its stop: its listeners
+        svc = DispenseService.start(Configuration.get());
+        assertEquals("running", DispenseService.startState());
     }
 }

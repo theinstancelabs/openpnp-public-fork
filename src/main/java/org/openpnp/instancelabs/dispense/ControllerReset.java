@@ -146,7 +146,10 @@ public final class ControllerReset {
     private Long journaledMoveMs;
     /** A host watchdog trip on record that no arm or reset has ended since (its M990 still reports it), or null. */
     private Long watchdogTripAtMs;
-    /** A detected reset (or an unread connect: maybe one) no home has followed yet: the next home moves the Z frame. */
+    /**
+     * A detected reset (or an unread connect, or one not read yet: maybe one) no home has followed yet: the next home
+     * moves the Z frame.
+     */
     private boolean resetUnhomed;
     /** When the last home after a detected reset moved the Z frame, or null. */
     private Long frameMovedAtMs;
@@ -243,10 +246,12 @@ public final class ControllerReset {
     }
 
     /**
-     * The machine was started, and not homed, before the engine saw the connect: the position is unknown until a home.
-     * In memory only: the engine reads the controller next ({@link #connected}).
+     * The machine was started, and not homed, before the engine saw the connect: the position is unknown until a home,
+     * and that home moves the Z frame, as after an unread connect (a home queued first leaves the read undone). In
+     * memory only: the engine reads the controller next ({@link #connected}).
      */
     public synchronized void startedUnhomed() {
+        resetUnhomed = true;
         if (positionKnown) {
             positionKnown = false;
             unknownWhy = "the machine was started but not homed when the engine started: its position was never "
