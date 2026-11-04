@@ -36,6 +36,8 @@ Behaviour comes from two places:
   default 1), "pressure_initial_event" (the pressure hold's first lastEvent, default "pressure off"), "run_homing"
   (machine.homing during the engine run: OpenPnP's home runs; default: the run's phase starts with "home", but the
   engine's home phase raises N1 before OpenPnP's home starts: false there)}.
+"journal" (true: as #12's engine, a home journals POSITION_KNOWN and a STOP SCREW_MOTOR_OFF in the config's
+instancelabs/dispense.db events table, run_uuid NULL, when that is a SQLite database).
 Failures (either list): version (wrong sha7 in server.version), crash (exit 1 at start), enable,
 reset (axes X/Y/Z 0 and B 720 after enable), no-sn (no serial log line), home, home-timeout (OpenPnP's G28 timed out:
 GcodeDriver sends it with its "infinity" timeout, 60 s in the lab machine.xml; the home's task ends and the API answers
@@ -345,6 +347,7 @@ class FakeOpenPnP:
                 else:
                     self.homed, self.booted = True, False
                     self.home_at_ms = int(time.time() * 1000)  # HomeTracker.machineHomed(true)
+                    self.journal("POSITION_KNOWN", "the controller's position is known: homed")
 
         t = threading.Thread(target=work, daemon=True)
         t.start()
@@ -358,7 +361,22 @@ class FakeOpenPnP:
             return 409, {"error": "refused", "reason": result["error"]}
         return 200, {"homed": True, "n1RaisedFromZ": None}
 
+    def journal(self, code, message):
+        """BR-02's journal (#12: ControllerReset.EVENT_* rows through DispenseDb.insertEvent, run_uuid NULL)."""
+        path = os.path.join(self.config, "instancelabs", "dispense.db")
+        if not self.jar.get("journal") or not os.path.exists(path):
+            return
+        import sqlite3
+        c = sqlite3.connect(path, timeout=5)
+        try:
+            c.execute("INSERT INTO events(ts, run_uuid, level, code, message) VALUES (?, NULL, 'INFO', ?, ?)",
+                      (int(time.time() * 1000), code, message))
+            c.commit()
+        finally:
+            c.close()
+
     def stop(self):
+        self.journal("SCREW_MOTOR_OFF", "the screw's motor was switched off: M18 B")
         with self.lock:
             if (self.homing or time.time() < self.g28_until or self.run_homing()
                     or (self.run_active and self.run_phase().startswith("home"))):

@@ -63,6 +63,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -71,6 +72,7 @@ import tempfile
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import namedtuple
@@ -1341,16 +1343,122 @@ def stop_sequence(api, wait_s, stop_timeout, poll, clock):
         clock.sleep(poll)
 
 
-def config_manifest(config_dir):
-    """{path relative to config_dir: sha256}, to spot config changes since a deploy. Skipped: log/ and SQLite
-    -shm files (an index that changes on reads; the db and its -wal hold the data)."""
+# The engine's database (DispenseDb) and the BR-02 journal it keeps in its events table (#12: ControllerReset.EVENT_*,
+# run_uuid NULL): every connect, home and STOP adds rows, so every health check does. Routine ones, written while the
+# deployer held the machine, are no config change; a reset's (CONTROLLER_RESET, POSITION_UNREAD, Z_FRAME_MOVED) and a
+# watchdog trip always are (a rollback's old database would lose them).
+ENGINE_DB = os.path.join("instancelabs", "dispense.db")
+ROUTINE_JOURNAL = ("SCREW_MOTOR_OFF", "SCREW_MOTION", "SCREW_COUNT_EPOCH", "HOST_WATCHDOG_ARMED", "POSITION_KNOWN",
+                   "RESET_JOURNAL")
+JOURNAL_SETTLE_S, JOURNAL_SETTLE_MAX_S = 1.0, 5.0  # the engine writes its journal on a thread, a moment later
+
+
+def _engine_db(config_dir):
+    """A consistent in-memory copy of the engine's database (read-only; its WAL included; OpenPnP may hold it open),
+    or None: no database, or not one SQLite reads."""
+    path = os.path.join(config_dir, ENGINE_DB)
+    if not os.path.isfile(path):
+        return None
+    try:
+        src = sqlite3.connect(f"file:{urllib.parse.quote(os.path.abspath(path))}?mode=ro", uri=True, timeout=5)
+        try:
+            mem = sqlite3.connect(":memory:")
+            src.backup(mem)
+        finally:
+            src.close()
+        mem.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        return mem
+    except sqlite3.Error:
+        return None
+
+
+def engine_db_newest_event(config_dir):
+    """The newest id in the engine database's events table (insert order), 0 if empty; None: no such table."""
+    db = _engine_db(config_dir)
+    if db is None:
+        return None
+    try:
+        return db.execute("SELECT coalesce(max(id), 0) FROM events").fetchone()[0]
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+
+
+def _engine_db_tables(config_dir, journal):
+    """{ENGINE_DB#table: sha256 of its schema and rows}, or None (as _engine_db). journal=(after_id, ranges) leaves out
+    the events rows of the routine BR-02 journal newer than after_id and inside a range (lo, hi] of events ids: what
+    the engine wrote while the deployer held the machine (claim_ranges). sqlite_sequence is left out: AUTOINCREMENT's
+    counter, which those rows move too (any other insert shows in its own table)."""
+    db = _engine_db(config_dir)
+    if db is None:
+        return None
     out = {}
+    try:
+        for name, sql in db.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name != "
+                                    "'sqlite_sequence' ORDER BY name").fetchall():
+            h = hashlib.sha256((sql or "").encode())
+            cur = db.execute(f'SELECT * FROM "{name}" ORDER BY rowid')
+            cols = [c[0] for c in cur.description]
+            for row in cur:
+                if name == "events" and journal and journal[0] is not None and _deployers_journal(
+                        dict(zip(cols, row)), *journal):
+                    continue
+                h.update(repr(row).encode())
+            out[f"{ENGINE_DB}#{name}"] = h.hexdigest()
+    except sqlite3.Error:
+        return None
+    finally:
+        db.close()
+    return out
+
+
+def _deployers_journal(r, after_id, ranges):
+    i = r.get("id")
+    return (r.get("code") in ROUTINE_JOURNAL and r.get("run_uuid") is None and isinstance(i, int) and i > after_id
+            and any(lo < i <= hi for lo, hi in ranges))
+
+
+def claim_ranges(journal_path):
+    """[(lo, hi)]: the engine's events ids written while the deployer held the machine, from deploy.jsonl's claim and
+    release records (the newest events id at each; a claim before there was a database counts from 0). A claim never
+    released (a hard kill) gives none."""
+    out, lo = [], None
+    try:
+        with open(journal_path) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("event") == "claim":
+                    lo = r.get("events_id") or 0
+                elif r.get("event") == "release" and lo is not None:
+                    if isinstance(r.get("events_id"), int):
+                        out.append((lo, r["events_id"]))
+                    lo = None
+    except OSError:
+        pass
+    return out
+
+
+def config_manifest(config_dir, journal=None, rows=True):
+    """{path relative to config_dir: sha256}, to spot config changes since a deploy. Skipped: log/ and SQLite
+    -shm files (an index that changes on reads; the db and its -wal hold the data). The engine's database is compared
+    by its rows, one entry per table (_engine_db_tables, with `journal`), when SQLite reads it and `rows`; else by
+    the bytes of the db and its -wal (a baseline kept that way, before 11-04)."""
+    out = {}
+    tables = _engine_db_tables(config_dir, journal) if rows else None
+    if tables is not None:
+        out.update(tables)
     for d, dirs, files in os.walk(config_dir):
         rel = os.path.relpath(d, config_dir)
         if rel == ".":
             dirs[:] = [x for x in dirs if x != "log"]
         for n in files:
             if n.endswith("-shm"):
+                continue
+            if tables is not None and os.path.normpath(os.path.join(rel, n)) in (ENGINE_DB, ENGINE_DB + "-wal"):
                 continue
             try:
                 out[os.path.normpath(os.path.join(rel, n))] = sha256_file(os.path.join(d, n))
@@ -1780,7 +1888,7 @@ class Deployer:
         rc, note = 1, None
         try:
             _defer_term(False)  # a SIGTERM during the claim is raised here, inside the try
-            self.record("claim", holder=claim, previous=prev)
+            self.record("claim", holder=claim, previous=prev, events_id=engine_db_newest_event(self.config))
             reasons = self.idle_reasons(our_claim=claim, scope=scope)
             if reasons:
                 handed = self._hand_back(action, claim, prev, prev)
@@ -2008,18 +2116,30 @@ class Deployer:
             self.state_line(f"{self.describe(cur)} since {rec.get('since', '?')}, deployed by Infra (il_deploy.py)"
                             + (f"; previous {prev}" if prev else "") + f". Config state: {self.config}.")
 
+    def _settled_events_id(self):
+        """The newest events id once the engine's journal writer has been quiet JOURNAL_SETTLE_S (at most
+        JOURNAL_SETTLE_MAX_S): what it wrote for this claim's last actions counts as the claim's."""
+        last, quiet, waited = engine_db_newest_event(self.config), 0.0, 0.0
+        while last is not None and quiet < JOURNAL_SETTLE_S and waited < JOURNAL_SETTLE_MAX_S:
+            self.clock.sleep(0.25)
+            waited += 0.25
+            now = engine_db_newest_event(self.config)
+            quiet = 0.0 if now != last else quiet + 0.25
+            last = now
+        return last
+
     def _hand_back(self, action, claim, text, prev):
         """Swap our claim for text. True, False (someone else's Holder now), or None: it could not be written,
         which is said on stderr and sets the hold."""
         try:
             ok = release_holder(self.cfg.state_md, claim, text)
-            self.record("release", ok=ok, holder=text)
+            self.record("release", ok=ok, holder=text, events_id=self._settled_events_id())
             return ok
         except (StateFileConflict, OSError) as e:
             msg = (f"could not hand the Holder back in {self.cfg.state_md} ({e}): it still says '{claim}'; "
                    "a person must set it")
             print(f"{action}: {msg}", file=sys.stderr, flush=True)
-            self.record("release", ok=False, error=str(e), holder=text)
+            self.record("release", ok=False, error=str(e), holder=text, events_id=self._settled_events_id())
             self.set_hold(msg)
             write_json(self.hold_path, dict(self.read_hold() or {}, holder=claim, previous=prev))
             return None
@@ -2789,7 +2909,8 @@ class Deployer:
         """The current build passed its health check: drop 'pending' (and 'unchecked') and keep the config's
         manifest, the baseline a later rollback compares with."""
         rec = _settled(rec)
-        rec.update(deployed_at=self.iso(), since=self.stamp(), post_manifest=config_manifest(self.config))
+        rec.update(deployed_at=self.iso(), since=self.stamp(), post_manifest=config_manifest(self.config),
+                   post_events_id=engine_db_newest_event(self.config))
         write_json(self.deployed_path, dict(self.read_deployed() or {}, current=rec))
 
     def _start_unchecked(self):
@@ -2902,7 +3023,11 @@ class Deployer:
         if not snap or not os.path.isdir(os.path.join(self.cfg.root, snap)):
             return self.refuse(f"the pre-deploy snapshot of {cur} ({snap}) is missing")
         base = rec.get("post_manifest")
-        changes = None if base is None else manifest_changes(base, config_manifest(self.config))
+        # the engine's routine journal written while this deployer held the machine is no change (#12); a baseline
+        # kept by bytes is compared by bytes
+        rows = base is not None and not ({ENGINE_DB, ENGINE_DB + "-wal"} & set(base))
+        journal = (rec.get("post_events_id"), claim_ranges(self.journal)) if rows else None
+        changes = None if base is None else manifest_changes(base, config_manifest(self.config, journal, rows))
         if changes != [] and not discard:
             why = (f"{cur} never passed its health check, so nothing shows what changed in {self.config} since it "
                    f"was installed ({rec.get('switched_at')})" if changes is None else
