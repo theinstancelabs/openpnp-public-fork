@@ -384,7 +384,7 @@
     const timer = setTimeout(() => ctl.abort(), 60000);
     let r, text;
     try {
-      r = await fetch('/api/photos?' + q.toString(), { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob, signal: ctl.signal, cache: 'no-store' });
+      r = await fetch('/api/photos?' + q.toString(), { method: 'POST', headers: Object.assign({ 'Content-Type': 'image/jpeg' }, IL.CLIENT_HEADER), body: blob, signal: ctl.signal, cache: 'no-store' });
       text = await r.text();
     } catch (e) {
       throw new IL.ApiError(0, { error: ctl.signal.aborted ? 'timeout' : 'network' }, 'OpenPnP did not answer the upload.');

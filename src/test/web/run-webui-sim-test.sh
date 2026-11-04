@@ -75,3 +75,5 @@ node "$HERE/board-import.playwright.cjs"
 # missing paste profiles and the pad calibration (PROFILE_CALIBRATION_DESIGN.md §14.4): moves the SIM, ≈ 6 min
 SHOTS_DIR="${PP_SHOTS_DIR:-$OUT_DIR/pad-profile-shots}" node "$HERE/pad-profile.playwright.cjs"
 SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.playwright.cjs"
+# who has the machine and Take control (P0, BR-72): last, it presses STOP on the SIM
+node "$HERE/lock.playwright.cjs"
