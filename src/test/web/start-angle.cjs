@@ -26,6 +26,8 @@ async function setStartAngle(page, base, note) {
   // Where B is: OpenPnP's B axis in the status (OpenPnP's driver takes M114's position line as its own report, so the
   // passthrough's M114 has no reply lines, 11-04), else the reply of a controller that prints it
   const st = await call(page, base, 'GET', '/api/status');
+  // the screw turns only on a simulator: never a G-code line to a real machine from a test's set-up (Backend, 11-04)
+  if (!(st.data && st.data.server && st.data.server.simulated === true)) throw new Error('start angle: not a simulator (status.server.simulated is not true): the screw was not turned');
   const ax = ((st.data && st.data.machine && st.data.machine.axes) || []).find((a) => a.letter === 'B');
   let b = ax ? Number(ax.driverCoordinate) : NaN;
   if (!Number.isFinite(b)) {
