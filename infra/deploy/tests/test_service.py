@@ -110,7 +110,8 @@ class Subprocess(unittest.TestCase):
         other.stop()
         self.assertEqual(stopped, [2])
         self.assertFalse(s.is_active())
-        self.assertFalse(os.path.exists(f"/proc/{pid}") and open(f"/proc/{pid}/stat").read().split()[2] != "Z")
+        st = il_deploy._proc_stat(pid)  # one reading: gone, a zombie, or dead (X) while it is reaped
+        self.assertTrue(st is None or st[0] in ("Z", "X"), st)
 
     def test_children_are_service_pids(self):
         s = self.make(["/bin/sh", "-c", "sleep 30 & wait"])
@@ -162,7 +163,10 @@ class Subprocess(unittest.TestCase):
         self.assertTrue(children)
         os.kill(leader, signal.SIGKILL)  # flock gone, java still running: OpenPnP is still up
         deadline = time.time() + 5
-        while time.time() < deadline and il_deploy._proc_stat(leader) and il_deploy._proc_stat(leader)[0] != "Z":
+        while time.time() < deadline:
+            st = il_deploy._proc_stat(leader)  # one reading per pass: it may be reaped between two
+            if st is None or st[0] in ("Z", "X"):
+                break
             time.sleep(0.02)
         self.assertTrue(s.is_active())
         self.assertTrue(children <= s.pids(), (children, s.pids()))
@@ -184,7 +188,10 @@ class Subprocess(unittest.TestCase):
         s.start()
         leader = il_deploy.read_json(s.pidfile)["pid"]
         deadline = time.time() + 10
-        while time.time() < deadline and not (os.path.exists(ready) and il_deploy._proc_stat(leader)[0] == "Z"):
+        while time.time() < deadline:
+            st = il_deploy._proc_stat(leader)
+            if os.path.exists(ready) and st and st[0] == "Z":
+                break
             time.sleep(0.01)
         self.assertEqual(il_deploy._proc_stat(leader)[0], "Z", "the main thread did not exit first")
         self.assertFalse(self.lock_is_free(lock))
