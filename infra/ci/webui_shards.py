@@ -12,10 +12,10 @@ import re
 import sys
 
 RUNNER = "src/test/web/run-webui-sim-test.sh"
-# webui-sim and board-import share a session's state; pad-profile and tip-setups pass alone with BR-74's paste seed.
-# A name ending in "?" joins its leg once it is in ALL_SCRIPTS (never the rest): tip-flow needs tip-setups' needle
-# frame, whichever PR lands first.
-SHARDS = {"main": ["webui-sim", "board-import"], "calib": ["pad-profile", "tip-setups", "tip-flow?"]}
+# One session for the scripts that share state: board-import after webui-sim; pad-profile and tip-setups after them
+# until BR-74 makes the SIM paste reproducible alone (then they become a leg of their own). A name ending in "?" joins
+# its leg once it is in ALL_SCRIPTS (never the rest): tip-flow needs tip-setups' needle frame, whichever PR lands first.
+SHARDS = {"main": ["webui-sim", "board-import", "pad-profile", "tip-setups", "tip-flow?"]}
 KEYS = tuple(SHARDS) + ("rest",)  # ci.yml's legs
 FULL = "full"  # every script in one session, as before the shards: for a comparison run, not a leg of the gate
 
