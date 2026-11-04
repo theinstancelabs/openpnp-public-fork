@@ -143,31 +143,58 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     check('(2) a touch-off without a reference shows no such line', gone);
     ST.touchOff = touchOffRow(true, true, 2);
     await page.evaluate(() => IL.pcr.loadCalibrations());
-    await page.waitForFunction(() => /left out/.test((document.getElementById('to-ref') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
+    await page.waitForFunction(() => /not counted/.test((document.getElementById('to-ref') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
     const skipped = await page.evaluate(() => { const n = document.getElementById('to-ref'); return n ? n.textContent : null; });
-    check('(2) a touch-off that left dots out says so with its reference (analysis.skippedDots)',
-      skipped === 'Normal dot 1.35 mm, from the tip’s ladder of 14:07. The first 2 dots after the prime were left out.', skipped);
+    check('(2) a touch-off that did not count dots says so with its reference (analysis.skippedDots)',
+      skipped === 'Normal dot 1.35 mm, from the tip’s ladder of 14:07. The first 2 dots after the prime were not counted.', skipped);
+    ST.touchOff = touchOffRow(true, true, 1);
+    await page.evaluate(() => IL.pcr.loadCalibrations());
+    await page.waitForFunction(() => /first dot/.test((document.getElementById('to-ref') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
+    const skipped1 = await page.evaluate(() => { const n = document.getElementById('to-ref'); return n ? n.textContent : null; });
+    check('(2) one dot not counted: said in the singular', skipped1 === 'Normal dot 1.35 mm, from the tip’s ladder of 14:07. The first dot after the prime was not counted.', skipped1);
 
     // ---- (2b) the touch-off's smallest ladder follows the mounted tip's recipe (BR-85: skip + the reference pair + one) --
     const stepsField = () => page.evaluate(() => ({ unit: (document.querySelector('#to-steps-wrap .unit') || {}).textContent || null,
-      min: document.getElementById('to-steps').getAttribute('min'), err: (document.getElementById('to-steps-err') || {}).hidden ? '' : document.getElementById('to-steps-err').textContent }));
+      min: document.getElementById('to-steps').getAttribute('min'), err: (document.getElementById('to-steps-err') || {}).hidden ? '' : document.getElementById('to-steps-err').textContent,
+      value: document.getElementById('to-steps').value }));
+    const unitIs = (u) => page.waitForFunction((x) => ((document.querySelector('#to-steps-wrap .unit') || {}).textContent || '') === x, u, { timeout: 8000 }).catch(() => null);
+    // the field as it opens (nothing typed yet) fits the recipe: 6 steps, or skip + 3 when that is more
+    ST.skip = 5;
+    await unitIs('8 to 20');
+    const f8 = await stepsField();
+    check('(2b) a recipe that does not count 5 dots: Steps opens at 8, nothing refused', f8.unit === '8 to 20' && f8.value === '8' && f8.err === '', f8);
     ST.skip = 2;
-    await page.waitForFunction(() => /^5 to 20$/.test((document.querySelector('#to-steps-wrap .unit') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
+    await unitIs('5 to 20');
+    check('(2b) back to a recipe that does not count 2: Steps opens at 6 again', (await stepsField()).value === '6', await stepsField());
     await page.fill('#to-steps', '4');
     await page.waitForFunction(() => !document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
     const f4 = await stepsField();
-    check('(2b) a recipe that leaves out 2 dots: Steps "5 to 20", and 4 is refused at the field with why', f4.unit === '5 to 20' && f4.min === '5'
-      && f4.err === 'At least 5: the tip’s recipe leaves out the first 2 dots after the prime, the reference takes the next two, and one more shows the contact.', f4);
-    await page.fill('#to-steps', '5');
-    await page.waitForFunction(() => document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
-    check('(2b) 5 steps pass', (await stepsField()).err === '', await stepsField());
+    check('(2b) a recipe that does not count 2 dots: Steps "5 to 20", and 4 is refused at the field with why', f4.unit === '5 to 20' && f4.min === '5'
+      && f4.err === 'At least 5: the tip’s recipe does not count the first 2 dots after the prime, the next two set the normal dot size, and one more shows the contact.', f4);
+    // the minimum drops under a typed 4 (the recipe changed): its refusal goes without retyping
     ST.skip = 0;
-    await page.waitForFunction(() => /^3 to 20$/.test((document.querySelector('#to-steps-wrap .unit') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
+    await unitIs('3 to 20');
+    await page.waitForFunction(() => document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    check('(2b) the recipe now counts every dot: the typed 4 is no longer refused', (await stepsField()).err === '', await stepsField());
+    ST.skip = 1;
+    await unitIs('4 to 20');
+    await page.fill('#to-steps', '3');
+    await page.waitForFunction(() => !document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    const f3 = await stepsField();
+    check('(2b) one dot not counted: 3 is refused, said in the singular', f3.err === 'At least 4: the tip’s recipe does not count the first dot after the prime, the next two set the normal dot size, and one more shows the contact.', f3);
+    await page.fill('#to-steps', '4');
+    await page.waitForFunction(() => document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    check('(2b) 4 steps pass', (await stepsField()).err === '', await stepsField());
+    ST.skip = 0;
+    await unitIs('3 to 20');
     await page.fill('#to-steps', '2');
     await page.waitForFunction(() => !document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
     const f2 = await stepsField();
-    check('(2b) no dots left out: Steps "3 to 20", and 2 is refused (the reference pair and one more)', f2.unit === '3 to 20' && f2.min === '3'
-      && f2.err === 'At least 3: the reference takes the first two dots after the prime, and one more shows the contact.', f2);
+    check('(2b) every dot counted: Steps "3 to 20", and 2 is refused (the pair that sets the normal dot and one more)', f2.unit === '3 to 20' && f2.min === '3'
+      && f2.err === 'At least 3: the first two dots after the prime set the normal dot size, and one more shows the contact.', f2);
+    ST.skip = null;   // an engine without the field (or a null one): every dot counts
+    await page.waitForFunction(() => document.getElementById('to-steps').getAttribute('min') === '3' && !document.getElementById('to-steps-err').hidden, null, { timeout: 8000 }).catch(() => null);
+    check('(2b) no touchOffSkipDots: Steps "3 to 20", 2 still refused', (await stepsField()).unit === '3 to 20' && /^At least 3:/.test((await stepsField()).err), await stepsField());
     await page.fill('#to-steps', '6');
     ST.skip = undefined;
 
