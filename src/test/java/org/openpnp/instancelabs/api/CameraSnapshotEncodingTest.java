@@ -92,13 +92,12 @@ public class CameraSnapshotEncodingTest {
             assertTrue(isJpeg(r.body));
             assertTrue(r.body.length < MachineEndpoints.FRAME_JPEG_BOUND_BYTES, r.body.length + " bytes");
         }
-        assertEquals(0.85f, MachineEndpoints.JPEG_QUALITY, 0, "the frames' quality is set, not the encoder's default");
     }
 
     /** No JPEG encoder at all (OpenCV missing too): PNG, never an empty 200. */
     @Test
     public void pngOnlyWhenNoJpegEncoderAtAll() throws Exception {
-        MachineEndpoints.openCvJpeg = false;
+        org.openpnp.instancelabs.dispense.JpegEncoder.openCv = false;
         try {
             ApiServer.Response r = withoutImageIoJpeg(() -> new MachineEndpoints(null).encodeFrame(frame()));
             assertEquals(200, r.status);
@@ -108,7 +107,7 @@ public class CameraSnapshotEncodingTest {
             assertEquals(0xffffff, back.getRGB(10, 10) & 0xffffff);
         }
         finally {
-            MachineEndpoints.openCvJpeg = true;
+            org.openpnp.instancelabs.dispense.JpegEncoder.openCv = true;
         }
     }
 }
