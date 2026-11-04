@@ -320,7 +320,7 @@ public final class SimPaste {
     private Random noise;
     // A motor-off's new screw phase (newPhaseOnMotorOff, INF-06), the motor-offs this connection, the idle timeout.
     private Integer jumped;
-    private int motorOffs;
+    private Random phases; // the motor-offs' phase draws this connection (one stream: consecutive seeds are not)
     private boolean unmodelledWarned; // a wholeTurnsOnly refusal said in the log (once per connection)
     private int emptyLeft; // contacts after a power cycle that still lay nothing (emptyDotsAfterPowerCycle)
     private String fill; // the open dot's tip fill (primeTurns): its tip and its needle
@@ -442,7 +442,6 @@ public final class SimPaste {
         offset = null;
         noise = null;
         jumped = null;
-        motorOffs = 0;
         motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
         lastMotionS = null;
         powerUp();
@@ -692,7 +691,9 @@ public final class SimPaste {
         store.dotAt(t);
         lastDot = null;
         // refused and empty contacts are still dots of the session: "12 empty, then normal" (INF-06 §5)
-        if (p.wholeTurnsOnly && !wholeTurns(net) && onWorkSurface(sc, p)) {
+        // n > 0: the first contact of a pressure session is where the engine puts its phase dot (it turns the screw to
+        // its start angle, on the purge row on the blank), no whole turn either; a sub-turn run still fails
+        if (p.wholeTurnsOnly && n > 0 && !wholeTurns(net) && onWorkSurface(sc, p)) {
             store.refused();
             if (!unmodelledWarned) {
                 unmodelledWarned = true;
@@ -801,15 +802,16 @@ public final class SimPaste {
     }
 
     /**
-     * A board that just booted: a connection after the scene's first (OpenPnP's simulator makes one SimPaste per
-     * connect), or a power cycle. Its motor was unpowered and its first contacts come out empty (INF-06 §4-5); the
-     * scene's first connection keeps a pinned phase and lays at once, as today.
+     * A board that just booted: every connection (OpenPnP's simulator makes one SimPaste per connect) and a power
+     * cycle. Its motor was unpowered and its first contacts come out empty (INF-06 §4-5); both keys are off by default.
      */
     private void powerUp() {
         SimScene sc = scenes.get();
-        SimScene.Paste p = sc == null || connection == 0 ? null : sc.pasteFor(physicalTip(sc));
+        SimScene.Paste p = sc == null ? null : sc.pasteFor(physicalTip(sc));
+        phases = null;
         motorOff(p);
         emptyLeft = p == null ? 0 : p.emptyDotsAfterPowerCycle;
+        unmodelledWarned = false;
     }
 
     /** The fill a tip's prime turns go into: the tip on the head and, with the engine, its needle (a needle change
@@ -820,8 +822,9 @@ public final class SimPaste {
         return (tip == null ? "" : tip) + "@" + (svc == null ? null : svc.getConfig().needleChangedAtMs);
     }
 
-    /** Where a refused contact is measured (the board, a coupon, the blank), not the waste on the bed: the engine's
-     * purge phase dot is no whole turn either. Judged at the commanded spot, without the landing scatter. */
+    /** Where a refused contact is measured (the board, a coupon, the blank), not on the bed. Judged at the commanded
+     * spot. shortcut: ignores the gap, so a sub-turn contact in the air over the blank is refused and its paste lost
+     * (it would hang on the tip); judge the gap too if a test ever turns in the air there. */
     private boolean onWorkSurface(SimScene sc, SimScene.Paste p) {
         return sc.regionAt(dotX + p.n2OffsetMm[0] + p.landingBiasMm[0], dotY + p.n2OffsetMm[1] + p.landingBiasMm[1])
                 != SimScene.Region.BED;
@@ -849,10 +852,14 @@ public final class SimPaste {
      * pressure while free, settles at a uniform random angle (Process: 2 of 2 motor-offs moved it far, INF-06 §4).
      */
     private void motorOff(SimScene.Paste p) {
-        if (p != null && p.newPhaseOnMotorOff) {
-            long base = p.noiseSeed != null ? p.noiseSeed : p.seed + connection; // as the noise (BR-74)
-            jumped = new Random(base * 0x9E3779B97F4A7C15L + 0x5C2E_0FF5L + ++motorOffs).nextInt(STEPS_PER_REV);
+        if (p == null) {
+            return;
         }
+        if (phases == null) {
+            long base = p.noiseSeed != null ? p.noiseSeed : p.seed + connection; // as the noise (BR-74)
+            phases = new Random(base * 0x9E3779B97F4A7C15L + 0x5C2E_0FF5L);
+        }
+        jumped = phases.nextInt(STEPS_PER_REV); // drawn whatever tip is on; offset() uses it while the flag holds
     }
 
     /** The dose and thread noise: the scene's noiseSeed on every connection (BR-74), else seed + connection. */

@@ -82,7 +82,9 @@ public class SimTipTest {
         assertNull(SimScene.of(json("{\"board\": {\"file\": \"t\", \"seat\": {\"x\": 0, \"y\": 0}}}")).physicalTip);
         String board = "{\"board\": {\"file\": \"t\", \"seat\": {\"x\": 0, \"y\": 0}}, \"paste\": {\"byTip\": {\"k\": ";
         for (String bad : new String[] {"{\"mRevMg\": 0}}}}", "{\"footprint\": {\"c\": -1}}}}}",
-            "{\"landingBiasMm\": [1]}}}}", "{\"cv\": -0.1}}}}", "{\"transferRatio\": 2}}}}"}) {
+            "{\"landingBiasMm\": [1]}}}}", "{\"cv\": -0.1}}}}", "{\"transferRatio\": 2}}}}",
+            "{\"wholeTurnsOnly\": 1}}}}", "{\"wholeTurnsOnly\": \"yes\"}}}}",
+            "{\"emptyDotsAfterPowerCycle\": 12.7}}}}"}) {
             IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                     () -> SimScene.of(json(board + bad)), bad);
             assertTrue(e.getMessage().startsWith("paste.byTip['k']: "), e.getMessage());
