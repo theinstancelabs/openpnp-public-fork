@@ -77,8 +77,14 @@
     return Number.isFinite(x) && Math.abs(x - Number(b)) < 1e-9;
   }
   const dirty = (f) => !!f && f.edited && !same(f);
-  /** The needle token now (§22.3): status dispense.needle.changedAtMs, null when no needle change is recorded. */
-  const curToken = () => (IL.tips ? IL.tips.token() : null);
+  /** The needle token of the status (§22.3): dispense.needle.changedAtMs, null when no needle change is recorded. */
+  const statusToken = () => (IL.tips ? IL.tips.token() : null);
+  /** A needle change a 409 needle-changed reported before the status shows it (postNeedle): {was: the status's token
+   *  then, now: the refusal's}. Kept until a status shows another token than `was`. */
+  let tokAhead = null;
+  IL.on('status', () => { if (tokAhead && statusToken() !== tokAhead.was) tokAhead = null; });
+  /** The needle token now (§22.3): the status's, or the one of a refusal the status does not show yet (tokAhead). */
+  const curToken = () => (tokAhead ? tokAhead.now : statusToken());
   /** The edit is over: the field follows the server again and forgets the token its edit was taken under. */
   function unedit(f) { f.edited = false; f.tok = undefined; }
   function sync(f, v) {
@@ -94,11 +100,12 @@
     f.el.classList.toggle('input--dirty', dirty(f));
     if (f.kind === 'num') f.el.classList.toggle('input--invalid', val(f) !== '' && !Number.isFinite(toNum(val(f))));
   }
-  /** Sets a value the way the operator would (capture buttons). */
+  /** Sets a value the way the operator would (capture buttons). The value is the status's (a live position), so it
+   *  carries the status's token, never a refusal's the status does not show yet (review of #14). */
   function setVal(f, v) {
     if (f.kind === 'check') f.el.checked = !!v; else f.el.value = v;
     f.edited = true;
-    f.tok = curToken();
+    f.tok = statusToken();
     paint(f);
     IL.render();
   }
@@ -560,7 +567,7 @@
     // every needle value carries the needle token it was taken under (§22.3): where its field's edit began, else now (tokenOf)
     c.bK.addEventListener('click', () => IL.act(c.bK, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), k = need(F.k, 'K');
-      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k, needleChangedAtMs: tokenOf([F.n1, F.k]) });
+      const r = await postNeedle('/api/needle/anchor', { surfaceZ: n1, needleContactRawSum: k }, [F.n1, F.k]);
       clean(F.n1, F.k, F.n2);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -569,7 +576,7 @@
       + ' mm, offset ' + fmt(r.offsetMm, 3) + ' mm. Confirm the offset or touch off next.' }, opts)));
     c.bBoth.addEventListener('click', () => IL.act(c.bBoth, async () => {
       const n1 = need(F.n1, 'the N1 contact Z'), n2 = need(F.n2, 'the needle contact Z');
-      const r = await IL.api('POST', '/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2, needleChangedAtMs: tokenOf([F.n1, F.n2]) });
+      const r = await postNeedle('/api/needle/anchor', { surfaceZ: n1, needleContactZ: n2 }, [F.n1, F.n2]);
       clean(F.n1, F.n2);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -581,8 +588,8 @@
       const manual = dirty(F.off);
       const off = manual ? need(F.off, 'the needle offset in mm') : nd.anchorOffsetMm;
       if (!isNum(off)) throw bad('Record the needle Z frame first.');
-      const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(Number(off).toFixed(4)), note: manual ? 'entered in the web UI' : 'confirmed frame offset (web UI)',
-        needleChangedAtMs: tokenOf([F.off]) });
+      const r = await postNeedle('/api/needle/offset', { offsetMm: Number(Number(off).toFixed(4)), note: manual ? 'entered in the web UI' : 'confirmed frame offset (web UI)' },
+        [F.off]);
       clean(F.off);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -594,20 +601,40 @@
   }
   /**
    * The needle token a press posts (§22.3): an edited field keeps the token of the moment its edit began (typing) or
-   * of its last capture, and a field edited under another needle than now gives its token, which the engine refuses
-   * (409 needle-changed); else now (the press takes the values shown). So a value typed before a needle change never
-   * goes out under the new needle's token: not when it only differs from the server's after the change (a focused
-   * field keeps it), nor after more keystrokes. A press passes only the fields it posts. Tokens compare by equality.
+   * of its last capture, a value shown carries the status's, and a value taken under another needle than now gives its
+   * token, which the engine refuses (409 needle-changed); else now. So a value typed before a needle change never goes
+   * out under the new needle's token: not when it only differs from the server's after the change (a focused field
+   * keeps it), nor after more keystrokes; nor a value shown by a status from before a change a refusal reported
+   * (tokAhead). A press passes only the fields it posts. Tokens compare by equality.
    */
   function tokenOf(fs) {
     const now = curToken();
-    const old = fs.find((f) => f.edited && f.tok !== undefined && f.tok !== now);
-    return old ? old.tok : now;
+    const old = fs.map((f) => (f.edited && f.tok !== undefined ? f.tok : statusToken())).find((t) => t !== now);
+    return old === undefined ? now : old;
+  }
+  /**
+   * Posts needle values with their token (tokenOf). A 409 needle-changed empties and releases the fields taken under
+   * another needle than the one it names (Backend's review of #5): the operator takes them again, and a value typed
+   * then carries this needle's token. Its token counts at once, also when it came before the status poll that shows
+   * the change (another browser changed the needle): tokAhead until then. The refusal still shows.
+   */
+  async function postNeedle(path, body, fs) {
+    try {
+      return await IL.api('POST', path, Object.assign({}, body, { needleChangedAtMs: tokenOf(fs) }));
+    } catch (e) {
+      if (e && e.status === 409 && e.code === 'needle-changed') {
+        const now = e.data && 'needleChangedAtMs' in e.data ? e.data.needleChangedAtMs : curToken();
+        const was = statusToken();
+        tokAhead = now !== was ? { was, now } : null;
+        for (const f of fs) if (f.edited && f.tok !== undefined && f.tok !== now) { if (f.kind !== 'check') f.el.value = ''; unedit(f); paint(f); }
+      }
+      throw e;
+    }
   }
   /** The frame or offset answer's question ("is the {S} on the dispenser?") and the I4 offset warning, kept until the next. */
   function frameAnswer(r) {
     const x = r && (r.r || r);
-    W.frameQ = x && (x.question || x.warning) ? { question: x.question || null, warning: x.warning || null, tok: IL.tips ? IL.tips.token() : null } : null;
+    W.frameQ = x && (x.question || x.warning) ? { question: x.question || null, warning: x.warning || null, tok: curToken() } : null;
     IL.render();
   }
   /** The offset typed under Other offset… minus the frame offset (mm), or null. */
@@ -657,7 +684,7 @@
     IL.show(c.lead, never);
     IL.setText(c.lead, never ? 'A tip that was never on: touch the same spot with N1 and with the needle (jog in OpenPnP). Another tip’s K does not fit: lengths differ by up to 10 mm.' : '');
     // the frame question of the last answer (this needle only)
-    const q = W.frameQ && W.frameQ.tok === (IL.tips ? IL.tips.token() : null) ? W.frameQ : null;
+    const q = W.frameQ && W.frameQ.tok === curToken() ? W.frameQ : null;
     IL.show(c.question, !!q);
     IL.keyed(c.question, q ? JSON.stringify([q.question, q.warning, mt && mt.mainPhoto && mt.mainPhoto.id]) : '', () => (q ? [
       mt && IL.tips ? IL.tips.thumb(mt, 'sm', true) : null,
@@ -684,9 +711,10 @@
       : (nd.anchored ? 'Frame recorded ' : 'Frame OUT OF DATE (needle changed): recorded ') + tm(a.setAtMs) + ': N1 contact ' + fmt(a.surfaceZMm, 3) + ' mm, needle contact '
         + fmt(a.needleContactZMm, 3) + ' mm' + (isNum(a.rawSumMm) ? ' (from K = ' + fmt(a.rawSumMm, 2) + ')' : '') + '.');
     // fields (server values). After a needle change the frame's contacts are the old needle's (§22.3): the fields stay
-    // empty until N1 and the new needle are captured (or typed), so one press cannot record the old frame again. K stays
-    // shown: the engine refuses it after a change (nd.kRefusal) and the card says why.
-    const frameOk = !!a && nd.anchored;
+    // empty until N1 and the new needle are captured (or typed), so one press cannot record the old frame again; so
+    // while the status is from before a change a refusal reported (tokAhead). K stays shown: the engine refuses it after
+    // a change (nd.kRefusal) and the card says why.
+    const frameOk = !!a && nd.anchored && !tokAhead;
     sync(F.n1, frameOk ? a.surfaceZMm : null);
     sync(F.k, a && isNum(a.rawSumMm) ? a.rawSumMm : bench || !known ? 65.59 : null);
     sync(F.n2, frameOk ? a.needleContactZMm : null);
@@ -773,7 +801,7 @@
         T.save.addEventListener('click', () => IL.act(T.save, async () => {
           const dx = need(F.dx, 'dx in mm (0 for none)'), dy = need(F.dy, 'dy in mm (0 for none)');
           if (Math.abs(dx) > 1 || Math.abs(dy) > 1) throw bad('The trim is at most ±1 mm on each axis: a needle that lands farther off needs its landing checked (Setup › Dispenser & tip › Check where it lands).');
-          const r = await IL.api('POST', '/api/needle/xy-trim', { dxMm: dx, dyMm: dy, note: IL.str(F.note.el) || null, needleChangedAtMs: tokenOf([F.dx, F.dy, F.note]) });
+          const r = await postNeedle('/api/needle/xy-trim', { dxMm: dx, dyMm: dy, note: IL.str(F.note.el) || null }, [F.dx, F.dy, F.note]);
           clean(F.dx, F.dy, F.note);
           IL.loadConfig();
           IL.planRefreshSoon();
@@ -1127,6 +1155,7 @@
             el('p', { class: 'panel__lead', text: "Jog N1 over a spot on the " + name + " in OpenPnP's window and lower it until the tip touches, then add the point. Spread at least 3 points (5 is better) around the purge row and the places on it." }),
             PB.live, PB.table, PB.fit));
         PB.handBox.open = PB.byHand;
+        PB.handApplied = PB.byHand;
         PB.handBox.addEventListener('toggle', () => { if (PB.byHand !== PB.handBox.open) { PB.byHand = PB.handBox.open; IL.render(); } });
         // the automatic foot
         PB.note = el('div', { class: 'su-blank-note', id: 'blank-note' });
@@ -1171,7 +1200,9 @@
       const fin = !live && run && PB.runId && run.runId === PB.runId ? run : null;
       if (!live) loadBlankPreview(s, name);
       const byHand = PB.byHand && !live;
-      if (PB.handBox.open !== byHand) PB.handBox.open = byHand;
+      // the wanted state is applied only when it changes: a render between a close (a click on the summary, or a test's
+      // .open = false) and its toggle event, which runs as a later task, must not open it again (gate flake, 11-02)
+      if (PB.handApplied !== byHand) { PB.handApplied = byHand; if (PB.handBox.open !== byHand) PB.handBox.open = byHand; }
       IL.show(PB.handBox, !live);
       IL.show(PB.autoFoot, !byHand);
       IL.show(PB.handFoot, byHand);

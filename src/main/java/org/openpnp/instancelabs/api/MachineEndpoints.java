@@ -518,20 +518,26 @@ final class MachineEndpoints {
         return encodeFrame(rgb).header("X-Frame-At", String.valueOf(at));
     }
 
-    /** JPEG, else PNG: never an empty 200. */
+    /** The camera frames' JPEG quality (0..1): light enough for a 2-5 per second view over the tailnet. */
+    static final float JPEG_QUALITY = 0.85f;
+    /** Tests' bound for a 1920 x 1080 frame at {@link #JPEG_QUALITY} (a PNG of it was 1.4-1.8 MB on 11-03). */
+    static final int FRAME_JPEG_BOUND_BYTES = 600_000;
+    /**
+     * JPEG at {@link #JPEG_QUALITY} ({@link org.openpnp.instancelabs.dispense.JpegEncoder}: ImageIO's writer, else
+     * OpenCV's; the deployed JVM has no ImageIO JPEG writer, so frames went out as 1.4-1.8 MB PNGs, 11-03); PNG only
+     * when neither works. Never an empty 200.
+     */
     ApiServer.Response encodeFrame(BufferedImage rgb) throws IOException, ApiException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        if (ImageIO.write(rgb, "jpg", out) && out.size() > 0) {
-            return ApiServer.Response.bytes(200, "image/jpeg", out.toByteArray());
+        byte[] jpg = org.openpnp.instancelabs.dispense.JpegEncoder.encode(rgb, JPEG_QUALITY);
+        if (jpg != null) {
+            return ApiServer.Response.bytes(200, "image/jpeg", jpg);
         }
-        // ImageIO answers false (no exception) when it has no writer for the image. Seen in real mode on the bench
-        // ThinkPad (2026-10-28): the JVM's writers were tif, bmp, gif, wbmp, png, no JPEG. PNG is always there.
         if (!noJpegLogged) {
             noJpegLogged = true;
-            Logger.warn("Top camera snapshot: no JPEG writer in this JVM (writers: {}); sending PNG",
+            Logger.warn("Camera frames: no JPEG encoder (ImageIO writers: {}); sending PNG",
                     String.join(",", ImageIO.getWriterFormatNames()));
         }
-        out.reset();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
         if (!ImageIO.write(rgb, "png", out) || out.size() == 0) {
             throw ApiException.unavailable("the camera frame could not be encoded (no JPEG or PNG writer)");
         }

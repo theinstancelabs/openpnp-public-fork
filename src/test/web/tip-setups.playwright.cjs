@@ -845,12 +845,12 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     await shoot(page, 'edit-tip-correction');
     await page.evaluate(() => { const d = IL.dialog.top(); if (d) d.close('test'); });
 
-    // ---- (11d-f) a value typed before a needle change keeps that needle's token (PR #5 reviews, setup.js:53/683/685) --
+    // ---- (11d-h) a value typed before a needle change keeps that needle's token (PR #5 reviews, setup.js:53/683/685) --
     // Each case: a frame recorded for this needle A (by the API, as another browser would), a value typed for A, needle B
     // recorded meanwhile in another browser, the other contact typed after the change (within 20 mm of it, so the engine
     // gets as far as the token): Record needle frame posts A's token, the engine refuses it (409 needle-changed), the
     // card shows the refusal, and no frame is recorded for B.
-    async function staleCase(name, typeOld, afterChange, freshId, freshVal) {
+    async function staleCase(name, typeOld, afterChange, freshId, freshVal, staleId, staleVal) {
       await closePanels(page);
       await page.reload();
       await page.waitForFunction(() => window.IL && IL.api && IL.tips && IL.tips.data(), null, { timeout: 30000 });
@@ -879,15 +879,167 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
       check(name, !!body && body.needleChangedAtMs === tokA && !!res && res.status() === 409 && !st.anchored
         && /The needle was changed at \d\d:\d\d after these values were taken/.test(box || ''),
         { body, status: res && res.status(), anchored: st.anchored, box: box && box.slice(0, 200), tokA, now: st.changedAtMs });
+      // the refused field is emptied and released (Backend's review of #5): typed again, it carries this needle's token
+      const emptied = await page.evaluate((x) => document.getElementById(x).value, staleId);
+      await page.click('#' + staleId, { clickCount: 3 });
+      await page.keyboard.type(staleVal);
+      const res2P = page.waitForResponse((r) => r.url().includes('/api/needle/anchor') && r.request().method() === 'POST', { timeout: 10000 }).catch(() => null);
+      await page.click('#btn-anchor');
+      const res2 = await res2P;
+      await sleep(800);
+      const st2 = (await status(page)).dispense.needle;
+      check(name.slice(0, 5) + ' then: the refused field is emptied, typed again it records the frame for the new needle', emptied === '' && !!res2 && res2.status() === 200 && st2.anchored,
+        { emptied, status: res2 && res2.status(), anchored: st2.anchored });
     }
     await staleCase('(11d) N2 retyped to the shown value and kept in focus through a needle change: posted with the old needle\'s token, refused',
-      async () => { await page.click('#anchor-n2', { clickCount: 3 }); await page.keyboard.type('2.910'); }, null, 'anchor-n1', '5.5');
+      async () => { await page.click('#anchor-n2', { clickCount: 3 }); await page.keyboard.type('2.910'); }, null, 'anchor-n1', '5.5', 'anchor-n2', '2.91');
     await staleCase('(11e) N2 typed for the old needle, then a key and Backspace after the change: still the old needle\'s token, refused',
       async () => { await page.click('#anchor-n2', { clickCount: 3 }); await page.keyboard.type('2.95'); await page.keyboard.press('Tab'); },
       async () => { await page.click('#anchor-n2'); await page.keyboard.press('End'); await page.keyboard.type('7'); await page.keyboard.press('Backspace'); },
-      'anchor-n1', '5.5');
+      'anchor-n1', '5.5', 'anchor-n2', '2.95');
     await staleCase('(11f) N1 typed for the old needle, N2 typed after the change: the old needle\'s token, refused',
-      async () => { await page.click('#anchor-n1', { clickCount: 3 }); await page.keyboard.type('5.6'); await page.keyboard.press('Tab'); }, null, 'anchor-n2', '2.91');
+      async () => { await page.click('#anchor-n1', { clickCount: 3 }); await page.keyboard.type('5.6'); await page.keyboard.press('Tab'); }, null, 'anchor-n2', '2.91', 'anchor-n1', '5.6');
+    await staleCase('(11g) N1 retyped to the shown value and kept in focus through a needle change: the old needle\'s token, refused',
+      async () => { await page.click('#anchor-n1', { clickCount: 3 }); await page.keyboard.type('5.500'); }, null, 'anchor-n2', '2.91', 'anchor-n1', '5.5');
+    // (11h) the refusal before the page's next status poll (review of #14, setup.js postNeedle): needle B recorded in
+    // another browser while the page's polls still get the status from before it (a route answers them with it), N1 and
+    // N2 typed then: they carry A's token, still the one the page shows. The refusal gives the needle's token now (409
+    // needleChangedAtMs): both fields are emptied and released, the old status rendered again leaves them empty (its
+    // frame is A's), and typed again, before the page shows the change or after, they carry B's token.
+    {
+      await closePanels(page);
+      await page.reload();
+      await page.waitForFunction(() => window.IL && IL.api && IL.tips && IL.tips.data(), null, { timeout: 30000 });
+      await page.evaluate(() => IL.go('#setup'));
+      await page.waitForSelector('#anchor-n2', { timeout: 10000 });
+      const tokA = (await status(page)).dispense.needle.changedAtMs;
+      await page.evaluate((t) => IL.api('POST', '/api/needle/anchor', { surfaceZ: 5.5, needleContactZ: 2.91, needleChangedAtMs: t }), tokA);
+      await page.waitForFunction(() => document.getElementById('anchor-n2').value === '2.910' && document.getElementById('anchor-n1').value === '5.500', null, { timeout: 8000 });
+      // the status from before the change, with both tips' live heights where they touched (the captures below read them)
+      const oldJ = await (await page.request.get(BASE + 'api/status')).json();
+      for (const t of oldJ.machine.positions || []) if (t.kind === 'nozzle') t.z = t.name === oldJ.dispense.nozzle ? 2.95 : 5.6;
+      const old = JSON.stringify(oldJ);
+      await page.route('**/api/status', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: old }));
+      await page.request.post(BASE + 'api/needle/changed', { data: { why: 'test (11h): another browser' } });
+      const tokB = (await (await page.request.get(BASE + 'api/status')).json()).dispense.needle.changedAtMs;
+      await sleep(1600);   // two polls answered with the status from before the change
+      const shown = await page.evaluate(() => IL.tips.token());
+      await page.click('#anchor-n1', { clickCount: 3 });
+      await page.keyboard.type('5.6');
+      await page.click('#anchor-n2', { clickCount: 3 });
+      await page.keyboard.type('2.95');
+      let body = null;
+      await page.route('**/api/needle/anchor', (route) => { body = route.request().postDataJSON(); return route.continue(); });
+      const resP = page.waitForResponse((r) => r.url().includes('/api/needle/anchor') && r.request().method() === 'POST', { timeout: 10000 }).catch(() => null);
+      await page.click('#btn-anchor');
+      const res = await resP;
+      const refusal = res ? await res.json().catch(() => null) : null;
+      await sleep(1600);   // the poll after the press and the next: the status from before the change, rendered again
+      const box = await page.evaluate(() => { const r = document.querySelector('#card-needle .su-ref .refusal'); return r ? r.textContent : null; });
+      check('(11h) N1 and N2 typed after a needle change in another browser that the page\'s status does not show yet: the old needle\'s token, refused',
+        shown === tokA && tokB !== tokA && !!body && body.needleChangedAtMs === tokA && !!res && res.status() === 409 && !!refusal && refusal.needleChangedAtMs === tokB
+        && /The needle was changed at \d\d:\d\d after these values were taken/.test(box || ''),
+        { shown, tokA, tokB, body, status: res && res.status(), refusal, box: box && box.slice(0, 200) });
+      const left = await page.evaluate(() => ['anchor-n1', 'anchor-n2'].map((x) => { const n = document.getElementById(x); return { id: x, value: n.value, dirty: n.classList.contains('input--dirty') }; }));
+      check('(11h) then: both fields are emptied and released, and the status from before the change rendered again leaves them empty',
+        left.every((f) => f.value === '' && !f.dirty), { fields: left, shown: await page.evaluate(() => IL.tips.token()) });
+      // still before the page shows the change (review of #14): the live heights the captures take are that status's, from
+      // before the change, so they carry A's token, refused, never a frame for B; Confirm offset confirms the frame that
+      // status shows, A's: refused too
+      await page.click('#btn-anchor-n1');
+      await page.click('#btn-anchor-n2');
+      const capd = await page.evaluate(() => ['anchor-n1', 'anchor-n2'].map((x) => document.getElementById(x).value));
+      body = null;
+      const res3P = page.waitForResponse((r) => r.url().includes('/api/needle/anchor') && r.request().method() === 'POST', { timeout: 10000 }).catch(() => null);
+      await page.click('#btn-anchor');
+      const res3 = await res3P;
+      const st3 = (await (await page.request.get(BASE + 'api/status')).json()).dispense.needle;
+      check('(11h) then: N1 and N2 taken with Use live (the heights of the status from before the change): the old needle\'s token, refused, no frame for the new needle',
+        capd[0] === '5.600' && capd[1] === '2.950' && !!body && body.needleChangedAtMs === tokA && !!res3 && res3.status() === 409 && !st3.anchored,
+        { capd, body, status: res3 && res3.status(), anchored: st3.anchored });
+      let offBody = null;
+      await page.route('**/api/needle/offset', (route) => { offBody = route.request().postDataJSON(); return route.continue(); });
+      const res4P = page.waitForResponse((r) => r.url().includes('/api/needle/offset') && r.request().method() === 'POST', { timeout: 10000 }).catch(() => null);
+      await page.click('#btn-needle-offset');
+      const res4 = await res4P;
+      await page.unroute('**/api/needle/offset');
+      const st4 = (await (await page.request.get(BASE + 'api/status')).json()).dispense.needle;
+      check('(11h) then: Confirm offset (the frame the status from before the change shows, A\'s): the old needle\'s token, refused',
+        !!offBody && offBody.needleChangedAtMs === tokA && !!res4 && res4.status() === 409 && !st4.touchedOff,
+        { offBody, status: res4 && res4.status(), touchedOff: st4.touchedOff });
+      // typed again: N2 while the page still shows the status from before the change, N1 once it shows the change
+      await page.click('#anchor-n2', { clickCount: 3 });
+      await page.keyboard.type('2.91');
+      await page.unroute('**/api/status');
+      await page.waitForFunction((t) => IL.tips.token() === t, tokB, { timeout: 5000 });
+      await page.click('#anchor-n1', { clickCount: 3 });
+      await page.keyboard.type('5.5');
+      body = null;
+      const res2P = page.waitForResponse((r) => r.url().includes('/api/needle/anchor') && r.request().method() === 'POST', { timeout: 10000 }).catch(() => null);
+      await page.click('#btn-anchor');
+      const res2 = await res2P;
+      await sleep(800);
+      await page.unroute('**/api/needle/anchor');
+      const st2 = (await status(page)).dispense.needle;
+      check('(11h) then: typed again (N2 before the page shows the change, N1 after), they record the frame for the new needle',
+        !!body && body.needleChangedAtMs === tokB && !!res2 && res2.status() === 200 && st2.anchored && st2.changedAtMs === tokB,
+        { body, status: res2 && res2.status(), anchored: st2.anchored, tokB, now: st2.changedAtMs });
+    }
+    // (11i) an offset (Other offset…) and an XY trim typed for needle A, saved after needle B and its frame were recorded in
+    // another browser (review of #14): A's token, refused; the fields are emptied and released like the frame's, and typed
+    // again they carry B's token and are saved
+    {
+      await closePanels(page);
+      await page.reload();
+      await page.waitForFunction(() => window.IL && IL.api && IL.tips && IL.tips.data(), null, { timeout: 30000 });
+      await page.evaluate(() => IL.go('#setup'));
+      await page.waitForSelector('#anchor-n2', { timeout: 10000 });
+      const tokA = (await status(page)).dispense.needle.changedAtMs;
+      const off = (await page.evaluate((t) => IL.api('POST', '/api/needle/anchor', { surfaceZ: 5.5, needleContactZ: 2.91, needleChangedAtMs: t }), tokA)).offsetMm;
+      await page.waitForFunction(() => document.getElementById('anchor-n2').value === '2.910', null, { timeout: 8000 });
+      if (!(await page.evaluate(() => document.getElementById('needle-other').open))) await page.click('#needle-other > summary');
+      const offTyped = (off + 0.002).toFixed(3);
+      await page.fill('#needle-offset', offTyped);
+      await page.evaluate(() => IL.openView('trim'));
+      await page.waitForSelector('#trim-dx', { state: 'visible', timeout: 5000 });
+      await page.fill('#trim-dx', '0.05');
+      await page.fill('#trim-dy', '-0.04');
+      await closePanels(page);
+      await page.evaluate(() => fetch('/api/needle/changed', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ why: 'test (11i): another browser' }) }));
+      await page.waitForFunction((t) => IL.tips.token() !== t, tokA, { timeout: 5000 });
+      const tokB = await page.evaluate(() => IL.tips.token());
+      await page.evaluate((t) => IL.api('POST', '/api/needle/anchor', { surfaceZ: 5.5, needleContactZ: 2.91, needleChangedAtMs: t }), tokB);
+      await page.waitForFunction(() => IL.S.status.dispense.needle.anchored, null, { timeout: 8000 });
+      // press, then the refused fields (released: no amber bar, the typed value gone; the render after the refusal shows
+      // the server's value again), then typed again and pressed
+      async function saveTwice(what, path, btnId, fields, typed, values) {
+        const bodies = [];
+        await page.route('**' + path, (route) => { bodies.push(route.request().postDataJSON()); return route.continue(); });
+        const press = async () => {
+          const p = page.waitForResponse((r) => r.url().includes(path) && r.request().method() === 'POST', { timeout: 10000 }).catch(() => null);
+          await page.waitForSelector('#' + btnId + ':not([disabled])', { timeout: 5000 });
+          await page.click('#' + btnId);
+          const r = await p;
+          return r && r.status();
+        };
+        const first = await press();
+        await sleep(800);
+        const left = await page.evaluate((ids) => ids.map((x) => { const n = document.getElementById(x); return { id: x, value: n.value, dirty: n.classList.contains('input--dirty') }; }), fields);
+        check('(11i) ' + what + ' typed for the old needle, saved after the new needle\'s frame: the old needle\'s token, refused; the fields released',
+          first === 409 && !!bodies[0] && bodies[0].needleChangedAtMs === tokA && left.every((f, i) => f.value !== typed[i] && !f.dirty), { first, body: bodies[0], fields: left, typed });
+        for (let i = 0; i < fields.length; i++) await page.fill('#' + fields[i], values[i]);
+        const second = await press();
+        await page.unroute('**' + path);
+        check('(11i) ' + what + ' then: typed again, it carries the new needle\'s token and is saved',
+          second === 200 && !!bodies[1] && bodies[1].needleChangedAtMs === tokB, { second, body: bodies[1] });
+      }
+      await saveTwice('the offset', '/api/needle/offset', 'btn-needle-offset', ['needle-offset'], [offTyped], [(off + 0.001).toFixed(3)]);
+      await page.evaluate(() => IL.openView('trim'));
+      await page.waitForSelector('#trim-dx', { state: 'visible', timeout: 5000 });
+      await saveTwice('the XY trim', '/api/needle/xy-trim', 'btn-trim', ['trim-dx', 'trim-dy'], ['0.05', '-0.04'], ['0.05', '-0.04']);
+      await closePanels(page);
+    }
 
     // ---- (12) the page ------------------------------------------------------------------------------------------------
     check('(12) no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
