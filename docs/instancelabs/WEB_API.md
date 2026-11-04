@@ -541,6 +541,20 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before the next
   guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
 
+### 3.8 Jog, move-to and the cameras (BR-49, BR-53)
+
+The user's Machine › Control (P0 after BR-72; `ControlEndpoints`; shape in `docs/backend-requests.md` "BR-49 + BR-53
+API"). Both motion routes are guarded writes (§3.7) and run as OpenPnP machine tasks; STOP ends them at once (a move
+that saw a STOP answers 409 "the move was stopped", even when its last ok came).
+- `POST /api/jog {tool: camera|n1|needle, dx?, dy?, dz?}` (mm; one press ≤ 10 X/Y, ≤ 2 Z) and
+  `POST /api/move-to {tool, place? | x?, y?}` (at safe Z, ends at safe Z: never lowers) →
+  `{tool, from: {x, y, z}, to: {x, y, z}, positions}`. Refused (409): not started, busy (a task, a batch, a pressure
+  hold, OpenPnP), switching off; unhomed: only a raise; the camera's `dz`; Z floors: N1 ≤ 0.5 mm below a probed
+  surface under it, the needle not below its I4 floor; OpenPnP's soft limits. 404 for an unknown place.
+- `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
+  `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
+  ms when taken; `/api/camera/top.jpg` too). Read only: never locked; nothing moves.
+
 ## 4. Pressure hold (Dispense tab)
 
 The engine pressurises inside each run. The hold is the manual "pressure on" for reading the regulator gauge:

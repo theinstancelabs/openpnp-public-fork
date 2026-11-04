@@ -86,6 +86,7 @@ final class MachineEndpoints {
 
     /** The web STOP, also a take-over's from a working lock holder (BR-72). */
     Map<String, Object> stop(String reason) {
+        ctx.stops.incrementAndGet();
         long answerBy = System.currentTimeMillis() + STOP_ANSWER_MS;
         List<String> actions = new ArrayList<>();
         DispenseService svc = ctx.svcOrNull();
@@ -444,10 +445,23 @@ final class MachineEndpoints {
         if (cam == null) {
             throw ApiException.notFound("no top (head) camera is configured");
         }
-        int maxW = r.queryInt("w", 0, 0, 4096);
+        return frame(cam, r.queryInt("w", 0, 0, 4096), 0);
+    }
+
+    /**
+     * One frame of an OpenPnP camera (no motion, no lights, no scripts), at most {@code maxW} wide (0 = as is), taken
+     * {@code settleMs} after the call: JPEG (PNG without a JPEG writer), with {@code X-Frame-At} the server time when
+     * it was taken (BR-53: the picture's age).
+     */
+    ApiServer.Response frame(Camera cam, int maxW, long settleMs) throws Exception {
+        if (settleMs > 0) {
+            Thread.sleep(settleMs);
+        }
         BufferedImage img;
+        long at;
         try {
             img = cameraExecutor.submit(cam::captureTransformed).get(10, TimeUnit.SECONDS);
+            at = System.currentTimeMillis();
         }
         catch (TimeoutException e) {
             throw ApiException.unavailable("the camera did not deliver a frame within 10 s");
@@ -468,7 +482,7 @@ final class MachineEndpoints {
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
         g.drawImage(img, 0, 0, w, h, null);
         g.dispose();
-        return encodeFrame(rgb);
+        return encodeFrame(rgb).header("X-Frame-At", String.valueOf(at));
     }
 
     /** JPEG, else PNG: never an empty 200. */

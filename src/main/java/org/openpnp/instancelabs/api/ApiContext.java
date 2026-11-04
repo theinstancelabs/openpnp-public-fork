@@ -30,6 +30,8 @@ final class ApiContext {
     final PadCalibrationJobs padCalJobs = new PadCalibrationJobs(this);
     /** OpenPnP switching the machine off (BR-52): Start waits for it, nothing else starts meanwhile. */
     final SwitchOff switchOff = new SwitchOff();
+    /** Web STOPs so far (a take-over's too): a move that saw one end meanwhile did not arrive (BR-49). */
+    final AtomicLong stops = new AtomicLong();
     /** Tests only: added to the lock's clock (a lease's lapse without waiting for it). */
     final AtomicLong lockClockSkewMs = new AtomicLong();
     /** BR-72: the one machine lock. */
