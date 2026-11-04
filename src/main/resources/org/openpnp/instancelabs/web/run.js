@@ -332,7 +332,19 @@
   function currentStep(s) {
     if (IL.recoveryActive()) return 'recovery';
     if (R.section && STEPS.includes(R.section)) return R.section;
-    return autoStep(s);
+    const a = autoStep(s);
+    return flowClaims(s, a) ? 'start' : a;
+  }
+  /**
+   * Run › Start (runflow.js) is bare #run's page while nothing needs today's: no board run running, stopped or part
+   * done, no result and no registration of today's pages to show. Start's own chain keeps it until its run starts.
+   * On today's pages (R.steps: a #run/<step> was opened) bare #run stays today's: Plan and Register move on there.
+   */
+  function flowClaims(s, a) {
+    if (!IL.runFlow || R.steps) return false;
+    if (IL.runFlow.chaining()) return a !== 'run';
+    if (a === 'probe') return !R.regResultRunId && !(regRun(s) && regRun(s).running);
+    return (a === 'board' || a === 'checks') && !stopDecision(s) && !partialDecision(s);
   }
   function goStep(step) {
     R.section = step;
@@ -479,7 +491,7 @@
     n.again.addEventListener('click', () => IL.runFix('plan-again', n.again));
     n.actions = el('div', { class: 'page-head__actions' }, n.change, n.again);
     n.headRef = el('div', { 'data-refusals': '', id: 'run-head-refusals' });
-    const head = el('div', { class: 'page-head' }, el('div', { class: 'page-head__text' }, n.eyebrow, n.title, n.meta, n.lock), n.actions);
+    const head = n.head = el('div', { class: 'page-head' }, el('div', { class: 'page-head__text' }, n.eyebrow, n.title, n.meta, n.lock), n.actions);
 
     n.chip = el('span', { class: 'plan-chip', id: 'plan-chip' });
     n.recipe = el('span', { id: 'run-recipe', class: 'run-recipe' });
@@ -547,6 +559,9 @@
     const n = R.n;
     if (!n.hero) return;
     const step = currentStep(s);
+    const start = step === 'start';
+    for (const x of [n.head, n.headRef, n.hero]) IL.show(x, !start);
+    if (IL.runFlow) IL.runFlow.render(s, start);
     let p = plan();
     let mode = mainMode(s, step);
     // another board chosen in the Board step: the main column shows it before planning (its drawing at the form's seat,
@@ -1325,6 +1340,13 @@
     const p0 = plan();
     return rem && rem.atMs ? rem.atMs : p0 && p0.source && c && p0.source.file === c.file ? p0.createdAtMs - S.skewMs : null;
   }
+  /** A file board's seat, kept in this browser (its position fields fill from it next time). */
+  function rememberSeat(body) {
+    if (body.source !== 'file') return;
+    const rem = remembered(body.file);
+    const same = rem && Number(rem.x) === body.x && Number(rem.y) === body.y && Number(rem.z) === body.z && Number(rem.rotation || 0) === body.rotation;
+    lsSet('il.boardloc.' + body.file, JSON.stringify({ x: body.x, y: body.y, z: body.z, rotation: body.rotation, atMs: same && rem.atMs ? rem.atMs : Date.now() }));
+  }
   function invalid(id, msg) {
     const i = $(id), e = $(id + '-err');
     if (i) i.classList.add('input--invalid');
@@ -1346,11 +1368,7 @@
     }
     const p = await IL.act(btn, async () => {
       const q = await postPlan(body);
-      if (c.kind === 'file') {
-        const rem = remembered(c.file);
-        const same = rem && Number(rem.x) === body.x && Number(rem.y) === body.y && Number(rem.z) === body.z && Number(rem.rotation || 0) === body.rotation;
-        lsSet('il.boardloc.' + c.file, JSON.stringify({ x: body.x, y: body.y, z: body.z, rotation: body.rotation, atMs: same && rem.atMs ? rem.atMs : Date.now() }));
-      }
+      rememberSeat(body);
       return q;
     }, { ok: (q) => 'Planned ' + q.summary.dots + ' dots on ' + q.summary.pads + ' pads' });
     if (!p) return;
@@ -1498,13 +1516,13 @@
     IL.loadPlan(r.nextPlanId);
   }
   /** Register board: POST /api/plan/{id}/register (probe 'auto': the engine's new-seat flag forces the probe). */
-  async function postRegister(probe) {
+  async function postRegister(probe, stay) {
     const p = plan();
     if (!p) throw new Error('Plan a board first.');
     const r = await IL.api('POST', '/api/plan/' + encodeURIComponent(p.planId) + '/register', { probe: probe || 'auto' });
     setRegResult(null);
     R.byHand = false;
-    if (IL.active() === 'run' && currentStep(S.status) !== 'probe') goStep('probe');
+    if (!stay && IL.active() === 'run' && currentStep(S.status) !== 'probe') goStep('probe');
     return r;
   }
   const regOk = (r) => (r && r.probeOnly ? 'Probe only started' : 'Register board started') + (r && r.home && r.home.needed ? ': homes first (≈ ' + IL.fmtSecs(r.home.estimateS) + '), then ' : ': ')
@@ -2871,12 +2889,7 @@
     if (m.padIds) body.padIds = m.padIds;
     if (h.n.wipe && h.n.wipe.input.checked) body.wiped = true;   // the server forgets the board's paste before the run
     h.starting = true;   // this run's own start closes the confirm without a note
-    const res = await IL.act(h.n.go, async () => {
-      const r = await IL.api('POST', '/api/run', body);
-      // what this run is (the Last board tile, Records and the Result step say "test", "the pads left")
-      if (r && r.planId) { R.kinds[r.planId] = m.kind; ssSet('il.run.kinds', R.kinds); }
-      return r;
-    }, {
+    const res = await IL.act(h.n.go, () => postRun(body, m.kind), {
       refusalIn: h.n.refusals, what: 'Run',
       ok: (r) => 'Run started: ' + IL.plural((r && r.dots) || m.n, 'dot') + (m.kind === 'test' ? ' (test)' : m.kind === 'rest' ? ' (the pads left)' : ''),
     });
@@ -2888,6 +2901,16 @@
     h.close('run');
     R.test = false;
     R.maxDots = '';
+    runStarted();
+  }
+  /** POST /api/run; what the run is (the Last board tile, Records and the Result step say "test", "the pads left"). */
+  async function postRun(body, kind) {
+    const r = await IL.api('POST', '/api/run', body);
+    if (r && r.planId) { R.kinds[r.planId] = kind; ssSet('il.run.kinds', R.kinds); }
+    return r;
+  }
+  /** After a run started: a result or refusal shown before is over, the decisions before it are made. */
+  function runStarted() {
     R.resultRunId = null;
     R.refused = null;
     R.decidedAt = Date.now();
@@ -3028,6 +3051,7 @@
       IL.views.recovery.render(parts, s, true);
       return;
     }
+    if (step === 'start') { IL.runFlow.panel(parts, s, true); return; }
     renderSteps(parts.top, s, step);
     if (step === 'board') {
       if (!R.boards && !R.boardsLoading) loadBoards();
@@ -3051,6 +3075,7 @@
   }
   function renderPanelStep(parts, s, step) {
     if (step === 'recovery') { IL.views.recovery.render(parts, s, false); return; }
+    if (step === 'start') { IL.runFlow.panel(parts, s, false); return; }
     renderSteps(parts.top, s, step);
     if (step === 'board') renderBoardStep(s, parts);
     else if (step === 'probe') renderProbe(s);
@@ -3114,6 +3139,29 @@
     IL.render();
   });
 
+  // ================================================================================== Run › Start (runflow.js)
+  // the Run menu item opens Start again, also from today's pages (the same #run does not route again)
+  const tabRun = $('tab-btn-run');
+  if (tabRun) tabRun.addEventListener('click', () => { R.steps = false; if (IL.active() === 'run') IL.render(); });
+  // what Start does through run.js, so both keep one board choice, one plan and one run bookkeeping
+  R.flow = {
+    selectBoard, loadBoards, needCard, padsDone, remembered,
+    estimate: (s) => estimate(s),
+    async plan(body) {
+      const p = await postPlan(body);
+      rememberSeat(body);
+      R.formDirty = false;
+      setRegResult(null);
+      return p;
+    },
+    register: (probe) => postRegister(probe, true),
+    async run(body, kind) {
+      const r = await postRun(body, kind);
+      runStarted();
+      return r;
+    },
+  };
+
   // ================================================================================== the workspace
   IL.workspace('run', {
     ownsRecovery: true,
@@ -3122,6 +3170,7 @@
       R.root = root;
       if (!R.form.sel) R.form.sel = lsGet('il.run.sel') || null;
       buildMain(root);
+      if (IL.runFlow) IL.runFlow.mount(root);
       if (S.plan) formFromPlan(S.plan);
       // board position fields remembered for a file board chosen before
       const c = selectedBoard();
@@ -3132,6 +3181,7 @@
     },
     show(route) {
       R.section = route && STEPS.includes(route.section) ? route.section : null;
+      R.steps = !!R.section;   // into Run from elsewhere: Start, unless a step of today's pages was asked for
       if (R.bv) setTimeout(() => R.bv.relayout(), 0);
     },
     hide() {
@@ -3141,6 +3191,7 @@
     route(route) {
       const sec = route && STEPS.includes(route.section) ? route.section : null;
       if (sec !== R.section) { R.section = sec; }
+      if (sec) R.steps = true;
     },
     render(s) { renderMain(s); },
     panel(parts, s, first) {
