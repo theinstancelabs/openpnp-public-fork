@@ -996,7 +996,8 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
       const off = (await page.evaluate((t) => IL.api('POST', '/api/needle/anchor', { surfaceZ: 5.5, needleContactZ: 2.91, needleChangedAtMs: t }), tokA)).offsetMm;
       await page.waitForFunction(() => document.getElementById('anchor-n2').value === '2.910', null, { timeout: 8000 });
       if (!(await page.evaluate(() => document.getElementById('needle-other').open))) await page.click('#needle-other > summary');
-      await page.fill('#needle-offset', (off + 0.002).toFixed(3));
+      const offTyped = (off + 0.002).toFixed(3);
+      await page.fill('#needle-offset', offTyped);
       await page.evaluate(() => IL.openView('trim'));
       await page.waitForSelector('#trim-dx', { state: 'visible', timeout: 5000 });
       await page.fill('#trim-dx', '0.05');
@@ -1008,8 +1009,9 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
       const tokB = await page.evaluate(() => IL.tips.token());
       await page.evaluate((t) => IL.api('POST', '/api/needle/anchor', { surfaceZ: 5.5, needleContactZ: 2.91, needleChangedAtMs: t }), tokB);
       await page.waitForFunction(() => IL.S.status.dispense.needle.anchored, null, { timeout: 8000 });
-      // press, then the refused field's value and its amber bar, then typed again and pressed
-      async function saveTwice(what, path, btnId, fields, values) {
+      // press, then the refused fields (released: no amber bar, the typed value gone; the render after the refusal shows
+      // the server's value again), then typed again and pressed
+      async function saveTwice(what, path, btnId, fields, typed, values) {
         const bodies = [];
         await page.route('**' + path, (route) => { bodies.push(route.request().postDataJSON()); return route.continue(); });
         const press = async () => {
@@ -1020,19 +1022,20 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
           return r && r.status();
         };
         const first = await press();
+        await sleep(800);
         const left = await page.evaluate((ids) => ids.map((x) => { const n = document.getElementById(x); return { id: x, value: n.value, dirty: n.classList.contains('input--dirty') }; }), fields);
-        check('(11i) ' + what + ' typed for the old needle, saved after the new needle\'s frame: the old needle\'s token, refused; the fields emptied and released',
-          first === 409 && !!bodies[0] && bodies[0].needleChangedAtMs === tokA && left.every((f) => f.value === '' && !f.dirty), { first, body: bodies[0], fields: left });
+        check('(11i) ' + what + ' typed for the old needle, saved after the new needle\'s frame: the old needle\'s token, refused; the fields released',
+          first === 409 && !!bodies[0] && bodies[0].needleChangedAtMs === tokA && left.every((f, i) => f.value !== typed[i] && !f.dirty), { first, body: bodies[0], fields: left, typed });
         for (let i = 0; i < fields.length; i++) await page.fill('#' + fields[i], values[i]);
         const second = await press();
         await page.unroute('**' + path);
         check('(11i) ' + what + ' then: typed again, it carries the new needle\'s token and is saved',
           second === 200 && !!bodies[1] && bodies[1].needleChangedAtMs === tokB, { second, body: bodies[1] });
       }
-      await saveTwice('the offset', '/api/needle/offset', 'btn-needle-offset', ['needle-offset'], [(off + 0.001).toFixed(3)]);
+      await saveTwice('the offset', '/api/needle/offset', 'btn-needle-offset', ['needle-offset'], [offTyped], [(off + 0.001).toFixed(3)]);
       await page.evaluate(() => IL.openView('trim'));
       await page.waitForSelector('#trim-dx', { state: 'visible', timeout: 5000 });
-      await saveTwice('the XY trim', '/api/needle/xy-trim', 'btn-trim', ['trim-dx', 'trim-dy'], ['0.05', '-0.04']);
+      await saveTwice('the XY trim', '/api/needle/xy-trim', 'btn-trim', ['trim-dx', 'trim-dy'], ['0.05', '-0.04'], ['0.05', '-0.04']);
       await closePanels(page);
     }
 
