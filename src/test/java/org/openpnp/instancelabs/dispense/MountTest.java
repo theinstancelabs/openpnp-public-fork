@@ -427,6 +427,7 @@ public class MountTest {
             svc.updateConfigAtomically(live -> {
                 live.parkedTips.get(K25).profile.startAngleDeg = 45;
                 live.parkedTips.get(K25).profile.startAngleSetAtMs = 1000L;
+                live.parkedTips.get(K25).profile.startAngleChangedAtMs = 1000L;
                 return live;
             });
             svc.setStartAngle(120.0, "measured");
@@ -442,6 +443,7 @@ public class MountTest {
             assertEquals(live.startAngleSetAtMs, now.startAngleSetAtMs, "not stamped: no new measurement");
             assertEquals("pc-1", now.startAngleFeature.runId);
             assertEquals(300, now.startAngleFeature.deg, 0);
+            assertEquals(live.startAngleChangedAtMs, now.startAngleChangedAtMs, "BR-75: the live angle's set time");
             // after a controller reset (BR-02) the angle is stale (I11); a mount leaves it as it was
             f.sim.machine.setEnabled(false);
             f.sim.server.powerCycle();
@@ -470,6 +472,27 @@ public class MountTest {
             assertEquals("pc-2", svc.getConfig().profile.startAngleFeature.runId);
             svc.setStartAngle(30.0, "typed");
             assertNull(svc.getConfig().profile.startAngleFeature, "a bare set, even of the same angle");
+        }
+    }
+
+    /** BR-75: an undo keeps the live start angle and when its value was set, as a mount does. */
+    @Test
+    public void anUndoKeepsTheLiveStartAngle() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            String parked25 = new Gson().toJson(svc.getConfig().parkedTips.get(K25));
+            f.mount(K25);
+            svc.setStartAngle(200.0, "measured");
+            DispenseProfile set = svc.getConfig().profile;
+            svc.undoMount("tester");
+            DispenseProfile now = svc.getConfig().profile;
+            assertEquals(Tip.SEED_KEY, svc.getConfig().tip.key);
+            assertEquals(200, now.startAngleDeg, 0);
+            assertEquals(set.startAngleSetAtMs, now.startAngleSetAtMs);
+            assertEquals(set.startAngleChangedAtMs, now.startAngleChangedAtMs);
+            // the angle is the machine's, no recipe: the 25G's entry is back as it was (review MINOR 5, BR-85's undo)
+            assertEquals(parked25, new Gson().toJson(svc.getConfig().parkedTips.get(K25)));
         }
     }
 
@@ -610,12 +633,16 @@ public class MountTest {
                 live.parkedTips.get(K25).profile.gapMm = 0.5;
                 return live;
             });
+            svc.setStartAngle(120.0, "measured");
+            DispenseProfile live = svc.getConfig().profile;
             MountResult r = f.mount(K25);
             assertEquals(1, r.warnings.size(), r.warnings.toString());
             assertTrue(r.warnings.get(0).startsWith("The 25G straight's dispense profile no longer validates ("),
                     r.warnings.get(0));
             assertTrue(svc.getConfig().profile.name.startsWith("25G straight (reset: "), svc.getConfig().profile.name);
             assertEquals(new DispenseProfile().gapMm, svc.getConfig().profile.gapMm, 0);
+            assertEquals(live.startAngleChangedAtMs, svc.getConfig().profile.startAngleChangedAtMs, "BR-75: the live "
+                    + "angle's set time");
             assertFalse(svc.getDb().query("SELECT * FROM events WHERE code = 'TIP' AND message LIKE '%no longer "
                     + "validates%'").isEmpty());
         }

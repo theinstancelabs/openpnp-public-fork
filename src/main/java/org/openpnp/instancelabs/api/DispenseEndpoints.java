@@ -76,15 +76,17 @@ final class DispenseEndpoints {
             "profile", "purgeRow", "cleanPadCheck", "fiducialCheck", "vacuumProbe", "paste", "calibrationArea",
             "padCalibration", "outputZones"));
     /**
-     * Nested fields only the engine or their own endpoints change: the start angle, its set time and the feature of the
-     * measure it was set from (I11, BR-02's checks, BR-77: POST /api/screw/start-angle), the time of the purge reset,
+     * Nested fields only the engine or their own endpoints change: the start angle, its set and change times and the
+     * feature of the measure it was set from (I11, BR-02's checks, BR-77: POST /api/screw/start-angle), the time of
+     * the purge reset,
      * and the used purge spots (runs reserve them, POST /api/purge-row/reset frees them: a stale
      * full-settings save must not put paste-covered spots back in use); likewise the used calibration
      * area and its wipe (POST /api/calibration-area/reset), and when the paste was loaded (POST /api/paste).
      */
     static final java.util.Set<String> PROTECTED_NESTED = new java.util.HashSet<>(java.util.Arrays.asList(
-            "profile.startAngleDeg", "profile.startAngleSetAtMs", "profile.startAngleFeature", "purgeRow.resetAtMs",
-            "purgeRow.usedSpots", "calibrationArea.usedMm", "calibrationArea.resetAtMs", "paste.loadedAtMs"));
+            "profile.startAngleDeg", "profile.startAngleSetAtMs", "profile.startAngleChangedAtMs",
+            "profile.startAngleFeature", "purgeRow.resetAtMs", "purgeRow.usedSpots", "calibrationArea.usedMm",
+            "calibrationArea.resetAtMs", "paste.loadedAtMs"));
 
     /** How long OpenPnP's thread may take to start a read of its board list (BOARD_IMPORT_DESIGN.md §3.6). */
     static final long EDT_START_MS = 10_000;
