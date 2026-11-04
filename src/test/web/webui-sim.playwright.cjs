@@ -1663,12 +1663,29 @@ async function runFirstDots(page, n) {
           return page.evaluate(() => {
             const z = IL.zMoved(IL.S.status);
             const card = document.querySelector('#chk-needs .ri[data-key="I4-z"]');
+            const all = card ? Array.from(card.querySelectorAll('button[data-fix]')).map((b) => [b.dataset.fix, b.textContent.trim()]) : null;
+            // the guided sequence (view:heights) leads the card; the step's own fix-its follow it
             return { step: z ? z.step : null, fixes: z ? z.fixes.map((f) => f.label) : [], text: card ? card.querySelector('.ri__d').textContent : null,
-              card: card ? Array.from(card.querySelectorAll('button[data-fix]')).map((b) => [b.dataset.fix, b.textContent.trim()]) : null, canRun: IL.ready().canRun };
+              first: all && all[0] ? all[0][0] : null, guided: all ? all.filter((x) => x[0] === 'view:heights') : null,
+              card: all ? all.filter((x) => x[0] !== 'view:heights') : null, canRun: IL.ready().canRun };
           });
         };
+        /** The heights view (strip's Machine cell or the card's first fix): its steps and the buttons of the step now. */
+        const heightsView = () => page.waitForFunction(() => !!document.querySelector('#hv-steps li[data-k]'), null, { timeout: 10000 }).catch(() => null)
+          .then(() => page.evaluate(() => ({ steps: Array.from(document.querySelectorAll('#hv-steps li[data-k]')).map((l) => [l.dataset.k, l.dataset.state]),
+            acts: Array.from(document.querySelectorAll('#hv-actions button[data-fix]')).map((b) => [b.dataset.fix, b.textContent.trim()]),
+            lead: (document.getElementById('hv-lead') || {}).textContent || '' })));
         let st = await zStep('frame');
         await page.screenshot({ path: path.join(OUT, 'z-moved-1-frame.png') });
+        check('Z moved 1: the card leads with the guided "Measure the heights again…"', st.first === 'view:heights' && !!st.guided
+          && JSON.stringify(st.guided) === JSON.stringify([['view:heights', 'Measure the heights again…']]), st);
+        const cell1 = await page.evaluate(() => { const c = document.getElementById('cell-machine'); return { v: c.querySelector('.cell__v').textContent, open: c.dataset.openView, cls: c.className }; });
+        await page.click('#cell-machine');
+        const hv1 = await heightsView();
+        check('Z moved 1: the strip says "Heights moved" and opens the steps: the needle frame now, the rest to do, its button there',
+          /Heights moved/.test(cell1.v) && cell1.open === 'heights' && JSON.stringify(hv1.steps) === JSON.stringify([['frame', 'now'], ['blank', 'todo'], ['places', 'todo'], ['touch-off', 'todo'], ['register', 'todo']])
+          && hv1.acts.length > 0 && hv1.acts[0][0] === 'go:#setup/needle' && /0\.\d\d mm/.test(hv1.lead), { cell1, hv1 });
+        await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
         check('Z moved 1: the blocker names the move, the remedy in its order, and offers "Open Needle Z frame"', st.step === 'frame' && !st.canRun && !!st.card
           && st.card[0] && st.card[0][0] === 'go:#setup/needle' && /^Z moved 0\.\d\d mm/.test(st.text || '')
           && /Record the needle frame again with both tips \(Setup › Needle Z frame\), probe the blank, take the places' Z again with N1 \(Setup › Places\), touch off and register the board again\./.test(st.text || ''), st);
@@ -1729,6 +1746,11 @@ async function runFirstDots(page, n) {
         st = await zStep('places');
         await page.screenshot({ path: path.join(OUT, 'z-moved-3-places.png') });
         const mp = (await status()).machine.zCheck.places.map((x) => x.name);
+        await page.click('#chk-needs .ri[data-key="I4-z"] button[data-fix="view:heights"]');
+        const hv3 = await heightsView();
+        check('Z moved 3: the steps follow: the frame and the blank done, the places now', JSON.stringify(hv3.steps.slice(0, 3)) === JSON.stringify([['frame', 'done'], ['blank', 'done'], ['places', 'now']])
+          && hv3.acts.length > 0 && /^go:#setup\/places/.test(hv3.acts[0][0]), hv3);
+        await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
         check('Z moved 3: after the blank, "Retake Z with N1" for each place set before the home, the waste among them',
           st.step === 'places' && mp.includes('waste') && !!st.card && st.card.length === Math.min(3, mp.length)
           && st.card.every(([f, t], i) => f === 'go:#setup/places/' + encodeURIComponent(mp[i]) && t === 'Retake Z with N1 (' + mp[i] + ')'), { st, mp });
@@ -1794,6 +1816,8 @@ async function runFirstDots(page, n) {
         await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); IL.go('#run/checks'); });
         st = await zStep('done');
         check('Z moved: after the remedy nothing is left to measure, no Z check blocker (the same home)', st.step === 'done' && !st.card, st);
+        const cellD = await page.evaluate(() => { const c = document.getElementById('cell-machine'); return { v: c.querySelector('.cell__v').textContent, open: c.dataset.openView }; });
+        check('Z moved: the strip reads Homed again and opens the machine view', /Homed/.test(cellD.v) && !/Heights moved/.test(cellD.v) && cellD.open === 'machine', cellD);
       }
 
       // 15. A board top Z planned 1.7 mm under the needle frame (planning takes up to 2.0 mm, the probe goes 1.5 mm under the
