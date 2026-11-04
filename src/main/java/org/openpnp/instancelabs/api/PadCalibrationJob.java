@@ -619,9 +619,9 @@ final class PadCalibrationJob {
 
     /**
      * BR-77, the start-angle measure (plan §1, §2): halves two rows of half-turn pairs from P and from P + 90, quarters 4
-     * quarter dots per turn from P, each row an engine step of its own after the throwaways. P is the request's, else
-     * the stored angle (0 when it was never set: the fit works from any P); the dots lie on the request's surface, else
-     * on the one probed surface under every target.
+     * quarter dots per turn from P, each row an engine step of its own after its own throwaways. P is the request's,
+     * else the stored angle (0 when it was never set: the fit works from any P); the dots lie on the request's surface,
+     * else on the one probed surface under every target.
      */
     private void planStartAngle(DispenseConfig c) throws ApiException {
         StartAngle q = req.startAngle;
@@ -644,8 +644,8 @@ final class PadCalibrationJob {
         int perRow = halves ? q.throwaways.size() / 2 : q.throwaways.size();
         if (halves && (q.throwaways.size() % 2 != 0 || perRow < 2 || perRow > MAX_THROWAWAYS)) {
             throw ApiException.badRequest("halves take one set of throwaways per row: an even count, 2 to "
-                    + MAX_THROWAWAYS + " per row (the first half before row 1, the second before row 2), not "
-                    + q.throwaways.size());
+                    + MAX_THROWAWAYS + " per row (the first half before row 1, the second before row 2), 4 to "
+                    + 2 * MAX_THROWAWAYS + " in all, not " + q.throwaways.size());
         }
         if (perRow < 2 || perRow > MAX_THROWAWAYS) {
             throw ApiException.badRequest("at least 2 throwaways, at most " + MAX_THROWAWAYS + ": the first sets the "
@@ -1071,8 +1071,9 @@ final class PadCalibrationJob {
         if (MEASURE_START_ANGLE.equals(measure)) {
             for (DoseBlocksRequest.Block x : saBlocks) {
                 find(x.label).estimateS = blockSeconds(c, java.util.Collections.singletonList(x));
-                pasteMg += (x.xy.size() + req.startAngle.throwaways.size() / saBlocks.size()) * countMgPerDot(
-                        x.netSteps);
+                // the row's dots at the block's dose, its own throwaways at the profile's (bandPurge)
+                pasteMg += x.xy.size() * countMgPerDot(x.netSteps) + req.startAngle.throwaways.size() / saBlocks.size()
+                        * profileMg;
             }
         }
         if (l != null && layout != null) {
@@ -1328,8 +1329,10 @@ final class PadCalibrationJob {
         }
         DispenseProfile.StartAngleFeature f = c.profile.startAngleFeature;
         if (req.startAngle.apply && (f == null || !saMode.equals(f.mode))) {
-            return "the start angle has no measured " + saMode + " feature: set it once from a measure (POST "
-                    + "/api/screw/start-angle {startAngleDeg, evidence: {runId}})";
+            return (f == null ? "the start angle has no measured " + saMode + " feature: set it once from a measure"
+                    : "the start angle was set from a " + f.mode + " measure, not a " + saMode + " one: set it once "
+                            + "from a " + saMode + " measure") + " (POST /api/screw/start-angle {startAngleDeg, evidence: "
+                    + "{runId}})";
         }
         InterlockReport r = svc.checkInterlocks(scope, 0, true);
         return r.ok() ? null : r.toString();
@@ -1839,8 +1842,8 @@ final class PadCalibrationJob {
     }
 
     /**
-     * BR-77: the measure's steps (plan §2-§5): each block an engine step of its own at its start angle after the
-     * throwaways (I11 waived, any quarter, half or whole turn), every dot's area by the before and after frames; then the
+     * BR-77: the measure's steps (plan §2-§5): each block an engine step of its own at its start angle after its
+     * own throwaways (I11 waived, any quarter, half or whole turn), every dot's area by the before and after frames; then the
      * fit, and with apply the new start = old start + (new feature - old feature), set as a measure's evidence sets it
      * (BR-02's checks). A STOP or a failed step ends the job before the fit: nothing is set.
      */

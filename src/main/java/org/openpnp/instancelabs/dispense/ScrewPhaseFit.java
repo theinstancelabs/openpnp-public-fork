@@ -26,8 +26,10 @@ public final class ScrewPhaseFit {
     public static final String HIGH = "high", LOW = "low", NONE = "none";
     /** Halves: the peak's standard error (deg) for high, for low; a ripple below 3 standard errors of x is none. */
     static final double HIGH_SE_DEG = 10, LOW_SE_DEG = 20, RIPPLE_SE = 3;
-    /** A normal SD per median absolute deviation. */
+    /** A normal SD per median absolute deviation (large n). */
     static final double MAD_SD = 1.4826;
+    /** Croux and Rousseeuw's small-sample factors for {@link #MAD_SD}, n = 2..9; above, n / (n - 0.8). */
+    private static final double[] MAD_SMALL_N = {1.196, 1.495, 1.363, 1.206, 1.200, 1.140, 1.129, 1.107};
     static final int MIN_FOUND_PER_HALF = 3;
     /** Quarters (Process 11-04): dead at or below 0.2 of the largest mean, a dip at or below 0.5; a live cv above 0.15. */
     static final double DEAD_SHARE = 0.2, DIP_SHARE = 0.5, LIVE_CV_MAX = 0.15;
@@ -305,17 +307,20 @@ public final class ScrewPhaseFit {
     }
 
     /**
-     * A median's standard error, √(π/2)·σ/√n, with σ from the median absolute deviation (a blob does not widen it), or
-     * the sample SD when more than half the values are equal (a MAD of 0 is no error of 0).
+     * A median's standard error, √(π/2)·σ/√n, with σ from the median absolute deviation (a blob does not widen it),
+     * corrected for few dots (the MAD of 3 is the smaller gap: it runs low), or the sample SD when more than half the
+     * values are equal (a MAD of 0 is no error of 0).
      */
     private static double medianSe(List<Double> l) {
+        int n = l.size();
         double m = median(l);
         List<Double> dev = new ArrayList<>();
         for (double v : l) {
             dev.add(Math.abs(v - m));
         }
-        double mad = median(dev), sd = mad > 0 ? MAD_SD * mad : Math.sqrt(var(l));
-        return Math.sqrt(Math.PI / 2) * sd / Math.sqrt(l.size());
+        double b = n < 2 ? 1 : n <= 9 ? MAD_SMALL_N[n - 2] : n / (n - 0.8);
+        double mad = median(dev), sd = mad > 0 ? MAD_SD * b * mad : Math.sqrt(var(l));
+        return Math.sqrt(Math.PI / 2) * sd / Math.sqrt(n);
     }
 
     private static double mean(List<Double> l) {

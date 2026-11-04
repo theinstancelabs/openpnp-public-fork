@@ -66,7 +66,7 @@ public class ScrewPhaseFitTest {
         assertEquals(-0.26220, h.rows.get(0).x, 1e-4);
         assertEquals(0.14415, h.rows.get(1).x, 1e-4);
         assertEquals(297.9, h.rows.get(0).startDeg, 1e-9);
-        assertTrue(h.peakSeDeg < 2, "± 0.02 on areas of 1: " + h.peakSeDeg);
+        assertTrue(h.peakSeDeg < 2.5, "± 0.02 on areas of 1 (about 2.0): " + h.peakSeDeg);
         // any start and peak, across 0
         for (double p : new double[] {0, 46, 135.5, 270, 359}) {
             for (double peak : new double[] {3, 120, 299}) {
@@ -106,16 +106,16 @@ public class ScrewPhaseFitTest {
                 + "blob) at 298°: left out, 6 dots joined to a neighbour (a thread or one blob) at 118°: left out]",
                 joined.why.toString());
         // a noisy measure (± 0.25 on areas of 1): the peak's standard error, √(x₂²se₁² + x₁²se₂²)/k², decides; each
-        // half's error is its median's, √(π/2)·1.4826·MAD/√n (MAD 0.25 here: xSe 0.1161)
+        // half's error is its median's, √(π/2)·1.4826·b₈·MAD/√n (MAD 0.25, b₈ 1.129 here: xSe 0.1311)
         ScrewPhaseFit.Halves low = noisy(0.7);
-        assertEquals(14.93, low.peakSeDeg, 0.01);
-        assertEquals(0.1161, low.rows.get(0).xSe, 1e-4);
+        assertEquals(16.86, low.peakSeDeg, 0.01);
+        assertEquals(0.1311, low.rows.get(0).xSe, 1e-4);
         assertEquals(ScrewPhaseFit.LOW, low.confidence);
-        assertEquals("the peak's standard error is 14.9° (high at most 10°)", low.why.get(0));
+        assertEquals("the peak's standard error is 16.9° (high at most 10°)", low.why.get(0));
         assertEquals(179.1, low.featureDeg(), 1e-9);
-        assertEquals(17.42, noisy(0.6).peakSeDeg, 0.01);
-        assertEquals(ScrewPhaseFit.HIGH, noisy(1.1).confidence, "SE 9.5°");
-        assertEquals(104.52, noisy(0.1).peakSeDeg, 0.01);
+        assertEquals(19.67, noisy(0.6).peakSeDeg, 0.01);
+        assertEquals(ScrewPhaseFit.HIGH, noisy(1.2).confidence, "SE 9.8°");
+        assertEquals(118.0, noisy(0.1).peakSeDeg, 0.01);
         assertEquals("no ripple: a whole-turn recipe needs no start angle", noisy(0.1).why.get(0));
     }
 
@@ -173,6 +173,14 @@ public class ScrewPhaseFitTest {
         ScrewPhaseFit.Halves t = ScrewPhaseFit.halves(tied, 298, r2, 28);
         assertEquals(-0.26, t.rows.get(0).x, 1e-9, "the medians 0.74 and 1.26");
         assertTrue(t.peakSeDeg > 3, "the SD's error, not 0: " + t.peakSeDeg);
+        // few dots: 1.4826·MAD runs low at small n (the MAD of 3 is the smaller gap), so it takes Croux-Rousseeuw's
+        // small-sample factor (b₃ 1.495): 3 dots per half at 1.0, 1.1 and 1.3 give xSe √2·√(π/2)·1.4826·1.495·0.1/√3/2.2
+        List<ScrewPhaseFit.Dot> few = new ArrayList<>();
+        for (double a : new double[] {1.0, 1.1, 1.3}) {
+            few.add(new ScrewPhaseFit.Dot(298, a));
+            few.add(new ScrewPhaseFit.Dot(118, a));
+        }
+        assertEquals(0.10310, ScrewPhaseFit.halves(few, 298, r2, 28).rows.get(0).xSe, 1e-5);
     }
 
     /** No angle from a dot the camera could not measure, or from a dot that did not start where the plan put it. */

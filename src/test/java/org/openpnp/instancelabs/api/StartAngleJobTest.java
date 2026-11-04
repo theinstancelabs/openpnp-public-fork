@@ -187,9 +187,30 @@ public class StartAngleJobTest {
         assertEquals(409, pv.status, "no stored halves feature: " + pv);
         assertTrue(pv.json().getAsJsonObject("preview").get("sentence").getAsString().contains(", each row after its 2 "
                 + "throwaways,"), pv.toString());
+        // the paste it takes: each row's 16 dots at the block's half turn, its own 2 throwaways at the profile's dose
+        t.svc.updateConfigAtomically(c -> {
+            c.profile.netStepsPerDot = 1600;
+            return c;
+        });
+        PadCalibrationJobTest.Res whole = t.call("POST", "/api/screw/start-angle/measure", halves + "\"throwaways\":[["
+                + "285,262],[287.5,262],[290,262],[292.5,262]],\"apply\":true}");
+        org.openpnp.instancelabs.padprofile.Tip tip = t.svc.mountedTip();
+        assertEquals(Math.round(2 * (16 * PadCalibrationJob.countMgPerDot(tip, 800) + 2 * PadCalibrationJob
+                .countMgPerDot(tip, 1600))), whole.json().getAsJsonObject("preview").get("pasteMg").getAsLong(),
+                whole.toString());
+        // an apply against a stored feature of the other mode says which it is
+        long t0 = System.currentTimeMillis();
+        t.svc.setStartAngle(298.0, "seeded", t0, new DispenseProfile.StartAngleFeature("quarters", 315, t0, "pc-0"));
+        PadCalibrationJobTest.Res other = t.call("POST", "/api/screw/start-angle/measure", halves + "\"throwaways\":[["
+                + "285,262],[287.5,262],[290,262],[292.5,262]],\"apply\":true}");
+        assertEquals(409, other.status, other.toString());
+        assertTrue(other.json().get("reason").getAsString().startsWith("the start angle was set from a quarters "
+                + "measure, not a halves one: set it once from a halves measure (POST /api/screw/start-angle "
+                + "{startAngleDeg, evidence: {runId}})"), other.toString());
         assertBad(halves + "\"throwaways\":[[285,262],[287.5,262],[290,262]]}", "halves take one set of throwaways per "
-                + "row: an even count, 2 to 8 per row (the first half before row 1, the second before row 2), not 3");
-        assertBad(halves + "\"throwaways\":[[285,262],[287.5,262]]}", "2 to 8 per row");
+                + "row: an even count, 2 to 8 per row (the first half before row 1, the second before row 2), 4 to 16 in "
+                + "all, not 3");
+        assertBad(halves + "\"throwaways\":[[285,262],[287.5,262]]}", "4 to 16 in all, not 2");
         assertBad(halves + "\"throwaways\":[" + spots(280, 262, 8) + "," + spots(280, 266, 9) + ",[300,270]]}",
                 "2 to 8 per row");
         assertBad(halves + "\"throwaways\":[[285,262],[287.5,262],[285,262],[290,262]]}", "throwaways 1 and 3 lie 0.00 "

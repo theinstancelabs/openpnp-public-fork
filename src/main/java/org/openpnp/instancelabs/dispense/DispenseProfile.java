@@ -53,9 +53,9 @@ public class DispenseProfile {
      */
     public StartAngleFeature startAngleFeature = null;
     /**
-     * BR-75: when the start angle's value was last set (a set, or a settings change of it; a confirm keeps it): the
-     * partial-turn records made before it are stale. Null in settings from before it: {@link #startAngleSetAtMs} counts,
-     * and the first confirm takes it from there.
+     * BR-75: when the start angle's value was last set (a set or a measure's apply; PUT cannot change it, BR-77; a
+     * confirm keeps it): the partial-turn records made before it are stale. Null in settings from before it:
+     * {@link #startAngleSetAtMs} counts, and the first confirm takes it from there.
      */
     public Long startAngleChangedAtMs = null;
     /** Screw speed: G1 B feed = rpm x 360 deg/min (the bench's 180 rpm = F64800). */

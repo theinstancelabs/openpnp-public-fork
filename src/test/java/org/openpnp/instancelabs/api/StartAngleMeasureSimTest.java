@@ -322,7 +322,7 @@ public class StartAngleMeasureSimTest {
         // an apply needs a stored feature of its own mode
         long t0 = System.currentTimeMillis();
         pc.svc.setStartAngle(298.0, "seeded", t0, new DispenseProfile.StartAngleFeature("halves", 118, t0, "pc-0"));
-        assertRefused(quarters(",\"apply\":true"), "the start angle has no measured quarters feature");
+        assertRefused(quarters(",\"apply\":true"), "the start angle was set from a halves measure, not a quarters one");
         // stored from a dead quarter: with none now, the regulator is the suspect (Process 11-04); such a measure is
         // no evidence. A throwaway on one wet layer is laid 0.15 mm higher than one on a clean spot.
         pc.svc.setStartAngle(298.0, "seeded", t0, new DispenseProfile.StartAngleFeature("quarters", 314.7, t0, "pc-0"));
