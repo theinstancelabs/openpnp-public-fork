@@ -581,7 +581,7 @@ again with N1 touching.`, its link opens the first one's Z (the engine refuses t
 
 - **Dispense profile** `#pf-card`: two-column form, label line with unit and range, bench evidence next to its
   field (`16 psi starved the screw, 20 psi drooled`, `180 rpm proven: never faster than the paste feeds the screw`,
-  `0.20 mm gap misses dots`); fields `#pf-name`, `#pf-psi` (+ `#pf-psi-note`), `#pf-dwell`, `#pf-turn` (whole
+  `the 22G missed dots at 0.20 mm, the 25G 0603 recipe runs at 0.20 mm`); fields `#pf-name`, `#pf-psi` (+ `#pf-psi-note`), `#pf-dwell`, `#pf-turn` (whole
   fractions of 1600 steps), `#pf-suck`, `#pf-gap`, `#pf-rpm` (+ `#pf-rpm-warn` above 180), `#pf-accel`,
   `#pf-purge`, `#pf-notes`; derived line `#pf-turn-info` (`forward 190.09° · back 9.91° · net 180.18° per dot ·
   800 steps · G1 B F64800`); problems `#pf-problems` at the field. A sticky **unsaved bar** (`#pf-diff`) appears as

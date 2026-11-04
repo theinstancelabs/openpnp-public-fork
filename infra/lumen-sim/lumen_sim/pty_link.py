@@ -17,8 +17,9 @@ a link named like a device (ttyACM0) would open the real board whenever the link
 
 One lumen-sim per link path: each holds an flock on <link>.lock while it runs (the file stays; a killed process lets
 go of the lock), so a second one on the same path is refused instead of silently taking over the first one's host.
-Lock files are never opened through a symlink, and a link name has no '.', so no link can replace a <link>.lock or a
-<link>.tmp<pid>; nor can it replace anything at its path but a link to a pty (a killed lumen-sim's).
+Lock files are never opened through a symlink, and a link name has no '.', so no link can replace a <link>.lock, a
+<link>.tmp<pid> or the runner's <link>.pose.json (INF-05; written through <link>.pose.json.tmp<pid>); nor can it
+replace anything at its path but a link to a pty (a killed lumen-sim's).
 
 A killed lumen-sim (SIGKILL: a stop that escalated, the OOM killer) cannot remove its link. A /dev/pts/N is no proof of
 a simulator: on the lab computer Klipper's G-code input (klippy.serial) is a pty too, so a host reconnecting through a
@@ -37,7 +38,7 @@ import termios
 import tty
 
 LINK_PREFIX = "ttyLUMEN"
-LINK_NAME = re.compile(r"ttyLUMEN[A-Za-z0-9_-]*\Z")  # no '.': <link>.lock and <link>.tmp<pid> are lumen-sim's own
+LINK_NAME = re.compile(r"ttyLUMEN[A-Za-z0-9_-]*\Z")  # no '.': <link>.lock, .tmp<pid>, .pose.json are lumen-sim's own
 PTS = re.compile(r"/dev/pts/[0-9]+\Z")
 # O_NOFOLLOW: a lock that is a symlink (lumen-sim never makes one) is refused, never followed to what it names
 LOCK_FLAGS = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NOCTTY
