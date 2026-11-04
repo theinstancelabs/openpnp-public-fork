@@ -1,5 +1,6 @@
 """The health check against a fake OpenPnP: each failure mode, and never a STOP during a home."""
 import contextlib
+import io
 import json
 import os
 import sys
@@ -16,7 +17,9 @@ from fakes import Lab, sha_of  # noqa: E402
 SHA = sha_of("c")
 
 
-class Health(unittest.TestCase):
+class HealthLab:
+    """A fake OpenPnP and the health check against it (no tests of its own)."""
+
     def setUp(self):
         self.lab = Lab()
         self.rel = os.path.join(self.lab.dir, "release")
@@ -29,13 +32,13 @@ class Health(unittest.TestCase):
             self.fake.shutdown()
         self.lab.cleanup()
 
-    def start(self, jar_fail=(), sha=SHA, **machine):
+    def start(self, jar_fail=(), sha=SHA, trusted=(), **machine):
         with open(os.path.join(self.rel, "VERSION.txt"), "w") as f:
             f.write("il-build-5-" + SHA[:7] + "\n")
         with open(os.path.join(self.rel, "openpnp-il.jar"), "w") as f:
             json.dump({"sha": sha, "fail": list(jar_fail)}, f)
         self.fake = FakeOpenPnP(self.lab.port, self.rel, self.lab.config, machine=machine,
-                                requests=self.lab.requests_path).start_thread()
+                                requests=self.lab.requests_path, trusted_origins=list(trusted)).start_thread()
 
     def check(self, *extra, expect=SHA[:7]):
         argv = self.lab.argv("status") + list(extra)
@@ -51,6 +54,9 @@ class Health(unittest.TestCase):
 
     def violations(self):
         return [r["violation"] for r in self.lab.requests() if "violation" in r]
+
+
+class Health(HealthLab, unittest.TestCase):
 
     def test_healthy(self):
         self.start()
@@ -507,6 +513,145 @@ class Health(unittest.TestCase):
         self.assertIn("not idle", self.lab.last_out)
         self.assertNotIn(("POST", "/api/machine/enable"), self.paths())
 
+
+
+class HealthLock(HealthLab, unittest.TestCase):
+    """BR-72: a lock taken between the idle check and the health check's enable is someone at the machine."""
+
+    def test_a_lock_taken_after_the_idle_check_is_the_machines_not_the_builds(self):
+        self.start(lock={"holder": {"kind": "agent", "who": "process", "label": "Process", "what": "a bench session"},
+                         "takenFrom": None})
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "claim-lost")  # their session: left alone (no rollback over it), a hold
+        self.assertTrue(rep["failure"].startswith("enable: someone took the machine lock: Process has the machine"),
+                        rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/home"), self.posts())
+        self.assertNotIn(("POST", "/api/stop"), self.posts())  # STOP would end the new holder's work
+
+    def test_a_lock_taken_between_the_enable_and_the_home_is_left_alone_too(self):
+        self.start(jar_fail=["lock-at-home"])
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "claim-lost")
+        self.assertTrue(rep["failure"].startswith("home: someone took the machine lock"), rep["failure"])
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_taking_over_is_a_lock_refusal_too(self):
+        """An anonymous caller hears 'locked' or, while the web UI's Take control runs, 'taking-over'."""
+        self.start(jar_fail=["taking-over-enable"])
+        rep = self.check()
+        self.assertEqual(rep["kind"], "claim-lost", rep)
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_a_holder_who_keeps_the_machine_on_after_the_last_stop_is_theirs(self):
+        self.start(jar_fail=["lock-at-stop"])
+        rep = self.check("--stop-timeout", "2")
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "claim-lost")  # never the bad list for someone else's session
+        self.assertTrue(rep["failure"].startswith("stop: "), rep["failure"])
+        self.assertIn("User holds the machine lock", rep["failure"])
+
+    def test_a_refused_enable_that_is_not_the_lock_stays_the_builds(self):
+        self.start(jar_fail=["enable"])
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "build")
+
+
+ORIGIN = "https://lumen.example.ts.net:8877"
+
+
+class TrustedOrigins(HealthLab, unittest.TestCase):
+    """BR-73: the real machine's web UI through `tailscale serve`, checked on every deploy before anything is enabled."""
+
+    def origins(self, *flags):
+        return self.check(*[x for o in flags for x in ("--trusted-origin", o)])
+
+    def probes(self):
+        return [r.get("origin") for r in self.lab.requests() if r.get("path") == il_deploy.ORIGIN_PROBE]
+
+    def test_its_own_origin_is_accepted_and_a_foreign_one_refused(self):
+        self.start(trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertTrue(rep["ok"], rep)
+        self.assertEqual([s["step"] for s in rep["steps"]][:3], ["status", "origins", "enable"])
+        # every build: a foreign Origin on its own Host (CSRF) and a foreign Host (DNS rebinding); then the tailnet's
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST] + [ORIGIN, il_deploy.FOREIGN_ORIGIN])
+        self.assertEqual(rep["trusted_origins"], [ORIGIN])
+
+    def test_without_the_flag_there_is_no_origins_step(self):
+        self.start(trusted=[ORIGIN])
+        rep = self.check()
+        self.assertTrue(rep["ok"], rep)
+        self.assertNotIn("origins", [s["step"] for s in rep["steps"]])
+        self.assertEqual(self.probes(), [])
+
+    def test_a_build_from_before_br73_passes_with_a_note(self):
+        """A rollback to it stays possible; the tailnet URL is refused there and the report says so."""
+        self.start(jar_fail=["old-origins"])
+        rep = self.origins(ORIGIN)
+        self.assertTrue(rep["ok"], rep)
+        step = next(s for s in rep["steps"] if s["step"] == "origins")
+        self.assertIn("before BR-73", step["detail"])
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST])  # its guards are still checked
+        self.assertIsNone(rep["trusted_origins"])
+
+    def test_a_build_that_refuses_its_origin_fails_before_the_enable(self):
+        self.start(jar_fail=["origins-refused"], trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "build")
+        self.assertTrue(rep["failure"].startswith("origins: "), rep["failure"])
+        self.assertIn("its own origin is refused", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.posts())
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_an_origin_that_did_not_reach_openpnp_is_the_units_not_the_builds(self):
+        """The same for every build (the unit's environment): never a reason to bad-list a build."""
+        self.start(trusted=[])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "config")
+        self.assertIn("lacks https://lumen.example.ts.net:8877", rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/enable"), self.posts())
+
+    def test_a_foreign_host_accepted_fails(self):
+        self.start(jar_fail=["hosts-open"], trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "build")
+        self.assertIn("a foreign Host is accepted", rep["failure"])
+
+    def test_a_foreign_origin_accepted_fails(self):
+        self.start(jar_fail=["origins-open"], trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertIn("a foreign Origin is accepted", rep["failure"])
+
+    def test_the_flag_is_normalised_as_openpnp_does(self):
+        self.start(trusted=[ORIGIN])
+        rep = self.origins("HTTPS://Lumen.Example.ts.net:8877/")
+        self.assertTrue(rep["ok"], rep)
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST] + [ORIGIN, il_deploy.FOREIGN_ORIGIN])
+
+    def test_normalise_origin(self):
+        n = il_deploy.normalise_origin
+        self.assertEqual(n("HTTPS://Lumen.example.ts.net:8877/"),
+                         ("https://lumen.example.ts.net:8877", "lumen.example.ts.net:8877"))
+        self.assertEqual(n("https://x.ts.net:443"), ("https://x.ts.net", "x.ts.net"))
+        self.assertEqual(n("http://x.ts.net:80"), ("http://x.ts.net", "x.ts.net"))
+        # as java.net.URI and ApiSettings.normalizeOrigin (PR #18): the port as a number, RFC 2396 host names
+        self.assertEqual(n("https://x.ts.net:08877"), ("https://x.ts.net:8877", "x.ts.net:8877"))
+        self.assertEqual(n("http://127.0.0.1:18877"), ("http://127.0.0.1:18877", "127.0.0.1:18877"))
+        for bad in ("https://x.ts.net/path", "ftp://x.ts.net", "x.ts.net:8877", "https://", "https://x:99999x",
+                    "https://x..ts.net", "https://-x.ts.net", "https://x-.ts.net", "https://x.ts.net:0",
+                    "https://x.ts.net:99999", "https://1.2.3.999", "https://x.ts.net//", "https://u@x.ts.net",
+                    "\u00a0https://x.ts.net", "https://\u212aelvin.ts.net", "https://x.ts.net:\u0668877"):
+            with self.assertRaises(ValueError, msg=bad):
+                n(bad)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            il_deploy.config_from_args(self.lab.argv("status") + ["--trusted-origin", "https://x.ts.net/path"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -312,12 +312,41 @@ il_deploy.py init --seed-from ~/instancelabs/realcfg-sw-20261030n   # once, with
 il_deploy.py poll                       # stage the newest eligible release
 il_deploy.py deploy [--version TAG]     # deploy when idle
 il_deploy.py run                        # poll + deploy (the timer)
+il_deploy.py keep-up                    # start OpenPnP (never enabled or homed) if it is down and the machine is free
 il_deploy.py rollback [--discard-config-changes]   # one step back
 il_deploy.py health [--sha7 X] [--no-claim]   # JSON report; --no-claim if you hold the machine already
 il_deploy.py status                     # JSON: versions, last deploy, idle verdict, hold, bad list
 il_deploy.py resume                     # after checking the machine: clear the hold, hand back the Holder
 il_deploy.py units --out DIR            # render the systemd user units (and the user manager's system drop-in)
 ```
+`--trusted-origin URL` (repeatable): an origin the API must also answer, the real machine's web UI on the tailnet
+(`https://lumen-thinkpad.tail3e978a.ts.net:8877` = `tailscale serve --bg --https=8877 http://127.0.0.1:18877`, no proxy
+in between: tailscaled keeps the Host header and passes the browser's Origin). `units` puts it into OpenPnP's
+environment (`OPENPNP_IL_API_TRUSTED_ORIGINS`, BR-73) and into the deployer's own flags; the health check then probes
+each one before it enables anything: a POST with that Host and Origin must pass the API's browser guards (404 on a
+route that does not exist) and a foreign Origin must still be refused (403). A build from before BR-73 lists no
+trusted origins: passed with a note, so a rollback to it stays possible (the tailnet URL is refused there).
+
+`keep-up` keeps the real machine's web UI up (the user's P0, 11-03): when OpenPnP is down it starts it, never enabled
+or homed, unless the machine is not free: a Holder other than nobody (a bench session), a hold, the serial lock or
+device taken, another OpenPnP or something else on the API port. An exit il_deploy did not cause sets the hold first,
+so a crash is never restarted over a machine a person must check. It runs under the root lock (never during a deploy).
+Before a bench session stops OpenPnP, write the Holder first, or keep-up starts it again within a minute: the UI comes
+back while you work (a second person could press Start), and the bench tool refuses on the serial lock.
+
+**BR-72's machine lock:** no deploy while `status.lock.holder` is set (an agent role, or the user, whose hold never
+expires: automatic deploys wait for Give back in the web UI); a lock field it cannot read counts as held. A lock
+taken during a health check (refusals `locked` or `taking-over`, or the machine kept on after the last STOP) is that
+person's session: no STOP, no rollback over it, the build stays installed unverified, with the hold. `health` by
+hand refuses while the lock is held.
+
+**The run marker** (`<root>/openpnp-run.json`): the unit's second ExecStartPre, `mark-start`, refuses a taken serial
+lock (java never starts then) and writes it with this boot's id; only `stop-openpnp` (the ExecStop) clears it, and only
+after a confirmed STOP, or when a live JVM is stopped before its API is up. OpenPnP down with the marker standing ran
+without a confirmed STOP: an exit il_deploy did not cause, so the hold, also across a reboot (systemd forgets
+`failed` at a reboot; a freeze, a power cut or an unconfirmed STOP at shutdown leave the marker). A start that flock
+refused (exit 75) drops it without a hold. `status` shows it (`run_marker`).
+
 `stop-openpnp` (the unit's ExecStop) and `check-device` (its ExecStartPre) are called by the OpenPnP unit,
 `wait-display` (its ExecStartPost: wait until Xvfb listens) by the Xvfb unit.
 
@@ -349,10 +378,12 @@ The units:
 
 | Unit | What it is |
 |---|---|
-| `il-openpnp.service` | Java with the three `--add-opens`, `-DconfigDir=<root>/state/config`, prefs in `<root>/prefs`, `-Xmx1536m`, API port 18877, `DISPLAY=:50`. Started under `flock -n -F -E 75 /tmp/lumen-serial.lock`, so the bench tools refuse while it runs; `-F` (no fork) makes java itself the main process, so the SIGTERM after ExecStop reaches it and its shutdown hooks run (prefs sync, log flushing; flock does not pass SIGTERM on, and `KillMode=mixed` SIGKILLs what is left). `SuccessExitStatus=143`: java's exit on SIGTERM is a clean stop, so the unit ends `failed` only on a crash. `ExecStop` = `stop-openpnp --home-busy-wait 300 --stop-timeout 90` (the STOP rule above; exit 1 if not confirmed); `TimeoutStopSec=420` covers that wait plus the STOP and its confirm; `KillMode=mixed`, `Restart=no`, higher CPU, IO and memory priority. It is not enabled at boot: deploys and people start it. |
+| `il-openpnp.service` | Java with the three `--add-opens`, `-DconfigDir=<root>/state/config`, prefs in `<root>/prefs`, `-Xmx1536m`, API port 18877, `DISPLAY=:50`. Started under `flock -n -F -E 75 /tmp/lumen-serial.lock`, so the bench tools refuse while it runs; `-F` (no fork) makes java itself the main process, so the SIGTERM after ExecStop reaches it and its shutdown hooks run (prefs sync, log flushing; flock does not pass SIGTERM on, and `KillMode=mixed` SIGKILLs what is left). `SuccessExitStatus=143`: java's exit on SIGTERM is a clean stop, so the unit ends `failed` on a crash or an ExecStop that could not confirm the STOP (also after java ended by itself: systemd runs ExecStop then with `$MAINPID` unset, and `stop-openpnp` exits 1 when nothing answered). `ExecStop` = `stop-openpnp --home-busy-wait 300 --stop-timeout 90` (the STOP rule above; exit 1 if not confirmed); `TimeoutStopSec=420` covers that wait plus the STOP and its confirm; `KillMode=mixed`, `Restart=no`, higher CPU, IO and memory priority. It is not enabled at boot: deploys and people start it. |
 | `il-openpnp-xvfb.service` | `Xvfb :50 -nolisten tcp` (outside uinav's :91-:299). `ExecStartPost=il_deploy.py wait-display` (up to 20 s for `/tmp/.X11-unix/X50`): Type=simple counts as started at the fork, and OpenPnP's first AWT call exits 1 without the socket, which at the first start after a boot would put a good build on the bad list. |
 | `il-deploy.service` | oneshot `run`. Exit code 3 (not idle) counts as success; no start timeout (a deploy homes the machine); 10 min stop timeout. `After=il-openpnp.service`, so at shutdown it stops first: its SIGTERM handler waits out a home and STOPs before the OpenPnP unit's ExecStop runs. That needs the user manager's drop-in above; without it a reboot kills both after 5 s (then "Killed outright" applies). |
 | `il-deploy.timer` | Starts the deploy service 2 min after the last run ended (and 5 min after boot). |
+| `il-keepup.service` | oneshot `keep-up` with the deployer's flags; exit 3 (not free) counts as success. |
+| `il-keepup.timer` | Starts keep-up 1 min after its last run ended (and 1 min after boot). Enable it on its own: `systemctl --user enable --now il-keepup.timer` (the deploy timer may stay off). |
 
 GitHub access: `gh` when it is logged in, else unauthenticated urllib (60 requests/h). An idle poll costs one
 request. Attestations are verified with `gh` only (2.97 on this host; `gh attestation verify` needs the policy flags
