@@ -325,10 +325,29 @@ public class SimPasteTest {
         assertEquals(Long.valueOf(42), parsed.paste.noiseSeed);
     }
 
+    /** The calibrating scenes' paste (il_sim_scene.py PASTE): the noise seeded, the physical phase pinned. */
     static SimScene seededScene(Long noiseSeed) {
         SimScene s = scene();
         s.paste.noiseSeed = noiseSeed;
+        if (noiseSeed != null) {
+            s.paste.offsetSteps = 529;
+        }
         return s;
+    }
+
+    /** A scene file written mid-connection does not turn the screw: the physical phase stays (Infra's tips leg). */
+    @Test
+    public void aSceneWriteKeepsThePhysicalPhase() {
+        SimScene[] cur = {scene()};
+        cur[0].paste.noiseSeed = 1011L;
+        SimPaste p = new SimPaste(() -> cur[0], SimPaste.Store.forScene(cur[0]), () -> nowNs[0], () -> 0.0);
+        int phase = p.offsetSteps();
+        SimScene again = scene();
+        again.paste.noiseSeed = 1011L;
+        cur[0] = again; // written again mid-connection
+        assertEquals(phase, p.offsetSteps(), "the same screw angle after a scene write");
+        p.powerCycle();
+        assertNotEquals(phase, p.offsetSteps(), "a power cycle draws it again");
     }
 
     /**

@@ -75,11 +75,14 @@ FID_MASK = re.compile(r"(?i)mask(\d+(?:\.\d+)?)mm")
 DEFAULT_BLANK = {"rect": [280.0, 225.0, 365.0, 250.0], "surface": {"z0": 5.62, "slopeX": -0.0012, "slopeY": 0.0}}
 # Pad calibration (§11.3). mRevMg 2.30 differs on purpose from the configured 2.11 (tools/lumen.py:97): a weighing
 # must find 1.15 mg per half turn, not 1.06. needleZOffsetMm None = the engine configuration's.
-# noiseSeed (BR-74): the dose and thread noise and the physical phase count the reconnects since the scene was last
-# written, so a calibrating test that writes its scene draws the same alone in a fresh session as after webui-sim's
-# reconnects (pad-profile and tip-setups failed alone, Infra 11-03). 1011, not 11: 11 is what the old seed drew on a
-# fresh session's first connection, the draws that failed. Values settled by Infra's calib vs full CI legs.
+# noiseSeed (BR-74): the dose and thread noise counts the reconnects since the scene was last written and starts again
+# when it is, so a calibrating test that writes its scene draws the same alone in a fresh session as after webui-sim's
+# reconnects (pad-profile and tip-setups failed alone, Infra 11-03); offsetSteps pins the physical phase the same way
+# (529: a half-turn's two halves straddle the ripple's mean, so neither is in the screw's weak half). 1011, not 11: 11
+# is what the old seed drew on a fresh session's first connection, the draws that failed. Settled by Infra's calib vs
+# full CI legs.
 PASTE = {"mRevMg": 2.30, "ripple": 0.15, "ripplePeakDeg": 299, "cv": 0.08, "seed": 11, "noiseSeed": 1011,
+         "offsetSteps": 529,
          "footprint": {"c": 0.875, "e": 0.77},
          "transferRatio": 0.75, "oozeFirst": 0.40, "refillDip": 0.30, "refillTauDots": 2, "idleFullS": 300,
          "idleDeadS": 3600, "threadShare": 0.5, "threadFullMg": 0.35, "threadZeroMg": 0.45, "missBelowMg": 0.12,

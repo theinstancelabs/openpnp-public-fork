@@ -748,12 +748,16 @@ public final class SimPaste {
         return noise;
     }
 
-    /** A newly written paste block (BR-74, noiseSeed only): its draws start again. */
+    /**
+     * A newly written paste block (BR-74, noiseSeed only): its noise starts again. The physical phase does not: a scene
+     * file written mid-test does not turn the screw (Infra's tips leg 11-03: re-drawing it there put the half-turn dots
+     * 54 % low); only a reconnect draws it again, unless the scene pins offsetSteps.
+     */
     private void seeded(SimScene.Paste p) {
         if (p.noiseSeed != null && p != drawnFor) {
             drawnFor = p;
             noise = null;
-            offset = null;
+            store.sinceWritten(p, connection); // counted from now: the reconnects after this write
         }
     }
 
