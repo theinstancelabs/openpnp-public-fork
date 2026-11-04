@@ -6,7 +6,12 @@ name: CI
 # What runs where: infra/README.md.
 
 on:
+  # A PR runs the fast gate (the UI end-to-end and SIM acceptance jobs only with the label full-ci); the merge queue
+  # (merge_group) and the push to il/integration run the full gate. Releases come from the push run only.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]  # labeled: adding full-ci runs the slow jobs
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [il/integration]
   workflow_dispatch:
@@ -163,6 +168,7 @@ jobs:
     # every other script in run-webui-sim-test.sh's ALL_SCRIPTS, so a new UI script needs no change here.
     name: UI end-to-end (${{ matrix.title }})
     needs: build
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     strategy:
@@ -229,6 +235,7 @@ jobs:
   acceptance:
     name: SIM acceptance (${{ matrix.shard }}${{ matrix.controller == 'pty' && ', on lumen-sim' || '' }})
     needs: build
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -283,9 +290,17 @@ jobs:
       - name: Every job passed
         env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+          FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
-          echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null
+          if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then
+            # the fast gate: the slow jobs run in the merge queue (label a PR full-ci to run them here too)
+            echo "$NEEDS" | jq -e 'length > 0 and all(to_entries[]; .value.result == "success" or
+              ((.key == "ui-e2e" or .key == "acceptance") and .value.result == "skipped"))' >/dev/null
+          else
+            echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null
+          fi
 
   release:
     name: Release (versioned build for the deployer)
