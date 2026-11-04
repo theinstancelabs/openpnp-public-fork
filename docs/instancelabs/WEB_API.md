@@ -20,8 +20,9 @@ localhost), §4.4–4.5 (Stop, on/off order), §5.5 (interlocks), §5.7 (Profile
   `DispenseService.install`. Both start on OpenPnP's `configurationComplete`.
 - URL: **http://127.0.0.1:8765/** (UI) and `/api/...` (JSON). JDK `com.sun.net.httpserver`, Gson, no new dependency.
 - Settings: `<configDir>/instancelabs/web-api.json` (never written by the API):
-  `{"port": 8765, "lanAccess": false, "enabled": true, "threads": 8}`.
-  Overrides: system properties `instancelabs.api.port|lan|enabled`, then env `OPENPNP_IL_API_PORT|LAN|ENABLED`.
+  `{"port": 8765, "lanAccess": false, "enabled": true, "threads": 8, "trustedOrigins": []}`.
+  Overrides: system properties `instancelabs.api.port|lan|enabled|trustedOrigins`, then env
+  `OPENPNP_IL_API_PORT|LAN|ENABLED|TRUSTED_ORIGINS` (trusted origins: a comma-separated list that replaces the file's).
 - `lanAccess: true` binds all interfaces (e.g. a tablet next to the machine). There is **no authentication**: turn it
   on only on a trusted network. Off by default.
 - If the port is taken, the API logs an error and OpenPnP continues without it.
@@ -30,6 +31,14 @@ localhost), §4.4–4.5 (Stop, on/off order), §5.5 (interlocks), §5.7 (Profile
 LAN access is on (DNS-rebinding guard). Requests other than GET/HEAD with a foreign `Origin`, or
 `Sec-Fetch-Site` other than `same-origin`/`none`, get 403 (CSRF guard), so a web page elsewhere cannot press buttons.
 `curl -X POST http://127.0.0.1:8765/api/stop` works. The UI is served with a strict CSP (`script-src 'self'`).
+
+**Trusted origins (BR-73).** The real machine's UI from the user's devices: `tailscale serve --https=8877` proxies
+`https://<name>.ts.net:8877` to the API on 127.0.0.1 and keeps the browser's `Host` and `Origin` (measured 11-03). With
+`trustedOrigins: ["https://<name>.ts.net:8877"]` (exact origins: scheme, host, port; a path or another scheme is dropped
+with a warning) that Host passes the DNS-rebinding guard, and a write passes the CSRF guard only with exactly that
+Origin (or none, as curl). `"http://" + Host` stays the rule for loopback Hosts only. The bind stays 127.0.0.1 (the proxy
+connects over loopback); never strip Origin in a proxy instead. `GET /api/status` lists them in
+`server.trustedOrigins`.
 
 ## 2. Errors and refusals
 

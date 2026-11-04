@@ -336,6 +336,56 @@ public class ApiServerSimTest {
         assertFalse(ApiServer.isLoopbackHost("127.0.0.1.evil.example"));
     }
 
+    /** The status line of a request written by hand (the JDK client cannot set Host). */
+    String rawStatusLine(String method, String path, String... headers) throws Exception {
+        try (Socket sock = new Socket(InetAddress.getLoopbackAddress(), api.getPort())) {
+            StringBuilder req = new StringBuilder(method + " " + path + " HTTP/1.1\r\n");
+            for (int i = 0; i + 1 < headers.length; i += 2) {
+                req.append(headers[i]).append(": ").append(headers[i + 1]).append("\r\n");
+            }
+            if (!"GET".equals(method)) {
+                req.append("Content-Type: application/json\r\nContent-Length: 2\r\n");
+            }
+            req.append("Connection: close\r\n\r\n").append("GET".equals(method) ? "" : "{}");
+            OutputStream out = sock.getOutputStream();
+            out.write(req.toString().getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+            return new BufferedReader(new InputStreamReader(sock.getInputStream(), StandardCharsets.US_ASCII))
+                    .readLine();
+        }
+    }
+
+    /** BR-73: the real machine's UI through `tailscale serve`, which keeps the browser's Host and Origin. */
+    @Test
+    public void br73TheTrustedTailnetOriginReachesTheApi() throws Exception {
+        String origin = "https://lumen.example.ts.net:8877", host = "lumen.example.ts.net:8877";
+        // 7. nothing configured: the tailnet Host is refused as before
+        assertTrue(rawStatusLine("GET", "/", "Host", host).contains(" 403"));
+        api.stop();
+        ApiSettings s = new ApiSettings();
+        s.port = 0;
+        s.trustedOrigins = Arrays.asList(origin, "https://other.example.ts.net");
+        api = ApiServer.start(Configuration.get(), s);
+        // 1. the page itself; 2. a write with the page's Origin reaches the routing (404 for an unknown route, not 403)
+        String line = rawStatusLine("GET", "/", "Host", host);
+        assertTrue(line.contains(" 200"), line);
+        line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", origin, "Sec-Fetch-Site", "same-origin");
+        assertTrue(line.contains(" 404"), line);
+        // 3. a foreign Origin; 4. a foreign Host; 5. the Host of one entry with the Origin of the other
+        line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", "https://evil.example");
+        assertTrue(line.contains(" 403"), line);
+        line = rawStatusLine("GET", "/", "Host", "evil.example");
+        assertTrue(line.contains(" 403"), line);
+        line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", "https://other.example.ts.net");
+        assertTrue(line.contains(" 403"), line);
+        // 6. plain http on the trusted name
+        line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", "http://lumen.example.ts.net:8877");
+        assertTrue(line.contains(" 403"), line);
+        // the deployer's health check reads the list
+        JsonArray listed = ok(get("/api/status")).getAsJsonObject("server").getAsJsonArray("trustedOrigins");
+        assertEquals("[\"https://lumen.example.ts.net:8877\",\"https://other.example.ts.net\"]", listed.toString());
+    }
+
     @Test
     public void padTypesAreGroupedAddableVersionedAndRetirable() throws Exception {
         JsonObject list = ok(get("/api/pad-types"));

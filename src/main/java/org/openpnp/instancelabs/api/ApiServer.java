@@ -15,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -40,7 +41,9 @@ import com.sun.net.httpserver.HttpServer;
  * <p>Browser-safety: no CORS headers are ever sent; the Host header must name this machine
  * (DNS-rebinding guard) unless LAN access is on; state-changing requests carrying a foreign
  * {@code Origin} or {@code Sec-Fetch-Site: cross-site} are refused (CSRF guard). Plain
- * {@code curl -X POST http://127.0.0.1:8765/api/stop} works.</p>
+ * {@code curl -X POST http://127.0.0.1:8765/api/stop} works. BR-73: a trusted origin
+ * ({@link ApiSettings#trustedOrigins}, the machine's tailnet name behind {@code tailscale serve}) passes both guards
+ * with its own Host and Origin ({@link #browserSafetyRefusal}).</p>
  */
 public final class ApiServer {
     public static final String RESOURCE_ROOT = "/org/openpnp/instancelabs/web/";
@@ -50,6 +53,8 @@ public final class ApiServer {
     private static volatile ApiServer instance;
 
     private final ApiSettings settings;
+    /** BR-73: {@link ApiSettings#trustedOriginSet()}, read once at start. */
+    private final Set<String> trustedOrigins;
     private final HttpServer server;
     private final ExecutorService executor;
     private final List<Route> routes = new ArrayList<>();
@@ -98,6 +103,10 @@ public final class ApiServer {
 
     private ApiServer(Configuration configuration, ApiSettings settings) throws IOException {
         this.settings = settings;
+        this.trustedOrigins = settings.trustedOriginSet();
+        if (!trustedOrigins.isEmpty()) {
+            Logger.info("Instance Labs API: trusted origins {}", trustedOrigins);
+        }
         InetSocketAddress addr = settings.lanAccess ? new InetSocketAddress(settings.port)
                 : new InetSocketAddress(InetAddress.getLoopbackAddress(), settings.port);
         this.server = HttpServer.create(addr, 0);
@@ -139,6 +148,11 @@ public final class ApiServer {
 
     public ApiSettings getSettings() {
         return settings;
+    }
+
+    /** BR-73: the trusted origins in force (normalised). */
+    public Set<String> getTrustedOrigins() {
+        return trustedOrigins;
     }
 
     ApiContext getContext() {
@@ -414,23 +428,56 @@ public final class ApiServer {
 
     /** DNS-rebinding and CSRF guards (see class comment). */
     private void checkBrowserSafety(HttpExchange ex, String method) throws ApiException {
-        String host = ex.getRequestHeaders().getFirst("Host");
-        if (!settings.lanAccess && (host == null || !isLoopbackHost(host))) {
-            throw new ApiException(403, "forbidden",
-                    "Host '" + host + "' is not allowed: this API answers 127.0.0.1 / localhost only");
+        String refusal = browserSafetyRefusal(method, ex.getRequestHeaders().getFirst("Host"),
+                ex.getRequestHeaders().getFirst("Origin"), ex.getRequestHeaders().getFirst("Sec-Fetch-Site"),
+                settings.lanAccess, trustedOrigins);
+        if (refusal != null) {
+            throw new ApiException(403, "forbidden", refusal);
+        }
+    }
+
+    /**
+     * Why a request fails the DNS-rebinding or CSRF guard, or null when it passes. Host: loopback, a trusted origin's
+     * {@code host[:port]} (BR-73), or anything with LAN access. Origin (writes only; none at all passes, as curl): a
+     * trusted Host needs exactly its own trusted origin, any other Host {@code "http://" + Host} (same-origin over
+     * plain http). Then {@code Sec-Fetch-Site} must be same-origin or none.
+     */
+    static String browserSafetyRefusal(String method, String host, String origin, String fetchSite, boolean lanAccess,
+            Set<String> trustedOrigins) {
+        String trusted = host == null ? null : trustedOriginOf(host, trustedOrigins);
+        if (!lanAccess && trusted == null && (host == null || !isLoopbackHost(host))) {
+            return "Host '" + host + "' is not allowed: this API answers 127.0.0.1 / localhost"
+                    + (trustedOrigins.isEmpty() ? "" : " and " + String.join(", ", trustedOrigins)) + " only";
         }
         if ("GET".equals(method) || "HEAD".equals(method)) {
-            return;
+            return null;
         }
-        String origin = ex.getRequestHeaders().getFirst("Origin");
-        if (origin != null && !origin.equalsIgnoreCase("http://" + host)) {
-            throw new ApiException(403, "forbidden",
-                    "cross-site request refused (Origin " + origin + " is not this server)");
+        if (origin != null && !(trusted != null ? trusted.equals(ApiSettings.normalizeOrigin(origin))
+                : origin.equalsIgnoreCase("http://" + host))) {
+            return "cross-site request refused (Origin " + origin + " is not this server)";
         }
-        String site = ex.getRequestHeaders().getFirst("Sec-Fetch-Site");
-        if (site != null && !site.equals("same-origin") && !site.equals("none")) {
-            throw new ApiException(403, "forbidden", "cross-site request refused (Sec-Fetch-Site: " + site + ")");
+        if (fetchSite != null && !fetchSite.equals("same-origin") && !fetchSite.equals("none")) {
+            return "cross-site request refused (Sec-Fetch-Site: " + fetchSite + ")";
         }
+        return null;
+    }
+
+    /**
+     * The trusted origin whose {@code host[:port]} this Host header names (case-insensitive; the scheme's default port
+     * may be written out or left out), or null.
+     */
+    static String trustedOriginOf(String hostHeader, Set<String> trustedOrigins) {
+        String h = hostHeader.trim().toLowerCase(Locale.ROOT);
+        for (String o : trustedOrigins) {
+            int sep = o.indexOf("://");
+            String authority = o.substring(sep + 3);
+            String withDefaultPort = authority + (o.startsWith("https") ? ":443" : ":80");
+            if (h.equals(authority) || (authority.lastIndexOf(':') <= authority.lastIndexOf(']')
+                    && h.equals(withDefaultPort))) {
+                return o;
+            }
+        }
+        return null;
     }
 
     static boolean isLoopbackHost(String hostHeader) {

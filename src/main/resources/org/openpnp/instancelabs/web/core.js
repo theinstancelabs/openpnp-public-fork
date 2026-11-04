@@ -805,12 +805,17 @@
     lsSet('il.planId', null);
     return IL.setPlan(null);
   };
-  /** Loads a plan by id (restore); 404 → S.planForgotten (plan chip "Plan forgotten (OpenPnP restarted)"). */
+  /**
+   * Loads a plan by id (restore); 404 → S.planForgotten (plan chip "Plan forgotten (OpenPnP restarted)"). An answer that
+   * comes after another plan was shown or asked for is dropped (null): a finished registration's plan (status.run.nextPlanId)
+   * loaded late must not replace the plan made meanwhile.
+   */
   IL.loadPlan = async function (id) {
     if (!id) return null;
     S.planId = id;
     try {
-      return IL.setPlan(await IL.api('GET', '/api/plan/' + encodeURIComponent(id)));
+      const q = await IL.api('GET', '/api/plan/' + encodeURIComponent(id));
+      return S.planId === id ? IL.setPlan(q) : null;
     } catch (e) {
       if (e.status === 404 && S.planId === id) {
         const prev = S.plan;
