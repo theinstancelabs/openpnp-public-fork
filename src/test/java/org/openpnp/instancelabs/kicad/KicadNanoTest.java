@@ -45,6 +45,9 @@ public class KicadNanoTest {
         assertEquals(55, p.counts.pastePads);
         assertEquals(20, p.counts.bottom);
         assertEquals(20, p.skipped.get("bottom").size());
+        String bottom = p.warnings("BOTTOM_SKIPPED").get(0).text; // parts, fiducials, headers and the logo alike
+        assertTrue(bottom.startsWith("20 bottom-side footprints get no paste (not read yet): ")
+                && bottom.endsWith(" and 10 more."), bottom);
         assertEquals(List.of("Silkscreen_Front", "D+0", "D-0", "J4"), p.skipped.get("artOnly"));
         assertEquals("Fiducial", p.placement("FD1").type);
         assertEquals("Fiducial", p.placement("FD2").type);

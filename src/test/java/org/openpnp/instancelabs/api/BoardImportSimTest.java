@@ -543,6 +543,7 @@ public class BoardImportSimTest {
         JsonObject c = byId(boards.getAsJsonArray("files"), "file", copy.getCanonicalPath());
         assertEquals("kicad", c.getAsJsonObject("art").get("kind").getAsString());
         assertEquals(artId, c.getAsJsonObject("art").get("id").getAsString());
+        assertEquals("ftp", c.getAsJsonObject("imported").get("slug").getAsString(), "its drawing's upload (BR-88)");
 
         // a placement moved in OpenPnP's Boards tab
         EdtRunner.call(() -> {
@@ -561,6 +562,65 @@ public class BoardImportSimTest {
         assertEquals(fallbackId, plan.getAsJsonObject("board").getAsJsonObject("art").get("id").getAsString());
         assertEquals("fallback", plan.getAsJsonObject("board").getAsJsonObject("art").get("kind").getAsString());
         assertEquals(200, get("/api/board-art/" + fallbackId).status);
+    }
+
+    /**
+     * BR-88: one KiCad file saved under two names: each board lists its own upload (the index keeps one drawing per
+     * geometry, the newest); a byte copy lists that drawing's upload, and the drawing stays shared.
+     */
+    @Test
+    public void twoSavesOfOneFileListTheirOwnUploads() throws Exception {
+        byte[] ftp = fixture(FTP);
+        JsonObject a = importBoard(ftp, "ftp.kicad_pcb", "ftp", false);
+        String fileA = a.get("file").getAsString();
+        long atA = byId(a.getAsJsonObject("boards").getAsJsonArray("files"), "file", fileA).getAsJsonObject("imported")
+                .get("atMs").getAsLong();
+        JsonObject b = importBoard(ftp, "ftp.kicad_pcb", "ftp B", false);
+        String fileB = b.get("file").getAsString();
+        String artB = b.getAsJsonObject("art").get("id").getAsString();
+        File copy = new File(sim.configDir, "00-ftp.board.xml");
+        Files.copy(new File(fileA).toPath(), copy.toPath());
+        EdtRunner.call(() -> Configuration.get().getBoard(copy), 10_000);
+        JsonArray files = ok(get("/api/boards")).getAsJsonArray("files");
+        JsonObject ia = byId(files, "file", fileA).getAsJsonObject("imported");
+        assertEquals("ftp", ia.get("slug").getAsString());
+        assertEquals("ftp", ia.get("name").getAsString());
+        assertEquals(atA, ia.get("atMs").getAsLong(), "the first board keeps its own upload");
+        JsonObject ib = byId(files, "file", fileB).getAsJsonObject("imported");
+        assertEquals("ftp-b", ib.get("slug").getAsString());
+        assertEquals("ftp B", ib.get("name").getAsString());
+        assertTrue(ib.get("atMs").getAsLong() > atA, ib.toString());
+        assertEquals(ib, byId(files, "file", copy.getCanonicalPath()).getAsJsonObject("imported"),
+                "the copy (of the first board's file): the newest upload of its geometry, as before");
+        for (String f : new String[] {fileA, fileB, copy.getCanonicalPath()}) {
+            assertEquals(artB, byId(files, "file", f).getAsJsonObject("art").get("id").getAsString(), f);
+        }
+    }
+
+    /** BR-88: status.boardImport.savedAtMs is the time of the last save that succeeded (another tab sees it). */
+    @Test
+    public void theStatusSaysWhenTheLastSaveSucceeded() throws Exception {
+        assertNull(savedAtMs(), "none yet in this OpenPnP run");
+        byte[] ftp = fixture(FTP);
+        long start = System.currentTimeMillis();
+        JsonObject saved = importBoard(ftp, "ftp.kicad_pcb", "ftp", false);
+        Long at = savedAtMs();
+        assertNotNull(at);
+        assertTrue(at >= start, at + " < " + start);
+        assertEquals(byId(saved.getAsJsonObject("boards").getAsJsonArray("files"), "file", saved.get("file")
+                .getAsString()).getAsJsonObject("imported").get("atMs").getAsLong(), (long) at,
+                "the saved board's imported.atMs");
+        refused(saveRes(ftp, "ftp.kicad_pcb", "ftp", false, preview(ftp, "ftp.kicad_pcb")), 409, "exists");
+        assertEquals(at, savedAtMs(), "a refused save changes nothing");
+        importBoard(ftp, "ftp.kicad_pcb", "ftp", true);
+        assertTrue(savedAtMs() > at, "a replace is a save");
+    }
+
+    /** status.boardImport.savedAtMs, or null. */
+    Long savedAtMs() throws Exception {
+        JsonObject s = ok(get("/api/status")).getAsJsonObject("boardImport");
+        assertTrue(s.has("savedAtMs"), s.toString());
+        return s.get("savedAtMs").isJsonNull() ? null : s.get("savedAtMs").getAsLong();
     }
 
     // ------------------------------------------------------------------------------------------
@@ -936,6 +996,7 @@ public class BoardImportSimTest {
             assertTrue(failed.get("reason").getAsString().startsWith("Could not save the board: test: the save fails "
                     + "after step " + step), failed.toString());
             assertTrue(failed.get("reason").getAsString().endsWith("Nothing was changed."));
+            assertNull(savedAtMs(), "step " + step);
             assertEquals(packages, ids(Configuration.get().getPackages()), "step " + step);
             assertNull(Configuration.get().getPart("R_0603_1608Metric-R_Small"), "step " + step);
             assertEquals(before, Configuration.get().getBoards(), "step " + step);
@@ -950,11 +1011,13 @@ public class BoardImportSimTest {
         File dir = new File(root, "ftp");
         Map<String, String> files = contents(dir);
         Board listed = Configuration.get().getBoard(new File(first.get("file").getAsString()));
+        Long saved = savedAtMs();
         for (int step : new int[] {5, 7, 8}) {
             JsonObject pv = preview(ftpR1Moved(), "ftp.kicad_pcb");
             BoardImporter.failAfterStep = step;
             refused(saveRes(ftpR1Moved(), "ftp.kicad_pcb", "ftp", true, pv), 500, "internal");
             BoardImporter.failAfterStep = 0;
+            assertEquals(saved, savedAtMs(), "step " + step);
             assertEquals(files, contents(dir), "step " + step);
             assertNoStaging(root);
             Board now = null;
@@ -1034,6 +1097,8 @@ public class BoardImportSimTest {
         assertEquals("kicad", listed.getAsJsonObject("art").get("kind").getAsString());
         assertEquals(artId, listed.getAsJsonObject("art").get("id").getAsString());
         assertEquals("attach", listed.getAsJsonObject("imported").get("how").getAsString());
+        assertEquals(pv.getAsJsonObject("skipped"), listed.getAsJsonObject("imported").getAsJsonObject("skipped"));
+        assertFalse(listed.getAsJsonObject("imported").get("pasteDnp").getAsBoolean());
         assertEquals(Arrays.asList("ftp.art.json", "ftp.kicad_pcb"), listing(new File(boardsRoot(), "ftp")));
 
         JsonObject after = plan(path);
@@ -1064,6 +1129,25 @@ public class BoardImportSimTest {
                 new File(sim.configDir, "nope.board.xml").getAbsolutePath()) + "&sha256="
                 + pv.getAsJsonObject("file").get("sha256").getAsString(), ftp), 409, "refused");
         assertTrue(notListed.get("reason").getAsString().endsWith("is not in OpenPnP's board list."));
+
+        // BR-88: a byte copy of the bench file (the same geometry) gets an attach of its own; each lists its own
+        long benchAt = listed.getAsJsonObject("imported").get("atMs").getAsLong();
+        File copy = new File(sim.configDir, "00-ftp.board.xml");
+        Files.copy(xml.toPath(), copy.toPath());
+        EdtRunner.call(() -> Configuration.get().getBoard(copy), 10_000);
+        String copyPath = copy.getCanonicalPath();
+        JsonArray files = ok(upload("/api/boards/import/attach?file=ftp.kicad_pcb&board=" + enc(copyPath) + "&name="
+                + enc("ftp copy") + "&sha256=" + pv.getAsJsonObject("file").get("sha256").getAsString(), ftp))
+                .getAsJsonObject("boards").getAsJsonArray("files");
+        JsonObject bench = byId(files, "file", path).getAsJsonObject("imported");
+        assertEquals("attach", bench.get("how").getAsString());
+        assertEquals("ftp", bench.get("slug").getAsString());
+        assertEquals(path, bench.get("board").getAsString());
+        assertEquals(benchAt, bench.get("atMs").getAsLong(), "the bench file keeps its own attach");
+        JsonObject copied = byId(files, "file", copyPath).getAsJsonObject("imported");
+        assertEquals("ftp-copy", copied.get("slug").getAsString());
+        assertEquals(copyPath, copied.get("board").getAsString());
+        assertEquals(copied.get("atMs").getAsLong(), (long) savedAtMs(), "an attach is a save");
     }
 
     static byte[] readIfThere(File f) throws Exception {
@@ -1149,6 +1233,10 @@ public class BoardImportSimTest {
         assertEquals(8, blocked, "4 LEDs below the gate, J3, SW1, Y1 and IC3");
         JsonObject saved = importBoard(nano, "NanoV3.3.kicad_pcb", "Arduino Nano V3.3", false);
         assertEquals("arduino-nano-v3-3", saved.get("slug").getAsString());
+        // BR-88 (a): the board list keeps what the upload's preview listed as getting no paste
+        JsonObject listed = byId(ok(get("/api/boards")).getAsJsonArray("files"), "file", saved.get("file").getAsString());
+        assertEquals(pv.getAsJsonObject("skipped"), listed.getAsJsonObject("imported").getAsJsonObject("skipped"));
+        assertFalse(listed.getAsJsonObject("imported").get("pasteDnp").getAsBoolean());
         JsonObject plan = plan(saved.get("file").getAsString());
         assertEquals(55, plan.getAsJsonArray("pads").size());
         assertEquals(saved.getAsJsonObject("art").get("id").getAsString(),
@@ -1171,6 +1259,9 @@ public class BoardImportSimTest {
                 + withDnp.getAsJsonObject("file").get("sha256").getAsString() + "&decisions="
                 + withDnp.get("decisions").getAsString(), mobo);
         assertEquals(201, mres.status, mres.toString());
+        JsonObject mlisted = byId(mres.json().getAsJsonObject("boards").getAsJsonArray("files"), "file",
+                mres.json().get("file").getAsString());
+        assertTrue(mlisted.getAsJsonObject("imported").get("pasteDnp").getAsBoolean(), "U2 is pasted: " + mlisted);
         JsonObject mplan = plan(mres.json().get("file").getAsString());
         assertEquals(261, mplan.getAsJsonArray("pads").size());
         assertEquals(mres.json().getAsJsonObject("art").get("id").getAsString(),

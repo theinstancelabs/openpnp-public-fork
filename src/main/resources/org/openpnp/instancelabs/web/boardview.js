@@ -298,7 +298,7 @@
           class: 'pad' + (p.blocked ? ' blocked' : ''), 'data-pad': p.padId, x: f(-w / 2), y: f(-h / 2),
           width: f(w), height: f(h), rx: f(Math.min(w, h) * (round === null ? 0.1 : round / 200)),
           transform: 'translate(' + f(p.x) + ' ' + f(-p.y) + ') rotate(' + f(-(p.rotation || 0)) + ')',
-        }, p.padId + ' · ' + (p.typeKey ? p.typeKey + (p.typeStatus ? ' (' + p.typeStatus + ')' : '') : 'no pad type')
+        }, p.title || p.padId + ' · ' + (p.typeKey ? p.typeKey + (p.typeStatus ? ' (' + p.typeStatus + ')' : '') : 'no pad type')
           + ' · ' + IL.fmt(p.w, 2) + ' × ' + IL.fmt(p.h, 2) + ' mm' + (round === null ? '' : ', corners ' + IL.fmt(round, 0) + ' %')
           + ' · ' + IL.plural(p.dotCount || 0, 'dot') + '\n' + (p.packageId || '')
           + (p.flags && p.flags.length ? '\n' + p.flags.join(', ') : '') + (p.blocked ? '\nCannot be dispensed (pad-type status)' : ''));

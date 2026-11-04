@@ -231,9 +231,10 @@ public final class ImportRules {
         }
         List<String> bottom = out.skipped.get(ImportProposal.SKIP_BOTTOM);
         if (!bottom.isEmpty()) {
+            // footprints, not parts: fiducials, headers and logos are among them (BR-88)
             out.warn(ImportWarning.of("BOTTOM_SKIPPED", bottom, bottom.size() + (bottom.size() == 1
-                    ? " bottom-side part gets" : " bottom-side parts get")
-                    + " no paste (only the top is dispensed): " + ImportWarning.names(bottom) + "."));
+                    ? " bottom-side footprint gets" : " bottom-side footprints get")
+                    + " no paste (not read yet): " + ImportWarning.names(bottom) + "."));
         }
         out.sortWarnings();
         return out;

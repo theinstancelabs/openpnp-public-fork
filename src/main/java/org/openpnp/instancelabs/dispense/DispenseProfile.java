@@ -65,10 +65,27 @@ public class DispenseProfile {
      */
     public double gapMm = 0.10;
     /**
+     * Pause at the lift height after each dot, the pressure on, before any X/Y travel (ms; 0 = none): the plastic 25G
+     * recipe waits 500 ms after its 3 mm lift, so the paste thread breaks there instead of across the board. Needs
+     * {@link #liftMm}: the pause is set for one lift height, not for whatever hop height the last tip left.
+     */
+    public int liftPauseMs = 0;
+    /**
+     * The lift after each dot, above its dispense Z (mm; null = the machine's {@link DispenseConfig#hopHeightMm}): the
+     * plastic 25G recipe's 3 mm, kept with its pause so a tip mount brings both back ({@link DispenseConfig#liftMm()}).
+     */
+    public Double liftMm = null;
+    /**
      * Purge dots on the purge row before the work, same recipe, then cross without stopping; the
      * first one sets the start angle.
      */
     public int purgeDots = 8;
+    /**
+     * Dots the needle touch-off leaves out after the prime (0 to 5), before its reference pair (BR-85): the plastic
+     * 25G's start blob lands on the first ones (2 at 13.7 psi, 3 above drool). Not part of a dot, so not in the
+     * fingerprints.
+     */
+    public int touchOffSkipDots = 0;
     /**
      * Highest paste demand (mg/s) a block of dots may ask of the screw (§1.2 R7): the bench saw 2.56
      * mg/s sustained at 18 psi (36 one-turn dots at 180 rpm and 250 ms dwell, runs/p18_blank). A
@@ -173,18 +190,27 @@ public class DispenseProfile {
     public String fingerprint() {
         return String.format(Locale.ROOT, "psi=%.3f net=%d suck=%.3f start=%.3f rpm=%.3f acc=%.1f dwell=%d gap=%.4f "
                 + "purge=%d", pressurePsi, netStepsPerDot, suckBackDeg, startAngleDeg, screwRpm, screwAccelDegS2,
-                dwellMs, gapMm, purgeDots);
+                dwellMs, gapMm, purgeDots) + liftKeys();
     }
 
     /**
      * Identity of everything but the turn that sets how much paste a turn lays (pressure, suck-back,
-     * speed, acceleration, dwell, gap): dose records and calibrated pad types carry it (§1.7). The
-     * net turn is the record's own, the start angle has its own rule, purge count and name are no
-     * part of a dot.
+     * speed, acceleration, dwell, gap, the pause after the lift and the recipe's own lift): dose records
+     * and calibrated pad types carry it (§1.7). The net turn is the record's own, the start angle has its
+     * own rule, purge count and name are no part of a dot.
      */
     public String doseFingerprint() {
         return String.format(Locale.ROOT, "psi=%.3f suck=%.3f rpm=%.3f acc=%.1f dwell=%d gap=%.4f", pressurePsi,
-                suckBackDeg, screwRpm, screwAccelDegS2, dwellMs, gapMm);
+                suckBackDeg, screwRpm, screwAccelDegS2, dwellMs, gapMm) + liftKeys();
+    }
+
+    /**
+     * " pause=500 lift=3.000", each only when set: the fingerprints stored before these keys existed stay
+     * byte-identical.
+     */
+    private String liftKeys() {
+        return (liftPauseMs > 0 ? " pause=" + liftPauseMs : "")
+                + (liftMm != null ? String.format(Locale.ROOT, " lift=%.3f", liftMm) : "");
     }
 
     /**
@@ -237,6 +263,15 @@ public class DispenseProfile {
         if (!(gapMm >= 0.05 - 1e-9 && gapMm <= 0.30 + 1e-9)) {
             p.add("profile gapMm must be 0.05 to 0.30");
         }
+        if (!(liftPauseMs >= 0 && liftPauseMs <= 5000)) {
+            p.add("profile liftPauseMs must be 0 to 5000");
+        }
+        else if (liftPauseMs > 0 && liftMm == null) {
+            p.add("profile liftPauseMs needs the recipe's own liftMm (the pause is set for one lift height)");
+        }
+        if (liftMm != null && !(liftMm > 0 && liftMm <= 10)) {
+            p.add("profile liftMm must be > 0 and <= 10 (null: the machine's hopHeightMm)");
+        }
         if (!(purgeDots >= 0 && purgeDots <= 60)) {
             p.add("profile purgeDots must be 0 to 60");
         }
@@ -246,6 +281,9 @@ public class DispenseProfile {
         }
         if (!(sustainedFeedMgS > 0 && sustainedFeedMgS <= 10)) {
             p.add("profile sustainedFeedMgS must be > 0 and <= 10 mg/s (the bench saw 2.56 at 18 psi)");
+        }
+        if (!(touchOffSkipDots >= 0 && touchOffSkipDots <= 5)) {
+            p.add("profile touchOffSkipDots must be 0 to 5");
         }
         return p;
     }
@@ -263,9 +301,12 @@ public class DispenseProfile {
         x.screwAccelDegS2 = screwAccelDegS2;
         x.dwellMs = dwellMs;
         x.gapMm = gapMm;
+        x.liftPauseMs = liftPauseMs;
+        x.liftMm = liftMm;
         x.purgeDots = purgeDots;
         x.sustainedFeedMgS = sustainedFeedMgS;
         x.notes = notes;
+        x.touchOffSkipDots = touchOffSkipDots;
         return x;
     }
 }

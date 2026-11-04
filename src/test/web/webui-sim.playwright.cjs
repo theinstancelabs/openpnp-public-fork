@@ -394,6 +394,70 @@ async function runFirstDots(page, n) {
       await page.waitForSelector('#pf-angle-warn', { state: 'hidden', timeout: 5000 }).then(() => true, () => false));
     await page.screenshot({ path: path.join(OUT, 'profiles-dispense-profile.png'), fullPage: true });
 
+    // ---- BR-82: the recipe's own lift and the pause after it (the 25G's 3 mm + 0.5 s), then back to the defaults -----
+    {
+      const prof = async () => (await (await page.request.get(BASE + 'api/status')).json()).dispense.profile;
+      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked. */
+      const typeIn = async (id, v, refused) => {
+        await page.fill('#' + id, '');
+        await page.locator('#' + id).pressSequentially(v);
+        await page.waitForFunction(([i, r]) => document.getElementById(i + '-err').hidden === !r, [id, refused], { timeout: 5000 }).catch(() => {});
+        return page.evaluate((i) => { const m = document.getElementById(i + '-err'); return { err: m.hidden ? '' : m.textContent, save: document.getElementById('btn-pf-save').disabled }; }, id);
+      };
+      const fp0 = (await prof()).fingerprint;
+      check('profile: “Lift after a dot” comes before “Pause after the lift” (the machine lifts, then pauses)', await page.evaluate(() =>
+        !!(document.getElementById('pf-lift').compareDocumentPosition(document.getElementById('pf-liftpause')) & Node.DOCUMENT_POSITION_FOLLOWING)));
+      let r;
+      for (const v of ['0', '10.1']) {
+        r = await typeIn('pf-lift', v, true);
+        check('profile: a lift of ' + v + ' mm is refused at the field, as the engine refuses it (Save locked)', r.err === 'Must be above 0 and at most 10 mm, or blank.' && r.save, r);
+      }
+      r = await typeIn('pf-lift', '3', false);
+      check('profile: a lift of 3 mm is taken', r.err === '', r);
+      r = await typeIn('pf-liftpause', '5001', true);
+      check('profile: a pause after the lift of 5001 ms is refused at the field, as the engine refuses it (Save locked)', r.err === 'Must be 0 to 5000 ms.' && r.save, r);
+      for (const v of ['5000', '0', '500']) {
+        r = await typeIn('pf-liftpause', v, false);
+        check('profile: a pause after the lift of ' + v + ' ms is taken', r.err === '', r);
+      }
+      r = await typeIn('pf-lift', '', true);
+      check('profile: a pause with a blank lift is refused at the lift, as the engine refuses it (Save locked)',
+        r.err === 'Needed for the pause after the lift: give a lift, or set the pause to 0.' && r.save, r);
+      await page.fill('#pf-lift', '3');
+      await waitText(page, 'pf-diff-t', /lift after a dot/, 5000).catch(() => {});
+      const bar = { parts: await textOf(page, 'pf-diff-t'), cons: await textOf(page, 'pf-diff-c') };
+      check('profile: the unsaved bar names the lift, then the pause; plans become stale',
+        bar.parts.includes('lift after a dot the machine’s hop height → 3.0 mm · pause after the lift 0 → 500 ms') && /plans become stale/.test(bar.cons), bar);
+      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+      await page.click('#btn-pf-save');
+      const p1 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 500 && s.dispense.profile.liftMm === 3, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: the lift and the pause are saved with the recipe (3 mm, 500 ms; the fingerprint gains “ pause=500 lift=3.000”)',
+        !!p1 && p1.fingerprint === fp0 + ' pause=500 lift=3.000' && p1.problems.length === 0, p1 && { fp0, fp: p1.fingerprint, problems: p1.problems });
+      await page.waitForFunction(() => { const t = document.querySelector('#pf-recipe .recipe'); return !!t && /pause 500 ms$/.test(t.getAttribute('aria-label')); }, null, { timeout: 10000 }).catch(() => {});
+      const token = await page.evaluate(() => { const t = document.querySelector('#pf-recipe .recipe'); return t && t.getAttribute('aria-label'); });
+      check('profile: the recipe token ends “· lift 3 mm · pause 500 ms”', / · lift 3 mm · pause 500 ms$/.test(token || ''), token);
+      await page.screenshot({ path: path.join(OUT, 'profiles-lift-pause.png'), fullPage: true });
+      const ev = await page.evaluate((fp) => IL.eventText("instancelabs dispense blocks: d1 profile 'p' " + fp), p1 && p1.fingerprint);
+      check('events: a fingerprint with the pause and the lift is folded away', ev === "instancelabs dispense blocks: d1 profile 'p'", ev);
+      await nav(page, 'setup');
+      await page.waitForFunction(() => /pause 500 ms/.test((document.getElementById('card-angle') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => {});
+      const angleCard = await page.evaluate(() => (document.getElementById('card-angle') || {}).textContent || '');
+      check('setup: the start-angle card lists the recipe’s lift and pause', /purge \d+ · lift 3 mm · pause 500 ms/.test(angleCard), angleCard);
+      await nav(page, 'profile');
+      await page.waitForSelector('#pf-lift', { state: 'visible', timeout: 10000 });
+      await page.fill('#pf-liftpause', '0');
+      r = await typeIn('pf-lift', '3e', true);
+      check('profile: a lift that is not a number (“3e”) is refused, never read as blank (Save would clear the saved 3 mm; Save locked)',
+        r.err === 'Enter a number or leave it blank.' && r.save, r);
+      await page.fill('#pf-lift', '');
+      await waitText(page, 'pf-diff-t', /lift after a dot 3\.0 mm → the machine’s hop height/, 5000).catch(() => {});
+      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+      await page.click('#btn-pf-save');
+      const p2 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 0 && s.dispense.profile.liftMm === null, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: a blank lift is saved as null (the machine’s hop height); the fingerprint is the one before, byte for byte',
+        !!p2 && p2.fingerprint === fp0, { fp0, fp: p2 && p2.fingerprint, liftMm: p2 && p2.liftMm });
+    }
+
     // ---- regulator attestation (§9.4): a psi change expires it for good, also when the psi is set back --------
     {
       const regState = () => page.evaluate(() => IL.ready().items.find((x) => x.key === 'regulator').state);
@@ -1657,6 +1721,14 @@ async function runFirstDots(page, n) {
         await page.waitForTimeout(600);
         const hr = await page.request.post(BASE + 'api/machine/home', { data: { wait: true }, timeout: 180000 });
         check('Z moved: homed (every height now predates the home)', hr.ok(), [hr.status(), (await hr.text()).slice(0, 300)]);
+        // the home ran no Z check yet: the steps view, opened, says nothing failed (its own words, no steps, no button)
+        await page.waitForFunction(() => { const x = IL.S.status; return !!x && x.machine.homed && !IL.zMoved(x); }, null, { timeout: 15000 }).catch(() => {});
+        await page.evaluate(() => IL.openView('heights', { keep: true }));
+        const hv0 = await page.waitForFunction(() => /No Z check failed/.test((document.getElementById('hv-lead') || {}).textContent || ''), null, { timeout: 8000 })
+          .then(() => page.evaluate(() => ({ lead: document.getElementById('hv-lead').textContent, hidden: document.getElementById('hv-steps').hidden,
+            acts: document.querySelectorAll('#hv-actions button').length, note: !document.getElementById('hv-note').hidden })), () => null);
+        check('Z moved 0: after a home whose Z check has not run, the steps view says nothing failed: no steps, no button', !!hv0 && hv0.hidden && hv0.acts === 0 && !hv0.note, hv0);
+        await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
         await page.request.post(BASE + 'api/machine/z-check', { data: { wait: true }, timeout: 180000 });
         const failedNow = (x) => !!(x.machine.zCheck && x.machine.zCheck.last && x.machine.zCheck.last.pass === false && x.machine.zCheck.last.homeAtMs === x.machine.zCheck.homeAtMs);
         const zf = await waitStatus(page, failedNow, 60000);
@@ -1676,12 +1748,29 @@ async function runFirstDots(page, n) {
           return page.evaluate(() => {
             const z = IL.zMoved(IL.S.status);
             const card = document.querySelector('#chk-needs .ri[data-key="I4-z"]');
+            const all = card ? Array.from(card.querySelectorAll('button[data-fix]')).map((b) => [b.dataset.fix, b.textContent.trim()]) : null;
+            // the guided sequence (view:heights) leads the card; the step's own fix-its follow it
             return { step: z ? z.step : null, fixes: z ? z.fixes.map((f) => f.label) : [], text: card ? card.querySelector('.ri__d').textContent : null,
-              card: card ? Array.from(card.querySelectorAll('button[data-fix]')).map((b) => [b.dataset.fix, b.textContent.trim()]) : null, canRun: IL.ready().canRun };
+              first: all && all[0] ? all[0][0] : null, guided: all ? all.filter((x) => x[0] === 'view:heights') : null,
+              card: all ? all.filter((x) => x[0] !== 'view:heights') : null, canRun: IL.ready().canRun };
           });
         };
+        /** The heights view (strip's Machine cell or the card's first fix): its steps and the buttons of the step now. */
+        const heightsView = () => page.waitForFunction(() => !!document.querySelector('#hv-steps li[data-k]'), null, { timeout: 10000 }).catch(() => null)
+          .then(() => page.evaluate(() => ({ steps: Array.from(document.querySelectorAll('#hv-steps li[data-k]')).map((l) => [l.dataset.k, l.dataset.state]),
+            acts: Array.from(document.querySelectorAll('#hv-actions button[data-fix]')).map((b) => [b.dataset.fix, b.textContent.trim()]),
+            lead: (document.getElementById('hv-lead') || {}).textContent || '' })));
         let st = await zStep('frame');
         await page.screenshot({ path: path.join(OUT, 'z-moved-1-frame.png') });
+        check('Z moved 1: the card leads with the guided "Measure the heights again…"', st.first === 'view:heights' && !!st.guided
+          && JSON.stringify(st.guided) === JSON.stringify([['view:heights', 'Measure the heights again…']]), st);
+        const cell1 = await page.evaluate(() => { const c = document.getElementById('cell-machine'); return { v: c.querySelector('.cell__v').textContent, open: c.dataset.openView, cls: c.className }; });
+        await page.click('#cell-machine');
+        const hv1 = await heightsView();
+        check('Z moved 1: the strip\'s Machine cell says "Z moved" (needs you) and opens the steps: the needle frame now, the rest to do, its button there',
+          /Z moved/.test(cell1.v) && /cell--need/.test(cell1.cls) && cell1.open === 'heights' && JSON.stringify(hv1.steps) === JSON.stringify([['frame', 'now'], ['blank', 'todo'], ['places', 'todo'], ['touch-off', 'todo'], ['register', 'todo']])
+          && hv1.acts.length > 0 && hv1.acts[0][0] === 'go:#setup/needle' && /0\.\d\d mm/.test(hv1.lead), { cell1, hv1 });
+        await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
         check('Z moved 1: the blocker names the move, the remedy in its order, and offers "Open Needle Z frame"', st.step === 'frame' && !st.canRun && !!st.card
           && st.card[0] && st.card[0][0] === 'go:#setup/needle' && /^Z moved 0\.\d\d mm/.test(st.text || '')
           && /Record the needle frame again with both tips \(Setup › Needle Z frame\), probe the blank, take the places' Z again with N1 \(Setup › Places\), touch off and register the board again\./.test(st.text || ''), st);
@@ -1708,7 +1797,7 @@ async function runFirstDots(page, n) {
         await page.evaluate(() => IL.go('#run/checks'));
         st = await zStep('blank');
         await page.screenshot({ path: path.join(OUT, 'z-moved-2-blank.png') });
-        check('Z moved 2: after the needle frame, the fix is "Probe the blank…"', st.step === 'blank' && !!st.card && st.card[0] && st.card[0][0] === 'view:probe-blank', st);
+        check('Z moved 2: after the needle frame, the fix is "Probe the blank…"', st.step === 'blank' && st.first === 'view:heights' && !!st.card && st.card[0] && st.card[0][0] === 'view:probe-blank', st);
         await page.click('#chk-needs .ri[data-key="I4-z"] button[data-fix="view:probe-blank"]');
         // the view keeps "Do it by hand" open from step 10: the automatic probe is the one this step wants
         await page.waitForSelector('#blank-by-hand', { state: 'attached', timeout: 15000 });
@@ -1742,8 +1831,13 @@ async function runFirstDots(page, n) {
         st = await zStep('places');
         await page.screenshot({ path: path.join(OUT, 'z-moved-3-places.png') });
         const mp = (await status()).machine.zCheck.places.map((x) => x.name);
+        await page.click('#chk-needs .ri[data-key="I4-z"] button[data-fix="view:heights"]');
+        const hv3 = await heightsView();
+        check('Z moved 3: the steps follow: the frame and the blank done, the places now', JSON.stringify(hv3.steps.slice(0, 3)) === JSON.stringify([['frame', 'done'], ['blank', 'done'], ['places', 'now']])
+          && hv3.acts.length > 0 && /^go:#setup\/places/.test(hv3.acts[0][0]), hv3);
+        await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
         check('Z moved 3: after the blank, "Retake Z with N1" for each place set before the home, the waste among them',
-          st.step === 'places' && mp.includes('waste') && !!st.card && st.card.length === Math.min(3, mp.length)
+          st.step === 'places' && st.first === 'view:heights' && mp.includes('waste') && !!st.card && st.card.length === Math.min(3, mp.length)
           && st.card.every(([f, t], i) => f === 'go:#setup/places/' + encodeURIComponent(mp[i]) && t === 'Retake Z with N1 (' + mp[i] + ')'), { st, mp });
         const locs0 = (await status()).dispense.locations;
         await page.click('#chk-needs .ri[data-key="I4-z"] button[data-fix="go:#setup/places/waste"]');
@@ -1788,7 +1882,7 @@ async function runFirstDots(page, n) {
         await page.evaluate(() => IL.go('#run/checks'));
         st = await zStep('touch-off');
         await page.screenshot({ path: path.join(OUT, 'z-moved-4-touch-off.png') });
-        check('Z moved 4: after the places, "Run a touch-off" only (not the frame\'s own offset: Z moved at this home)', st.step === 'touch-off' && !!st.card
+        check('Z moved 4: after the places, "Run a touch-off" only (not the frame\'s own offset: Z moved at this home)', st.step === 'touch-off' && st.first === 'view:heights' && !!st.card
           && JSON.stringify(st.card) === JSON.stringify([['go:#calibrate/touch-off', 'Run a touch-off']]), st);
         // the SIM scene has no paste for the touch-off's dots: the operator confirms the measured both-tips frame on the
         // Needle Z frame card instead (still allowed, no longer offered by the remedy)
@@ -1799,7 +1893,7 @@ async function runFirstDots(page, n) {
         await page.evaluate(() => IL.go('#run/checks'));
         st = await zStep('register');
         await page.screenshot({ path: path.join(OUT, 'z-moved-5-register.png') });
-        check('Z moved 5: after the touch-off, "Register board"', st.step === 'register' && !!st.card && st.card[0] && st.card[0][0] === 'register', st);
+        check('Z moved 5: after the touch-off, "Register board"', st.step === 'register' && st.first === 'view:heights' && !!st.card && st.card[0] && st.card[0][0] === 'register', st);
         const t8 = Date.now() + (await page.evaluate(() => IL.S.skewMs));
         await press2(page, '#chk-needs .ri[data-key="I4-z"] button[data-fix="register"]');
         const rz = await regEnd(t8);
@@ -1807,6 +1901,13 @@ async function runFirstDots(page, n) {
         await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); IL.go('#run/checks'); });
         st = await zStep('done');
         check('Z moved: after the remedy nothing is left to measure, no Z check blocker (the same home)', st.step === 'done' && !st.card, st);
+        const cellD = await page.evaluate(() => { const c = document.getElementById('cell-machine'); return { v: c.querySelector('.cell__v').textContent, open: c.dataset.openView }; });
+        check('Z moved: the strip reads Homed again and opens the machine view', /Homed/.test(cellD.v) && !/Z moved/.test(cellD.v) && cellD.open === 'machine', cellD);
+        await page.evaluate(() => IL.openView('heights', { keep: true }));
+        const hvD = await heightsView();
+        check('Z moved: the steps view, opened after the remedy, has every step done and no button', hvD.steps.length === 5 && hvD.steps.every((x) => x[1] === 'done')
+          && hvD.acts.length === 0 && /nothing left/.test(hvD.lead), hvD);
+        await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
       }
 
       // 15. A board top Z planned 1.7 mm under the needle frame (planning takes up to 2.0 mm, the probe goes 1.5 mm under the

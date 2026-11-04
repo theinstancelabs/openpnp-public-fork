@@ -225,7 +225,7 @@ svg.pv-art.pv-art--quiet { --pv-a-mask: #aab2b1; --pv-a-mask-op: 1; }
 .pad-insp-head__ref { font: 700 19px/1.25 var(--font-ui); }
 .pad-insp-head__s { font-size: 13.5px; color: var(--ink-2); overflow-wrap: anywhere; margin-top: 2px; white-space: pre-line; }
 .pad-insp-head .btn { flex: none; }
-#pad-insp-svg { height: 240px; border: 1px solid var(--line); border-radius: 12px; background: var(--pv-bg); margin: 12px 0; overflow: hidden; }
+#pad-insp-svg, #tb-map { height: 240px; border: 1px solid var(--line); border-radius: 12px; background: var(--pv-bg); margin: 12px 0; overflow: hidden; }
 #pad-insp-pads { width: 100%; }
 #pad-insp-pads td, #pad-insp-dots td { white-space: nowrap; padding: 8px 6px; }
 #pad-insp-pads td.pad-insp-type { white-space: normal; }   /* "QFN / DFN perimeter pad" wraps; the numbers do not */

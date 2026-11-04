@@ -397,11 +397,17 @@
     if (steps * 4 === rev * 3) return '¾ turn';
     return steps + ' steps';
   };
-  /** Recipe token parts: [name, "18 psi", "½ turn", "dwell 250 ms", "gap 0.10 mm", "purge 8"]. */
+  /**
+   * Recipe token parts: [name, "18 psi", "½ turn", "dwell 250 ms", "gap 0.10 mm", "purge 8"], then "lift 3 mm" and
+   * "pause 500 ms" when the recipe has them, in the machine's order (a change of either alone still shows).
+   */
   IL.recipeParts = function (p) {
     if (!p) return [];
-    return [p.name || 'profile', IL.fmtPsi(p.pressurePsi) + ' psi', IL.turnLabel(p.netStepsPerDot, p.stepsPerRev),
+    const parts = [p.name || 'profile', IL.fmtPsi(p.pressurePsi) + ' psi', IL.turnLabel(p.netStepsPerDot, p.stepsPerRev),
       'dwell ' + p.dwellMs + ' ms', 'gap ' + IL.fmt(p.gapMm, 2) + ' mm', 'purge ' + p.purgeDots];
+    if (isNum(p.liftMm)) parts.push('lift ' + p.liftMm + ' mm');
+    if (p.liftPauseMs > 0) parts.push('pause ' + p.liftPauseMs + ' ms');
+    return parts;
   };
   /** The recipe token (.recipe). opts: {changed, changedText, href, title}. aria-label = parts without the name. */
   IL.recipeEl = function (p, opts) {
@@ -430,7 +436,7 @@
     }
     return t
       .replace(/\b([0-9a-f]{4})[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(-subset-[\w-]+)?/gi, (m, a, sub) => a + (sub ? ' (part)' : ''))
-      .replace(/ psi=[\d.]+ net=\d+ suck=[\d.]+ start=[\d.]+ rpm=[\d.]+ acc=[\d.]+ dwell=\d+ gap=[\d.]+( purge=\d+)?/g, '')
+      .replace(/ psi=[\d.]+ net=\d+ suck=[\d.]+ start=[\d.]+ rpm=[\d.]+ acc=[\d.]+ dwell=\d+ gap=[\d.]+( purge=\d+)?( pause=\d+)?( lift=[\d.]+)?/g, '')
       .replace(/\{[^{}]{40,}\}|\[[^\[\]]{60,}\]/g, '{…}');
   };
   /**
@@ -828,7 +834,8 @@
   };
   /**
    * Why a control is locked now, or null. need: {connected, homed, idle (default true), pressureOff (default true),
-   * engine, homes (the task homes by itself: it waits while N1 is low)}. Texts are the spec's (§13 "Locked control").
+   * engine, homes (the task homes by itself: it waits while N1 is low), held (default true: an agent's lock locks it)}.
+   * Texts are the spec's (§13 "Locked control").
    */
   IL.lockReason = function (status, need) {
     const s = status || S.status;
@@ -837,7 +844,7 @@
     if (!s) return 'Waiting for OpenPnP';
     // an agent holds the machine (BR-72): a control that acts on it waits for Take control (data-only writes stay free;
     // a guarded write without these needs answers 409 locked, whose refusal offers Take control)
-    const held = n.connected || n.homed || n.engine || n.homes ? IL.heldReason(s) : null;
+    const held = (n.connected || n.homed || n.engine || n.homes) && n.held !== false ? IL.heldReason(s) : null;
     if (held) return held;
     const m = s.machine || {}, d = s.dispense || {}, pr = s.pressure || {};
     if (n.idle && IL.taskRunning(s)) {
@@ -1112,6 +1119,8 @@
     if (surf(d.boardSurfaceName || 'board')) return { step: 'register', fixes: [registerFix(S.plan), { fix: 'probe-by-hand', label: 'Do it by hand' }] };
     return { step: 'done', fixes: [] };
   };
+  /** The remedy's steps in IL.zMoved's order (the heights view lists them). */
+  IL.zMoved.STEPS = ['frame', 'blank', 'places', 'touch-off', 'register'];
   /**
    * Register board's fix-it for a plan: "Probe only (X/Y as planned)" for a board without fiducials (F10: N1 probes it
    * where it is planned; registrationTargets.probeOnly), else "Register board".
@@ -1446,39 +1455,49 @@
     const runChecking = s.run && s.run.running && s.run.label === 'clean-pad check';
     // "0 of 160 clean": the board position is wrong, not every pad dirty (§13): check the position, do not wipe
     const posWrong = IL.cleanPositionWrong(cc) && !runChecking;
-    if (posWrong) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: 'position?', short: 'check position', posWrong: true,
+    // a board with a clean-pad ledger (BR-76): a run that needs more clean pads than it has is refused before anything
+    // moves; with enough, its numbers lead the line
+    const pl = plan && plan.padLedger;
+    const ledger = pl ? { line: 'Clean pads · ' + pl.clean + ', this run needs ' + pl.needed + '.', short: pl.clean < pl.needed } : null;
+    const add9 = pl ? (it) => add(Object.assign(it, { ledger, detail: ledger.line + ' ' + it.detail })) : add;
+    if (ledger && ledger.short) {
+      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'block', value: pl.clean + ' of ' + pl.needed, short: 'wipe the board', ledger,
+        detail: 'Wipe the board first: ' + pl.clean + ' clean, this run needs ' + pl.needed + '.',
+        fixes: [{ fix: 'board-wiped', arg: pl.board, label: 'Board wiped', icon: 'i-wipe', primary: true }, { href: '#calibrate/test-board', label: 'Test board' }] });
+    } else if (posWrong) {
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: 'position?', short: 'check position', posWrong: true,
         detail: IL.cleanSummary(cc) + ' Check the board X/Y and rotation in the Board step, then check the pads again.'
           + (cpc.enabled ? '' : ' The check before each board is off: the run will not look again.'),
         fixes: [{ href: '#run/board', label: 'Check the board position', primary: true }, { fix: 'clean-check', label: 'Check again' }] });
     } else if (!cpc.enabled && cc && !cc.ok && !runChecking) {
       // the check is off, but a check of this plan found paste: never "ready" next to red pads (the run will not look again)
       const n = (cc.dirtyPadIds || IL.dirtyPads(cc)).length;
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: n + ' dirty', short: n ? 'wipe ' + IL.plural(n, 'pad') : 'check pads',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: n + ' dirty', short: n ? 'wipe ' + IL.plural(n, 'pad') : 'check pads',
         detail: IL.cleanSummary(cc) + ' The check before each board is off: the run will not look again.',
         dirty: IL.dirtyPads(cc), fixes: [{ fix: 'clean-check', label: 'Wiped: check again' }] });
     } else if (!cpc.enabled) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'off', value: 'off', short: 'pads clean',
-        detail: sim && !(s.server && s.server.simulatorConfirmed) ? 'Off (simulator): the simulated camera is a static picture.' : 'Off: not checked before a board.' });
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: pl ? 'ok' : 'off', value: pl ? pl.clean + ' clean' : 'off', short: 'pads clean',
+        detail: (pl ? 'The camera check before each board is off' : 'Off') + (sim && !(s.server && s.server.simulatorConfirmed)
+          ? (pl ? ' (simulator: its camera is a static picture).' : ' (simulator): the simulated camera is a static picture.') : pl ? '.' : ': not checked before a board.') });
     } else if (i10 && i10.state === 'blocked') {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'block', value: 'no camera', short: 'pad check camera',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'block', value: 'no camera', short: 'pad check camera',
         detail: 'Clean-pad check is on but there is no top camera.', fixes: [{ href: '#setup/settings', label: 'Switch the check off in Settings' }] });
     } else if (!plan) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'wait', value: '—', short: 'pads clean', detail: 'Known after planning.' });
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'wait', value: '—', short: 'pads clean', detail: 'Known after planning.' });
     } else if (plan.cleanCheckRunning || runChecking) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'live', value: 'checking', short: 'pad check', detail: 'The top camera visits every pad (pressure off).' });
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'live', value: 'checking', short: 'pad check', detail: 'The top camera visits every pad (pressure off).' });
     } else if (!cc) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: 'not checked', short: 'check pads',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: 'not checked', short: 'check pads',
         detail: 'Not checked yet. The run checks every pad first (≈ 3 min); checking now lets you wipe before the run.',
         fixes: [{ fix: 'clean-check', label: 'Check pads' }] });
     } else if (cc.ok) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'ok', value: 'clean ' + IL.fmtTime(cc.checkedAtMs), short: 'pads clean',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'ok', value: 'clean ' + IL.fmtTime(cc.checkedAtMs), short: 'pads clean',
         detail: IL.cleanSummary(cc) });
     } else {
       const dirty = IL.dirtyPads(cc);
       const named = dirty.slice(0, 3).map((x) => x.padId + (x.share === null || x.share === undefined ? '' : ' (' + IL.fmt(x.share, 2) + ')')).join(', ');
       const n = (cc.dirtyPadIds || dirty).length;
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: n + ' dirty', short: n ? 'wipe ' + IL.plural(n, 'pad') : 'check pads',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: n + ' dirty', short: n ? 'wipe ' + IL.plural(n, 'pad') : 'check pads',
         detail: IL.cleanSummary(cc) + (named ? ' Paste on ' + named + (dirty.length > 3 ? ' and ' + (dirty.length - 3) + ' more' : '') + '.' : ''),
         dirty, fixes: [{ fix: 'clean-check', label: 'Wiped: check again' }] });
     }
@@ -1944,7 +1963,7 @@
     const surf = Object.values(d.surfaces || {}).map((x) => x.name + ':' + x.setAtMs + ':' + x.boundToBoard).join(',');
     return [m.enabled, m.homed, p.controllerConnectedAtMs, p.fingerprint, p.startAngleSetAtMs, surf, pr.usedSpots, pr.resetAtMs,
       pr.defined, n.setAtMs, n.changedAtMs, n.anchor && n.anchor.setAtMs, d.cleanPadCheck && d.cleanPadCheck.enabled,
-      d.minPadTypeStatus, s.run && s.run.running].join('|');
+      d.minPadTypeStatus, s.run && s.run.running, s.run && s.run.running ? '' : (s.padLedgers || []).map((x) => x.board + ':' + x.clean + ':' + x.wipedAtMs).join(',')].join('|');
   }
   let lastFreshKey = null;
 
@@ -2228,6 +2247,17 @@
     }
     return { kind: 'off', v: ['Off', ' · vented'], t: pr.engineRunActive ? 'The running task switches the pressure on and off by itself.' : 'Valve closed, barrel vented. Set the regulator by hand.' };
   }
+  /** BR-76: a run (an agent's) waits for clean pads: a band on every page until it no longer waits. */
+  function renderPadsWait(s) {
+    const w = ((s && s.padLedgers) || []).find((x) => x.waiting);
+    if (!w) { IL.msg('pads-wait', null); return; }
+    const x = w.waiting;
+    IL.msg('pads-wait', { kind: 'need', alert: false,
+      text: (x.by ? x.by + '\u2019s ' + (x.what || 'run') : cap(x.what || 'a run')) + ' waits for clean pads: ' + x.clean + ' clean, it needs ' + x.needed + '.',
+      sub: 'Wipe the board (' + (w.name || w.board) + '), then press Board wiped.',
+      actions: [IL.fixButton({ fix: 'board-wiped', arg: w.board, label: 'Board wiped', icon: 'i-wipe', primary: true }, { cls: 'btn--sm' }),
+        IL.fixButton({ href: '#calibrate/test-board', label: 'Test board' }, { cls: 'btn--sm' })] });
+  }
   /**
    * The In control cell (P0): who holds the machine, what it does and since when; Take control beside it while an agent
    * holds it. Hidden while this OpenPnP reports no lock (before BR-72).
@@ -2250,14 +2280,17 @@
     if (!s || off) { setCell(lc, 'off', off ? 'Unknown' : '…', off ? cap(since) : null); return; }
     if (!h) { setCell(lc, 'off', 'Nobody', 'Nobody has the machine. Its controls are yours: your first move makes it yours until you give it back. An agent may take it while nobody has it.'); return; }
     if (lk.mine) { setCell(lc, 'ok', 'You', 'You have the machine' + (t ? ' since ' + t : '') + '. Agents cannot use it until you give it back (click here).'); return; }
-    const name = IL.holderName(h), working = h.busy === true || IL.holderWorking(h);
+    // an agent that waits for clean pads (BR-76 (b)) is not working, unless it runs something again (a stale record)
+    const name = IL.holderName(h), waits = (s.padLedgers || []).some((x) => x.waiting);
+    const working = h.busy === true || (!waits && IL.holderWorking(h)), waiting = waits && !working;
     const last = isNum(h.lastActiveMs) ? 'its last command ' + IL.fmtAgo(h.lastActiveMs - S.skewMs) : 'no command yet';
-    setCell(lc, working ? 'live' : 'info', [name + (working ? ' · working' : ' · idle'), h.what ? ' · ' + h.what : '', 2],
+    setCell(lc, working ? 'live' : 'info', [name + (working ? ' · working' : waiting ? ' · waiting' : ' · idle'), h.what ? ' · ' + h.what : '', 2],
       name + ' (an agent) has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '. '
-      + (working ? 'Working' : 'Idle') + ': ' + last + '. Take control stops its work and makes the machine yours.');
+      + (working ? 'Working' : waiting ? 'Waiting for clean pads' : 'Idle') + ': ' + last + '. Take control stops its work and makes the machine yours.');
     IL.msg('held', { kind: working ? 'live' : 'info', alert: false,
       text: name + ' has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '.',
-      sub: (working ? 'It is working now.' : 'It is idle (no command for a while).') + ' This page shows everything but cannot move the machine until you take control.',
+      sub: waiting ? 'It waits for clean pads: Board wiped (below) works without taking control. Anything else needs Take control.'
+        : (working ? 'It is working now.' : 'It is idle (no command for a while).') + ' This page shows everything but cannot move the machine until you take control.',
       actions: [IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true }, { cls: 'btn--sm' })] });
   }
   function renderStrip() {
@@ -2267,7 +2300,7 @@
     const mc = $('cell-machine'), conn = $('pill-conn'), homed = $('pill-homed');
     if (!mc) return;
     const sep = mc.querySelector('.cell__sep');
-    let showStart = false, showHome = false;
+    let showStart = false, showHome = false, open = 'machine';
     const homedVisible = (on) => {
       IL.setClass(homed, on ? '' : 'sr');
       IL.setClass(conn, on ? 'long' : '');
@@ -2314,13 +2347,18 @@
         }
       } else {
         const p = (s.dispense && s.dispense.profile) || {};
-        setCell(mc, 'ok', undefined, 'Connected' + (p.controllerConnectedAtMs ? ' ' + IL.fmtTime(p.controllerConnectedAtMs - S.skewMs) : '')
+        const zm = IL.zMoved(s);
+        const moved = !!zm && zm.step !== 'done';
+        setCell(mc, moved ? 'need' : 'ok', undefined, moved ? 'Homed, but its Z check found the heights moved: measure them again (press for the steps).'
+          : 'Connected' + (p.controllerConnectedAtMs ? ' ' + IL.fmtTime(p.controllerConnectedAtMs - S.skewMs) : '')
           + ' · homed' + (S.homedAt ? ' ' + IL.fmtTime(S.homedAt) : ''));
         IL.setText(conn, 'Connected');
-        IL.setText(homed, 'Homed');
+        IL.setText(homed, moved ? 'Z moved' : 'Homed');
         homedVisible(true);
+        if (moved) open = 'heights';   // the cell opens the steps while the heights are measured again
       }
     }
+    IL.setAttr(mc, 'data-open-view', open);
     const bs = $('btn-start'), bh = $('btn-home');
     // while an agent holds the machine its controls are not the user's: Take control stands there instead
     const agentHolds = !!s && !off && IL.lockOf(s).agent;
@@ -2329,6 +2367,7 @@
     if (!showHome && armed && armed.btn === bh) disarm();
     IL.show(bh, showHome);
     renderLockCell(s, off, since);
+    renderPadsWait(s);
 
     // pressure, start angle, purge row
     const pc = $('pill-pressure'), ac = $('chip-angle'), uc = $('chip-purge');
@@ -2997,7 +3036,9 @@
         if (k === 'zcheck') {
           if (/^(I4:\s*)?z moved\b/i.test(msg)) {
             const zm = IL.zMoved(s);
-            return zm && zm.fixes.length ? zm.fixes : [{ href: '#setup/needle', label: 'Open Needle Z frame' }];
+            // the guided sequence first (every step in order, one press each), then the step now's own fix-its
+            return zm && zm.fixes.length ? [{ view: 'heights', label: 'Measure the heights again…', primary: true }].concat(zm.fixes)
+              : [{ href: '#setup/needle', label: 'Open Needle Z frame' }];
           }
           return /no point measured before/i.test(msg) ? [{ href: '#setup/needle', label: 'Open Needle Z frame' }] : [{ fix: 'check-z', label: 'Check Z' }];
         }
@@ -3091,6 +3132,20 @@
     gate: (s) => IL.lockReason(s),
     run: async () => { const r = await IL.api('POST', '/api/purge-row/reset'); IL.planRefreshSoon(); return r; },
     ok: (r) => 'Purge row reset: ' + (r && isNum(r.spotsLeft) ? r.spotsLeft + ' spots free' : 'all spots free') + '.',
+  });
+  // BR-76: the board's pads wiped by hand. The engine counts them clean again, then the top camera checks every pad (the
+  // head moves, nothing touches the board) and a pad still carrying paste stays used
+  IL.fix('board-wiped', {
+    press2: 'board wiped',
+    // while an agent's run waits for clean pads, the user's wipe runs under its lock (Backend, BR-76 (b)): no STOP
+    gate: (s) => {
+      const waits = ((s && s.padLedgers) || []).some((x) => x.waiting);
+      const lk = IL.lockOf(s);
+      if (lk.agent && !waits && S.online !== false) return IL.holderName(lk.holder) + ' is working: Take control to wipe now (stops its work)';
+      return IL.lockReason(s, { connected: true, homed: true, held: !waits });
+    },
+    run: (btn, board) => IL.api('POST', '/api/boards/' + encodeURIComponent(board) + '/wiped', {}),
+    ok: (r) => 'Board wiped: the camera checks every pad' + (r && r.check && isNum(r.check.etaS) ? ' (≈ ' + IL.fmtClock(r.check.etaS) + ')' : '') + '. Nothing touches the board.',
   });
   IL.fix('pressure-off', { run: () => IL.api('POST', '/api/pressure/stop'), ok: 'Pressure off · valve closed, then pump off' });
   IL.fix('pressure-on', {

@@ -55,6 +55,7 @@ const PADCAL = path.join(REPO, 'src', 'test', 'resources', 'padprofile', 'padcal
 const TS = Date.now().toString(36);
 fs.mkdirSync(OUT, { recursive: true });
 fs.mkdirSync(SHOTS, { recursive: true });
+require('./needs-before.cjs')('pad-profile', ['webui-sim', 'board-import'], path.join(OUT, 'pad-profile-results.json'));
 
 const results = [];
 function check(name, cond, detail) {

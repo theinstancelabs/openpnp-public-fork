@@ -3,6 +3,7 @@ package org.openpnp.instancelabs.dispense;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Arrays;
@@ -232,6 +233,88 @@ public class DispenseProfileTest {
         }
     }
 
+    /**
+     * BR-82: the pause at the lift height before travel (the plastic 25G recipe's 500 ms), 0 to 5000 ms. At 0 (the
+     * default, and older files) both fingerprints stay byte for byte what every dose record and plan stored.
+     */
+    @Test
+    public void liftPause() {
+        DispenseProfile p = new DispenseProfile();
+        assertEquals(0, p.liftPauseMs);
+        assertEquals("psi=18.000 suck=10.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000", p.doseFingerprint());
+        assertEquals("psi=18.000 net=800 suck=10.000 start=298.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000 "
+                + "purge=8", p.fingerprint());
+        String dose = p.doseFingerprint();
+        String plan = p.fingerprint();
+        p.liftPauseMs = 500;
+        assertNotEquals(dose, p.doseFingerprint());
+        assertNotEquals(plan, p.fingerprint());
+        assertEquals("pause none -> 500", DispenseProfile.fingerprintDiff(dose, p.doseFingerprint()));
+        assertEquals(500, p.copy().liftPauseMs);
+        p.liftMm = 3.0; // a pause needs the recipe's own lift
+        for (int ok : new int[] {0, 500, 5000}) {
+            p.liftPauseMs = ok;
+            assertTrue(p.validate(C).isEmpty(), ok + ": " + p.validate(C));
+        }
+        assertRefused(x -> x.liftPauseMs = -1, "liftPauseMs must be 0 to 5000");
+        assertRefused(x -> x.liftPauseMs = 5001, "liftPauseMs must be 0 to 5000");
+        DispenseConfig old = DispenseConfig.fromJson("{\"profile\":{\"dwellMs\":250}}");
+        assertEquals(0, old.profile.liftPauseMs, "older files: no pause");
+    }
+
+    /**
+     * BR-82 review: the recipe's own lift after a dot (the plastic 25G's 3 mm; null = the machine's hopHeightMm), so
+     * it comes and goes with the tip like its pause. Set, it is in both fingerprints; null (the default, and older
+     * files) keeps them byte for byte.
+     */
+    @Test
+    public void liftOfItsOwn() {
+        DispenseProfile p = new DispenseProfile();
+        assertNull(p.liftMm);
+        DispenseConfig c = new DispenseConfig();
+        assertEquals(1.0, c.liftMm(), 0, "null: the machine's hop height");
+        assertEquals("psi=18.000 suck=10.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000", p.doseFingerprint());
+        assertEquals("psi=18.000 net=800 suck=10.000 start=298.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000 "
+                + "purge=8", p.fingerprint());
+        String dose = p.doseFingerprint();
+        String plan = p.fingerprint();
+        p.liftMm = 3.0;
+        assertEquals(dose + " lift=3.000", p.doseFingerprint());
+        assertEquals(plan + " lift=3.000", p.fingerprint());
+        assertEquals("lift none -> 3", DispenseProfile.fingerprintDiff(dose, p.doseFingerprint()));
+        p.liftPauseMs = 500;
+        assertEquals(dose + " pause=500 lift=3.000", p.doseFingerprint());
+        assertEquals(3.0, p.copy().liftMm, 0);
+        c.profile = p;
+        assertEquals(3.0, c.liftMm(), 0);
+        assertEquals(1.0, c.hopHeightMm, 0, "the machine's hop height stays");
+        assertTrue(c.validate().isEmpty(), c.validate().toString());
+        for (double ok : new double[] {0.01, 3, 10}) {
+            p.liftMm = ok;
+            assertTrue(p.validate(C).isEmpty(), ok + ": " + p.validate(C));
+        }
+        assertRefused(x -> x.liftMm = 0.0, "liftMm must be > 0 and <= 10");
+        assertRefused(x -> x.liftMm = 10.1, "liftMm must be > 0 and <= 10");
+        assertNull(DispenseConfig.fromJson("{\"profile\":{\"dwellMs\":250}}").profile.liftMm, "older files: none");
+    }
+
+    /**
+     * BR-82 re-review: the pause is set for one lift height, so it needs the recipe's own lift. On the machine's hop
+     * height it paused at whatever the last tip left (the 25G's 500 ms at the 22G's 1 mm, its records still fresh).
+     */
+    @Test
+    public void aPauseNeedsTheRecipesOwnLift() {
+        assertRefused(x -> x.liftPauseMs = 500,
+                "profile liftPauseMs needs the recipe's own liftMm (the pause is set for one lift height)");
+        DispenseProfile p = new DispenseProfile();
+        p.liftPauseMs = 500;
+        p.liftMm = 3.0;
+        assertTrue(p.validate(C).isEmpty(), p.validate(C).toString());
+        p.liftPauseMs = 0;
+        p.liftMm = null;
+        assertTrue(p.validate(C).isEmpty(), p.validate(C).toString());
+    }
+
     /** Screw angle = Marlin's M114 step count of B ("Count ... B:<n>"), never the B position. */
     @Test
     public void stepCountFromMarlinsM114() {
@@ -273,6 +356,20 @@ public class DispenseProfileTest {
         assertEquals(base, p.copy().fingerprint());
         assertEquals(123L, (long) p.copy().startAngleSetAtMs);
         assertEquals("renamed", p.copy().name);
+    }
+
+    /** BR-85: the dots the touch-off skips after the prime are the recipe's: 0 to 5, copied, no part of a dot. */
+    @Test
+    public void touchOffSkipDotsIsTheRecipesAndNoPartOfADot() {
+        DispenseProfile p = new DispenseProfile();
+        assertEquals(0, p.touchOffSkipDots, "today's touch-off");
+        p.touchOffSkipDots = 5;
+        assertTrue(p.validate(C).isEmpty(), p.validate(C).toString());
+        assertEquals(5, p.copy().touchOffSkipDots);
+        assertEquals(new DispenseProfile().fingerprint(), p.fingerprint(), "plans stay fresh");
+        assertEquals(new DispenseProfile().doseFingerprint(), p.doseFingerprint(), "dose records stay fresh");
+        assertRefused(x -> x.touchOffSkipDots = 6, "touchOffSkipDots");
+        assertRefused(x -> x.touchOffSkipDots = -1, "touchOffSkipDots");
     }
 
     @Test
