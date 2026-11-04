@@ -141,7 +141,8 @@ final class DispenseEndpoints {
         Machine mach = ctx.configuration.getMachine();
         DispenseService svc = ctx.svcOrNull();
         out.put("server", Views.map("version", Main.getVersion(), "timeMs", System.currentTimeMillis(), "startedAtMs",
-                JVM_STARTED_AT_MS, "port", s.getPort(), "lanAccess", s.getSettings().lanAccess, "simulated",
+                JVM_STARTED_AT_MS, "port", s.getPort(), "lanAccess", s.getSettings().lanAccess, "trustedOrigins",
+                new ArrayList<>(s.getTrustedOrigins()), "simulated",
                 SimGuard.isLoopbackOnly(mach), "simulatorConfirmed",
                 svc != null ? svc.isSimulatorConfirmed() : SimGuard.isSimulated(mach)));
         out.put("machine", machine.machineStatus());

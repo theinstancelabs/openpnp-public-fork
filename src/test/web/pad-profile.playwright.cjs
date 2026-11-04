@@ -195,7 +195,7 @@ async function weighCoupon(page, place) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const jsErrors = [];
-  page.on('pageerror', (e) => jsErrors.push(String(e)));
+  page.on('pageerror', (e) => jsErrors.push(String((e && e.stack) || e)));
   page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) jsErrors.push(m.text()); });
   const dialogs = [];
   page.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
