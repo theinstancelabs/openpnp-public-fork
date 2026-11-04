@@ -7,7 +7,8 @@ does. The config is a copy of ~/.openpnp2 (read only) with machine.xml from tool
 the config the SIM acceptance uses, plus visual homing off (the SIM camera has no homing fiducial).
 
   (a) enable + home through /api/machine/enable and /api/machine/home {"wait": true, "clearBelowAttested": true}
-      (INF-10): homed, and OpenPnP's axes match lumen-sim's state;
+      (INF-10): homed, OpenPnP's axes match lumen-sim's state, and lumen-sim's pose file beside the port-name
+      (INF-05) has the home's offset;
   (b) STOP 4 s into a home (POST /api/stop): 'timeout waiting for response to M410' in OpenPnP's log, the home
       fails, lumen-sim is halted, a reconnect cannot talk to it until 'uinav controller power-cycle';
   (c) the 30-turn prime at 180 rpm through the engine (a needle touch-off with primeRotationDeg 10800 and the
@@ -322,6 +323,10 @@ class HomeAndPrimeTest(SessionTest):
         self.assertAlmostEqual(n2["z"], 63.0 - lg["Z"], delta=0.01, msg="N2 = 63 - Z (see-saw)")
         for i, axis in enumerate("XYZ"):
             self.assertAlmostEqual(sim["physical"][i], lg[axis], delta=0.01, msg="physical " + axis)
+        # INF-05: the head's error beside the port-name OpenPnP opens, where the SIM cameras read it (SimPose); at boot
+        # it was the park position, so this is the update after the home
+        with open(self.s.lumen["link"] + ".pose.json") as f:
+            self.assertEqual(json.load(f)["offset"], sim["head"]["offset"])
 
     def set_start_angle(self, note):
         """I11: confirm the start angle. After a reset (lumen-sim boots in the power-on state) or a screw motor-off, a

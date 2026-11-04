@@ -1,5 +1,7 @@
 """The real-time loop: wall clock -> simulator time, pty <-> simulator, control socket, transport faults."""
+import json
 import math
+import os
 import select
 import time
 
@@ -9,6 +11,7 @@ from .pty_link import PtyLink
 
 CLOSED_POLL_S = 0.01   # how often a closed (or frozen) port is checked for the host opening (or closing) it
 RETRY_S = 1.0          # a port that could not come back anywhere is tried again this much later (simulator s)
+POSE_SUFFIX = ".pose.json"  # <link>.pose.json: the head's physical - logical offset, for the SIM cameras (INF-05)
 
 
 class Runner:
@@ -35,6 +38,8 @@ class Runner:
         self.down_until = None      # link closed by a fault: reopen at this sim time (inf: at the next power cycle)
         self.next_link = None       # a power cycle's new link path, published when the link comes back
         self.running = True
+        self.pose = None            # (path, offset) last written to the pose file
+        self.pose_error = None      # its last write's error, noted once
         sim.on_error = self._sim_error
 
     def now(self):
@@ -67,6 +72,7 @@ class Runner:
         t = self.now()
         self.sim.run_until(t)
         self._do_actions(t)
+        self._publish_pose(t)  # before the output: a G28's ok never reaches the host ahead of where it landed
         self._write_out(t)
 
     def _wait(self):
@@ -122,6 +128,37 @@ class Runner:
                 self.io.controller(self.pending[:n])
             self.pending = self.pending[n:]
 
+    def _publish_pose(self, t):
+        """The head's physical - logical offset at <link>.pose.json (INF-05: the SIM top camera draws OpenPnP's location
+        plus it), rewritten atomically when it or the link path changes. Not inside a G28: each homing phase zeroes its
+        axis, which is no head error, and OpenPnP believes the old place until the ok. It stays while the port is down
+        (the head is still there). A failed write is noted once and tried again at the next step."""
+        if self.sim.fw.in_g28:
+            return
+        path = self.link.link + POSE_SUFFIX
+        offset = self.sim.head(t)["offset"]
+        if self.pose == (path, offset):
+            return
+        if self.pose and self.pose[0] != path:
+            _remove(self.pose[0])
+        tmp = "%s.tmp%d" % (path, os.getpid())
+        try:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
+            # O_EXCL: never written through a symlink someone left at tmp
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o644), "w") as f:
+                json.dump({"offset": offset}, f)
+            os.replace(tmp, path)
+        except OSError as e:
+            _remove(tmp)
+            error = "pose file: %s: %s" % (type(e).__name__, e)
+            if error != self.pose_error:
+                self.pose_error = error
+                self.log("lumen-sim " + error)
+                self._note(error)
+            return
+        self.pose, self.pose_error = (path, offset), None
+
     # ------------------------------------------------------------------ control and transport faults
     def _handle_control(self, req):
         t = self.now()
@@ -135,6 +172,7 @@ class Runner:
             reply = self.sim.control(req, t)
             if reply.get("ok"):
                 errors = self._do_actions(t)
+                self._publish_pose(t)  # a client that injects a fault, then grabs a frame, sees it
                 if req.get("cmd") == "state":
                     reply["state"].update(self.transport_state())
                 elif req.get("cmd") == "power_cycle" or errors:
@@ -222,8 +260,18 @@ class Runner:
             self.io.note(text)
 
     def shutdown(self):
+        if self.pose:
+            _remove(self.pose[0])
+            self.pose = None
         self.link.release()
         if self.control:
             self.control.close()
         if self.io:
             self.io.close()
+
+
+def _remove(path):
+    try:
+        os.unlink(path)
+    except OSError:  # gone already (its directory with it), or not ours to remove: never worth ending the loop
+        pass

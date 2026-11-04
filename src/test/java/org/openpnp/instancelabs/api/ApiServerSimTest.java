@@ -1175,12 +1175,12 @@ public class ApiServerSimTest {
             assertEquals(400, gone.status, k + ": " + gone);
             assertTrue(gone.body.contains("unknown setting"), gone.toString());
         }
-        // gap: 0.05-0.15 behave the same, >= 0.20 misses dots
-        Res wide = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"gapMm\":0.2}}");
+        // gap: 0.05 (the crash side) to 0.30 (the top of Process's gap ladder); the 25G's board recipe runs at 0.20
+        Res wide = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"gapMm\":0.31}}");
         assertEquals(400, wide.status, wide.toString());
-        assertTrue(wide.body.contains("gapMm must be 0.05 to 0.15"), wide.toString());
-        JsonObject c = ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"gapMm\":0.15}}"));
-        assertEquals(0.15, c.getAsJsonObject("profile").get("gapMm").getAsDouble(), 1e-9);
+        assertTrue(wide.body.contains("gapMm must be 0.05 to 0.30"), wide.toString());
+        JsonObject c = ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"gapMm\":0.20}}"));
+        assertEquals(0.20, c.getAsJsonObject("profile").get("gapMm").getAsDouble(), 1e-9);
         assertEquals(4, c.get("schemaVersion").getAsInt(), "the tip setups' schema (§22.1)");
         assertFalse(c.toString().contains("Gcode"), c.toString());
     }

@@ -126,7 +126,7 @@ One profile per pressure session, the same for the purge row and the work. Defau
 | `screwRpm` | 180 | B feed = rpm × 360 deg/min (`F64800`). <= 400 rpm and <= `bMaxFeedDegS`. |
 | `screwAccelDegS2` | 20000 | Sent as `M204 S` around the B moves only (1000..30000). |
 | `dwellMs` | 250 | Dwell after the forward turn, before the suck-back: the dot-size knob at fixed pressure. |
-| `gapMm` | 0.10 | Needle-to-surface gap while dispensing (0.05..0.15; >= 0.20 misses dots). |
+| `gapMm` | 0.10 | Needle-to-surface gap while dispensing (0.05..0.30; it depends on the tip: the 22G missed dots at 0.20, the 25G 0603 recipe runs at 0.20). |
 | `purgeDots` | 8 | Purge dots on the purge row before the work (>= 2 for a partial turn: the first sets the start angle, at least one normal dot flushes it). |
 | `notes` | | Operator notes. |
 

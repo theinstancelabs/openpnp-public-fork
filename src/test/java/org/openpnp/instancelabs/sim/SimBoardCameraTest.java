@@ -12,6 +12,8 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -27,6 +29,7 @@ import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.model.Placement;
 import org.openpnp.spi.Camera;
+import org.openpnp.spi.base.AbstractAxis;
 
 /**
  * The SIM top camera on a simulated machine (GcodeDriver over loopback TCP to RecordingGcodeServer):
@@ -191,6 +194,48 @@ public class SimBoardCameraTest {
                 sim.driver.setCommunicationsType(CommunicationsType.tcp);
             }
         }
+    }
+
+    /** INF-05: lumen-sim's head offset (its pose file beside the pty link) moves the view as the physical head. */
+    @Test
+    public void lumenSimsHeadOffsetMovesTheView() throws Exception {
+        try (SimGuardTest.Pty pty = new SimGuardTest.Pty()) {
+            sim = new SimMachine(false);
+            writeScene(sim.configDir);
+            sim.driver.setCommunicationsType(CommunicationsType.serial);
+            Path pose = Paths.get(pty.link + SimPose.SUFFIX);
+            try {
+                sim.driver.setPortName(pty.link.toString());
+                SimBoardCamera cam = camera(false);
+                cam.setAxisX((AbstractAxis) sim.n1.getAxisX()); // the head's X and Y: lumen-sim's controller moves them
+                cam.setAxisY((AbstractAxis) sim.n1.getAxisY());
+                SimGuard.noteIdentity(sim.machine, SimGuardTest.LUMEN_SIM);
+                double[] e = expectedFid1();
+                assertFid1(cam, e[0], e[1], "no pose file: where OpenPnP believes the head is");
+                Files.write(pose, "{\"offset\": {\"X\": 0.5, \"Y\": -0.25, \"Z\": 0.1}}".getBytes(StandardCharsets.UTF_8));
+                assertFid1(cam, e[0] - 0.5 / UPP_X, e[1] - 0.25 / UPP_Y, "the head 0.5 mm further +X, 0.25 mm -Y");
+                Files.write(pose, "{\"offset\": {\"X\": -0.3, \"Y\": 0.0, \"Z\": 0.0}}".getBytes(StandardCharsets.UTF_8));
+                assertFid1(cam, e[0] + 0.3 / UPP_X, e[1], "a rewrite shows in the next frame");
+                Files.write(pose, "{\"offset\": ".getBytes(StandardCharsets.UTF_8));
+                assertFid1(cam, e[0], e[1], "a bad file: no offset");
+                Path other = pose.resolveSibling("other.json");
+                Files.write(other, "{\"offset\": {\"X\": 0.5, \"Y\": 0.0}}".getBytes(StandardCharsets.UTF_8));
+                Files.delete(pose);
+                Files.createSymbolicLink(pose, other);
+                assertFid1(cam, e[0], e[1], "a link is not lumen-sim's file: never followed");
+                Files.delete(other);
+            }
+            finally {
+                Files.deleteIfExists(pose);
+                sim.driver.setCommunicationsType(CommunicationsType.tcp);
+            }
+        }
+    }
+
+    static void assertFid1(SimBoardCamera cam, double x, double y, String why) {
+        double[] c = SimBoardRendererTest.centroid(cam.internalCapture(), x, y, 0.75 / UPP_X);
+        assertEquals(x, c[0], 0.1, why + " (x)");
+        assertEquals(y, c[1], 0.1, why + " (y)");
     }
 
     @Test
