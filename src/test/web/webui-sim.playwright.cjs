@@ -1644,6 +1644,14 @@ async function runFirstDots(page, n) {
         await page.waitForTimeout(600);
         const hr = await page.request.post(BASE + 'api/machine/home', { data: { wait: true }, timeout: 180000 });
         check('Z moved: homed (every height now predates the home)', hr.ok(), [hr.status(), (await hr.text()).slice(0, 300)]);
+        // the home ran no Z check yet: the steps view, opened, says nothing failed (its own words, no steps, no button)
+        await page.waitForFunction(() => { const x = IL.S.status; return !!x && x.machine.homed && !IL.zMoved(x); }, null, { timeout: 15000 }).catch(() => {});
+        await page.evaluate(() => IL.openView('heights', { keep: true }));
+        const hv0 = await page.waitForFunction(() => /No Z check failed/.test((document.getElementById('hv-lead') || {}).textContent || ''), null, { timeout: 8000 })
+          .then(() => page.evaluate(() => ({ lead: document.getElementById('hv-lead').textContent, hidden: document.getElementById('hv-steps').hidden,
+            acts: document.querySelectorAll('#hv-actions button').length, note: !document.getElementById('hv-note').hidden })), () => null);
+        check('Z moved 0: after a home whose Z check has not run, the steps view says nothing failed: no steps, no button', !!hv0 && hv0.hidden && hv0.acts === 0 && !hv0.note, hv0);
+        await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
         await page.request.post(BASE + 'api/machine/z-check', { data: { wait: true }, timeout: 180000 });
         const failedNow = (x) => !!(x.machine.zCheck && x.machine.zCheck.last && x.machine.zCheck.last.pass === false && x.machine.zCheck.last.homeAtMs === x.machine.zCheck.homeAtMs);
         const zf = await waitStatus(page, failedNow, 60000);
