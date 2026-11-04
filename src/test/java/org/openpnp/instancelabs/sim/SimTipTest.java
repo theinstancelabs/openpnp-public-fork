@@ -240,6 +240,28 @@ public class SimTipTest {
         sim.machine.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
     }
 
+    /** INF-06 §8 (review): a needle change is a fresh tip to prime, whatever was primed before it. */
+    @Test
+    public void aNeedleChangeIsAFreshTipToPrime() throws Exception {
+        sim = new SimMachine(false);
+        writeScene(null);
+        svc = DispenseService.start(Configuration.get());
+        SimScene s = SimPasteTest.exact();
+        s.paste.ripple = 0;
+        s.paste.primeTurns = 1;
+        SimPaste p = new SimPaste(() -> s, SimPaste.Store.forScene(s), () -> 0L, () -> 0.0);
+        SimNeedle n = new SimNeedle(p, s.paste.n2OffsetMm);
+        n.pressurize();
+        n.dot(300, 240, SimPasteTest.BLANK_Z, 1600);
+        n.dot(303, 240, SimPasteTest.BLANK_Z, 1600);
+        assertEquals(1, p.deposits(null).size(), "the first turn fills the mounted tip");
+        svc.recordNeedleChange("SimTipTest", "infra");
+        n.dot(306, 240, SimPasteTest.BLANK_Z, 1600);
+        assertEquals(1, p.deposits(null).size(), "a new needle: fresh");
+        n.dot(309, 240, SimPasteTest.BLANK_Z, 1600);
+        assertEquals(2, p.deposits(null).size());
+    }
+
     @Test
     public void theBottomCameraSeesTheTipOnTheHeadOnlyWhileN2IsOverIt() throws Exception {
         sim = new SimMachine(false);

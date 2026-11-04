@@ -412,6 +412,8 @@ def parse_paste_by_tip(text):
             except ValueError:
                 raise ValueError("--paste-by-tip %r: %s=%r is not a%s number" % (
                     text, name, value, "n integer" if name in PASTE_BY_TIP_INTS else "")) from None
+            if not math.isfinite(entry[name]):  # SimScene refuses it, and the running SIM keeps its old scene
+                raise ValueError("--paste-by-tip %r: %s=%r is not finite" % (text, name, value))
             continue
         if not eq or name not in PASTE_BY_TIP_FIELDS:
             raise ValueError("--paste-by-tip %r: %r is not one of %s" % (text, item, ", ".join(
@@ -596,7 +598,7 @@ def cmd_selftest(a):
         == {"primeTurns": 230.0, "wholeTurnsOnly": True, "newPhaseOnMotorOff": False, "maxGapMm": 0.35,
             "emptyDotsAfterPowerCycle": 12})
     for bad in ("25g-straight", "25g-straight:", "k:mRevMg=0", "k:c=-1", "k:landing=2.4", "k:speed=3", "k:mRevMg",
-                "k:wholeTurnsOnly=yes", "k:emptyDotsAfterPowerCycle=1.5", "k:cv=x"):
+                "k:wholeTurnsOnly=yes", "k:emptyDotsAfterPowerCycle=1.5", "k:cv=x", "k:cv=nan", "k:maxGapMm=inf"):
         try:
             parse_paste_by_tip(bad)
             check("paste-by-tip refuses %r" % bad, False)

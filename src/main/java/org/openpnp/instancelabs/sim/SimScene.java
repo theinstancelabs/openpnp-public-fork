@@ -597,12 +597,10 @@ public final class SimScene {
             p.n2OffsetMm = n2;
         }
         p.reportCount = o.has("reportCount") ? o.get("reportCount").getAsBoolean() : p.reportCount;
-        p.newPhaseOnMotorOff = o.has("newPhaseOnMotorOff") ? o.get("newPhaseOnMotorOff").getAsBoolean()
-                : p.newPhaseOnMotorOff;
-        p.wholeTurnsOnly = o.has("wholeTurnsOnly") ? o.get("wholeTurnsOnly").getAsBoolean() : p.wholeTurnsOnly;
+        p.newPhaseOnMotorOff = flag(o, "newPhaseOnMotorOff", p.newPhaseOnMotorOff);
+        p.wholeTurnsOnly = flag(o, "wholeTurnsOnly", p.wholeTurnsOnly);
         p.primeTurns = num(o, "primeTurns", p.primeTurns);
-        p.emptyDotsAfterPowerCycle = o.has("emptyDotsAfterPowerCycle") ? o.get("emptyDotsAfterPowerCycle").getAsInt()
-                : p.emptyDotsAfterPowerCycle;
+        p.emptyDotsAfterPowerCycle = integer(o, "emptyDotsAfterPowerCycle", p.emptyDotsAfterPowerCycle);
         if (o.has("noiseSeed")) {
             p.noiseSeed = o.get("noiseSeed").isJsonNull() ? null : Long.valueOf(o.get("noiseSeed").getAsLong());
         }
@@ -611,6 +609,30 @@ public final class SimScene {
                     : Integer.valueOf(Math.floorMod(o.get("offsetSteps").getAsInt(), SimPaste.STEPS_PER_REV));
         }
         return p;
+    }
+
+    /** A JSON true or false (Gson reads 1 or "yes" as false: a guard would switch off without a word). */
+    static boolean flag(JsonObject o, String key, boolean def) {
+        if (!o.has(key)) {
+            return def;
+        }
+        JsonElement e = o.get(key);
+        if (!e.isJsonPrimitive() || !e.getAsJsonPrimitive().isBoolean()) {
+            throw new IllegalArgumentException(key + " must be true or false, not " + e);
+        }
+        return e.getAsBoolean();
+    }
+
+    /** A JSON integer (Gson's getAsInt makes 12.7 a 12). */
+    static int integer(JsonObject o, String key, int def) {
+        if (!o.has(key)) {
+            return def;
+        }
+        double v = o.get(key).getAsDouble();
+        if (v != Math.rint(v) || Math.abs(v) > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(key + " must be an integer, not " + o.get(key));
+        }
+        return (int) v;
     }
 
     /** Overlays of {@link #paste} per tip key, made once per scene ({@link #pasteFor}). */

@@ -307,6 +307,7 @@ public class SimPasteTest {
         m.send("M84");
         assertEquals(second, again.offsetSteps(), "the same scene, connection and lines: the same phases");
         s.paste.newPhaseOnMotorOff = false;
+        assertEquals(phase, p.offsetSteps(), "the flag off again (a scene reload): the drawn phase goes with it");
         s.paste.offsetSteps = 100;
         p.powerCycle();
         assertEquals(100, p.offsetSteps(), "a pinned phase survives a power cycle while the flag is off");
@@ -383,6 +384,11 @@ public class SimPasteTest {
         n.pressurize();
         n.dot(312, 240, BLANK_Z, 1600);
         assertEquals(2, p.deposits(null).size(), "tip a again, after a power cycle: still primed");
+        SimPaste other = paste(s);
+        SimNeedle m = needle(other, s);
+        m.pressurize();
+        m.dot(315, 240, BLANK_Z, 1600);
+        assertEquals(3, other.deposits(null).size(), "and on another connection (the fill is the store's)");
     }
 
     /** INF-06 §5 (Process): the 22G lays ~12 empty half-turn dots after a power cycle, then normal ones. */
@@ -402,6 +408,85 @@ public class SimPasteTest {
         assertEquals(1, p.deposits(null).size(), "the 2 dots after it are empty");
         n.dot(309, 240, BLANK_Z, 800);
         assertEquals(2, p.deposits(null).size(), "then normal again");
+    }
+
+    /** OpenPnP's simulator makes one SimPaste per connect: a connection after the scene's first is a new board. */
+    @Test
+    public void aLaterConnectionIsANewBoard() {
+        SimScene s = exact();
+        s.paste.newPhaseOnMotorOff = true;
+        s.paste.emptyDotsAfterPowerCycle = 1;
+        SimPaste first = paste(s);
+        assertEquals(0, first.offsetSteps(), "the scene's first connection keeps the pinned phase");
+        SimNeedle n = needle(first, s);
+        n.pressurize();
+        n.dot(300, 240, BLANK_Z, 800);
+        assertEquals(1, first.deposits(null).size(), "and lays at once");
+        SimPaste second = paste(s);
+        assertNotEquals(0, second.offsetSteps(), "a reconnect: the motor was off");
+        SimNeedle m = needle(second, s);
+        m.pressurize();
+        m.dot(303, 240, BLANK_Z, 800);
+        m.dot(306, 240, BLANK_Z, 800);
+        assertEquals(2, second.deposits(null).size(), "its first contact empty, then laid");
+    }
+
+    @Test
+    public void m84SRestartsTheIdleTimerAndABareSIsEveryMotorOff() {
+        SimScene s = scene();
+        s.paste.newPhaseOnMotorOff = true;
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        n.send(turnB(90));
+        n.send("G4 S9");
+        n.send("M84 S10"); // Marlin restarts the idle timer here
+        n.send("G4 S2");
+        int phase = p.offsetSteps();
+        n.send(turnB(180));
+        assertEquals(phase, p.offsetSteps(), "2 s after M84 S10: still powered");
+        n.send("M84 S");
+        assertNotEquals(phase, p.offsetSteps(), "M84 S without a value: every motor off");
+    }
+
+    /** The guard counts where dots are measured: the engine's purge phase dot at the waste (bed) is no whole turn. */
+    @Test
+    public void wholeTurnsOnlyLaysTheWasteAndComesFromTheTip() {
+        SimScene s = exact();
+        s.paste.byTip.put("25g", new com.google.gson.JsonParser().parse("{\"wholeTurnsOnly\": true}")
+                .getAsJsonObject());
+        s.physicalTip = "25g";
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.dot(200, 100, s.contactZ(SimScene.Region.BED, 200, 100), 1324); // the purge phase dot, on the bed
+        assertEquals(1, p.deposits(null).size(), "laid at the waste");
+        assertEquals(0, p.unmodelledContacts(), "and not counted");
+        n.dot(300, 240, BLANK_Z, 800);
+        assertEquals(1, p.deposits(null).size(), "a half turn on the blank: the tip's guard refuses it");
+        assertEquals(1, p.unmodelledContacts());
+        assertEquals(1, paste(s).unmodelledContacts(), "the count is the scene's, on every connection");
+    }
+
+    /** INF-06 §5: "~12 empty, then normal": the empty dots are dots of the session, so no first-dot ooze after them. */
+    @Test
+    public void afterTheEmptyDotsTheDotsAreNormal() {
+        SimScene s = exact();
+        s.paste.ripple = 0;
+        s.paste.oozeFirst = 0.4;
+        s.paste.emptyDotsAfterPowerCycle = 2;
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.dot(300, 240, BLANK_Z, 800);
+        n.send("G4 S400"); // an idle longer than idleFullS: a first dot would ooze ×1.4
+        p.powerCycle();
+        n.pressurize();
+        n.dot(303, 240, BLANK_Z, 800);
+        n.dot(306, 240, BLANK_Z, 800);
+        n.dot(309, 240, BLANK_Z, 800);
+        List<SimPaste.Deposit> d = p.deposits(null);
+        assertEquals(2, d.size());
+        assertEquals(1.15, d.get(1).mg, 1e-6, "the third dot after the power cycle: normal, no first-dot ooze");
     }
 
     @Test
