@@ -24,7 +24,7 @@ release comes minutes after the merge, not an hour. A job the queue run skipped 
 | Job | What | About |
 |---|---|---|
 | build | `mvn -DskipTests package` (checkstyle runs at validate); the jar + lib become the artifact every later job tests | 3 min |
-| queued | on a push to `il/integration`: the test jobs this commit's `merge_group` run passed (its gate's `gate-needs` artifact: the gate's `needs` by job id). Every test job below runs unless its id is in that list; anything unexpected (an API error, no such run, no artifact) answers `[]` | seconds |
+| queued | on a push to `il/integration`: the test jobs this commit's `merge_group` run passed (its gate's `gate-needs` artifact: the gate's `needs` by job id), read once that run's gate job has passed (GitHub can mark the run itself completed minutes later). Every test job below runs unless its id is in that list; anything unexpected (an API error, no such run, no artifact) answers `[]` | seconds |
 | infra | `python3 -m unittest discover -s infra/<x>/tests -t infra/<x>` for every component here | 1 min |
 | maven | `mvn test`: unit tests and the simulated-machine integration tests (in-JVM GcodeServer, `*SimTest`) | 13 min |
 | controller-e2e | `infra/lumen-sim/e2e`: OpenPnP on lumen-sim's pty: home, STOP in G28, the 30-turn prime timeout | 6 min |
