@@ -307,41 +307,56 @@ public class SimPasteTest {
     }
 
     /**
-     * BR-74 (Infra 11-03): a scene's paste is the same however often the controller reconnected. With the scene's
-     * noiseSeed the dose and thread noise does not depend on the connection count, so pad-profile and tip-setups pass
-     * alone in fresh sessions, not only after webui-sim's reconnects; without it, Random((seed + connection) ...)
-     * as before.
+     * BR-74 (Infra 11-03; #21's review): a test draws the same paste alone in a fresh session as in the full run. With
+     * the scene's noiseSeed the noise and the physical phase count the connections since the paste block was written,
+     * and start again when it is written (a test's scene): a fresh store, or one that reconnected 3 times before the
+     * scene was written again, lay the same light dots and the same threads at the same places. Without the seed:
+     * Random(seed + connection) as before. The scene file's key is read.
      */
     @Test
-    public void aNoiseSeedMakesThePasteTheSameOnEveryConnection() {
-        assertEquals(rowMasses(42L, 0), rowMasses(42L, 3), "the same paste on connection 0 and on connection 3");
-        assertNotEquals(rowMasses(null, 0), rowMasses(null, 3), "without: Random(seed + connection) as before");
-        // the scene file's key
+    public void aNoiseSeedMakesATestsPasteTheSameAloneAndInTheSuite() {
+        List<String> alone = lightRow(1011L, 0);
+        assertTrue(alone.stream().anyMatch((d) -> d.startsWith("thread")), "light dots lay threads: " + alone);
+        assertEquals(alone, lightRow(1011L, 3), "the same dots and threads after 3 reconnects and a scene write");
+        assertNotEquals(lightRow(null, 0), lightRow(null, 3), "without: Random(seed + connection) as before");
         SimScene parsed = SimScene.of(new com.google.gson.JsonParser().parse("{\"version\": 1, \"board\": {\"file\": "
                 + "\"toy.board.xml\", \"seat\": {\"x\": 0, \"y\": 0}}, \"paste\": {\"noiseSeed\": 42}}")
                 .getAsJsonObject());
         assertEquals(Long.valueOf(42), parsed.paste.noiseSeed);
     }
 
-    /** The masses of a row of 6 dots on a fresh scene's paste after {@code reconnects} power cycles. */
-    List<Double> rowMasses(Long noiseSeed, int reconnects) {
+    static SimScene seededScene(Long noiseSeed) {
         SimScene s = scene();
-        s.paste.offsetSteps = 0; // the phase pinned, as the calibrating scenes
         s.paste.noiseSeed = noiseSeed;
-        SimPaste p = paste(s);
+        return s;
+    }
+
+    /**
+     * Every deposit (dot or thread, its mass and place) of a row of 8 light dots (300 steps) on one store: after
+     * {@code reconnects} power cycles the scene is written again (a new scene object, the same values), then the row.
+     */
+    List<String> lightRow(Long noiseSeed, int reconnects) {
+        SimScene[] cur = {seededScene(noiseSeed)};
+        SimPaste.Store store = SimPaste.Store.forScene(cur[0]);
+        SimPaste p = new SimPaste(() -> cur[0], store, () -> nowNs[0], () -> 0.0);
+        p.offsetSteps(); // the first connection draws for the first scene
         for (int i = 0; i < reconnects; i++) {
             p.powerCycle();
+            p.offsetSteps();
         }
-        SimNeedle n = needle(p, s);
+        if (reconnects > 0 && noiseSeed != null) {
+            cur[0] = seededScene(noiseSeed); // the test writes its scene
+        }
+        SimNeedle n = needle(p, cur[0]);
         n.pressurize();
-        n.row(290, 230, 2.5, 6, BLANK_Z, 800);
-        // the dots and the threads between them: both drawn from the noise
-        List<Double> m = new java.util.ArrayList<>();
+        n.row(290, 230, 2.5, 8, BLANK_Z, 300);
+        List<String> out = new java.util.ArrayList<>();
         for (SimPaste.Deposit d : p.deposits("blank")) {
-            m.add(d.mg);
+            out.add(String.format(java.util.Locale.ROOT, "%s %.6f at %.4f %.4f", d.thread ? "thread" : "dot", d.mg, d.x,
+                    d.y));
         }
-        assertEquals(6, SimNeedle.dots(p, "blank").size());
-        return m;
+        assertEquals(8, SimNeedle.dots(p, "blank").size());
+        return out;
     }
 
     @Test

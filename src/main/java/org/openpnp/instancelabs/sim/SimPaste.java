@@ -216,6 +216,22 @@ public final class SimPaste {
             VERSION.incrementAndGet();
         }
 
+        /** BR-74: the paste block the draws count from (a scene write gives a new one), and its first connection. */
+        private Object pasteBlock;
+        private int pasteBase;
+
+        /**
+         * The connection's number since the scene's paste block was last written (BR-74): a write is the start of a
+         * test's scene, so a test draws the same alone in a fresh session as after the suite's reconnects.
+         */
+        synchronized int sinceWritten(Object block, int connection) {
+            if (block != pasteBlock) {
+                pasteBlock = block;
+                pasteBase = connection;
+            }
+            return connection - pasteBase;
+        }
+
         synchronized int connect() {
             return connections++;
         }
@@ -289,6 +305,8 @@ public final class SimPaste {
     private int connection;
     private Integer offset;
     private Random noise;
+    /** BR-74: the paste block the draws above were made for. */
+    private Object drawnFor;
     // The screw and the pneumatics.
     private double logicalB, machineB;
     private boolean absolute = true;
@@ -708,19 +726,39 @@ public final class SimPaste {
         if (p.offsetSteps != null) {
             return p.offsetSteps;
         }
+        seeded(p);
         if (offset == null) {
-            offset = new Random(p.seed + connection).nextInt(STEPS_PER_REV);
+            offset = new Random(p.noiseSeed != null ? p.noiseSeed + 31L * since(p) + 7 : p.seed + connection)
+                    .nextInt(STEPS_PER_REV);
         }
         return offset;
     }
 
-    /** The dose and thread noise: the scene's noiseSeed on every connection (BR-74), else seed + connection. */
+    /**
+     * The dose and thread noise. BR-74: with the scene's noiseSeed it counts the connections since the paste block was
+     * written, and starts again when it is written (a test's scene), so a test draws the same alone in a fresh session
+     * as after the suite's reconnects; without, Random(seed + connection) as before.
+     */
     private Random noise(SimScene.Paste p) {
+        seeded(p);
         if (noise == null) {
-            long base = p.noiseSeed != null ? p.noiseSeed : p.seed + connection;
+            long base = p.noiseSeed != null ? p.noiseSeed + since(p) : p.seed + connection;
             noise = new Random(base * 0x9E3779B97F4A7C15L + 1);
         }
         return noise;
+    }
+
+    /** A newly written paste block (BR-74, noiseSeed only): its draws start again. */
+    private void seeded(SimScene.Paste p) {
+        if (p.noiseSeed != null && p != drawnFor) {
+            drawnFor = p;
+            noise = null;
+            offset = null;
+        }
+    }
+
+    private int since(SimScene.Paste p) {
+        return store.sinceWritten(p, connection);
     }
 
     /** The needle's Z from the planned axes (raw Z when the dispense nozzle is not found). */
