@@ -532,7 +532,8 @@ class TrustedOrigins(HealthLab, unittest.TestCase):
         rep = self.origins(ORIGIN)
         self.assertTrue(rep["ok"], rep)
         self.assertEqual([s["step"] for s in rep["steps"]][:3], ["status", "origins", "enable"])
-        self.assertEqual(self.probes(), [ORIGIN, il_deploy.FOREIGN_ORIGIN])
+        # every build: a foreign Origin on its own Host (CSRF) and a foreign Host (DNS rebinding); then the tailnet's
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST] + [ORIGIN, il_deploy.FOREIGN_ORIGIN])
         self.assertEqual(rep["trusted_origins"], [ORIGIN])
 
     def test_without_the_flag_there_is_no_origins_step(self):
@@ -549,7 +550,7 @@ class TrustedOrigins(HealthLab, unittest.TestCase):
         self.assertTrue(rep["ok"], rep)
         step = next(s for s in rep["steps"] if s["step"] == "origins")
         self.assertIn("before BR-73", step["detail"])
-        self.assertEqual(self.probes(), [])
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST])  # its guards are still checked
         self.assertIsNone(rep["trusted_origins"])
 
     def test_a_build_that_refuses_its_origin_fails_before_the_enable(self):
@@ -562,12 +563,21 @@ class TrustedOrigins(HealthLab, unittest.TestCase):
         self.assertNotIn(("POST", "/api/machine/enable"), self.posts())
         self.assertNotIn(("POST", "/api/stop"), self.posts())
 
-    def test_an_origin_that_did_not_reach_openpnp_fails(self):
+    def test_an_origin_that_did_not_reach_openpnp_is_the_units_not_the_builds(self):
+        """The same for every build (the unit's environment): never a reason to bad-list a build."""
         self.start(trusted=[])
         rep = self.origins(ORIGIN)
         self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "config")
         self.assertIn("lacks https://lumen.example.ts.net:8877", rep["failure"])
         self.assertNotIn(("POST", "/api/machine/enable"), self.posts())
+
+    def test_a_foreign_host_accepted_fails(self):
+        self.start(jar_fail=["hosts-open"], trusted=[ORIGIN])
+        rep = self.origins(ORIGIN)
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "build")
+        self.assertIn("a foreign Host is accepted", rep["failure"])
 
     def test_a_foreign_origin_accepted_fails(self):
         self.start(jar_fail=["origins-open"], trusted=[ORIGIN])
@@ -579,7 +589,7 @@ class TrustedOrigins(HealthLab, unittest.TestCase):
         self.start(trusted=[ORIGIN])
         rep = self.origins("HTTPS://Lumen.Example.ts.net:8877/")
         self.assertTrue(rep["ok"], rep)
-        self.assertEqual(self.probes(), [ORIGIN, il_deploy.FOREIGN_ORIGIN])
+        self.assertEqual(self.probes(), [il_deploy.FOREIGN_ORIGIN, "http://" + il_deploy.FOREIGN_HOST] + [ORIGIN, il_deploy.FOREIGN_ORIGIN])
 
     def test_normalise_origin(self):
         n = il_deploy.normalise_origin
@@ -587,7 +597,12 @@ class TrustedOrigins(HealthLab, unittest.TestCase):
                          ("https://lumen.example.ts.net:8877", "lumen.example.ts.net:8877"))
         self.assertEqual(n("https://x.ts.net:443"), ("https://x.ts.net", "x.ts.net"))
         self.assertEqual(n("http://x.ts.net:80"), ("http://x.ts.net", "x.ts.net"))
-        for bad in ("https://x.ts.net/path", "ftp://x.ts.net", "x.ts.net:8877", "https://", "https://x:99999x"):
+        # as java.net.URI and ApiSettings.normalizeOrigin (PR #18): the port as a number, RFC 2396 host names
+        self.assertEqual(n("https://x.ts.net:08877"), ("https://x.ts.net:8877", "x.ts.net:8877"))
+        self.assertEqual(n("http://127.0.0.1:18877"), ("http://127.0.0.1:18877", "127.0.0.1:18877"))
+        for bad in ("https://x.ts.net/path", "ftp://x.ts.net", "x.ts.net:8877", "https://", "https://x:99999x",
+                    "https://x..ts.net", "https://-x.ts.net", "https://x-.ts.net", "https://x.ts.net:0",
+                    "https://x.ts.net:99999", "https://1.2.3.999", "https://x.ts.net//", "https://u@x.ts.net"):
             with self.assertRaises(ValueError, msg=bad):
                 n(bad)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

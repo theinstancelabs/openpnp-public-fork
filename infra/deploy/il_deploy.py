@@ -40,6 +40,8 @@ Usage (common flags go after the subcommand):
   il_deploy.py stop-openpnp                 POST /api/stop unless homing, wait until the machine, the engine and
                                             the pressure are off (the ExecStop; exit 1 if not)
   il_deploy.py check-device                 exit 1 if a process has the serial device open
+  il_deploy.py mark-start                   the unit's second ExecStartPre: refuse if the serial lock is taken, else
+                                            write the run marker (cleared only by stop-openpnp's confirmed STOP)
   il_deploy.py wait-display                 wait until Xvfb listens on --display (the Xvfb unit's ExecStartPost)
 Common flags: --root --state-md --lock --device --activity FILE (repeatable) --quiet-min --api-port
   --trusted-origin URL (repeatable: OpenPnP's OPENPNP_IL_API_TRUSTED_ORIGINS, checked by the health check)
@@ -1173,19 +1175,42 @@ def openpnp_env(cfg):
 
 ORIGIN_PROBE = "/api/il-deploy/origin-probe"  # no such route: 404 once the Host and Origin checks pass, else 403
 FOREIGN_ORIGIN = "https://il-deploy-probe.invalid"
+FOREIGN_HOST = "il-deploy-probe.invalid"
+RUN_MARKER = "openpnp-run.json"  # OpenPnP started (mark-start) and not stopped by a confirmed STOP (stop-openpnp) yet
+
+
+def boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip()
+    except OSError:
+        return "unknown"
 
 
 def normalise_origin(text):
     """(origin, authority) as OpenPnP's ApiSettings normalises a trusted origin (BR-73): lowercase, no trailing slash,
     the scheme's default port dropped. ValueError for anything but http(s)://host[:port]."""
-    m = re.fullmatch(r"(https?)://([a-z0-9.-]+)(?::(\d{1,5}))?/?", text.strip().lower())
-    if not m:
+    t = text.strip().lower()
+    t = t[:-1] if t.endswith("/") else t  # one, as ApiSettings
+    m = re.fullmatch(r"(https?)://([^/:?#@\[\]]+)(?::(\d+))?", t)
+    port = int(m.group(3)) if m and m.group(3) else None
+    if not m or not _uri_host(m.group(2)) or port == 0 or (port or 0) > 65535:
         raise ValueError(f"not an origin (http(s)://host[:port]): {text!r}")
-    scheme, host, port = m.groups()
-    if port and int(port) == (443 if scheme == "https" else 80):
+    scheme, host = m.group(1), m.group(2)
+    if port == (443 if scheme == "https" else 80):
         port = None
     authority = f"{host}:{port}" if port else host
     return f"{scheme}://{authority}", authority
+
+
+def _uri_host(h):
+    """A host java.net.URI accepts (RFC 2396): an IPv4 address, or labels of letters, digits and inner hyphens whose
+    last one starts with a letter. URI.getHost() is null otherwise, and ApiSettings drops the origin."""
+    if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", h):
+        return all(int(x) <= 255 for x in h.split("."))
+    labels = h[:-1].split(".") if h.endswith(".") else h.split(".")
+    return (all(re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", label) for label in labels)
+            and re.match(r"[a-z]", labels[-1]) is not None)
 
 
 def make_service(cfg):
@@ -1779,14 +1804,45 @@ class Deployer:
         except (OSError, subprocess.SubprocessError, ValueError) as e:
             self.record("openpnp-exit-unknown", error=str(e))
             return None
-        if not ex or (read_json(self.exit_seen_path, {}) or {}).get("id") == ex["id"]:
+        if ex and (read_json(self.exit_seen_path, {}) or {}).get("id") == ex["id"]:
+            ex = None
+        ex = ex or self._marker_exit()
+        if not ex:
             return None
         note = (f"OpenPnP ended without il_deploy stopping it: {ex['detail']}. The valve and pump keep their state when "
                 "it dies and no STOP was sent; a person must check the machine")
         self.record("openpnp-exit", exit=ex)
         self.set_hold(note)
-        self._note_exit_seen(ex)
+        if not ex["id"].startswith("marker@"):
+            self._note_exit_seen(ex)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.run_marker_path)  # the hold carries it now; the next start writes a new one
         return note
+
+    @property
+    def run_marker_path(self):
+        return os.path.join(self.cfg.root, RUN_MARKER)
+
+    def _marker_exit(self):
+        """OpenPnP down while its run marker stands: it ran (mark-start) and no confirmed STOP followed (stop-openpnp
+        clears the marker only then). Covers what systemd forgets at a reboot (a freeze, a power cut, an unconfirmed
+        STOP at shutdown) and an exit between two state reads. Never while the unit runs, starts or stops."""
+        m = read_json(self.run_marker_path)
+        if not isinstance(m, dict) or self.svc.is_active():
+            return None
+        when = "before the last reboot" if m.get("boot_id") != boot_id() else "since"
+        return {"id": f"marker@{m.get('at')}", "detail": f"it was started at {m.get('at')} and is down {when} with no "
+                                                         "confirmed STOP (its run marker stands)"}
+
+    def mark_start(self):
+        """The unit's ExecStartPre after check-device: refuse (exit 1: java never runs) while the serial lock is taken,
+        else write the run marker with this boot's id."""
+        held = self._lock_reasons(set())
+        if held:
+            self.say("mark-start: " + "; ".join(held))
+            return 1
+        write_json(self.run_marker_path, {"boot_id": boot_id(), "at": self.iso()})
+        return 0
 
     def _note_exit_seen(self, ex=None):
         try:
@@ -2109,34 +2165,38 @@ class Deployer:
             self._note_own(since)
 
     def _origins_check(self, server):
-        """(ok, detail): OpenPnP answers each --trusted-origin as the user's browser reaches it through `tailscale serve`
-        (its Host and Origin, a POST), and still refuses a foreign Origin. A build from before BR-73 lists none: passed
-        with a note (a rollback to it stays possible; the tailnet URL is refused there)."""
+        """(ok, detail, kind): OpenPnP answers each --trusted-origin as the user's browser reaches it through `tailscale
+        serve` (its Host and Origin, a POST), and every build still refuses a foreign Origin on its own Host (CSRF) and
+        a foreign Host (DNS rebinding). A build from before BR-73 lists none: passed with a note (a rollback to it stays
+        possible; the tailnet URL is refused there). An origin the API does not list is the unit's environment, not the
+        build ('config': no bad list)."""
+        loopback = f"127.0.0.1:{self.cfg.api_port}"
+        probes = [(loopback, FOREIGN_ORIGIN, 403, "a foreign Origin is accepted (the CSRF guard is off)"),
+                  (FOREIGN_HOST, "http://" + FOREIGN_HOST, 403, "a foreign Host is accepted (the DNS-rebinding guard is off)")]
         listed = server.get("trustedOrigins")
-        if listed is None:
-            return True, ("this build has no trusted origins (before BR-73): the tailnet URL is refused "
-                          f"({', '.join(self.cfg.trusted_origins)})")
-        if not isinstance(listed, list):
-            return False, f"server.trustedOrigins is not a list: {listed!r}"
+        if listed is not None and not isinstance(listed, list):
+            return False, f"server.trustedOrigins is not a list: {listed!r}", "build"
         checked = []
-        for text in self.cfg.trusted_origins:
+        for text in self.cfg.trusted_origins if listed is not None else ():
             origin, host = normalise_origin(text)
             if origin not in listed:
                 return False, (f"server.trustedOrigins {listed} lacks {origin}: OPENPNP_IL_API_TRUSTED_ORIGINS did not "
-                               "reach OpenPnP, or it dropped the entry")
-            for probe, want in ((origin, 404), (FOREIGN_ORIGIN, 403)):
-                try:
-                    code, body = self.api.call("POST", ORIGIN_PROBE, {}, timeout=10,
-                                               headers={"Host": host, "Origin": probe})
-                except ApiDown as e:
-                    return False, f"the origin probe got no answer ({e})"
-                if code != want:
-                    what = ("its own origin is refused" if want == 404 else
-                            "a foreign Origin is accepted (the CSRF guard is off)")
-                    return False, (f"a POST with Host {host} and Origin {probe} answered HTTP {code}, expected {want}: "
-                                   f"{what} ({body.get('reason', body)})")
+                               "reach OpenPnP (render and reload the units), or it dropped the entry"), "config"
+            probes += [(host, origin, 404, "its own origin is refused"),
+                       (host, FOREIGN_ORIGIN, 403, "a foreign Origin is accepted on the tailnet Host (CSRF guard off)")]
             checked.append(origin)
-        return True, f"{', '.join(checked)}: accepted with its Host and Origin; a foreign Origin refused"
+        for host, origin, want, what in probes:
+            try:
+                code, body = self.api.call("POST", ORIGIN_PROBE, {}, timeout=10, headers={"Host": host, "Origin": origin})
+            except ApiDown as e:
+                return False, f"the origin probe got no answer ({e})", "build"
+            if code != want:
+                return False, (f"a POST with Host {host} and Origin {origin} answered HTTP {code}, expected {want}: "
+                               f"{what} ({body.get('reason', body)})"), "build"
+        if listed is None:
+            return True, ("this build has no trusted origins (before BR-73): the tailnet URL is refused "
+                          f"({', '.join(self.cfg.trusted_origins)}); a foreign Origin and Host refused"), None
+        return True, f"{', '.join(checked)}: accepted with its Host and Origin; a foreign Origin and Host refused", None
 
     def _health_check(self, expect_sha7, watch_service):
         cfg, steps = self.cfg, []
@@ -2194,9 +2254,9 @@ class Deployer:
 
         if cfg.trusted_origins:
             rep["trusted_origins"] = server.get("trustedOrigins")  # what the API listed (None: a build before BR-73)
-            ok, detail = self._origins_check(server)
+            ok, detail, kind = self._origins_check(server)
             if not ok:
-                return fail("origins", detail, stop=False)
+                return fail("origins", detail, kind, stop=False)
             step("origins", detail)
 
         try:
@@ -2654,14 +2714,14 @@ class Deployer:
             self.svc.start()
         except (ServiceError, OSError, subprocess.SubprocessError) as e:
             self.record("start", ok=False, error=str(e))
-            return False, f"it did not start: {e}"
+            return False, str(e)
         try:
             st, why, _ = self._wait_status(True)
         finally:
             self._note_own(since)
         if st is None:
             self.record("start", ok=False, checked=False, error=why)
-            return False, f"it did not start: {why}"
+            return False, why
         self.record("start", ok=True, checked=False)
         return True, "OpenPnP runs, machine not enabled"
 
@@ -2913,31 +2973,35 @@ class Deployer:
         restarted over a machine whose valve and pump may still be on. 0 started or running, 3 not free, 1 failed."""
         if self.svc.is_active():
             return 0
+        exited = self.check_openpnp_exit()  # it may have gone down after main's check: never restart over a crash
+        if exited:
+            self.say(exited)
+            return 5
         reasons = self.keep_up_reasons()
         if reasons:
             self.say("OpenPnP is down; not starting it: " + "; ".join(reasons))
             return 3
         ok, detail = self._start_not_enabled()
         self.record("keep-up", ok=ok, detail=detail)
-        self.say(f"OpenPnP was down with the machine free: {detail}")
+        self.say(f"OpenPnP was down with the machine free: {detail}" if ok else
+                 f"OpenPnP was down with the machine free but did not start: {detail}")
         return 0 if ok else 1
 
     def keep_up_reasons(self):
         """Why OpenPnP must stay down ([] = start it): a hold, a Holder, the serial lock or device taken, another
         OpenPnP or something else on the API port. No quiet period: a start moves nothing."""
-        reasons = []
         hold = self.read_hold()
         if hold:
             since, why = self.hold_reasons(hold if isinstance(hold, dict) else {})
-            reasons.append(f"on hold since {since}: {why} (after a person has checked the machine: il_deploy.py resume)")
+            return [f"on hold since {since}: {why} (after a person has checked the machine: il_deploy.py resume)"]
         try:
             with open(self.cfg.state_md, encoding="utf-8") as f:
                 h = parse_holder(f.read())
-            if not h.idle:
-                reasons.append(h.reason)
         except OSError as e:
-            reasons.append(f"STATE.md unreadable ({self.cfg.state_md}): {e.strerror}")
-        reasons += self._lock_reasons(set()) + self._device_reasons(set())
+            return [f"STATE.md unreadable ({self.cfg.state_md}): {e.strerror}"]
+        if not h.idle:
+            return [h.reason]  # a bench session: its tools hold the port; nothing else to look at
+        reasons = self._lock_reasons(set()) + self._device_reasons(set())
         for pid, d, real in self.procs.openpnp_processes():
             if real:
                 reasons.append(f"another OpenPnP with a real-machine config runs (pid {pid}, config {d})")
@@ -3122,6 +3186,9 @@ class Deployer:
         next command sets the hold (an exit it did not cause)."""
         ok, detail = self.stop_machine()
         self.say(f"stop-openpnp: {detail}")
+        if ok:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.run_marker_path)  # a confirmed STOP: this run ended as it should
         return 0 if ok else 1
 
     def wait_display(self, timeout, x11_dir="/tmp/.X11-unix"):
@@ -3194,12 +3261,14 @@ def render_units(cfg, script, python):
         *(f'Environment="{k}={v}"' for k, v in env.items()),
         # bench tools refuse while OpenPnP holds the serial lock; refuse to start if the port is open
         "ExecStartPre=" + sd_join(me + ["check-device", "--device", cfg.device]),
+        # the run marker: a down unit with it standing never had a confirmed STOP (survives a reboot, unlike 'failed')
+        "ExecStartPre=" + sd_join(me + ["mark-start", "--root", root, "--lock", cfg.lock]),
         "ExecStart=" + sd_join(openpnp_command(cfg, use_override=False)),
         # STOP sequence first: SIGTERM saves nothing and leaves the outputs as they are. Never during a home:
         # wait out a whole one (API homes 21-23 s, up to 5 min); still busy then, no STOP: SIGTERM closes the
         # port and Marlin finishes the home. Then wait until the machine is off, the engine idle and the valve and
         # pump off; exit 1 if not (the unit ends 'failed': il_deploy sets the hold). TimeoutStopSec covers it all.
-        "ExecStop=" + sd_join(me + ["stop-openpnp", "--api-port", str(port), "--home-busy-wait",
+        "ExecStop=" + sd_join(me + ["stop-openpnp", "--root", root, "--api-port", str(port), "--home-busy-wait",
                                     str(UNIT_HOME_WAIT), "--stop-timeout", str(UNIT_STOP_TIMEOUT)]),
         # SIGTERM to the main process (java itself: flock -F), SIGKILL to anything left; java's exit on SIGTERM
         # (143) is a clean stop, so only a crash leaves the unit 'failed'
@@ -3210,6 +3279,10 @@ def render_units(cfg, script, python):
         "CPUWeight=1000",
         "IOWeight=1000",
         "MemoryLow=2G",
+        # the user's web UI and the one owner of the serial port: the lowest an unprivileged unit may go (the user
+        # manager's own 100); agents' scopes run at 800, so the kernel's OOM killer takes their processes first
+        "OOMScoreAdjust=100",
+        "ManagedOOMPreference=avoid",
         ""])
     xvfb = "\n".join([
         "[Unit]",
@@ -3220,6 +3293,7 @@ def render_units(cfg, script, python):
         # Type=simple is 'started' at the fork: active (and il-openpnp, After= it, started) only once X listens
         "ExecStartPost=" + sd_join(me + ["wait-display", "--display", cfg.display, "--timeout", "20"]),
         "Restart=on-failure",
+        "OOMScoreAdjust=100",  # OpenPnP dies with its display
         ""])
     deploy = "\n".join([
         "[Unit]",
@@ -3331,7 +3405,7 @@ def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=__doc__.split("\n\n", 1)[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("poll", "run", "keep-up", "status", "resume", "stop-openpnp", "check-device"):
+    for name in ("poll", "run", "keep-up", "status", "resume", "stop-openpnp", "check-device", "mark-start"):
         sub.add_parser(name, parents=[common])
     sub.add_parser("rollback", parents=[common]).add_argument(
         "--discard-config-changes", action="store_true",
@@ -3401,7 +3475,8 @@ def main(argv=None, deps=None):
               f"  cp {cfg.out}/il-* ~/.config/systemd/user/ && systemctl --user daemon-reload\n"
               f"  sudo install -D -m 644 {os.path.join(cfg.out, drop_in)} /etc/systemd/{drop_in} "
               "&& sudo systemctl daemon-reload   # root, with the user's OK\n"
-              "  systemctl --user enable --now il-deploy.timer")
+              "  systemctl --user enable --now il-keepup.timer   # the real machine's web UI up whenever it is free\n"
+              "  systemctl --user enable --now il-deploy.timer   # automatic deploys (they home the machine)")
         return 0
     if cmd == "status":
         return d.status()
@@ -3409,6 +3484,8 @@ def main(argv=None, deps=None):
         return d.stop_openpnp()
     if cmd == "check-device":
         return d.check_device()
+    if cmd == "mark-start":
+        return d.mark_start()
     if cmd == "wait-display":
         return d.wait_display(cfg.timeout, cfg.x11_dir)
     with root_lock(cfg.root) as got:

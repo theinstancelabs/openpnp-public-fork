@@ -41,6 +41,20 @@ class Units(unittest.TestCase):
                          ["il-deploy.service", "il-deploy.timer", "il-keepup.service", "il-keepup.timer",
                           "il-openpnp-xvfb.service", "il-openpnp.service", "system"])
 
+    def test_openpnp_writes_its_run_marker_and_a_confirmed_stop_clears_it(self):
+        lines = self.read("il-openpnp.service").splitlines()
+        pre = [shlex.split(l[len("ExecStartPre="):]) for l in lines if l.startswith("ExecStartPre=")]
+        self.assertEqual([p[2] for p in pre], ["check-device", "mark-start"])  # mark-start only once the port is free
+        self.assertEqual(pre[1][pre[1].index("--root") + 1], self.lab.root)
+        self.assertEqual(pre[1][pre[1].index("--lock") + 1], self.lab.lock)
+        stop = shlex.split([l for l in lines if l.startswith("ExecStop=")][0][len("ExecStop="):])
+        self.assertEqual(stop[stop.index("--root") + 1], self.lab.root)
+
+    def test_openpnp_and_its_display_are_the_last_the_oom_killer_takes(self):
+        for name in ("il-openpnp.service", "il-openpnp-xvfb.service"):
+            self.assertIn("OOMScoreAdjust=100", self.read(name).splitlines(), name)
+        self.assertIn("ManagedOOMPreference=avoid", self.read("il-openpnp.service").splitlines())
+
     def test_without_a_trusted_origin_openpnp_gets_none(self):
         self.assertNotIn("OPENPNP_IL_API_TRUSTED_ORIGINS", self.read("il-openpnp.service"))
 

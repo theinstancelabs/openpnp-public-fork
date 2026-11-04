@@ -646,7 +646,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         detail = step(report, "origins")["detail"]
         if report["trusted_origins"] is not None:
             self.assertEqual(report["trusted_origins"], [ORIGIN])
-            self.assertEqual(detail, ORIGIN + ": accepted with its Host and Origin; a foreign Origin refused")
+            self.assertEqual(detail, ORIGIN + ": accepted with its Host and Origin; a foreign Origin and Host refused")
         else:
             self.assertIn("before BR-73", detail)
 

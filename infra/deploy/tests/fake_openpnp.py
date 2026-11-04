@@ -375,24 +375,24 @@ class FakeOpenPnP:
     def browser_safety(self, method, host, origin):
         """ApiServer.checkBrowserSafety with BR-73's trusted origins: (403, body) or None. Fail flags: 'old-origins' (a
         build from before BR-73: loopback only), 'origins-refused' (it lists them but refuses them), 'origins-open' (any
-        Origin passes: the CSRF guard broken)."""
+        Origin passes: the CSRF guard broken), 'hosts-open' (any Host passes: the DNS-rebinding guard broken)."""
         def refuse(why):
             return 403, {"error": "forbidden", "reason": why}
         host = (host or "").lower()
         trusted = {} if ("old-origins" in self.fail or "origins-refused" in self.fail) else {
             o.split("://", 1)[1]: o for o in self.trusted}
         loopback = bool(LOOPBACK.match(host))
-        if not loopback and host not in trusted:
+        if not loopback and host not in trusted and "hosts-open" not in self.fail:
             return refuse(f"Host '{host}' is not allowed")
         if method in ("GET", "HEAD") or origin is None or "origins-open" in self.fail:
             return None
-        if origin.lower() == (f"http://{host}" if loopback else trusted.get(host)):
+        if origin.lower() == (f"http://{host}" if loopback or "hosts-open" in self.fail else trusted.get(host)):
             return None
         return refuse(f"cross-site request refused (Origin {origin} is not this server)")
 
     def handle(self, method, path, body, host=None, origin=None):
         self.record({"method": method, "path": path, **({"origin": origin} if origin else {})})
-        refused = self.browser_safety(method, host or f"127.0.0.1:{self.port}", origin)
+        refused = self.browser_safety(method, f"127.0.0.1:{self.port}" if host is None else host, origin)
         if refused:
             return refused
         if method == "GET" and path in ("/api/status", "/api/machine") and "machine-500" in self.fail:
@@ -421,8 +421,8 @@ class FakeOpenPnP:
                     body = json.loads(raw) if raw else {}
                 except ValueError:
                     body = {}
-                code, out = fake.handle(method, self.path.split("?")[0], body, self.headers.get("Host"),
-                                        self.headers.get("Origin"))
+                code, out = fake.handle(method, self.path.split("?")[0], body, self.headers.get("Host") or "",
+                                        self.headers.get("Origin"))  # no Host: refused, as the real API
                 data = json.dumps(out).encode()
                 try:
                     self.send_response(code)
