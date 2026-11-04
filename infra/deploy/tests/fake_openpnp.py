@@ -216,6 +216,7 @@ class FakeOpenPnP:
                            **({} if "old-origins" in self.fail else {"trustedOrigins": list(self.trusted)}),
                            port=self.port, lanAccess=False, simulated=sim, simulatorConfirmed=sim),
             "machine": self.machine_status(),
+            **({} if "old-lock" in self.fail else {"lock": self.lock_status()}),
             # DispenseEndpoints.status: config times (persisted) of the needle, tip, seat, places and surfaces
             "dispense": {"running": True, "available": "unavailable" not in self.fail, "busy": self.run_active,
                          "needle": {"touchedOff": True, "setAtMs": self.ago_ms("needle_set_s_ago"),
@@ -266,7 +267,22 @@ class FakeOpenPnP:
         return out
 
     # --- endpoints -----------------------------------------------------------------------------
+    def lock_status(self):
+        """BR-72's lock: fake-machine.json "lock" (default: nobody holds it); none at all for a build before BR-72."""
+        return self.machine.get("lock", {"holder": None, "takenFrom": None})
+
+    def locked(self):
+        """A guarded write from this anonymous client while someone holds the lock: BR-72's refusal, or None."""
+        holder = self.lock_status().get("holder") if "old-lock" not in self.fail else None
+        if holder:
+            return 409, {"error": "locked", "reason": f"{holder.get('label', 'Someone')} has the machine "
+                                                      f"({holder.get('what', '')}). Take control to use it.",
+                         "lock": self.lock_status()}
+        return None
+
     def enable(self):
+        if self.locked():
+            return self.locked()
         if "enable" in self.fail:
             return 409, {"error": "refused", "reason": "could not start the machine: fake port not found"}
         with self.lock:
@@ -296,6 +312,8 @@ class FakeOpenPnP:
     def home(self, body):
         """As MachineEndpoints.home: refusals before the home starts, then {"wait": true} waits up to the server's
         own limit (f.get(5, MINUTES); "home_cap_s" here) and answers 409 after it while the home runs on."""
+        if self.locked():
+            return self.locked()
         if "home-404" in self.fail:
             return 404, {"error": "not-found", "reason": "no such endpoint: /api/machine/home"}
         with self.lock:

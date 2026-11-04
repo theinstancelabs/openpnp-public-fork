@@ -515,6 +515,25 @@ class Health(HealthLab, unittest.TestCase):
 
 
 
+class HealthLock(HealthLab, unittest.TestCase):
+    """BR-72: a lock taken between the idle check and the health check's enable is someone at the machine."""
+
+    def test_a_lock_taken_after_the_idle_check_is_the_machines_not_the_builds(self):
+        self.start(lock={"holder": {"kind": "agent", "who": "process", "label": "Process", "what": "a bench session"},
+                         "takenFrom": None})
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "machine")  # a hold, never the bad list
+        self.assertTrue(rep["failure"].startswith("enable: HTTP 409: Process has the machine"), rep["failure"])
+        self.assertNotIn(("POST", "/api/machine/home"), self.posts())
+
+    def test_a_refused_enable_that_is_not_the_lock_stays_the_builds(self):
+        self.start(jar_fail=["enable"])
+        rep = self.check()
+        self.assertFalse(rep["ok"], rep)
+        self.assertEqual(rep["kind"], "build")
+
+
 ORIGIN = "https://lumen.example.ts.net:8877"
 
 

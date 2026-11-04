@@ -658,6 +658,22 @@ def api_enabled_reasons(st):
     return []
 
 
+LOCK_REFUSALS = ("locked", "lock-lost", "no-lock")  # BR-72: someone else holds the machine lock
+
+
+def api_lock_reasons(st):
+    """BR-72: someone holds the machine lock (an agent role or the user): they are working at it, also when it looks
+    quiet. A build from before BR-72 has no lock field."""
+    lock = st.get("lock")
+    if not isinstance(lock, dict) or lock.get("holder") is None:
+        return []
+    h = lock["holder"] if isinstance(lock["holder"], dict) else {}  # anything else: held by someone (fail closed)
+    since = _ms(h.get("sinceMs"))
+    when = time.strftime("%H:%M", time.localtime(since / 1000)) if since else "?"
+    return [f"{h.get('label') or h.get('who') or 'someone'} holds the machine lock "
+            f"({h.get('what') or 'no purpose given'}, since {when})"]
+
+
 def _ms(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
@@ -1599,7 +1615,8 @@ class Deployer:
                 if code != 200:
                     reasons.append(f"OpenPnP's /api/status answered HTTP {code}")
                 else:
-                    reasons += api_busy_reasons(st) + api_enabled_reasons(st) + self._api_quiet_reasons(st)
+                    reasons += (api_busy_reasons(st) + api_enabled_reasons(st) + api_lock_reasons(st)
+                                + self._api_quiet_reasons(st))
         else:
             try:
                 self.api.get("/api/status", timeout=3)
@@ -2298,7 +2315,9 @@ class Deployer:
         except ApiDown as e:
             return gone("enable", e)
         if code != 200 or body.get("enabled") is not True:
-            return fail("enable", f"HTTP {code}: {body.get('reason', body)}")
+            # someone took the machine lock after the idle check (BR-72): theirs, never the build's fault
+            locked = code == 409 and body.get("error") in LOCK_REFUSALS
+            return fail("enable", f"HTTP {code}: {body.get('reason', body)}", "machine" if locked else "build")
         step("enable", "machine enabled")
 
         pattern = self._serial_pattern()
