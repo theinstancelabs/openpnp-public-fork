@@ -625,8 +625,9 @@ public class GcodeStreamBuilder {
         restSteps += netSteps;
         setAccel(cfg.zLiftAccelMmS2);
         moveNozzle(x, y, d.hopZ, cfg.zLiftFeedMmS, "G1");
-        // the no-pause rule's one exception (plastic 25G, BR-82): pressure on at the lift height, the thread breaks
-        dwell(profile.liftPauseMs);
+        // the no-pause rule's one exception (plastic 25G, BR-82): pressure on at the lift height, the thread breaks;
+        // in settle pieces, so a STOP's valve-off waits at most one
+        settle(profile.liftPauseMs);
         setAccel(cfg.travelAccelMmS2);
         markLast(GcodeProgram.Marker.DOT_END, d.index, d.label, d.rotationDeg);
         prog.dotCount += d.index >= 0 ? 1 : 0;

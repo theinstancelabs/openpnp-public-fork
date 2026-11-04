@@ -531,17 +531,12 @@ public class GcodeStreamTest {
                 t.add(l.text);
             }
         }
-        assertEquals(11, Collections.frequency(t, "G4 P500"), "8 purge dots and 3 board dots");
-        for (int i = 0; i < t.size(); i++) {
-            if (t.get(i).equals("G4 P500")) {
-                assertTrue(t.get(i - 1).matches("G1 Z-?\\d+\\.\\d{4} F3000"), "after the lift: " + t.get(i - 1));
-                // then X/Y at the lift height, the cross (travel Z, then X/Y) or the session end
-                String next = t.get(i + 1).equals("G1 Z31.5000 F3000") ? t.get(i + 2) : t.get(i + 1);
-                assertTrue(next.matches("G0 [XY]-?\\d+\\.\\d{4}( Y-?\\d+\\.\\d{4})? F12000|M400"), next);
-            }
-        }
+        assertEquals(11, pausedLifts(t, 2), "8 purge dots and 3 board dots, the pause in two 250 ms pieces");
         for (List<GcodeProgram.Line> d : dotLines(p)) {
-            assertEquals("G4 P500", d.get(d.size() - 1).text, "the pause ends the dot: " + texts(d));
+            List<String> x = texts(d);
+            assertEquals(java.util.Arrays.asList("G4 P250", "G4 P250"), x.subList(x.size() - 2, x.size()),
+                    "the pause ends the dot: " + x);
+            assertTrue(x.get(x.size() - 3).matches("G1 Z-?\\d+\\.\\d{4} F3000"), "after the lift: " + x);
         }
         // 0: one G4 per dot, its dwell
         DispenseConfig none = toyConfig();
@@ -553,21 +548,34 @@ public class GcodeStreamTest {
         List<GcodeStreamBuilder.DotSpec> specs = Collections.singletonList(new GcodeStreamBuilder.DotSpec(62, 30,
                 2.96, 3.96, 180.1802, 0, "d"));
         GcodeProgram dots = GcodeStreamBuilder.forDots(c, mapper(), specs, false, false, true, "prime");
-        assertEquals(2, Collections.frequency(dots.text(), "G4 P500"), dots.asString());
+        assertEquals(2, pausedLifts(dots.text(), 2), dots.asString());
         DispenseConfig b = GcodeBlocksTest.cfg();
         b.profile.liftPauseMs = 500;
         GcodeProgram blocks = GcodeStreamBuilder.forBlocks(b, mapper(), GcodeBlocksTest.threeBlocks(),
                 DispenseService.purgeSpecs(b, 17), 4, false, false, 1234L, null);
         assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(blocks, b, "B"));
-        assertEquals(17 + 9, Collections.frequency(blocks.text(), "G4 P500"));
-        // watchdog armed (ping every 1000 ms): 2500 ms go out as 1000 + 1000 + 500
+        assertEquals(17 + 9, pausedLifts(blocks.text(), 2));
+        // watchdog armed (ping every 1000 ms): 2500 ms still go out in pieces of 250 (the settle cap)
         c.profile.liftPauseMs = 2500;
         GcodeProgram armed = board(c, mapper(), toyPlan(c), false, true, 0L);
         assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(armed, c, "B"));
-        for (List<GcodeProgram.Line> d : dotLines(armed)) {
-            List<String> x = texts(d);
-            assertEquals(java.util.Arrays.asList("G4 P1000", "G4 P1000", "G4 P500"), x.subList(x.size() - 3, x.size()));
+        assertEquals(11, pausedLifts(armed.text(), 10));
+    }
+
+    /** Lifts (G1 Z … F3000) followed by exactly {@code pieces} lines of G4 P250: the dots' pauses. */
+    static int pausedLifts(List<String> t, int pieces) {
+        int n = 0;
+        for (int i = 0; i + pieces < t.size(); i++) {
+            if (!t.get(i).matches("G1 Z-?\\d+\\.\\d{4} F3000")) {
+                continue;
+            }
+            int k = 0;
+            while (i + 1 + k < t.size() && t.get(i + 1 + k).equals("G4 P250")) {
+                k++;
+            }
+            n += k == pieces ? 1 : 0;
         }
+        return n;
     }
 
     /** BR-82: the estimate counts the pause, 0.5 s per dot: the duration, the pressurised time (I7), the dot clock. */
