@@ -179,6 +179,18 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
     await page.evaluate(() => IL.setTheme('light'));
     check('the board flow is loaded (IL.boardFlow, IL.boardImport) and Run calls it (#btn-board-upload in the Board step)',
       await page.evaluate(() => !!(IL.boardFlow && IL.boardImport)) && (await toBoardStep(page), await page.isVisible('#btn-board-upload')));
+    // run alone (WEBUI_SCRIPTS="board-import", a fresh session): the machine connected and homed (Camera is on FID1
+    // reads the camera), and a dispensable 0603 for the plans: webui-sim does both before it in the full run
+    if (!(await page.evaluate(() => IL.S.status.machine.enabled))) {
+      await page.evaluate(() => IL.api('POST', '/api/machine/enable'));
+      await page.waitForFunction(() => IL.S.status.machine.enabled, null, { timeout: 30000 });
+    }
+    if (!(await page.evaluate(() => IL.S.status.machine.homed))) await page.evaluate(() => IL.api('POST', '/api/machine/home', { wait: true }, { timeoutMs: 180000 }));
+    const pt0 = await page.evaluate(() => IL.api('GET', '/api/pad-types'));
+    const chip0 = await page.evaluate(() => IL.api('GET', '/api/pad-types/chip-0603'));
+    if (!['characterized', 'validated'].includes(chip0.current.status)) {
+      await page.evaluate((k) => IL.api('PUT', '/api/pad-types/chip-0603', { status: 'characterized', forSetup: k }), pt0.forSetup && pt0.forSetup.key);
+    }
     const b0 = await boards(page);
     const ftpFile = ((b0.files || []).find((f) => /ftp\.board\.xml$/.test(f.file || '')) || {}).file;
     check('the session lists ftp.board.xml', !!ftpFile, (b0.files || []).map((f) => f.file));
