@@ -136,7 +136,9 @@ public class TipSetupValuesSimTest {
      * BR-85 follow-up: the skipped dots go above the reference gap. With a skip of 3 a ladder from 0.125 mm in steps of
      * 0.05 would lay its reference pair at -0.025 and -0.075 mm, possibly at contact (a wrong needle frame): refused
      * before anything moves, with the start gap that keeps the reference where it sits without a skip; 1 µm under it
-     * is refused too. A step so large that this start gap would pass 2 mm is refused with the largest step instead.
+     * is refused too. A ladder past -0.1 mm names itself and the most such steps; a step so large that no ladder of
+     * skip + 3 dots from at most 2 mm keeps its reference at 0.125 mm and its lowest gap at -0.1 mm names the largest
+     * step that does.
      */
     @Test
     public void aTouchOffWhoseReferenceSitsBelowTheReferenceGapIsRefused() throws Exception {
@@ -155,6 +157,11 @@ public class TipSetupValuesSimTest {
                 + "start gap of 0.125 mm its reference dots would sit at 0.050 mm and 0.025 mm, possibly at contact; "
                 + "start at 0.200 mm or more, so they sit at 0.125 mm and 0.100 mm as without a skip", TipSim.str(form,
                         "reason"));
+        JsonObject deep = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"stepMm\":0.05,\"steps\":13}"), 400,
+                "bad-request");
+        assertEquals("the lowest gap would be -0.325 mm (13 steps of 0.050 mm from 0.275 mm), i.e. the needle 0.325 mm "
+                + "into the surface if the current offset is right; keep it at -0.1 mm or above: at most 8 such steps, "
+                + "or start higher", TipSim.str(deep, "reason"));
         TipSim.ok(t.call("PUT", "/api/config", recipe + "2}}"));
         JsonObject under = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"startGapMm\":0.174,\"steps\":5}"),
                 400, "bad-request");
@@ -162,33 +169,41 @@ public class TipSetupValuesSimTest {
                 + "start gap of 0.174 mm its reference dots would sit at 0.124 mm and 0.099 mm, possibly at contact; "
                 + "start at 0.175 mm or more, so they sit at 0.125 mm and 0.100 mm as without a skip", TipSim.str(under,
                         "reason"));
-        // (2 - 0.125) / 4 is 0.46875: 0.468 is the largest step to 1 µm
+        // 7 dots from 2 mm end at -0.1 mm in steps of (2 + 0.1) / 6 = 0.35 mm: the floor binds before the 2 mm cap
         TipSim.ok(t.call("PUT", "/api/config", recipe + "4}}"));
         JsonObject step = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"stepMm\":0.47}"), 400,
                 "bad-request");
         assertEquals("the 25G straight's recipe skips the first 4 dots after the prime (touchOffSkipDots): in steps of "
-                + "0.470 mm the ladder would start at 2.005 mm to keep its reference pair at 0.125 mm, over the 2 mm a "
-                + "start gap may be; use steps of at most 0.468 mm", TipSim.str(step, "reason"));
+                + "0.470 mm no ladder of 7 dots from at most 2 mm keeps its reference pair at 0.125 mm or higher and "
+                + "its lowest gap at -0.1 mm or above; use steps of at most 0.350 mm", TipSim.str(step, "reason"));
     }
 
     /**
      * BR-85 follow-up: without a start gap a ladder with skipped dots starts that many steps above 0.125 mm, so its
-     * reference sits where it does without a skip; a start gap at that minimum runs, and with no skip nothing changes
-     * (a start under 0.125 mm runs). The answer names the start gap the server chose, as the pitch.
+     * reference sits where it does without a skip, and without a number of steps it lays the most that end at -0.1 mm
+     * or above in its steps; a start gap at that minimum runs, the largest step a skip allows runs, and with no skip
+     * nothing changes (a start under 0.125 mm runs). The answer names the start gap and steps the server chose.
      */
     @Test
     public void theTouchOffStartsAboveTheSkippedDots() throws Exception {
         String recipe = layingWith(3);
-        double[] from = {0.275, 0.225, 0.175, 0.125, 0.075, 0.025};
-        assertArrayEquals(from, gaps(laid("{\"startGapMm\":0.275,\"stepMm\":0.05,\"steps\":6,\"wait\":true}")),
-                1e-9, "the first reference dot at 0.125 mm");
-        JsonObject chosen = laid("{\"stepMm\":0.05,\"steps\":6,\"wait\":true}");
-        assertArrayEquals(from, gaps(chosen), 1e-9, "no start gap: 3 steps above 0.125 mm");
-        assertTrue(chosen.has("startGapMm"), chosen.toString());
+        assertArrayEquals(new double[] {0.275, 0.225, 0.175, 0.125, 0.075, 0.025}, gaps(laid("{\"startGapMm\":0.275,"
+                + "\"stepMm\":0.05,\"steps\":6,\"wait\":true}")), 1e-9, "the first reference dot at 0.125 mm");
+        JsonObject chosen = laid("{\"stepMm\":0.05,\"wait\":true}");
+        assertArrayEquals(new double[] {0.275, 0.225, 0.175, 0.125, 0.075, 0.025, -0.025, -0.075}, gaps(chosen), 1e-9,
+                "3 steps above 0.125 mm, and 3 + 1 + 4 steps: the next would be -0.125 mm");
+        assertTrue(chosen.has("startGapMm") && chosen.has("steps"), chosen.toString());
         assertEquals(0.275, chosen.get("startGapMm").getAsDouble(), 1e-12);
+        assertEquals(8, chosen.get("steps").getAsInt());
         // 0.175 - 2 x 0.025 is 0.12499999999999999 in doubles: the minimum itself is accepted
         TipSim.ok(t.call("PUT", "/api/config", recipe + "2}}"));
         assertEquals(0.125, gaps(laid("{\"startGapMm\":0.175,\"steps\":5,\"wait\":true}"))[2], 1e-12);
+        // the largest step the refusal names for a skip of 4 lays 7 dots from 2 mm
+        TipSim.ok(t.call("PUT", "/api/config", recipe + "4}}"));
+        double[] widest = gaps(laid("{\"startGapMm\":2,\"stepMm\":0.35,\"steps\":7,\"wait\":true}"));
+        assertEquals(7, widest.length);
+        assertEquals(0.6, widest[4], 1e-9, "the first reference dot");
+        assertEquals(-0.1, widest[6], 1e-9);
 
         // no skip: as before
         TipSim.ok(t.call("PUT", "/api/config", recipe + "0}}"));
