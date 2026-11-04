@@ -34,6 +34,10 @@ class Shards(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pad-profile"):
             webui_shards.scripts_for([s for s in self.ALL if s != "pad-profile"], "main")
 
+    def test_full_runs_every_script_in_one_session_as_before(self):
+        self.assertEqual(webui_shards.scripts_for(self.ALL, "full"), self.ALL)
+        self.assertNotIn("full", webui_shards.KEYS)  # a comparison run, never a leg of the gate
+
     def test_an_unknown_key_is_refused(self):
         with self.assertRaises(ValueError):
             webui_shards.scripts_for(self.ALL, "everything")

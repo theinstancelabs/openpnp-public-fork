@@ -5,7 +5,7 @@ The named shards are fixed here; the leg "rest" runs every other script in the r
 (tip-flow, jog, ...) runs in CI without a change here. A named script that is no longer in ALL_SCRIPTS fails the leg
 (a rename must not drop it from CI silently). Prints the GitHub output line `scripts=<names>`.
 
-    python3 infra/ci/webui_shards.py main|calib|rest  (from the repo root)
+    python3 infra/ci/webui_shards.py main|calib|rest|full  (from the repo root)
 """
 import os
 import re
@@ -14,7 +14,8 @@ import sys
 RUNNER = "src/test/web/run-webui-sim-test.sh"
 # webui-sim and board-import share a session's state; pad-profile and tip-setups pass alone with BR-74's paste seed
 SHARDS = {"main": ["webui-sim", "board-import"], "calib": ["pad-profile", "tip-setups"]}
-KEYS = tuple(SHARDS) + ("rest",)
+KEYS = tuple(SHARDS) + ("rest",)  # ci.yml's legs
+FULL = "full"  # every script in one session, as before the shards: for a comparison run, not a leg of the gate
 
 
 def all_scripts(text):
@@ -25,6 +26,8 @@ def all_scripts(text):
 
 
 def scripts_for(all_, key):
+    if key == FULL:
+        return list(all_)
     if key not in KEYS:
         raise ValueError(f"unknown shard {key!r} (known: {', '.join(KEYS)})")
     missing = [s for names in SHARDS.values() for s in names if s not in all_]
