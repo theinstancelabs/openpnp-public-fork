@@ -397,11 +397,17 @@
     if (steps * 4 === rev * 3) return '¾ turn';
     return steps + ' steps';
   };
-  /** Recipe token parts: [name, "18 psi", "½ turn", "dwell 250 ms", "gap 0.10 mm", "purge 8"]. */
+  /**
+   * Recipe token parts: [name, "18 psi", "½ turn", "dwell 250 ms", "gap 0.10 mm", "purge 8"], then "lift 3 mm" and
+   * "pause 500 ms" when the recipe has them, in the machine's order (a change of either alone still shows).
+   */
   IL.recipeParts = function (p) {
     if (!p) return [];
-    return [p.name || 'profile', IL.fmtPsi(p.pressurePsi) + ' psi', IL.turnLabel(p.netStepsPerDot, p.stepsPerRev),
+    const parts = [p.name || 'profile', IL.fmtPsi(p.pressurePsi) + ' psi', IL.turnLabel(p.netStepsPerDot, p.stepsPerRev),
       'dwell ' + p.dwellMs + ' ms', 'gap ' + IL.fmt(p.gapMm, 2) + ' mm', 'purge ' + p.purgeDots];
+    if (isNum(p.liftMm)) parts.push('lift ' + p.liftMm + ' mm');
+    if (p.liftPauseMs > 0) parts.push('pause ' + p.liftPauseMs + ' ms');
+    return parts;
   };
   /** The recipe token (.recipe). opts: {changed, changedText, href, title}. aria-label = parts without the name. */
   IL.recipeEl = function (p, opts) {
@@ -430,7 +436,7 @@
     }
     return t
       .replace(/\b([0-9a-f]{4})[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(-subset-[\w-]+)?/gi, (m, a, sub) => a + (sub ? ' (part)' : ''))
-      .replace(/ psi=[\d.]+ net=\d+ suck=[\d.]+ start=[\d.]+ rpm=[\d.]+ acc=[\d.]+ dwell=\d+ gap=[\d.]+( purge=\d+)?/g, '')
+      .replace(/ psi=[\d.]+ net=\d+ suck=[\d.]+ start=[\d.]+ rpm=[\d.]+ acc=[\d.]+ dwell=\d+ gap=[\d.]+( purge=\d+)?( pause=\d+)?( lift=[\d.]+)?/g, '')
       .replace(/\{[^{}]{40,}\}|\[[^\[\]]{60,}\]/g, '{…}');
   };
   /**

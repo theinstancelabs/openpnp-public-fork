@@ -1147,6 +1147,78 @@ public class ApiServerSimTest {
         assertFalse(c.toString().contains("Gcode"), c.toString());
     }
 
+    /**
+     * BR-82: the pause after the lift is saved with the mounted tip's recipe (0 to 5000 ms) and shown with it. Re-review:
+     * only with the recipe's own lift (the machine's hop height is whatever the last tip left).
+     */
+    @Test
+    public void liftPauseIsSavedWithTheRecipe() throws Exception {
+        Res tooLong = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftPauseMs\":5001}}");
+        assertEquals(400, tooLong.status, tooLong.toString());
+        assertTrue(tooLong.body.contains("liftPauseMs must be 0 to 5000"), tooLong.toString());
+        Res noLift = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftPauseMs\":500}}");
+        assertEquals(400, noLift.status, noLift.toString());
+        assertTrue(noLift.body.contains("profile liftPauseMs needs the recipe's own liftMm (the pause is set for one lift "
+                + "height)"), noLift.toString());
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftPauseMs\":500,\"liftMm\":3}}"));
+        JsonObject c = ok(get("/api/config")).getAsJsonObject("profile");
+        assertEquals(500, c.get("liftPauseMs").getAsInt());
+        assertEquals(250, c.get("dwellMs").getAsInt(), "the other fields are kept");
+        JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertEquals(500, p.get("liftPauseMs").getAsInt(), p.toString());
+        assertTrue(p.get("fingerprint").getAsString().endsWith(" pause=500 lift=3.000"), p.toString());
+    }
+
+    /**
+     * BR-82 re-review: Run compares the plan's lift with the recipe's own ({@code DispenseConfig.liftMm()}). A plan made
+     * with the recipe's 3 mm runs whatever the machine's hop height; without the recipe's lift it is stale.
+     */
+    @Test
+    public void runComparesThePlansLiftWithTheRecipes() throws Exception {
+        setUpBoardRuns();
+        File board = writeBoard();
+        ok(call("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}"));
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftMm\":3}}"));
+        JsonObject plan = planTied(board);
+        assertTrue(plan.getAsJsonObject("interlocks").get("ok").getAsBoolean(), plan.toString());
+        assertEquals(3.0, plan.get("hopHeightMm").getAsDouble(), 0, "the lift the plan was made with");
+        String run = "{\"planId\":\"" + plan.get("planId").getAsString() + "\",\"wait\":true}";
+        JsonObject first = ok(post("/api/run", run));
+        assertEquals("OK", first.getAsJsonObject("result").get("status").getAsString(), first.toString());
+        // the machine's hop height is not this recipe's lift: the plan still runs
+        ok(call("PUT", "/api/config", "{\"hopHeightMm\":1.2}"));
+        JsonObject second = ok(post("/api/run", run));
+        assertEquals("OK", second.getAsJsonObject("result").get("status").getAsString(), second.toString());
+        // the recipe's lift removed: its dots would lift the machine's 1.2 mm
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftMm\":null}}"));
+        Res stale = post("/api/run", run);
+        assertEquals(409, stale.status, stale.toString());
+        assertTrue(stale.body.contains("gap or lift height changed since this plan was made"), stale.toString());
+        assertTrue(stale.body.contains("plan the board again"), stale.toString());
+    }
+
+    /**
+     * BR-82 review: the recipe's own lift is saved with it (above 0 to 10 mm) and shown with it; the recipe editor
+     * sends a blank as null, which gives the machine's hop height back. The machine's hop height never changes.
+     */
+    @Test
+    public void liftIsSavedWithTheRecipe() throws Exception {
+        for (String bad : new String[] {"0", "10.1"}) {
+            Res r = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftMm\":" + bad + "}}");
+            assertEquals(400, r.status, r.toString());
+            assertTrue(r.body.contains("liftMm must be > 0 and <= 10"), r.toString());
+        }
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftMm\":3}}"));
+        JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertEquals(3.0, p.get("liftMm").getAsDouble(), 0, p.toString());
+        assertTrue(p.get("fingerprint").getAsString().endsWith(" lift=3.000"), p.toString());
+        assertEquals(1.0, ok(get("/api/config")).get("hopHeightMm").getAsDouble(), 0);
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftMm\":null}}"));
+        JsonObject c = ok(get("/api/config"));
+        assertTrue(c.getAsJsonObject("profile").get("liftMm").isJsonNull(), c.toString());
+        assertEquals(1.0, c.get("hopHeightMm").getAsDouble(), 0);
+    }
+
     /** PUT /api/config merges the nested settings one level deep; stamped fields are the engine's. */
     @Test
     public void nestedSettingsMergeOneLevelDeep() throws Exception {
