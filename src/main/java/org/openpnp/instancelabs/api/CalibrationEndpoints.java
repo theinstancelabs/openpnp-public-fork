@@ -206,9 +206,14 @@ final class CalibrationEndpoints {
         JsonObject b = r.json();
         DispenseService svc = ctx.availableSvc();
         NeedleTouchOff.Request req = new NeedleTouchOff.Request();
-        req.startGapMm = Json.num(b, "startGapMm", req.startGapMm);
+        int skip = svc.getConfig().profile.touchOffSkipDots;
         req.stepMm = Json.num(b, "stepMm", req.stepMm);
-        req.steps = Json.integer(b, "steps", req.steps);
+        // BR-85: without a start gap the skipped dots go above the reference gap, the reference sits as without a skip
+        req.startGapMm = Json.num(b, "startGapMm", NeedleTouchOff.REFERENCE_GAP_MM + skip * req.stepMm);
+        // BR-89 (1): with a skip, the most steps from the default start that end at -0.1 mm or above, within skip + 3
+        // to 20 (skip + 10 in steps of 0.025 mm, skip + 5 in steps of 0.05 mm)
+        double fit = skip + 1 + Math.floor((NeedleTouchOff.REFERENCE_GAP_MM + 0.1) / req.stepMm + 1e-9);
+        req.steps = Json.integer(b, "steps", skip > 0 ? (int) Math.max(skip + 3, Math.min(20, fit)) : req.steps);
         req.rotationDeg = Json.num(b, "rotationDeg", req.rotationDeg);
         req.locationName = Json.str(b, "locationName", null);
         req.primeAtWaste = Json.bool(b, "primeAtWaste", req.primeAtWaste);
@@ -219,7 +224,16 @@ final class CalibrationEndpoints {
         }
         // without a pitch: 1.6 mm, or the smallest that leaves room between larger dots (F14)
         req.pitchMm = Json.num(b, "pitchMm", NeedleTouchOff.defaultPitchMm(req, svc.getConfig()));
-        int skip = svc.getConfig().profile.touchOffSkipDots;
+        // skip + 3 dots from at most 2 mm end at -0.1 mm or above in steps of at most (2 + 0.1) / (skip + 2) mm: 0.42,
+        // 0.35 and 0.30 for skips 3 to 5 (for 1 and 2 the 0.5 mm a step may be binds first)
+        double largest = Math.floor((2 + 0.1) / (skip + 2) * 1000 + 1e-9) / 1000;
+        if (skip > 0 && largest < 0.5 && req.stepMm > largest + 1e-9) {
+            throw ApiException.badRequest(String.format(java.util.Locale.ROOT, "the %s's recipe skips the first %d "
+                    + "dots after the prime (touchOffSkipDots): in steps of %.3f mm no ladder of %d dots from at most "
+                    + "2 mm keeps its reference pair at %.3f mm or higher and its lowest gap at -0.1 mm or above; use "
+                    + "steps of at most %.3f mm", svc.getConfig().tip.name, skip, req.stepMm, skip + 3,
+                    NeedleTouchOff.REFERENCE_GAP_MM, largest));
+        }
         if (req.steps < 2 || req.steps > 20 || req.stepMm <= 0 || req.stepMm > 0.5 || req.startGapMm > 2
                 || req.pitchMm <= 0 || req.jumpRatio <= 0) {
             throw ApiException.badRequest("steps " + (skip + 3) + " to 20, step 0 to 0.5 mm, start gap at most 2 mm, "
@@ -235,11 +249,17 @@ final class CalibrationEndpoints {
         if (pitch != null) {
             throw ApiException.badRequest(pitch);
         }
+        String start = NeedleTouchOff.startGapProblem(req, skip, svc.getConfig().tip.name);
+        if (start != null) {
+            throw ApiException.badRequest(start);
+        }
         double lowest = req.startGapMm - (req.steps - 1) * req.stepMm;
         if (lowest < -0.1 - 1e-9) { // F16: 0.30 - 8 x 0.05 is -0.10000000000000003 in doubles
-            throw ApiException.badRequest(String.format(java.util.Locale.ROOT,
-                    "the lowest gap would be %.3f mm, i.e. the needle %.3f mm into the surface if the current offset is right; "
-                            + "keep it at -0.1 mm or above", lowest, -lowest));
+            throw ApiException.badRequest(String.format(java.util.Locale.ROOT, "the lowest gap would be %.3f mm (%d "
+                    + "steps of %.3f mm from %.3f mm), i.e. the needle %.3f mm into the surface if the current offset "
+                    + "is right; keep it at -0.1 mm or above: at most %d such steps, or start higher", lowest,
+                    req.steps, req.stepMm, req.startGapMm, -lowest,
+                    1 + (int) Math.floor((req.startGapMm + 0.1) / req.stepMm + 1e-9)));
         }
         DispenseConfig cfg = svc.getConfig();
         refuseReservedCoupon(svc, req.locationName == null ? cfg.blankLocationName : req.locationName);
@@ -250,6 +270,6 @@ final class CalibrationEndpoints {
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, res -> Views.map("analysis", res.analysis,
                 "previousOffsetMm", res.previousOffsetMm, "newOffsetMm", res.newOffsetMm, "applied", res.applied, "run",
                 Views.run(res.run, false)), Views.map("kind", "needle touch-off", "apply", apply, "pitchMm",
-                        req.pitchMm));
+                        req.pitchMm, "startGapMm", req.startGapMm, "steps", req.steps));
     }
 }
