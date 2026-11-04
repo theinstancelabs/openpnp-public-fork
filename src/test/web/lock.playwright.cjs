@@ -107,6 +107,9 @@ const cellText = (page) => page.evaluate(() => {
   return { shown: !c.hidden && c.offsetParent !== null, k: c.querySelector('.cell__k').textContent.trim(), v: v.textContent.trim(), title: c.title, cls: c.className };
 });
 const takeBtn = (page) => page.evaluate(() => { const b = document.getElementById('btn-take'); return b ? { shown: !b.hidden && b.offsetParent !== null, disabled: b.disabled, text: b.textContent.trim() } : null; });
+/** The first machine control in the Machine panel that can be pressed now (not Take control), waiting up to 20 s. */
+const waitFix = (page) => page.waitForFunction(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled && x.dataset.fix !== 'take-control'); return b ? b.dataset.fix : null; },
+  null, { timeout: 20000 }).then((h) => h.jsonValue(), () => null);
 const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = document.getElementById('cell-lock'); return c && new RegExp(src).test(c.querySelector('.cell__v').textContent); }, re.source, { timeout: ms || 8000 }).catch(() => null);
 
 (async () => {
@@ -232,7 +235,7 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     await page.click('#cell-machine');
     await page.waitForSelector('#pv-machine-act button[data-fix]', { state: 'attached', timeout: 5000 });
     await sleep(900);
-    const btn = await page.evaluate(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled); return b ? b.dataset.fix : null; });
+    const btn = await waitFix(page);
     check('(6) a machine control is free while nobody has it', !!btn, btn);
     if (btn) {
       const sel = '#pv-machine-act button[data-fix="' + btn + '"]';
@@ -256,7 +259,7 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     await page.evaluate(() => IL.openView('machine', { keep: true }));   // a second click on its cell would close it
     await page.waitForSelector('#pv-machine-act button[data-fix]', { state: 'attached', timeout: 5000 });
     await sleep(900);
-    const btn7 = await page.evaluate(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled && x.dataset.fix !== 'take-control'); return b ? b.dataset.fix : null; });
+    const btn7 = await waitFix(page);
     if (btn7) {
       const sel = '#pv-machine-act button[data-fix="' + btn7 + '"]';
       await page.click(sel);
@@ -282,13 +285,39 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     check('(8) the strip reads You', /^You/.test((await cellText(page)).v), await cellText(page));
     await page.screenshot({ path: path.join(OUT, 'lock-unconfirmed.png') });
 
+    // ---- (8b) the strip after that STOP, its widest state: the verdict never cut, its time kept at 1440 px (In control
+    // gives its room first while it reads You or Nobody); an agent's cell never leaves the strip ---------------------------
+    await page.evaluate(() => IL.msg('lock', null));
+    await page.waitForFunction(() => /^Stopped \d\d:\d\d/.test(document.querySelector('#pill-engine .cell__v').textContent), null, { timeout: 10000 }).catch(() => null);
+    const fit = async (w, h) => {
+      await page.setViewportSize({ width: w, height: h });
+      await sleep(500);
+      return page.evaluate((ww) => {
+        const v = document.querySelector('#pill-engine .cell__v'), cells = document.getElementById('cells'), lc = document.getElementById('cell-lock');
+        const r = v.getBoundingClientRect(), lim = cells.getBoundingClientRect().right;
+        return { w: ww, shown: v.innerText, cut: v.scrollWidth > v.clientWidth + 0.5 || r.right > lim + 0.5, tier: cells.className, lock: lc.offsetParent !== null };
+      }, w);
+    };
+    const cuts = [];
+    for (const [w, h] of [[1440, 900], [1280, 800], [1024, 768]]) cuts.push(await fit(w, h));
+    check('(8b) after a STOP, with You in control: the verdict reads "Stopped…" in full at 1440, 1280 and 1024 px', cuts.every((c) => !c.cut && /^Stopped/.test(c.shown)), cuts);
+    check('(8b) and keeps the time of the stop at 1440 px', /^Stopped \d\d:\d\d/.test(cuts[0].shown), cuts[0]);
+    stub.holder = agent(3, 1);
+    await waitCell(page, /^Process/);
+    const a1024 = await fit(1024, 768);
+    check('(8b) an agent holding the machine stays in the strip at 1024 px', a1024.lock, a1024);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    stub.holder = user(Date.now());
+    await waitCell(page, /^You/);
+
     // ---- (9) a write while a take still stops the agent (409 taking-over): the reason, no second Take control -------------------
     await page.evaluate(() => { IL.msg('lock', null); IL.openView('machine', { keep: true }); });
     stub.holder = user(Date.now());
     await waitCell(page, /^You/);
     await sleep(900);
     stub.takingOver = true;
-    const fix9 = await page.evaluate(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled && x.dataset.fix !== 'take-control'); return b ? b.dataset.fix : null; });
+    // (8)'s STOP may still be switching the machine off on a slower runner: wait for a control to press
+    const fix9 = await waitFix(page);
     if (fix9) {
       const sel = '#pv-machine-act button[data-fix="' + fix9 + '"]';
       await page.click(sel);

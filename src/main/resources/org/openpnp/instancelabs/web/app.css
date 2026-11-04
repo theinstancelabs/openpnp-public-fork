@@ -216,9 +216,14 @@ kbd {
    labels, t5 the tip cell while it is ok (Setup, the run confirm and the pad-cal view name the tip; 1024 px after a
    STOP with the tip cell: PROFILE_CALIBRATION_DESIGN §22.13); the verdict keeps its label and value (cells never
    truncate, §4) */
+/* t2l: In control, while it reads You or Nobody, keeps only its mark (still the click to its panel) before the verdict
+   gives up anything; an agent's holder keeps its words */
+.cells--t2l #cell-lock.cell--ok .cell__txt, .cells--t2l #cell-lock.cell--off .cell__txt { display: none; }
+.cells--t2l #cell-lock.cell--ok, .cells--t2l #cell-lock.cell--off { padding: 0 10px; }
 .cells--t3 #pill-pressure.cell--off { display: none; }
 .cells--t4 .cell:not(.cell--verdict) .cell__k { display: none; }
 .cells--t5 #chip-tip.cell--ok { display: none; }
+.cells--t5 #cell-lock.cell--ok, .cells--t5 #cell-lock.cell--off { display: none; }
 
 /* ---------- STOP ---------- */
 .stop-bay { order: 99; flex: none; width: calc(var(--stop-w) + 21px); height: calc(100% + 1px); align-self: flex-start; padding-left: 20px; border-left: 1px solid var(--line); background: var(--surface); position: relative; z-index: 2; }
