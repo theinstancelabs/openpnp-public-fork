@@ -70,6 +70,9 @@ const cellText = (page) => page.evaluate(() => {
 });
 const takeBtn = (page) => page.evaluate(() => { const b = document.getElementById('btn-take'); return b ? { shown: !b.hidden && b.offsetParent !== null, disabled: b.disabled } : null; });
 const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = document.getElementById('cell-lock'); return c && new RegExp(src).test(c.querySelector('.cell__v').textContent); }, re.source, { timeout: ms || 8000 }).catch(() => null);
+/** The first machine control in the Machine panel that can be pressed now (not Take control), waiting up to 20 s. */
+const waitFix = (page) => page.waitForFunction(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled && x.dataset.fix !== 'take-control'); return b ? b.dataset.fix : null; },
+  null, { timeout: 20000 }).then((h) => h.jsonValue(), () => null);
 const bandText = (page, key) => page.evaluate((k) => { const b = document.querySelector('#msg-area [data-msg="' + k + '"]'); return b ? b.textContent.replace(/\s+/g, ' ').trim() : null; }, key);
 
 (async () => {
@@ -177,7 +180,8 @@ const bandText = (page, key) => page.evaluate((k) => { const b = document.queryS
     await sleep(1200);
     freeze.on = true;                                  // the page keeps seeing "nobody"
     token = await acquire('took it between two polls (test)');
-    const fix = await page.evaluate(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled); return b ? b.dataset.fix : null; });
+    // (4)'s STOP may still be switching the machine off on a slower runner: wait for a control to press
+    const fix = await waitFix(page);
     if (fix) {
       const sel = '#pv-machine-act button[data-fix="' + fix + '"]';
       await page.click(sel);
@@ -199,7 +203,7 @@ const bandText = (page, key) => page.evaluate((k) => { const b = document.queryS
     await waitCell(page, /^Nobody/);
     await page.evaluate(() => { IL.msg('lock', null); IL.openView('machine', { keep: true }); });
     await sleep(1200);
-    const fix7 = await page.evaluate(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled && x.dataset.fix !== 'take-control'); return b ? b.dataset.fix : null; });
+    const fix7 = await waitFix(page);
     if (fix7) {
       const sel = '#pv-machine-act button[data-fix="' + fix7 + '"]';
       await page.click(sel);
