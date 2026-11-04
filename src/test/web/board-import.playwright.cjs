@@ -366,7 +366,7 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
       && /exists/.test(await page.textContent('#board-import-exists')), await page.textContent('#board-import-exists'));
     await page.click('#btn-board-import-save');
     const armed = (await page.textContent('#btn-board-import-save')).trim();
-    check('(7) first press: "Press again: replace board"', armed === 'Press again: replace board', armed);
+    check('(7) first press: "Press again: replace the design"', armed === 'Press again: replace the design', armed);
     await sleep(450);
     await page.click('#btn-board-import-save');
     const st7 = await page.evaluate(() => document.getElementById('dlg-board-import').dataset.state);   // the save runs (not a pending press)
