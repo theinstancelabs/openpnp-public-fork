@@ -12,9 +12,9 @@ import java.util.TreeMap;
  *
  * <ul>
  * <li><b>Halves</b> (the 22G, roles/process.md "Screw timing"): two rows of half-turn pairs, the second 90° after the
- * first. Per row x = (A − B)/(A + B) of the medians of the found dots at its start and half a turn on (a half turn always
- * lays paste; a carried or start blob at 2-3× moves a mean, not a median); x = −(2a/π)·sin(start − peak) gives the
- * flow's peak and its amplitude a.</li>
+ * first. Per row x = (A − B)/(A + B) of the trimmed means (min and max dropped) of the found dots at its start and half
+ * a turn on (a half turn always lays paste; a start-up or carried blob at 2-3× comes one at a time and is trimmed; a
+ * second in one half makes the angle low); x = −(2a/π)·sin(start − peak) gives the flow's peak and its amplitude a.</li>
  * <li><b>Quarters</b> (the 25G at a threshold): 4 quarter dots per turn, a dot not found laid nothing; the dead quarter's
  * start by the first harmonic of the 4 means (the 90° grid alone misses ±22.5°), the grid's own minimum kept beside
  * it.</li>
@@ -26,10 +26,11 @@ public final class ScrewPhaseFit {
     public static final String HIGH = "high", LOW = "low", NONE = "none";
     /** Halves: the peak's standard error (deg) for high, for low; a ripple below 3 standard errors of x is none. */
     static final double HIGH_SE_DEG = 10, LOW_SE_DEG = 20, RIPPLE_SE = 3;
-    /** A normal SD per median absolute deviation (large n). */
-    static final double MAD_SD = 1.4826;
-    /** Croux and Rousseeuw's small-sample factors for {@link #MAD_SD}, n = 2..9; above, n / (n - 0.8). */
-    private static final double[] MAD_SMALL_N = {1.196, 1.495, 1.363, 1.206, 1.200, 1.140, 1.129, 1.107};
+    /**
+     * Halves (Process 11-04 15:0x): a dot this many times its half's median left after the trim is a second outlier in
+     * that half (normal scatter is 10-15 % cv, the blobs 1.7-2.9×).
+     */
+    static final double OUTLIER_SHARE = 1.5;
     static final int MIN_FOUND_PER_HALF = 3;
     /** Quarters (Process 11-04): dead at or below 0.2 of the largest mean, a dip at or below 0.5; a live cv above 0.15. */
     static final double DEAD_SHARE = 0.2, DIP_SHARE = 0.5, LIVE_CV_MAX = 0.15;
@@ -122,9 +123,17 @@ public final class ScrewPhaseFit {
                 h.why.addAll(notes);
                 return h;
             }
-            double a = median(half.get(0)), b = median(half.get(1));
+            for (int j = 0; j < 2; j++) {
+                List<Double> t = trimmed(half.get(j));
+                double m = median(half.get(j)), top = java.util.Collections.max(t);
+                if (top > OUTLIER_SHARE * m) {
+                    notes.add("two outliers in one half at " + deg(r.startDeg + 180 * j) + ": a dot at "
+                            + DispenseProfile.plain(round1(top / m)) + "× the half's median is left after the trim");
+                }
+            }
+            double a = mean(trimmed(half.get(0))), b = mean(trimmed(half.get(1)));
             r.x = (a - b) / (a + b);
-            r.xSe = Math.hypot(medianSe(half.get(0)), medianSe(half.get(1))) / (a + b);
+            r.xSe = Math.hypot(trimmedSe(half.get(0)), trimmedSe(half.get(1))) / (a + b);
             maxSe = Math.max(maxSe, r.xSe);
             h.rows.add(r);
         }
@@ -306,21 +315,26 @@ public final class ScrewPhaseFit {
         return n % 2 == 1 ? s.get(n / 2) : (s.get(n / 2 - 1) + s.get(n / 2)) / 2;
     }
 
+    /** The values without one min and one max (at least 3 values). */
+    private static List<Double> trimmed(List<Double> l) {
+        List<Double> s = new ArrayList<>(l);
+        java.util.Collections.sort(s);
+        return s.subList(1, s.size() - 1);
+    }
+
     /**
-     * A median's standard error, √(π/2)·σ/√n, with σ from the median absolute deviation (a blob does not widen it),
-     * corrected for few dots (the MAD of 3 is the smaller gap: it runs low), or the sample SD when more than half the
-     * values are equal (a MAD of 0 is no error of 0).
+     * The trimmed mean's standard error (Tukey-McLaughlin): the winsorized SD (min and max replaced by their
+     * neighbours: a blob does not widen it)·√n/(n − 2); the sample SD in its place when winsorizing leaves no spread
+     * (3 dots, or ties).
      */
-    private static double medianSe(List<Double> l) {
+    private static double trimmedSe(List<Double> l) {
         int n = l.size();
-        double m = median(l);
-        List<Double> dev = new ArrayList<>();
-        for (double v : l) {
-            dev.add(Math.abs(v - m));
-        }
-        double b = n < 2 ? 1 : n <= 9 ? MAD_SMALL_N[n - 2] : n / (n - 0.8);
-        double mad = median(dev), sd = mad > 0 ? MAD_SD * b * mad : Math.sqrt(var(l));
-        return Math.sqrt(Math.PI / 2) * sd / Math.sqrt(n);
+        List<Double> w = new ArrayList<>(l);
+        java.util.Collections.sort(w);
+        w.set(0, w.get(1));
+        w.set(n - 1, w.get(n - 2));
+        double sd = Math.sqrt(var(w));
+        return (sd > 0 ? sd : Math.sqrt(var(l))) * Math.sqrt(n) / (n - 2);
     }
 
     private static double mean(List<Double> l) {
