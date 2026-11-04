@@ -22,12 +22,19 @@ async function setStartAngle(page, base, note) {
   const c = await call(page, base, 'POST', '/api/screw/start-angle', { note });
   if (c.status === 200) return 'confirmed';
   if (c.status !== 409 || !/measure/i.test(String((c.data && c.data.reason) || ''))) throw new Error('start angle: ' + said(c));
-  // the screw turns once (B is in degrees: 3.6° is 16 of its 1600 steps a turn), then the angle is set as measured
-  const m = await call(page, base, 'POST', '/api/gcode', { lines: ['M114'], what: note + ': where the screw is' });
-  const replies = m.data && m.data.results && m.data.results[0] ? m.data.results[0].replies.join(' ') : '';
-  const b = Number((/\bB:\s*(-?\d+(?:\.\d+)?)/.exec(replies) || [])[1]);
-  if (m.status !== 200 || !Number.isFinite(b)) throw new Error('start angle: no screw position from M114: ' + said(m));
-  const t = await call(page, base, 'POST', '/api/gcode', { lines: ['G1 B' + (b + 3.6).toFixed(3) + ' F600', 'M400'], what: note + ': the screw turns once' });
+  // the screw turns once (B is in degrees: 3.6° is 16 of its 1600 steps a turn), then the angle is set as measured.
+  // Where B is: OpenPnP's B axis in the status (OpenPnP's driver takes M114's position line as its own report, so the
+  // passthrough's M114 has no reply lines, 11-04), else the reply of a controller that prints it
+  const st = await call(page, base, 'GET', '/api/status');
+  const ax = ((st.data && st.data.machine && st.data.machine.axes) || []).find((a) => a.letter === 'B');
+  let b = ax ? Number(ax.driverCoordinate) : NaN;
+  if (!Number.isFinite(b)) {
+    const m = await call(page, base, 'POST', '/api/gcode', { lines: ['M114'], what: note + ': where the screw is' });
+    const replies = m.data && m.data.results && m.data.results[0] ? m.data.results[0].replies.join(' ') : '';
+    b = Number((/\bB:\s*(-?\d+(?:\.\d+)?)/.exec(replies) || [])[1]);
+    if (m.status !== 200 || !Number.isFinite(b)) throw new Error('start angle: no B axis in the status and no position from M114: ' + said(m));
+  }
+  const t = await call(page, base, 'POST', '/api/gcode', { lines: ['G1 B' + (b + 3.6).toFixed(3) + ' F36000', 'M400'], what: note + ': the screw turns once' });
   if (t.status !== 200) throw new Error('start angle: the screw move: ' + said(t));
   const s = await call(page, base, 'GET', '/api/status');
   const deg = s.data && s.data.dispense && s.data.dispense.profile ? s.data.dispense.profile.startAngleDeg : null;
