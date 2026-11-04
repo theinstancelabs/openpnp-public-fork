@@ -529,8 +529,8 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   finish (≤ 120 s; a STOP inside a home hangs this controller); a working holder (a call or batch running, a move
   queued since its last M400, an engine task, a pressure hold, a pad calibration, OpenPnP busy) gets the web STOP
   (the machine ends off and unhomed: Start, then Home), an idle one valve, pump, N1 valve and pump off (`M107 P3/P2/
-  P1/P0`; still started and homed). `{lock, stopped: null | {label, who, what, mode: stop|outputs-off, actions,
-  machineOff, confirmed}, atMs}`. A lapsed lease ends the same way. The user's hold never lapses.
+  P1/P0`; still started and homed). `{lock, stopped: null | {label, who, what, mode: stop|outputs-off, actions (plain
+  phrases for the user), detail (the lines sent), machineOff, confirmed}, atMs}`. A lapsed lease ends the same way. The user's hold never lapses.
 - `POST /api/gcode {lines[] ≤ 1000, timeoutMs? per line 1000..300000 = 60000, what?}` (the holder): on OpenPnP's
   machine thread through its driver, one `ok` per line; `{results: [{line, replies[], ms}], ms, lock}`. Taken or
   stopped while a line ran (its last line included): 409 `lock-lost` / `stopped` with that line in `results` marked

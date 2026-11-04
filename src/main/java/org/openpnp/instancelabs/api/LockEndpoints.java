@@ -217,6 +217,8 @@ final class LockEndpoints {
             return Views.map("lock", ctx.lock.view(), "stopped", null, "atMs", at);
         }
         Map<String, Object> stopped = endHolderWork(old, "the user took control from " + old.label);
+        Logger.info("Take control from {}: {}", old.label, stopped);
+        ctx.passthrough.log("engine", "!", "the user took control from " + old.label + ": " + stopped.get("detail"));
         Map<String, Object> body = Views.map("lock", ctx.lock.view(), "stopped", stopped, "atMs", at);
         if (!Boolean.TRUE.equals(stopped.get("confirmed"))) {
             ApiException e = new ApiException(409, "stop-not-confirmed", "You have the machine, but stopping "
@@ -238,12 +240,14 @@ final class LockEndpoints {
      * {@code actions}, {@code confirmed} false when the machine may still run.
      */
     Map<String, Object> endHolderWork(MachineLock.Holder old, String why) {
+        // actions: plain phrases the user reads verbatim (the UI's take-over confirmation); detail: what was sent
         List<String> actions = new ArrayList<>();
+        List<String> detail = new ArrayList<>();
         Map<String, Object> out = Views.map("label", old.label, "who", old.who, "what", old.what, "mode", "stop",
-                "actions", actions, "machineOff", false, "confirmed", false);
+                "actions", actions, "detail", detail, "machineOff", false, "confirmed", false);
         Machine m = ctx.configuration.getMachine();
         if (m == null) {
-            actions.add("no machine configured");
+            actions.add("no machine");
             out.put("mode", "outputs-off");
             out.put("confirmed", true);
             return out;
@@ -254,17 +258,22 @@ final class LockEndpoints {
         }
         long waited = System.currentTimeMillis() - t0;
         if (waited >= 200) {
-            actions.add(String.format(Locale.ROOT, "waited %.1f s for the home in progress to end (a STOP inside a home "
-                    + "hangs this controller)", waited / 1000.0));
+            actions.add(String.format(Locale.ROOT, "waited %.0f s for its home to finish", Math.max(1, waited / 1000.0)));
+            detail.add(String.format(Locale.ROOT, "waited %.1f s for the home in progress to end (a STOP inside a home "
+                    + "hangs this controller, F15)", waited / 1000.0));
         }
         if (homing(m)) {
-            actions.add("a home still runs after " + HOME_WAIT_MS / 1000 + " s: nothing was sent during it");
+            actions.add("its home still runs: nothing was sent during it; press STOP when it ends");
+            detail.add("a home still runs after " + HOME_WAIT_MS / 1000 + " s: nothing was sent during it");
             out.put("machineOff", !m.isEnabled());
             return out;
         }
         DispenseService svc = ctx.svcOrNull();
-        boolean working = ctx.lock.busy(old) || ctx.passthrough.running() || ctx.passthrough.motionPending()
-                || svc != null && svc.isBusy() || ctx.pressure.isActive() || ctx.padCalJobs.lockReason() != null
+        boolean batch = ctx.passthrough.running();
+        boolean run = svc != null && svc.isBusy();
+        boolean hold = ctx.pressure.isActive();
+        boolean padCal = ctx.padCalJobs.lockReason() != null;
+        boolean working = ctx.lock.busy(old) || batch || ctx.passthrough.motionPending() || run || hold || padCal
                 || m.isBusy();
         if (!working) {
             if (!m.isEnabled()) {
@@ -275,26 +284,44 @@ final class LockEndpoints {
                 return out;
             }
             try {
-                actions.addAll(ctx.passthrough.outputsOff(m));
+                detail.addAll(ctx.passthrough.outputsOff(m));
+                actions.addAll(GcodePassthrough.OUTPUT_NAMES);
                 out.put("mode", "outputs-off");
                 out.put("confirmed", true);
                 return out;
             }
             catch (Exception e) {
-                actions.add("switching the outputs off failed (" + MachineEndpoints.rootMessage(e) + "): STOP instead");
+                actions.add("switching its outputs off failed, so it was stopped as STOP does");
+                detail.add("switching the outputs off failed (" + MachineEndpoints.rootMessage(e) + "): STOP instead");
             }
+        }
+        if (batch) {
+            actions.add("its G-code batch stopped");
+        }
+        if (run) {
+            actions.add("its run stopped");
+        }
+        if (hold) {
+            actions.add("the pressure hold vented");
+        }
+        if (padCal) {
+            actions.add("its pad calibration stopped");
         }
         Map<String, Object> stop = machine.stop(why);
         @SuppressWarnings("unchecked")
         List<String> stopActions = (List<String>) stop.get("actions");
-        actions.addAll(stopActions);
+        detail.addAll(stopActions);
         long t1 = System.currentTimeMillis();
         while ((m.isEnabled() || ctx.switchOff.inProgress()) && System.currentTimeMillis() - t1 < STOP_CONFIRM_MS) {
             sleep(50);
         }
         boolean off = !m.isEnabled();
-        if (!off) {
-            actions.add("the machine still reads started " + STOP_CONFIRM_MS / 1000 + " s after the STOP");
+        if (off) {
+            actions.add("the machine switched off (quick stop; valve, pump and screw off)");
+        }
+        else {
+            actions.add("the machine is still switching off");
+            detail.add("the machine still reads started " + STOP_CONFIRM_MS / 1000 + " s after the STOP");
         }
         out.put("machineOff", off);
         out.put("confirmed", off);
@@ -319,7 +346,7 @@ final class LockEndpoints {
             try {
                 Map<String, Object> done = endHolderWork(h, h.label + "'s lease ran out");
                 Logger.info("lock: {}'s lease ran out ({}): {}", h.label, h.what, done);
-                ctx.passthrough.log("engine", "!", h.label + "'s lease ran out: " + done.get("actions"));
+                ctx.passthrough.log("engine", "!", h.label + "'s lease ran out: " + done.get("detail"));
             }
             finally {
                 ctx.lock.finishExpiry(h);

@@ -258,6 +258,11 @@ public class LockApiSimTest {
         assertTrue(stopped.get("machineOff").getAsBoolean(), take.toString());
         assertEquals("Process", stopped.get("label").getAsString());
         assertEquals("feed step check", stopped.get("what").getAsString());
+        // the user reads actions verbatim (UI, 11-03): plain phrases; the technical lines are in detail
+        String acts = stopped.getAsJsonArray("actions").toString();
+        assertTrue(acts.contains("its G-code batch stopped") && acts.contains("the machine switched off"), acts);
+        assertFalse(acts.contains("DISABLE_COMMAND") || acts.contains("emergency") || acts.contains("M410"), acts);
+        assertTrue(stopped.getAsJsonArray("detail").toString().contains("DISABLE_COMMAND"), stopped.toString());
         assertEquals("user", t.getAsJsonObject("lock").getAsJsonObject("holder").get("kind").getAsString());
         // the batch ended lock-lost and sent nothing after its line in flight
         Res b = batch.get();
@@ -334,6 +339,9 @@ public class LockApiSimTest {
         JsonObject stopped = t.getAsJsonObject("stopped");
         assertEquals("outputs-off", stopped.get("mode").getAsString(), t.toString());
         assertFalse(stopped.get("machineOff").getAsBoolean());
+        assertEquals("[\"valve off\",\"pump off\",\"N1's valve off\",\"N1's pump off\"]",
+                stopped.getAsJsonArray("actions").toString());
+        assertTrue(stopped.getAsJsonArray("detail").toString().contains("M107 P3"), stopped.toString());
         assertEquals(Arrays.asList("M107 P3", "M107 P2", "M107 P1", "M107 P0"), commands(sim.server.sinceMark()));
         JsonObject m = status().getAsJsonObject("machine");
         assertTrue(m.get("enabled").getAsBoolean());

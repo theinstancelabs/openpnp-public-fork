@@ -54,7 +54,8 @@ final class GcodePassthrough {
     /** The outputs a take-over from an idle holder or a lapse switches off: right valve first, as the Stop sequence. */
     static final List<String> OUTPUTS_OFF = Arrays.asList(ControllerCommands.VALVE_OFF, ControllerCommands.PUMP_OFF,
             ControllerCommands.LEFT_VALVE_OFF, ControllerCommands.LEFT_PUMP_OFF);
-    private static final String[] OUTPUT_NAMES = {"valve off", "pump off", "N1 valve off", "N1 pump off"};
+    /** How the user reads them (the take-over's confirmation shows these verbatim). */
+    static final List<String> OUTPUT_NAMES = Arrays.asList("valve off", "pump off", "N1's valve off", "N1's pump off");
     private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS",
             Locale.ROOT);
 
@@ -427,7 +428,7 @@ final class GcodePassthrough {
 
     /**
      * Take-over from an idle holder, or a lapsed lease: valve, pump, N1 valve and pump off (no motion; the machine stays
-     * started and homed), then OpenPnP's coordinates re-read if a move was not. The actions done, in order.
+     * started and homed), then OpenPnP's coordinates re-read if a move was not. The lines sent, in order (technical).
      */
     List<String> outputsOff(Machine m) throws Exception {
         GcodeDriver d = driver(m);
@@ -438,7 +439,7 @@ final class GcodePassthrough {
                 for (int i = 0; i < OUTPUTS_OFF.size(); i++) {
                     log("engine", ">", OUTPUTS_OFF.get(i));
                     ch.sendCritical(OUTPUTS_OFF.get(i), 10000);
-                    done.add(OUTPUT_NAMES[i] + " (" + OUTPUTS_OFF.get(i) + ")");
+                    done.add(OUTPUTS_OFF.get(i) + " (" + OUTPUT_NAMES.get(i) + ")");
                 }
                 boolean stale;
                 synchronized (this) {
@@ -450,7 +451,7 @@ final class GcodePassthrough {
                         motionPending = false;
                     }
                     resync(m, d, 30000);
-                    done.add("OpenPnP re-read the position (M114)");
+                    done.add("M400, M114: OpenPnP re-read the head's position");
                 }
                 return done;
             }
