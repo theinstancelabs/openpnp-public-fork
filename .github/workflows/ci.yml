@@ -159,24 +159,39 @@ jobs:
           retention-days: 14
 
   ui-e2e:
-    name: UI end-to-end (webui-sim, board-import, pad-profile, tip-setups)
+    # One fresh SIM session per leg (WEBUI_SCRIPTS): infra/ci/webui_shards.py names each leg's scripts; "rest" runs
+    # every other script in run-webui-sim-test.sh's ALL_SCRIPTS, so a new UI script needs no change here.
+    name: UI end-to-end (${{ matrix.title }})
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {shard: main, title: "webui-sim, board-import"}
+          - {shard: calib, title: "pad-profile, tip-setups"}
+          - {shard: rest, title: "lock and the other UI scripts"}
     steps:
       - uses: actions/checkout@v7
+      - name: The leg's scripts
+        id: shard
+        run: python3 infra/ci/webui_shards.py ${{ matrix.shard }} | tee -a "$GITHUB_OUTPUT"
       - uses: ./.github/actions/sim-env
+        if: steps.shard.outputs.scripts != ''
         with:
           uinav-token: ${{ secrets.UINAV_TOKEN }}
           uinav-ssh-key: ${{ secrets.UINAV_DEPLOY_KEY }}
       - name: run-webui-sim-test.sh
+        if: steps.shard.outputs.scripts != ''
         env:
           OUT_DIR: ${{ runner.temp }}/webui
+          WEBUI_SCRIPTS: ${{ steps.shard.outputs.scripts }}
         run: src/test/web/run-webui-sim-test.sh
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: ui-e2e
+          name: ui-e2e-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/webui/
             /tmp/openpnp-uinav-*/*/*.log
