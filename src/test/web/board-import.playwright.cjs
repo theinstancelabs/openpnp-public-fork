@@ -256,7 +256,7 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
       return { overAllowed: over, dropAllowed: drop, toast: document.getElementById('toast').textContent };
     });
     check('(4) a file dropped on the page is taken by the guard (default prevented) and named in a toast', !dg.overAllowed && !dg.dropAllowed
-      && /Drop a \.kicad_pcb file/.test(dg.toast), dg);
+      && /Only a KiCad board \(a \.kicad_pcb file\) can be dropped here\./.test(dg.toast), dg);
     check('(4) the page stays (same address, STOP visible)', (await page.evaluate(() => location.href)) === href0 && (await page.isVisible('#btn-stop')));
 
     // ---- (5) upload ftp ---------------------------------------------------------------------------------------------
