@@ -2126,8 +2126,8 @@
       // the other cells' long parts first: the verdict keeps its own ("Stopped 14:19", a task's progress) while it fits
       cells.classList.add('cells--t1');
       if (over()) cells.classList.replace('cells--t1', 'cells--t2');
-      // In control, while it reads You or Nobody, shrinks to its mark before the verdict's own long part (the time of a
-      // stop) goes; an agent holding the machine keeps its words: the user must always see that
+      // In control, while it reads You or Nobody, shrinks to that word before the verdict's own long part (the time of a
+      // stop) goes; an agent holding the machine keeps its label and words: the user must always see that
       if (over()) cells.classList.add('cells--t2l');
       if (over()) cells.classList.add('cells--t2v');
       // still too long (1024 px after a STOP, the widest state): the verdict is never cut (UI_DESIGN §4), so the
@@ -3029,21 +3029,32 @@
       IL.stop('Take control: the stop was not confirmed');
       return e.data;
     }
-    showTaken(r, before, false);
+    // the machine as it is now, read after the take (a home of the agent's may have ended during it)
+    const now = await IL.api('GET', '/api/status', undefined, { timeoutMs: L.statusTimeoutMs }).catch(() => null);
+    showTaken(r, before, false, (now && now.machine) || (S.status && S.status.machine));
     return r;
   };
-  /** The confirmation band: the machine is the user's, and what was stopped (BR-72's answer). */
-  function showTaken(r, before, unconfirmed) {
+  /** What the machine is after a take, in one sentence true for this case: off (the engine's machineOff), unhomed or ready. */
+  function takenMachineText(st, m) {
+    if (st.machineOff || !m || !m.enabled) return 'The machine is off now: Connect, then Home before moving it.';
+    if (!m.homed || m.positionKnown === false) return 'The machine is still connected but not homed: Home before moving it.';
+    return 'The machine is still connected and homed: its controls work now.';
+  }
+  /** The confirmation band: the machine is the user's, what was stopped (BR-72's answer) and what it is now (m). */
+  function showTaken(r, before, unconfirmed, m) {
     const st = r && r.stopped;
     const at = IL.fmtTimeS(r && isNum(r.atMs) ? r.atMs - S.skewMs : Date.now());
     const was = st && before && before.kind !== 'user' && isNum(before.sinceMs) ? ', since ' + IL.fmtTime(before.sinceMs - S.skewMs) : '';
     const work = st ? st.label + "'s work (" + (st.what || 'no task named') + was + ')' : '';
     const done = st && st.actions && st.actions.length ? ': ' + st.actions.join(', ') : '';
+    const back = st ? ' ' + st.label + ' cannot use it until you give it back.' : '';
     let sub;
     if (unconfirmed) sub = 'The stop of ' + (work || 'the machine') + ' was NOT confirmed: STOP is being sent again. Look at the machine; switch it off at its power switch if it still moves.';
     else if (!st) sub = 'Nobody had it. Agents cannot use it until you give it back (In control › Give back).';
-    else if (st.mode === 'outputs-off') sub = st.label + ' was idle. Its outputs are off' + done + '. The machine is still connected and homed: its controls work now. ' + st.label + ' cannot use it until you give it back.';
-    else sub = 'Stopped ' + work + ' the way STOP does' + done + '. ' + (st.machineOff === false ? '' : 'The machine is off now: Connect, then Home before moving it. ') + st.label + ' cannot use it until you give it back.';
+    // idle with the machine off (after a deploy, a STOP): nothing was on to switch off (the engine's "the machine was off")
+    else if (st.mode === 'outputs-off' && st.machineOff) sub = st.label + ' was idle and the machine was already off: nothing needed switching off. Connect, then Home before moving it.' + back;
+    else if (st.mode === 'outputs-off') sub = st.label + ' was idle. Its outputs are off' + done + '. ' + takenMachineText(st, m) + back;
+    else sub = 'Stopped ' + work + ' the way STOP does' + done + '. ' + takenMachineText(st, m) + back;
     IL.log('The machine is yours (' + at + '). ' + sub, unconfirmed ? 'block' : 'ok');
     // a refusal that offered Take control is answered now
     for (const b of document.querySelectorAll('.refusal')) if (b.querySelector('[data-fix="take-control"]')) b.remove();
@@ -3303,7 +3314,8 @@
           el('p', { class: 'panel__lead', text: 'One holder at a time: an agent, you (every window of this page), or nobody. '
             + 'While an agent has the machine this page shows everything but cannot move it. Take control stops a working agent '
             + 'the way STOP does (then Connect and Home), or only switches an idle one\'s outputs off; the machine then stays '
-            + 'yours until you give it back. While nobody has it, your first move makes it yours.' }));
+            + 'yours until you give it back. While nobody has it, your first move makes it yours. While anyone has it, '
+            + 'updates of this software wait (they install only when nobody has the machine).' }));
         const take = IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true });
         take.dataset.k = 'take';
         const give = el('button', { type: 'button', class: 'btn', 'data-k': 'release', text: 'Give back' });

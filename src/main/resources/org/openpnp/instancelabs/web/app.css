@@ -216,9 +216,10 @@ kbd {
    labels, t5 the tip cell while it is ok (Setup, the run confirm and the pad-cal view name the tip; 1024 px after a
    STOP with the tip cell: PROFILE_CALIBRATION_DESIGN §22.13); the verdict keeps its label and value (cells never
    truncate, §4) */
-/* t2l: In control, while it reads You or Nobody, keeps only its mark (still the click to its panel) before the verdict
-   gives up anything; an agent's holder keeps its words */
-.cells--t2l #cell-lock.cell--ok .cell__txt, .cells--t2l #cell-lock.cell--off .cell__txt { display: none; }
+/* t2l: In control, while it reads You or Nobody, keeps only its word (who has the machine, at a glance: a bare mark said
+   nothing, PM 11-03) before the verdict gives up anything; an agent's holder keeps everything */
+.cells--t2l #cell-lock.cell--ok .cell__k, .cells--t2l #cell-lock.cell--off .cell__k,
+.cells--t2l #cell-lock.cell--ok .st, .cells--t2l #cell-lock.cell--off .st { display: none; }
 .cells--t2l #cell-lock.cell--ok, .cells--t2l #cell-lock.cell--off { padding: 0 10px; }
 .cells--t3 #pill-pressure.cell--off { display: none; }
 .cells--t4 .cell:not(.cell--verdict) .cell__k { display: none; }

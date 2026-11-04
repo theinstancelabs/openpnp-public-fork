@@ -53,7 +53,11 @@ public class DispenseProfile {
     public double screwAccelDegS2 = 20000;
     /** Dwell after the forward turn, before the suck-back (ms): the dot-size knob at fixed pressure. */
     public int dwellMs = 250;
-    /** Real needle-to-surface gap while dispensing (mm): 0.05-0.15 behave the same, >= 0.20 misses. */
+    /**
+     * Real needle-to-surface gap while dispensing (mm), 0.05 (the crash side) to 0.30 (the top of the process
+     * engineer's gap ladder). It depends on the tip: the 22G's dots missed at 0.20 (10-28), the 25G's 0603 board recipe
+     * passed at 0.20 (11-03).
+     */
     public double gapMm = 0.10;
     /**
      * Pause at the lift height after each dot, the pressure on, before any X/Y travel (ms; 0 = none): the plastic 25G
@@ -227,8 +231,8 @@ public class DispenseProfile {
         if (!(dwellMs >= 0 && dwellMs <= 5000)) {
             p.add("profile dwellMs must be 0 to 5000");
         }
-        if (!(gapMm >= 0.05 - 1e-9 && gapMm <= 0.15 + 1e-9)) {
-            p.add("profile gapMm must be 0.05 to 0.15 (>= 0.20 misses dots)");
+        if (!(gapMm >= 0.05 - 1e-9 && gapMm <= 0.30 + 1e-9)) {
+            p.add("profile gapMm must be 0.05 to 0.30");
         }
         if (!(liftPauseMs >= 0 && liftPauseMs <= 5000)) {
             p.add("profile liftPauseMs must be 0 to 5000");

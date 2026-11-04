@@ -72,3 +72,26 @@
 .place-link:hover { border-color: var(--accent); }
 .place-link b { font: 650 15px/1.25 var(--font-ui); color: var(--accent-ink); }
 .place-link span { font-size: 13px; color: var(--ink-2); }
+
+/* Machine › Control (places.js, BR-49): the jog pad, the step, Move to a place */
+#jog-panel { display: flex; flex-direction: column; gap: 12px; }
+#jog-panel .section-k { margin-top: 6px; }
+.jog { display: flex; gap: 18px; align-items: center; justify-content: center; margin: 4px 0; }
+.jog__xy { display: grid; grid-template-columns: repeat(3, 54px); grid-template-rows: repeat(3, 54px); gap: 6px; }
+.jog__xy .jog__yp { grid-column: 2; grid-row: 1; }
+.jog__xy .jog__xm { grid-column: 1; grid-row: 2; }
+.jog__xy .jog__xp { grid-column: 3; grid-row: 2; }
+.jog__xy .jog__ym { grid-column: 2; grid-row: 3; }
+.jog__z { display: flex; flex-direction: column; gap: 8px; }
+.jog__b { width: 54px; height: 54px; padding: 0; justify-content: center; font: 650 20px/1 var(--font-ui); }
+.jog__z .jog__b { width: 66px; height: 46px; font-size: 15px; }
+.jog__steps .field__h { margin-top: 6px; }
+.jog__go { display: flex; gap: 8px; }
+.jog__go .input { flex: 1; min-width: 0; }
+/* Machine › Control: the camera card (places.js; BR-53 or OpenPnP's top camera) */
+#cam-card .card__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.cam-view { position: relative; min-height: 220px; max-height: 360px; border-radius: 12px; overflow: hidden; background: #111; display: grid; place-items: center; }
+.cam-view img { display: block; width: 100%; max-height: 360px; object-fit: contain; }
+.cam-tag { position: absolute; left: 10px; top: 10px; padding: 4px 8px; border-radius: 6px; background: rgba(0, 0, 0, .65); color: #fff; font: 650 13px/1.2 var(--font-ui); }
+.cam-empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; color: #d8d8d8; font: 600 15px/1.4 var(--font-ui); text-align: center; }
+#cam-line { margin: 10px 0 0; }

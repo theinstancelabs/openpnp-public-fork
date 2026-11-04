@@ -355,6 +355,14 @@ async function runFirstDots(page, n) {
     await page.selectOption('#pf-turn', '800');
     await page.fill('#pf-suck', '10');
     await page.fill('#pf-dwell', '260');
+    // the gap's bound follows the engine's (0.05 to 0.30 mm since #29): 0.31 refused at the field, 0.25 taken
+    await page.fill('#pf-gap', '0.31');
+    await page.waitForFunction(() => !document.getElementById('pf-gap-err').hidden, null, { timeout: 5000 }).catch(() => {});
+    const gapHi = await page.evaluate(() => ({ err: document.getElementById('pf-gap-err').textContent, save: document.getElementById('btn-pf-save').disabled }));
+    check('profile: a gap of 0.31 mm is refused at the field, as the engine refuses it (Save locked)', gapHi.err === 'Must be 0.05 to 0.30 mm.' && gapHi.save, gapHi);
+    await page.fill('#pf-gap', '0.25');
+    await page.waitForFunction(() => document.getElementById('pf-gap-err').hidden, null, { timeout: 5000 }).catch(() => {});
+    check('profile: a gap of 0.25 mm is taken (the 25G 0603 recipe runs at 0.20)', await page.evaluate(() => document.getElementById('pf-gap-err').hidden));
     await page.fill('#pf-gap', '0.10');
     await page.fill('#pf-accel', '20000');
     await page.fill('#pf-purge', '8');
@@ -1755,6 +1763,23 @@ async function runFirstDots(page, n) {
         await page.click('#chk-needs .ri[data-key="I4-z"] button[data-fix="view:probe-blank"]');
         // the view keeps "Do it by hand" open from step 10: the automatic probe is the one this step wants
         await page.waitForSelector('#blank-by-hand', { state: 'attached', timeout: 15000 });
+        // a render between closing "Do it by hand" and its toggle event (a later task) keeps it closed: the gate's flake
+        // of 11-02 (setup.js re-applied the open state on every render; a status poll could land in between)
+        const race = await page.evaluate(async () => {
+          const d = document.getElementById('blank-by-hand');
+          if (!d.open) { d.open = true; await new Promise((r) => setTimeout(r, 150)); }
+          const hold = (e) => e.stopImmediatePropagation();
+          d.addEventListener('toggle', hold, { capture: true });
+          d.open = false;
+          IL.render();
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const stayed = !d.open;
+          d.removeEventListener('toggle', hold, { capture: true });
+          d.open = true;   // back in step with the page's state, then the close below as before
+          await new Promise((r) => setTimeout(r, 150));
+          return stayed;
+        });
+        check('Z moved 2: a render between closing "Do it by hand" and its toggle event keeps it closed', race, race);
         await page.evaluate(() => { const d = document.getElementById('blank-by-hand'); if (d.open) d.open = false; });
         await page.waitForSelector('#btn-blank-auto', { state: 'visible', timeout: 15000 });
         const t7 = Date.now() + (await page.evaluate(() => IL.S.skewMs));

@@ -337,8 +337,13 @@ public class DispenseProfileTest {
     public void validateRefusesUnsafeOrUnmeasuredValues() {
         assertRefused(p -> p.pressurePsi = 22, "pressurePsi");
         assertRefused(p -> p.pressurePsi = 0, "pressurePsi");
-        assertRefused(p -> p.gapMm = 0.20, "gapMm");
-        assertRefused(p -> p.gapMm = 0.04, "gapMm");
+        assertRefused(p -> p.gapMm = 0.31, "gapMm must be 0.05 to 0.30");
+        assertRefused(p -> p.gapMm = 0.04, "gapMm must be 0.05 to 0.30");
+        for (double gap : new double[] {0.05, 0.20, 0.30}) { // 0.20: the 25G's 0603 board recipe (11-03)
+            DispenseProfile p = new DispenseProfile();
+            p.gapMm = gap;
+            assertTrue(p.validate(C).isEmpty(), gap + ": " + p.validate(C));
+        }
         assertRefused(p -> p.screwRpm = 401, "screwRpm");
         assertRefused(p -> p.screwAccelDegS2 = 500, "screwAccelDegS2");
         assertRefused(p -> p.dwellMs = -1, "dwellMs");
