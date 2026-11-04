@@ -314,6 +314,7 @@ const card = (page) => page.evaluate(() => {
     check('(5) an agent busy again despite an old waiting record reads "working", without the wipe sentence',
       /^Process · working/.test(busy.cell || '') && !/Board wiped/.test(busy.sub || ''), busy);
     ST.lock = AGENT();
+    await page.waitForFunction(() => { const v = document.querySelector('#cell-lock .cell__v'); return v && /waiting/.test(v.textContent); }, null, { timeout: 8000 }).catch(() => null);
     await shot(page, 'clean-pads-band.png', false);
     L.waiting = null;
     const gone = await page.waitForFunction(() => !document.querySelector('#msg-area [data-msg="pads-wait"]'), null, { timeout: 8000 }).then(() => true, () => false);
