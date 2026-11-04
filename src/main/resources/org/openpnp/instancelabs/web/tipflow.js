@@ -7,14 +7,16 @@
    On today's API (PR #3's tip setups): GET /api/tip-setups (IL.tips), POST /api/tip-setups/{key}/mount and
    …/picture, POST /api/pressure/stop, the landing check POST /api/pad-calibrations {measure: "landing"}. Asked of the
    backend: the head's move to the waste (BR-49), the path per way in and the session check (BR-51), the bed switch
-   for the height (BR-48). Nothing moves before a press that says so. Styles: tipflow.css. */
+   for the height (BR-48). Nothing moves before a press that says so. Park, It's on and the swap steps wait while a
+   task runs or OpenPnP moves the head (It's on and the steps also for the air); the checks stop at a step that did
+   not finish. Styles: tipflow.css. */
 'use strict';
 (function () {
   const { el, S } = IL;
   const isNum = IL.isNum;
   const SEL_KEY = 'il.tipflow.sel';
   const RAIL = ['Which tip', 'Swap', 'Regulator', 'Fit', 'Lands', 'Dose', 'Accept'];
-  const W = { view: 'now', sel: IL.ssJson(SEL_KEY, null), mountedTok: null, below: null, lands: null, job: null, running: false, err: null, V: {} };
+  const W = { view: 'now', sel: IL.ssJson(SEL_KEY, null), mountedTok: null, below: null, lands: null, job: null, running: false, err: null, panelWaits: false, V: {} };
   const V = W.V;
 
   // ================================================================================== data
@@ -28,6 +30,9 @@
   }
   function choose(key) { W.sel = key; IL.ssSet(SEL_KEY, key); IL.panel.reset(); IL.render(); }
   const sameKind = () => { const m = mounted(), s = selected(); return !!(m && s && m.key === s.key); };
+  /** Why hands stay off the tip now, or null: a task runs, OpenPnP moves the head, or (pressureOff) the air is not off. */
+  const handsLock = (s, pressureOff) => IL.lockReason(s, { pressureOff })
+    || (s && s.machine && s.machine.enabled && s.machine.busy ? 'OpenPnP is busy (homing or moving): wait for it to finish' : null);
 
   /** Every setting of the tip on now, with how and when it was measured and what makes it out of date. */
   function evidence(s) {
@@ -103,12 +108,14 @@
     V.swapRail = el('div');
     V.swapPic = el('div', { class: 'tf-pic', style: 'height:236px' });
     V.swapHow = el('ol', { class: 'howto' });
+    V.swapWaitWhy = el('div');
+    V.swapWait = el('div', { class: 'notebox notebox--need', id: 'tip-swap-wait', hidden: true }, el('b', { text: 'Wait: keep your hands off the tip.' }), V.swapWaitWhy);
     V.swapMeta = el('div', { class: 'meta' });
     V.swapTitle = el('h1', { class: 'tf-h1', text: 'Swap the tip' });
     V.swap = el('div', { class: 'tf-stack', 'data-view': 'swap', hidden: true },
       head('Set up a tip', V.swapTitle, V.swapMeta), V.swapRail,
       el('div', { class: 'tf-row' }, el('section', { class: 'card', style: 'flex:0 0 300px' }, el('div', { class: 'card__body', style: 'padding:14px' }, V.swapPic)),
-        el('section', { class: 'card' }, el('div', { class: 'card__head' }, el('h2', { class: 'card__title', text: 'Your hands' })), el('div', { class: 'card__body' }, V.swapHow))));
+        el('section', { class: 'card' }, el('div', { class: 'card__head' }, el('h2', { class: 'card__title', text: 'Your hands' })), el('div', { class: 'card__body' }, V.swapWait, V.swapHow))));
     // Checks
     V.chkRail = el('div');
     V.chkLeave = el('div');
@@ -166,8 +173,15 @@
     IL.setText(V.swapTitle, done ? 'The tip is on' : 'Swap the tip');
     IL.keyed(V.swapRail, String(done), () => rail(done ? ['done', 'done', 'need', 'wait', 'wait', 'wait', 'wait'] : ['done', 'need', 'wait', 'wait', 'wait', 'wait', 'wait'],
       [sel ? sel.name : '', done ? t(token()) : 'your turn', done ? 'your turn' : 'next', '', '', '', '']));
-    IL.keyed(V.swapMeta, String(done) + (s.pressure && s.pressure.on), () => [el('span', { text: s.pressure && s.pressure.on ? 'The pressure is ON: switch it off first.' : 'Air off.' }),
-      el('b', { text: done ? 'Now the gauge.' : 'Nothing moves until you press It’s on.' })]);
+    // switching on or off, or a vent that failed, is not off; while a task runs or OpenPnP moves the head, or the air is
+    // not off, the hands-on steps give way to why (a task can start from another tab meanwhile)
+    const air = !!(s.pressure && s.pressure.state && s.pressure.state !== 'off');
+    const why = handsLock(s, true);
+    IL.keyed(V.swapMeta, JSON.stringify([done, air, !!why]), () => [el('span', { text: air ? 'The pressure is not off: switch it off first.' : 'Air off.' }),
+      done || !why ? el('b', { text: done ? 'Now the gauge.' : 'Nothing moves until you press It’s on.' }) : null]);
+    IL.show(V.swapHow, !why);
+    IL.show(V.swapWait, !!why);
+    IL.setText(V.swapWaitWhy, why || '');
     IL.keyed(V.swapPic, sel ? sel.key + (sel.mainPhoto ? sel.mainPhoto.id : '') : '', () => (sel ? IL.tips.thumb(sel, 'big', true) : null));
     IL.keyed(V.swapHow, sel ? sel.key + sel.form + sel.bendToward : '', () => [
       el('li', {}, el('span', {}, 'Unscrew the old tip.', el('small', { text: 'Paste may drip: hold a wipe under it.' }))),
@@ -196,10 +210,11 @@
       : ['hand', 'By hand first: record the needle height frame, then confirm its offset (Machine › By hand › Setup › Needle Z frame); where it lands waits for both. The machine measures it itself with the bed switch (requested).'];
     st.prime = ['hand', 'By hand today: Setup › Pressure and prime. The machine primes by itself once it can see the flow (requested).'];
     st.drip = ['hand', 'By hand today: watch the tip for a minute with the screw still. The machine checks it itself once built (requested).'];
-    const job = W.job;
-    st.lands = nd.xyChecked && W.lands === 'done' ? ['done', 'checked ' + t((nd.landing || {}).setAtMs)]
+    const job = W.job, L = nd.landing || {};
+    const mine = !!job && !!L.jobId && L.jobId === job.id;   // the landing in use is this check's: saved, or its question answered
+    st.lands = nd.xyChecked && (W.lands === 'done' || mine) ? ['done', 'checked ' + t(L.setAtMs)]
       : W.lands === 'running' ? ['now', job && job.step ? 'running: ' + (job.step.text || job.step.key || job.step) : 'running…']
-        : W.lands && W.lands.error ? ['todo', W.lands.error] : nd.xyChecked ? ['done', 'checked ' + t((nd.landing || {}).setAtMs)] : ['todo', 'dots on the test blank, then where they land'];
+        : W.lands && W.lands.error ? ['todo', W.lands.error] : nd.xyChecked ? ['done', 'checked ' + t(L.setAtMs)] : ['todo', 'dots on the test blank, then where they land'];
     st.exact = ['notyet', 'Not built yet: the backend picks the steps per way in (requested, BR-51).'];
     st.short = ['notyet', 'Not built yet (BR-51). Meanwhile Calibrate › Pad calibration › Measure its dots measures the dose in full.'];
     st.accept = ['notyet', 'Not built yet: the accept rules are Process’s; the backend applies them (requested).'];
@@ -215,11 +230,15 @@
       W.below = 'running';
       IL.render();
       try {
-        await IL.api('POST', '/api/tip-setups/' + encodeURIComponent(sel.key) + '/picture', { calibrationIds: [], wait: true }, { timeoutMs: 120000 });
+        // a STOP answers ok false (takePicture throws its message); a picture still being taken answers finished false
+        const res = await IL.tips.takePicture([]);
+        if (!res || res.ok !== true) throw new Error(res && res.finished === false ? 'Still taking the picture: the checks stopped here. Look at the machine.' : 'No picture was stored.');
         W.below = 'done';
         W.belowAt = Date.now() + S.skewMs;
-        IL.tips.load();
-      } catch (e) { W.below = { error: e.message || String(e) }; }
+      } catch (e) {
+        W.below = { error: IL.errorText(e) };
+        return;   // nothing more moves after a picture that did not finish
+      }
       IL.render();
       const nd = ((S.status || {}).dispense || {}).needle || {};
       if (!(nd.anchor && nd.anchored && nd.touchedOff)) {   // the engine refuses the landing check before the height and its offset (I4)
@@ -241,9 +260,10 @@
           IL.render();
           if (W.job.state !== 'running') break;
         }
-        const res = W.job.result || {};
-        W.lands = W.job.state === 'done' || res.outcome === 'done' || (res.landing && res.landing.saved) ? 'done' : { error: res.sentence || 'The landing check ended: ' + W.job.state };
-      } catch (e) { W.lands = { error: e.message || String(e) }; }
+        // done only when it was saved: a check that found no dot, did not fit or asks whether this tip is on saved nothing
+        const res = W.job.result || {}, L = res.landing || {};
+        W.lands = L.saved === true ? 'done' : { error: L.question || res.sentence || L.text || 'The landing check ended: ' + W.job.state, ask: !!L.question };
+      } catch (e) { W.lands = { error: IL.errorText(e) }; }
     } finally {
       W.running = false;
       IL.render();
@@ -257,8 +277,20 @@
       ok('lands') ? 'done' : W.running && ok('below') ? 'live' : 'wait', 'wait', 'wait'], [mounted() ? mounted().name : '', t(token()), '', '', '', '', '']));
     IL.keyed(V.chkLeave, String(W.running), () => (W.running ? leave('You can leave now', 'The machine checks what it can by itself. It asks you here if a check needs you.')
       : leave('Start the checks when your hands are clear', 'Then you can leave. The steps the machine can’t do yet say what to do by hand.', true)));
-    const res = W.job && W.job.result;
-    IL.keyed(V.chkResult, JSON.stringify([res && res.sentence, W.lands, W.below]), () => (res && res.sentence ? el('div', { class: 'notebox' + (W.lands === 'done' ? '' : ' notebox--need'), id: 'tip-checks-result', text: res.sentence }) : null));
+    // the check's sentence; a question (is this tip on?) is answered in the pad calibration's view of the job, and once
+    // answered there the step says it is checked
+    const res = W.job && W.job.result, L = (res && res.landing) || {};
+    const good = W.lands === 'done' || ok('lands');
+    const text = res && res.sentence && !(ok('lands') && L.question && !L.saved) ? res.sentence : null;
+    const ask = !good && W.lands && W.lands.ask ? W.job.id : null;
+    IL.keyed(V.chkResult, JSON.stringify([text, good, ask]), () => (text ? el('div', { class: 'notebox' + (good ? '' : ' notebox--need'), id: 'tip-checks-result' },
+      el('span', { text }), ask ? el('div', { class: 'btn-row' }, answerButton(ask)) : null) : null));
+  }
+  /** Answer it: the landing check's question in the pad calibration's own view of that job (Save it, or another tip is on). */
+  function answerButton(id) {
+    const b = el('button', { type: 'button', class: 'btn btn--sm', id: 'tip-landing-answer' }, 'Answer it…');
+    b.addEventListener('click', () => IL.go('#tip/checks?panel=pad-cal&job=' + encodeURIComponent(id)));
+    return b;
   }
 
   // ================================================================================== the panel
@@ -278,7 +310,12 @@
       p.body.append(V.pTo, V.pSteps, V.pNote);
       V.pPark = el('button', { type: 'button', class: 'btn btn--primary btn--lg btn--block', id: 'btn-tip-park' }, IL.icon('i-home'), 'Park for the swap');
       V.pPark.addEventListener('click', () => IL.act(V.pPark, async () => {
-        if (S.status && S.status.pressure && S.status.pressure.on) await IL.api('POST', '/api/pressure/stop');
+        // asked in every state (switching on is not "on"); the swap waits for OpenPnP's answer "off"
+        const r = await IL.api('POST', '/api/pressure/stop');
+        if (!r || r.state !== 'off') {
+          throw new Error(r && r.state === 'vent_failed' ? 'The pressure is NOT off: the valve did not confirm. Press Pressure off or STOP again.'
+            : 'The pressure is not off yet: press Park for the swap again in a moment.');
+        }
         W.mountedTok = null;
         IL.go('#tip/swap');
       }, { ok: 'Pressure off. Swap the tip.' }));
@@ -293,6 +330,7 @@
       ['The machine checks it', 'what it can today; the rest is by hand', 'machine']].map(([a, b, who], i) => el('li', { class: 'rstep' }, el('span', { class: 'st st--sm st--num', text: String(i + 1) }),
       el('div', {}, el('div', { class: 'rstep__t', text: a }), el('div', { class: 'rstep__d', text: b })), who === 'you' ? el('span', { class: 'tag tag--you', text: 'you' }) : el('span', { class: 'icode', text: 'machine' }))));
     IL.setText(V.pNote, same ? 'A fresh tip of the same kind keeps the kind’s dose settings when its short row of dots matches them (that check comes with BR-51).' : 'Another kind: its own settings load as a start; the checks then confirm them.');
+    IL.gate(V.pPark, handsLock(s, false));   // Park switches the air off itself
   }
   function panelSwap(p, s, first) {
     const sel = selected();
@@ -324,10 +362,12 @@
     }
     const done = !!W.mountedTok && W.mountedTok === token();
     const psi = ((s.dispense || {}).profile || {}).pressurePsi;
-    IL.keyed(V.pSwapCard, String(done) + (sel && sel.key), () => [IL.glyph(done ? 'ok' : 'need', 'sm'),
+    const why = handsLock(s, true);   // It's on comes after the hands: never while the head may move or the air is not off
+    IL.keyed(V.pSwapCard, JSON.stringify([done, sel && sel.key, why]), () => [IL.glyph(done ? 'ok' : 'need', 'sm'),
       el('div', {}, el('div', { class: 'ri__t', text: done ? 'It’s on: the ' + (sel ? sel.name : 'tip') : 'Swap the tip' }),
-        el('div', { class: 'ri__d', text: done ? 'Now read the gauge below.' : 'The machine waits for you. The air is off.' })),
+        el('div', { class: 'ri__d', text: done ? 'Now read the gauge below.' : why || 'The machine waits for you. The air is off.' })),
       el('div', { class: 'ri__aside' }), done ? null : el('div', { class: 'ri__act' }, V.pOn)]);
+    IL.gate(V.pOn, why);
     IL.setText(V.pGaugeT, 'Turn the knob to ' + IL.fmtPsi(psi) + ' psi');
     if (!V.pGaugeT.querySelector('small')) V.pGaugeT.append(el('small', { text: 'The pump runs with the valve closed. Type what the gauge shows.' }));
     V.pGauge.disabled = !done;
@@ -387,11 +427,16 @@
       else renderChecks(s);
     },
     panel(p, s, first) {
+      // a direct load: the status can come before the tips; the whole panel is built once they are read
+      if (!IL.tips.data()) { W.panelWaits = true; return; }
+      if (W.panelWaits) {
+        W.panelWaits = false;
+        if (!first) { IL.panel.reset(); return; }
+      }
       if (first) {
         const title = { now: 'Ready?', which: 'Change the tip', swap: 'Your turn', checks: 'Checks' }[W.view];
         p.body.append(el('div', { class: 'panel__title' }, el('h2', { text: title })));
       }
-      if (!IL.tips.data()) return;
       if (W.view === 'now') panelNow(p, s, first);
       else if (W.view === 'which') panelWhich(p, s, first);
       else if (W.view === 'swap') panelSwap(p, s, first);

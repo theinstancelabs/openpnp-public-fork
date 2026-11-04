@@ -7,8 +7,13 @@
  * the kind on now first as a fresh tip, the path per kind; Park for the swap switches the pressure off; (4) Swap: It's
  * on mounts the chosen kind (a new needle token); the gauge reading is kept with that needle; (5) Checks: the steps in
  * the flow's order, each done, by hand or not built yet; Start the checks takes the picture from below and runs the
- * landing check on the SIM; (6) On now shows where it lands with its time; no JavaScript errors, no native dialogs.
- * Runs after tip-setups.playwright.cjs in the same session (the tips it set up). Nothing here runs a real machine.
+ * landing check on the SIM; (6) On now shows where it lands with its time; (7) a direct load of a Tip page whose
+ * status comes before the tips builds its panel; (8) Designs › Upload a design › Use this board chooses the board on
+ * Run; no JavaScript errors, no native dialogs. Answers the SIM does not give on demand come from Playwright routes:
+ * a task running or the pressure switching (Park and It's on wait, the hands-on steps hide), a picture stopped or
+ * still running and a landing check that saved nothing or asks a question (nothing more moves; the step says why),
+ * no boards at all. Runs after tip-setups.playwright.cjs in the same session (the tips it set up). Nothing here runs
+ * a real machine.
  *
  * Env: IL_BASE or IL_API_URL (the UI), PLAYWRIGHT_DIR, OUT_DIR (tip-flow-results.json).
  */
@@ -30,6 +35,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const status = (page) => page.evaluate(() => IL.api('GET', '/api/status'));
 const IL_num = (v) => (typeof v === 'number' && isFinite(v) ? v : null);
 const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelectorAll(s)).map((n) => n.textContent.trim()), sel);
+/** Answers the page's GET /api/status with the session's own status changed by fn (a state the SIM does not hold). */
+async function fakeStatus(page, fn) {
+  await page.route('**/api/status', async (route) => {
+    try {
+      const res = await route.fetch();
+      const body = await res.json();
+      fn(body);
+      await route.fulfill({ response: res, json: body });
+    } catch (e) { /* unrouted while it was being answered */ }
+  });
+}
+/** Starts the checks and waits until they have ended (Start the checks free again). */
+async function runChecks(page, timeout) {
+  await page.waitForSelector('#btn-tip-checks-start:enabled', { timeout: 10000 }).catch(() => null);
+  await page.click('#btn-tip-checks-start');
+  await page.waitForSelector('#btn-tip-checks-start:disabled', { timeout: 3000 }).catch(() => null);
+  await page.waitForSelector('#btn-tip-checks-start:enabled', { timeout }).catch(() => null);
+}
+const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySelector('#tip-checks li[data-k="' + key + '"]');
+  return l ? { s: l.dataset.state, d: (l.querySelector('.ph__d') || {}).textContent || '' } : null; }, k);
 
 (async () => {
   const t0 = Date.now();
@@ -80,6 +105,17 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     await page.waitForSelector('#designs-list .design', { timeout: 10000 }).catch(() => null);
     const dz = await page.evaluate(() => ({ n: document.querySelectorAll('#designs-list .design').length, up: !!document.getElementById('btn-design-upload') }));
     check('(1) Designs lists the boards and offers Upload a design', dz.n >= 1 && dz.up, dz);
+    // a fresh installation has no boards: its first answer is an empty list (a page of its own, so it is the first)
+    {
+      const p2 = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      p2.on('pageerror', (e) => jsErrors.push('no boards: ' + e));
+      await p2.route('**/api/boards', (r) => r.fulfill({ json: { job: [], files: [] } }));
+      await p2.goto(BASE + '#designs');
+      await p2.waitForFunction(() => /No designs yet/.test((document.getElementById('designs-list') || {}).textContent || ''), null, { timeout: 10000 }).catch(() => null);
+      const empty = await p2.evaluate(() => (document.getElementById('designs-list') || {}).textContent || null);
+      check('(1) no boards yet: Designs says "No designs yet: upload one."', /^No designs yet: upload one\.$/.test((empty || '').trim()), empty);
+      await p2.close();
+    }
 
     // ---- (2) Tip › On now ---------------------------------------------------------------------------------------------
     await page.evaluate(() => IL.go('#tip'));
@@ -112,6 +148,34 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     const to3 = await page.evaluate(() => (document.getElementById('tipwhich-to') || {}).textContent || '');
     const otherName = await page.evaluate((k) => document.querySelector('.kind[data-key="' + k + '"] .kind__t').textContent.trim(), other.key);
     check('(3) choosing a kind says what happens to it', to3.includes(otherName), { to3, otherName });
+    // the head may move while a task runs or OpenPnP homes by itself: Park waits, and says why
+    const parkLock = async (patch) => {
+      await fakeStatus(page, patch);
+      await page.waitForSelector('#btn-tip-park:disabled', { timeout: 5000 }).catch(() => null);
+      const b = await page.evaluate(() => { const x = document.getElementById('btn-tip-park'); return x ? { disabled: x.disabled, title: x.title } : null; });
+      await page.unroute('**/api/status');
+      await page.waitForSelector('#btn-tip-park:enabled', { timeout: 5000 }).catch(() => null);
+      return b;
+    };
+    const lockTask = await parkLock((s) => { s.dispense.busy = true; });
+    const lockMove = await parkLock((s) => { s.machine.enabled = true; s.machine.busy = true; });
+    check('(3) Park for the swap waits while a task runs or OpenPnP moves, and says why', !!lockTask && lockTask.disabled && /^Locked while/.test(lockTask.title)
+      && !!lockMove && lockMove.disabled && /OpenPnP is busy/.test(lockMove.title), { lockTask, lockMove });
+    // the pressure switching on is not "on": Park still asks for it off, and goes on only when OpenPnP answers off
+    let stopAsks = 0;
+    await fakeStatus(page, (s) => { s.pressure.state = 'starting'; s.pressure.on = false; });
+    await page.route('**/api/pressure/stop', (r) => { stopAsks++; return r.fulfill({ json: { state: 'vent_failed', on: false, lastError: 'the valve did not confirm' } }); });
+    await page.waitForFunction(() => IL.S.status.pressure.state === 'starting', null, { timeout: 5000 }).catch(() => null);
+    await page.click('#btn-tip-park');
+    await page.waitForFunction(() => /NOT off/.test((document.getElementById('toast') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => null);
+    const vent3 = { asks: stopAsks, hash: await page.evaluate(() => location.hash), toast: await page.evaluate(() => (document.getElementById('toast') || {}).textContent || '') };
+    check('(3) Park while the pressure switches on: it asks for it off, and stays when the answer is not off', vent3.asks === 1 && vent3.hash.startsWith('#tip/which')
+      && /NOT off/.test(vent3.toast), vent3);
+    await page.unroute('**/api/pressure/stop');
+    await page.unroute('**/api/status');
+    await page.waitForFunction(() => IL.S.status.pressure.state === 'off', null, { timeout: 5000 }).catch(() => null);
+    await page.evaluate(() => { if (!location.hash.startsWith('#tip/which')) IL.go('#tip/which'); });   // the next steps start from Which tip
+    await page.waitForSelector('#btn-tip-park:enabled', { timeout: 5000 }).catch(() => null);
     let stopPosts = 0;
     await page.route('**/api/pressure/stop', (r) => { stopPosts++; return r.continue(); });
     await page.click('#btn-tip-park');
@@ -124,6 +188,18 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     // ---- (4) Swap and the gauge ---------------------------------------------------------------------------------------
     const rail4 = await page.evaluate(() => Array.from(document.querySelectorAll('#tip-rail .step')).map((s) => s.className));
     check('(4) the rail: Which tip done, Swap now', rail4.length === 7 && /step--done/.test(rail4[0]) && /step--(now|need)/.test(rail4[1]), rail4);
+    // a task starting meanwhile (from another tab, say): It's on waits, and the hands-on steps give way to why
+    await fakeStatus(page, (s) => { s.dispense.busy = true; });
+    await page.waitForSelector('#tip-swap-wait:not([hidden])', { timeout: 5000 }).catch(() => null);
+    const busy4 = await page.evaluate(() => {
+      const b = document.getElementById('btn-tip-on'), h = document.querySelector('#ws-tip [data-view="swap"] .howto'), w = document.getElementById('tip-swap-wait');
+      return { on: b ? { disabled: b.disabled, title: b.title } : null, steps: !!h && !h.hidden, wait: w && !w.hidden ? w.textContent.trim() : null };
+    });
+    await page.unroute('**/api/status');
+    await page.waitForSelector('#btn-tip-on:enabled', { timeout: 5000 }).catch(() => null);
+    const back4 = await page.evaluate(() => { const h = document.querySelector('#ws-tip [data-view="swap"] .howto'); return !!h && !h.hidden; });
+    check('(4) while a task runs, It\'s on waits and the hands-on steps give way to why; they come back after', !!busy4.on && busy4.on.disabled && !busy4.steps
+      && /Locked while/.test(busy4.wait || '') && back4, { busy4, back4 });
     let mountUrl = null;
     await page.route('**/api/tip-setups/*/mount', (r) => { mountUrl = r.request().url(); return r.continue(); });
     const mountResP = page.waitForResponse((r) => /\/api\/tip-setups\/[^/]+\/mount$/.test(r.url()), { timeout: 20000 }).catch(() => null);
@@ -168,6 +244,48 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     check('(5) after the frame and its offset by hand, the height is done', (await page.evaluate(() => (document.querySelector('#tip-checks li[data-k="height"]') || {}).dataset.state)) === 'done', { bz });
     // the checks lay dots: the paste question of the session (same barrel or new) comes first when nobody answered it
     if (await page.$('#tip-barrel-same')) await page.click('#tip-barrel-same');
+    // a picture that did not finish ends the checks there: nothing more moves, no landing check starts (a STOP answers
+    // 200 with ok false; a picture still being taken, 202 with finished false; a refusal, 409)
+    let landPosts = 0;
+    await page.route('**/api/pad-calibrations', (r) => { if (r.request().method() !== 'POST') return r.continue(); landPosts++; return r.abort(); });
+    const pic5 = [];
+    for (const a of [{ status: 200, json: { kind: 'tip picture', setupKey: other.key, finished: true, result: { ok: false, message: 'Stopped: no picture was stored.' } } },
+      { status: 202, json: { kind: 'tip picture', setupKey: other.key, finished: false, note: 'still running after 600 s; follow /api/status' } },
+      { status: 409, json: { error: 'refused', reason: 'Home first: the head moves to the bottom camera.' } }]) {
+      await page.route('**/api/tip-setups/*/picture', (r) => r.fulfill(a));
+      await runChecks(page, 15000);
+      await page.unroute('**/api/tip-setups/*/picture');
+      pic5.push({ status: a.status, below: await stepOf(page, 'below') });
+    }
+    await page.unroute('**/api/pad-calibrations');
+    check('(5) a picture stopped, still being taken or refused ends the checks: no landing check, the step says why', landPosts === 0
+      && pic5.every((x) => !!x.below && x.below.s === 'todo' && x.below.d.length > 0) && /^Stopped: no picture/.test(pic5[0].below ? pic5[0].below.d : ''), { landPosts, pic5 });
+    // a landing check that saved nothing is not done: no dot found (the step and the result say why), or a question (is
+    // this tip on?) that the pad calibration's own view of the job answers
+    const NF = 'No locator dot was found within ±6 mm of where the ' + otherName + ' should land: nothing was saved.';
+    const Q = 'The ' + otherName + ' lands 1.5 mm from where it landed on 10-29: is the ' + otherName + ' on the dispenser?';
+    const job = (id, outcome, landing) => ({ id, kind: 'pad calibration', measure: 'landing', state: 'done', steps: [], forTip: other.key, tipName: otherName,
+      result: { outcome, sentence: landing.text, landing: Object.assign({ jobId: id, setupKey: other.key, saved: false }, landing) } });
+    let jobNow = null;
+    await page.route('**/api/tip-setups/*/picture', (r) => r.fulfill({ json: { kind: 'tip picture', setupKey: other.key, finished: true, result: { ok: true, message: 'Stored.' } } }));
+    await page.route('**/api/pad-calibrations', (r) => (r.request().method() === 'POST' ? r.fulfill({ status: 202, json: { kind: 'pad calibration', id: jobNow.id, started: true } }) : r.continue()));
+    await page.route('**/api/pad-calibrations/tf-*', (r) => r.fulfill({ json: jobNow }));
+    jobNow = job('tf-not-found', 'not-found', { found: false, searchMm: 6, text: NF });
+    await runChecks(page, 20000);
+    const nf5 = { lands: await stepOf(page, 'lands'), result: await page.evaluate(() => { const r = document.getElementById('tip-checks-result');
+      return r ? { need: r.classList.contains('notebox--need'), text: r.textContent.trim() } : null; }) };
+    check('(5) a landing check that saved nothing is not done: the step and the result say why', !!nf5.lands && nf5.lands.s !== 'done' && nf5.lands.d === NF
+      && !!nf5.result && nf5.result.need && nf5.result.text.includes(NF), nf5);
+    jobNow = job('tf-question', 'question', { found: true, n: 8, dxMm: 1.2, dyMm: 0.9, question: Q, text: Q });
+    await runChecks(page, 20000);
+    const q5 = { lands: await stepOf(page, 'lands'), answer: await page.evaluate(() => (document.getElementById('tip-landing-answer') || {}).textContent || null) };
+    if (q5.answer) await page.click('#tip-landing-answer');
+    await page.waitForSelector('#btn-pcal-landing-save', { state: 'visible', timeout: 10000 }).catch(() => null);
+    q5.view = await page.evaluate(() => ({ view: document.getElementById('panel').dataset.view, hash: location.hash, save: !!document.getElementById('btn-pcal-landing-save') }));
+    check('(5) a landing check that asks whether the tip is on is not done; Answer it opens that job\'s view with Save it', !!q5.lands && q5.lands.s !== 'done'
+      && !!q5.answer && q5.view.view === 'pad-cal' && /job=tf-question/.test(q5.view.hash) && q5.view.save, q5);
+    await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
+    for (const u of ['**/api/tip-setups/*/picture', '**/api/pad-calibrations', '**/api/pad-calibrations/tf-*']) await page.unroute(u);
     await page.waitForSelector('#btn-tip-checks-start:enabled', { timeout: 10000 }).catch(() => null);
     await page.click('#btn-tip-checks-start');
     await page.waitForFunction(() => { const l = document.querySelector('#tip-checks li[data-k="lands"]'); return l && /done|hand/.test(l.dataset.state); }, null, { timeout: 240000, polling: 1000 }).catch(() => null);
@@ -182,8 +300,48 @@ const texts = (page, sel) => page.evaluate((s) => Array.from(document.querySelec
     await page.waitForSelector('#tipnow-evidence tr[data-k="lands"]', { timeout: 10000 }).catch(() => null);
     const lands6 = await page.evaluate(() => { const r = document.querySelector('#tipnow-evidence tr[data-k="lands"]'); return r ? r.querySelector('.how').textContent.trim() : null; });
     check('(6) On now: where it lands, with the time it was checked', /\d\d:\d\d/.test(lands6 || ''), lands6);
-    check('(6) no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
-    check('(6) no native dialogs', dialogs.length === 0, dialogs);
+
+    // ---- (7) a direct load of a Tip page: its status can come before the tips; the panel is built once they are read --
+    {
+      const p3 = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      const errs = [];
+      p3.on('pageerror', (e) => jsErrors.push('direct load: ' + e));
+      p3.on('console', (m) => { if (m.type() === 'error' && /^\[IL\]/.test(m.text())) errs.push(m.text()); });
+      await p3.route('**/api/tip-setups**', async (r) => { await sleep(2500); await r.continue().catch(() => {}); });
+      await p3.goto(BASE + '#tip/swap');
+      const built = await p3.waitForSelector('#btn-tip-on', { timeout: 15000 }).then(() => true, () => false);
+      const parts7 = await p3.evaluate(() => ({ gauge: !!document.getElementById('tip-gauge'), title: (document.querySelector('#panel .panel__title h2') || {}).textContent || null }));
+      check('(7) a direct load of Tip › Swap whose status comes first: the panel is built once the tips are read', built && parts7.gauge && parts7.title === 'Your turn'
+        && errs.length === 0, { built, parts7, errs: errs.slice(0, 4) });
+      await p3.close();
+    }
+
+    // ---- (8) Designs › Upload a design › Use this board: the board chosen on Run, and Designs lists it ---------------
+    {
+      const name = 'tipflow-' + Date.now().toString(36);
+      const pcb = fs.readFileSync(path.join(__dirname, '..', 'resources', 'padprofile', 'padcal.kicad_pcb'));
+      await page.evaluate(() => IL.go('#designs'));
+      await page.click('#btn-design-upload');
+      await page.waitForSelector('#dlg-board-import #board-import-drop', { state: 'visible', timeout: 10000 });
+      await page.setInputFiles('#board-import-file', { name: name + '.kicad_pcb', mimeType: 'application/octet-stream', buffer: pcb });
+      await page.waitForSelector('#dlg-board-import[data-state="preview"]', { timeout: 60000 });
+      await page.fill('#board-import-name', name);
+      const saveP = page.waitForResponse((r) => /\/api\/boards\/import\/save$/.test(r.url()), { timeout: 60000 }).catch(() => null);
+      await page.click('#btn-board-import-save');
+      const saveRes = await saveP;
+      const saved = saveRes ? await saveRes.json().catch(() => null) : null;
+      await page.waitForSelector('#dlg-board-import[data-state="saved"]', { timeout: 60000 });
+      await page.click('#btn-board-import-use');
+      await page.waitForFunction((f) => { const s = document.getElementById('board-select'); return location.hash.startsWith('#run/board') && !!s && s.value === 'file:' + f; },
+        saved && saved.file, { timeout: 15000 }).catch(() => null);
+      const run8 = await page.evaluate(() => ({ hash: location.hash, board: (document.getElementById('board-select') || {}).value || null }));
+      const listed = await page.waitForFunction((n) => Array.from(document.querySelectorAll('#designs-list .design')).some((d) => (d.dataset.name || '').includes(n)), name,
+        { timeout: 10000 }).then(() => true, () => false);
+      check('(8) Use this board after an upload from Designs: Run\'s Board step opens with it chosen, and Designs lists it', !!saved && run8.hash.startsWith('#run/board')
+        && run8.board === 'file:' + saved.file && listed, { file: saved && saved.file, run8, listed });
+    }
+    check('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
+    check('no native dialogs', dialogs.length === 0, dialogs);
   } catch (e) {
     check('test ran to the end', false, String(e && e.stack || e).slice(0, 2000));
     try { await page.screenshot({ path: path.join(OUT, 'tip-flow-failure.png') }); } catch (x) { /* the page may be gone */ }

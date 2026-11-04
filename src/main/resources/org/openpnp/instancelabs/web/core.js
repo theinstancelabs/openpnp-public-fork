@@ -2489,9 +2489,13 @@
       P.first = true;
     }
     const w = WS[r.ws];
-    // a detail chosen in this workspace (#records/boards/<id>, #profile/pad-types/<key>) shows in its default panel: a
-    // pushed Recovery yields to it here (like its back arrow); the strip still says Stopped, other workspaces show it again
-    if (r.id && P.pushed && P.pushed.view === 'recovery' && !(w && w.ownsRecovery) && prev.ws === r.ws && prev.id !== r.id) IL.panel.close();
+    // a detail chosen in this workspace (#records/boards/<id>, #profile/pad-types/<key>) shows in its default panel: the
+    // Recovery yields to it here (like its back arrow), also one not drawn yet (a choice before the first render would
+    // have it pushed over the detail); the strip still says Stopped, other workspaces show it again
+    if (r.id && !(w && w.ownsRecovery) && prev.ws === r.ws && prev.id !== r.id) {
+      recoveryDismissedWs = r.ws;
+      if (P.pushed && P.pushed.view === 'recovery') IL.panel.close();
+    }
     if (w && w.route) safe(() => w.route(r), 'route ' + r.ws);
     IL.emit('route', r, prev);
     IL.render();

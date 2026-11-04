@@ -23,7 +23,8 @@
   function renderDesigns() {
     if (!D.list) return;
     const files = (D.boards && D.boards.files) || [];
-    IL.keyed(D.list, JSON.stringify([files.map((f) => [f.name, f.placements, f.widthMm, f.heightMm]), D.err]), () => {
+    // read or not in the key: an empty first answer replaces "Reading the boards…"
+    IL.keyed(D.list, JSON.stringify([!!D.boards, files.map((f) => [f.name, f.placements, f.widthMm, f.heightMm]), D.err]), () => {
       if (D.err) return el('p', { class: 'notebox notebox--block', text: 'The boards could not be read: ' + D.err });
       if (!D.boards) return el('p', { class: 'muted', text: 'Reading the boards…' });
       if (!files.length) return el('p', { class: 'notebox', text: 'No designs yet: upload one.' });
@@ -33,10 +34,15 @@
           IL.isNum(f.placements) ? f.placements + ' parts' : null].filter(Boolean).join(' · ') })));
     });
   }
+  /** "Use this board" after an upload here: the list read again, and the board chosen in Run's Board step. */
+  function onImported(saved) {
+    loadBoards();
+    return IL.boardFlow ? IL.boardFlow.onImported(saved) : null;
+  }
   IL.workspace('designs', {
     mount(root) {
       const up = el('button', { type: 'button', class: 'btn btn--primary', id: 'btn-design-upload' }, IL.icon('i-plus'), 'Upload a design');
-      up.addEventListener('click', () => IL.boardImport.open());
+      up.addEventListener('click', () => IL.boardImport.open({ onSaved: onImported }));
       D.list = el('div', { class: 'designs', id: 'designs-list' });
       root.append(
         el('div', { class: 'page-head' }, el('div', { class: 'page-head__text' },
