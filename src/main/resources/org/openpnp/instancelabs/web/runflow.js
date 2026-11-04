@@ -72,7 +72,13 @@
       : src.source === 'file' && src.file === e.x.file;
     return same ? p : null;
   }
-  const planCurrent = (p) => { const it = IL.ready().items.find((x) => x.key === 'plan'); return !!p && !S.planForgotten && (!it || !!it.ready); };
+  function planCurrent(p) {
+    const it = IL.ready().items.find((x) => x.key === 'plan');
+    if (!p || S.planForgotten || (it && !it.ready)) return false;
+    // its registration no longer applies (registered again in another tab, a simulator record): Start plans it again
+    const rw = R.flow.registerWhy(S.status, R.flow.probeOnlyPlan(p));
+    return !(rw && rw.fix === 'plan-again');
+  }
   /** The pads of the board on this seat that already have paste (the server's): the run lays them again. */
   const pastedPads = (p) => (p ? R.flow.padsDone(p).length : 0);
   /** Readiness needs Start does not settle itself; the gauge is a tick and the pad check the run's own, as today. */
@@ -119,7 +125,7 @@
   }
   async function choose(e, btn) {
     if (!e || F.chain || (e.key === R.form.sel && planOf(e))) return;
-    const lock = IL.lockReason(S.status);
+    const lock = IL.lockReason(S.status, { pressureOff: false });
     if (lock) { IL.toast(lock, 'need'); return; }
     R.flow.selectBoard(e.key);
     const seat = seatOf(e);
@@ -163,6 +169,7 @@
       if (F.wiped) body.wiped = true;   // ticked "I wiped it": the server forgets this seat's paste first
       return R.flow.run(body, 'full');
     }, { refusalIn: F.n.refusals, what: 'Start', ok: (r) => (r ? 'Pasting started: ' + IL.plural(r.dots, 'dot') + '. You can leave now.' : null) });
+    if (F.chain && F.chain.step === 'paste') await until((st) => st && st.run && st.run.label === 'board' && st.run.running, 10000, 'The run').catch(() => null);
     F.chain = null;
     F.wiped = false;
     IL.render();
@@ -230,6 +237,7 @@
     const v = view && view !== 'start' ? view : null;
     IL.show(n.view, !!v);
     placeHero(!!v);
+    if (v === 'live' && n.refusals.firstChild) n.refusals.replaceChildren();   // a refusal before it is over
     if (view === 'start') renderStart(s);
     else if (v) renderView(s, v);
   }
@@ -417,9 +425,9 @@
         });
         return { key, input, lab, row: el('label', { class: 'check' }, input, lab) };
       });
-      n.pressure = IL.fixButton({ fix: 'pressure-on', label: 'Pressure on to adjust', title: 'Pressure on to read the gauge (press twice unless the needle is over the waste)' });
+      n.pressure = IL.fixButton({ fix: 'pressure-on', label: 'Pressure on to adjust', icon: 'i-gauge', title: 'Pressure on to read the gauge (press twice unless the needle is over the waste)' }, { cls: 'btn--sm' });
       n.pressure.id = 'rs-pressure';
-      F.wiped = false;
+      if (!F.chain) F.wiped = false;   // the box starts unticked, except under Start's own chain (it sends it)
       n.wiped = el('input', { type: 'checkbox', id: 'rs-tick-wiped' });
       n.wiped.addEventListener('change', () => { F.wiped = n.wiped.checked; IL.render(); });
       n.wipedLab = el('span');
@@ -461,7 +469,7 @@
     if (n.wiped.checked !== F.wiped) n.wiped.checked = F.wiped;
     for (const x of [n.wiped, n.newBoard].concat(n.ticks.map((t) => t.input))) x.disabled = !!F.chain;
     // what needs you first: a run of this plan that was refused (its words), then the checks
-    const ref = R.refused && S.plan && IL.planMatches(R.refused.planId) ? R.refused : null;
+    const ref = R.refused && p && IL.planMatches(R.refused.planId) ? R.refused : null;
     const ns = needs();
     const clean = ref && /^I10/.test(String(ref.message || '')) ? IL.ready().items.find((x) => x.key === 'clean' && !x.ready) : null;
     if (clean && !ns.includes(clean)) ns.push(clean);

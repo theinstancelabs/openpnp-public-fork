@@ -105,11 +105,15 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     // the SIM scene's board: the one with a stored registration (the runner's board, registered by webui-sim)
     const simBoard = (boards.files || []).find((b) => b.file && b.registration && b.registration.nominal);
     const key2 = simBoard ? 'file:' + simBoard.file : null;
+    // already the chosen one (a second run in one session): another card first, so this click chooses it again
+    const other2 = cards.find((c) => c.board !== key2);
+    if (key2 && planned === key2 && other2) await page.click('#rs-designs .design[data-board="' + other2.board.replace(/"/g, '\\"') + '"]');
+    const planPost = page.waitForRequest((q) => q.method() === 'POST' && /\/api\/plan$/.test(q.url()), { timeout: 15000 }).then(() => true, () => false);
     if (key2) await page.click('#rs-designs .design[data-board="' + key2.replace(/"/g, '\\"') + '"]');
     const p2 = await page.waitForFunction((f) => IL.S.plan && IL.S.plan.source && IL.S.plan.source.file === f && IL.S.plan, simBoard && simBoard.file, { timeout: 30000 })
       .then((h) => h.jsonValue(), () => null);
     const nom = simBoard && simBoard.registration.nominal;
-    check('(2) a click on a design plans it where it sat (its last registration): the card is pressed', !!p2 && !!nom && Math.abs(p2.source.x - nom.x) < 1e-6
+    check('(2) a click on a design plans it where it sat (its last registration): the card is pressed', await planPost && !!p2 && !!nom && Math.abs(p2.source.x - nom.x) < 1e-6
       && Math.abs(p2.source.y - nom.y) < 1e-6 && (await page.getAttribute('#rs-designs .design[aria-pressed="true"]', 'data-board')) === key2, { key2, nom, src: p2 && p2.source });
 
     // ---- (3) Boards this run -----------------------------------------------------------------------------------------
@@ -139,7 +143,8 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     if (await shown(page, '#rs-wipe-row')) {
       const why5 = await startState(page);
       await page.click('#rs-new-board');
-      const gone = await page.waitForSelector('#rs-wipe-row', { state: 'hidden', timeout: 15000 }).then(() => true, () => false);
+      const gone = await page.waitForFunction(() => { const pd = IL.S.plan && IL.S.plan.pasted; return (!pd || !pd.pads || !Object.keys(pd.pads).length)
+        && document.getElementById('rs-wipe-row').hidden; }, null, { timeout: 15000 }).then(() => true, () => false);
       check('(5) paste on this seat\'s board: Start waits, and "It is a new board" takes it off (a new seat, nothing moves)', /paste on|is done/.test(why5.why) && gone,
         { why5, newSeat: await page.evaluate(() => IL.S.newSeatAtMs || (IL.S.status.dispense || {}).newSeatAtMs || null) });
     }
@@ -184,19 +189,28 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     });
     await page.waitForSelector('#btn-rs-start:enabled', { timeout: 15000 }).catch(() => null);
     const pre8 = await startState(page);
+    // Live as it shows: the cut run lasts some seconds, so the page records the first complete Live it draws
+    await page.evaluate(() => {
+      window.__live = null;
+      const read = () => {
+        const t = document.getElementById('rv-title'), v = document.getElementById('run-view');
+        if (window.__live || !t || !v || v.hidden || !/Pasting side 1/.test(t.textContent) || !document.getElementById('rv-steps')) return;
+        window.__live = { leave: (document.getElementById('rv-leave-box') || {}).textContent || '',
+          rail: Array.from(document.querySelectorAll('#rv-rail .step')).map((x) => [x.dataset.k, x.className.replace(/^step ?/, '')]),
+          heroHere: !!document.querySelector('#rv-slot > #run-hero'), tiles: Array.from(document.querySelectorAll('#rv-tiles .tile')).map((x) => x.dataset.k),
+          parts: (document.querySelector('#rv-tiles .tile[data-k="Parts"] .tile__s') || {}).textContent || '',
+          stop: (() => { const x = document.getElementById('panel-stop'); return !!x && !x.hidden; })(),
+          check: (document.querySelector('#rv-steps li[data-k="check"]') || {}).textContent || '' };
+      };
+      new MutationObserver(read).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+    });
     const runId0 = await page.evaluate(() => (IL.S.status.run && IL.S.status.run.runId) || null);
     await page.click('#btn-rs-start');
     // a board run other than the one before (webui-sim's last run is still the status's until this one starts)
     const ran = await page.waitForFunction((id0) => { const r = IL.S.status.run; return !!r && r.label === 'board' && !!r.runId && r.runId !== id0; }, runId0,
       { timeout: 300000, polling: 500 }).then(() => true, () => false);
     // ---- (10) Live while it pastes (the cut run lasts some seconds: read at once) -------------------------------------
-    const live = await page.waitForFunction(() => { const t = document.getElementById('rv-title'); return !!t && /Pasting side 1/.test(t.textContent) && !document.getElementById('run-view').hidden; },
-      null, { timeout: 15000, polling: 200 }).then(() => page.evaluate(() => ({
-      leave: (document.getElementById('rv-leave-box') || {}).textContent || '',
-      rail: Array.from(document.querySelectorAll('#rv-rail .step')).map((x) => [x.dataset.k, x.className.replace(/^step ?/, '')]),
-      heroHere: !!document.querySelector('#rv-slot > #run-hero'), tiles: Array.from(document.querySelectorAll('#rv-tiles .tile')).map((x) => x.dataset.k),
-      parts: ((document.querySelector('#rv-tiles .tile[data-k="Parts"] .tile__s') || {}).textContent || ''),
-      stop: (() => { const x = document.getElementById('panel-stop'); return !!x && !x.hidden; })(), check: ((document.querySelector('#rv-steps li[data-k="check"]') || {}).textContent || '') })), () => null);
+    const live = await page.waitForFunction(() => window.__live, null, { timeout: 15000, polling: 100 }).then((h) => h.jsonValue(), () => null);
     check('(10) Live: "You can leave now", the rail with Paste live, the board picture in its frame, four tiles, STOP in the panel', !!live && /You can leave now/.test(live.leave)
       && live.rail.some(([k, c]) => k === 'Paste' && /live/.test(c)) && live.heroHere && ['Pads', 'Parts', 'Side 1 left', 'Paste on since'].every((k) => live.tiles.includes(k)) && live.stop, live);
     check('(10) Live: what the machine cannot do yet says so (parts, check the paste)', !!live && /not built yet/.test(live.parts) && /not built yet/.test(live.check), live);
@@ -240,6 +254,12 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     await page.screenshot({ path: path.join(OUT, 'run-need.png') });
 
     // ---- (9) Step by step ----------------------------------------------------------------------------------------------
+    await page.click('#rv-need-more > summary').catch(() => null);
+    await page.click('#rv-need-more a[href="#run/steps"]').catch(() => null);
+    const steps9 = await page.waitForFunction(() => location.hash === '#run/steps' && document.getElementById('run-view').hidden && document.getElementById('run-start').hidden
+      && !document.getElementById('run-hero').hidden && !!document.querySelector('#panel nav.steps'), null, { timeout: 10000 }).then(() => true, () => false);
+    check('(9) Step by step (#run/steps): today\'s pages at their own step, the board picture back in today\'s frame', steps9,
+      await page.evaluate(() => ({ hash: location.hash, steps: !!document.querySelector('#panel nav.steps') })));
     await page.evaluate(() => IL.go('#run/checks'));
     check('(9) Step by step: today\'s Checks with its board picture', await page.waitForSelector('#plan-interlocks', { state: 'visible', timeout: 10000 }).then(() => true, () => false)
       && await shown(page, '#run-hero') && !(await shown(page, '#run-start')));

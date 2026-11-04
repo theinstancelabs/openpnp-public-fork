@@ -50,3 +50,5 @@
 .rf-more summary { cursor: pointer; color: var(--accent-ink); font-weight: 650; font-size: 14px; }
 .rf-more .btn-row { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .rf-done-acts { display: flex; flex-direction: column; gap: 10px; }
+.rf-wipe { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.rf-wipe .btn { align-self: flex-start; }
