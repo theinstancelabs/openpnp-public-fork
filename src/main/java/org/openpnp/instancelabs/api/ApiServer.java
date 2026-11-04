@@ -60,6 +60,8 @@ public final class ApiServer {
     private final List<Route> routes = new ArrayList<>();
     private final ApiContext context;
     private final MachineEndpoints machineEndpoints;
+    /** BR-72: the machine lock's routes and the guard on every write. */
+    private final LockEndpoints lockEndpoints;
 
     // ------------------------------------------------------------------------------------------
     // Lifecycle
@@ -112,7 +114,8 @@ public final class ApiServer {
         this.server = HttpServer.create(addr, 0);
         AtomicInteger n = new AtomicInteger();
         // Unbounded (cached) so STOP always gets a thread even while other requests block
-        // (camera capture, ?wait=true runs). Bounded by the localhost-only clients.
+        // (camera capture, ?wait=true runs). Bounded by the few clients: localhost, and since BR-73 the user's tailnet
+        // devices through tailscale serve (the tailnet's access rules are the only access control: no login).
         this.executor = Executors.newCachedThreadPool(r -> {
             Thread t = new Thread(r, "il-api-" + n.incrementAndGet());
             t.setDaemon(true);
@@ -121,6 +124,8 @@ public final class ApiServer {
         this.context = new ApiContext(configuration);
         this.machineEndpoints = new MachineEndpoints(context);
         machineEndpoints.register(this);
+        this.lockEndpoints = new LockEndpoints(context, machineEndpoints);
+        lockEndpoints.register(this);
         DispenseEndpoints dispense = new DispenseEndpoints(context, machineEndpoints);
         dispense.register(this);
         dispense.registration.register(this);
@@ -162,6 +167,7 @@ public final class ApiServer {
     public synchronized void stop() {
         server.stop(0);
         executor.shutdownNow();
+        lockEndpoints.shutdown();
         context.shutdown();
         machineEndpoints.shutdown();
         if (instance == this) {
@@ -229,6 +235,8 @@ public final class ApiServer {
         private final byte[] raw;
         private String body;
         private String[] groups = new String[0];
+        /** BR-72: the lock holder's call this request is (null: not a guarded write, or nobody holds the lock). */
+        MachineLock.Activity lockActivity;
 
         Request(HttpExchange ex, byte[] raw) {
             this.exchange = ex;
@@ -376,7 +384,15 @@ public final class ApiServer {
                 g[i] = Request.decode(m.group(i + 1));
             }
             req.groups = g;
-            Object out = route.handler.handle(req);
+            // BR-72: a write passes the machine lock first (409 locked / lock-lost / no-lock)
+            req.lockActivity = lockEndpoints.admit(req);
+            Object out;
+            try {
+                out = route.handler.handle(req);
+            }
+            finally {
+                context.lock.end(req.lockActivity);
+            }
             return out instanceof Response ? (Response) out : Response.json(200, out);
         }
         if (pathMatched) {
@@ -444,10 +460,12 @@ public final class ApiServer {
      */
     static String browserSafetyRefusal(String method, String host, String origin, String fetchSite, boolean lanAccess,
             Set<String> trustedOrigins) {
-        String trusted = host == null ? null : trustedOriginOf(host, trustedOrigins);
+        // loopback keeps its own rule even with a trusted entry naming it (the local UI's Stop must never be refused)
+        String trusted = host == null || isLoopbackHost(host) ? null : trustedOriginOf(host, trustedOrigins);
         if (!lanAccess && trusted == null && (host == null || !isLoopbackHost(host))) {
-            return "Host '" + host + "' is not allowed: this API answers 127.0.0.1 / localhost"
-                    + (trustedOrigins.isEmpty() ? "" : " and " + String.join(", ", trustedOrigins)) + " only";
+            // never the trusted names: a DNS-rebinding page reads this answer as same-origin (#18 review)
+            return "Host '" + host + "' is not allowed: this API answers 127.0.0.1 / localhost and its trusted origins "
+                    + "only";
         }
         if ("GET".equals(method) || "HEAD".equals(method)) {
             return null;

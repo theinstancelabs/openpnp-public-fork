@@ -36,9 +36,11 @@ LAN access is on (DNS-rebinding guard). Requests other than GET/HEAD with a fore
 `https://<name>.ts.net:8877` to the API on 127.0.0.1 and keeps the browser's `Host` and `Origin` (measured 11-03). With
 `trustedOrigins: ["https://<name>.ts.net:8877"]` (exact origins: scheme, host, port; a path or another scheme is dropped
 with a warning) that Host passes the DNS-rebinding guard, and a write passes the CSRF guard only with exactly that
-Origin (or none, as curl). `"http://" + Host` stays the rule for loopback Hosts only. The bind stays 127.0.0.1 (the proxy
-connects over loopback); never strip Origin in a proxy instead. `GET /api/status` lists them in
-`server.trustedOrigins`.
+Origin (or none, as curl). `"http://" + Host` stays the rule for loopback Hosts (and LAN Hosts with `lanAccess`); a
+loopback Host keeps it even if an entry names loopback. The bind stays 127.0.0.1 (the proxy connects over loopback);
+never strip Origin in a proxy instead. `GET /api/status` lists them in `server.trustedOrigins`. **There is no login: the
+tailnet's access rules are the only access control** (any device they let in can drive the machine, with curl too).
+Never serve it on a port Funnel can publish (443, 8443, 10000).
 
 ## 2. Errors and refusals
 

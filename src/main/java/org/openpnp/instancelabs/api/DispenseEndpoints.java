@@ -146,6 +146,8 @@ final class DispenseEndpoints {
                 SimGuard.isLoopbackOnly(mach), "simulatorConfirmed",
                 svc != null ? svc.isSimulatorConfirmed() : SimGuard.isSimulated(mach)));
         out.put("machine", machine.machineStatus());
+        // BR-72: who holds the machine, what it does, since when
+        out.put("lock", ctx.lock.view());
         Map<String, Object> d = new LinkedHashMap<>();
         out.put("dispense", d);
         Map<String, Object> pressure = ctx.pressure.snapshot();

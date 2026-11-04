@@ -81,11 +81,19 @@ final class MachineEndpoints {
     // ------------------------------------------------------------------------------------------
 
     Object stop() {
+        return stop("STOP pressed in the web UI");
+    }
+
+    /** The web STOP, also a take-over's from a working lock holder (BR-72). */
+    Map<String, Object> stop(String reason) {
         long answerBy = System.currentTimeMillis() + STOP_ANSWER_MS;
         List<String> actions = new ArrayList<>();
-        String reason = "STOP pressed in the web UI";
         DispenseService svc = ctx.svcOrNull();
         boolean engineWasBusy = svc != null && svc.isBusy();
+        // BR-72: a G-code batch of the lock holder sends nothing after its line in flight
+        if (ctx.passthrough.abort(reason)) {
+            actions.add("G-code batch: stopped before its next line");
+        }
         // a pad calibration first: it queues no further engine step once its stop flag is set (§7.8)
         ctx.padCalJobs.stop(reason);
         if (svc != null) {
