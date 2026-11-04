@@ -315,7 +315,7 @@ public class ZFrameTest {
         g.profile.gapMm = 2;
         assertFalse(g.validate().isEmpty());
         g.profile.gapMm = 0.31; // above Process's gap ladder (0.30)
-        assertFalse(g.validate().isEmpty());
+        assertTrue(g.validate().toString().contains("gapMm"), g.validate().toString());
     }
 
     /** Review finding: no hard Z floor. The builder and, independently, the validator enforce one. */
