@@ -464,6 +464,16 @@ class MachineLockTest(SessionTest):
     """(d) in its own session: the lock, Take control and the G-code passthrough (BR-72)."""
     NAME = "lumen-e2e-lock"
 
+    def setUp(self):
+        """Each test starts with nobody holding the lock, whatever an earlier one left (a failure mid-test)."""
+        holder = self.s.status()["lock"]["holder"]
+        if holder and holder["kind"] == "agent":
+            self.assertEqual(self.s.api("POST", "/api/lock/take", {}, timeout=60, headers=UI)[0], 200)
+            holder = self.s.status()["lock"]["holder"]
+        if holder and holder["kind"] == "user":
+            self.assertEqual(self.s.api("POST", "/api/lock/release", {}, headers=UI)[0], 200)
+        self.assertIsNone(self.s.status()["lock"]["holder"])
+
     def acquire(self, what):
         code, r = self.s.api("POST", "/api/lock/acquire", {"who": "process", "label": "Process", "what": what,
                                                            "ttlS": 300})
@@ -543,8 +553,6 @@ class MachineLockTest(SessionTest):
         self.assertEqual((take["lock"]["holder"]["kind"], take["lock"]["holder"]["who"]), ("user", "user"), take)
         self.assertEqual(take["stopped"]["mode"], "stop", take)
         self.assertTrue(take["stopped"]["machineOff"], take)
-        b_code, batch = res["batch"]
-        self.assertEqual((b_code, batch.get("error")), (409, "lock-lost"), batch)
         self.assertFalse(sim["moving"], "the board still moves after Take control")
         sent = [lines_sent(io, l) for l in STOP_LINES]
         self.assertTrue(all(sent), dict(zip(STOP_LINES, sent)))
@@ -560,6 +568,10 @@ class MachineLockTest(SessionTest):
         code, r = self.gcode(agent, ["M114"])  # the agent sees it lost the lock and sends nothing more
         self.assertEqual((code, r.get("error")), (409, "lock-lost"), r)
         self.assertEqual(r["lost"]["how"], "taken", r)
+        # Last: the batch in flight. Its M400 got an ok because the take's M410 flushed the move, not because the
+        # head arrived: a 200 would tell the agent its move was done (BR-72: the batch ends lock-lost).
+        b_code, batch = res["batch"]
+        self.assertEqual((b_code, batch.get("error")), (409, "lock-lost"), batch)
         code, r = self.s.api("POST", "/api/lock/acquire", {"who": "process", "label": "Process", "what": "again"})
         self.assertEqual((code, r.get("error")), (409, "locked"), r)  # while the user holds it
         code, r = self.s.api("POST", "/api/lock/release", {}, headers=UI)  # Give back
