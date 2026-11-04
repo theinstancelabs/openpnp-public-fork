@@ -47,7 +47,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: ${{ github.event_name == 'pull_request' && 'maven' || '' }}  # queue and push runs resolve alike
+          cache: ${{ github.event_name != 'merge_group' && 'maven' || '' }}  # queue runs restore nothing
       - name: Package
         run: mvn -B -T1 -DskipTests package
       - uses: actions/upload-artifact@v7
@@ -126,7 +126,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: ${{ github.event_name == 'pull_request' && 'maven' || '' }}  # queue and push runs resolve alike
+          cache: ${{ github.event_name != 'merge_group' && 'maven' || '' }}  # queue runs restore nothing
       - name: Test inputs from infra/fixtures (BR-40 env overrides)
         # LiveBoardPlanTest reads IL_TEST_BOARD and IL_LIVE_CONFIG (without them: the repo's copies, never skipped)
         run: python3 infra/ci/sim_env.py "$RUNNER_TEMP/lab" >> "$GITHUB_ENV"

@@ -76,15 +76,17 @@ class MergeQueue(unittest.TestCase):
         for prefix, _ in calls:
             self.assertRegex(prefix, r"^timeout \d+\s+$")
 
-    def test_the_gate_is_bounded_and_push_runs_build_like_the_queue(self):
+    def test_the_gate_is_bounded_and_pushes_keep_the_cache_prs_restore(self):
         js = ci_wiring.jobs(self.ci)
-        self.assertRegex(js["gate"], r"\n    timeout-minutes: \d+")  # a hung step would hold the queue's check
-        for name in ("build", "maven"):  # no cache on a push or in the queue: the shipped jar resolves as the tested
+        self.assertRegex(js["gate"], r"\n    timeout-minutes: ([1-9]|10)\b")  # a hung step would hold the queue's check
+        # a PR restores the Maven cache its base branch's pushes saved (GitHub's cache scopes): without them every PR
+        # run downloads everything from Maven Central, which answers 429 under load (seen 11-04 on #34)
+        for name in ("build", "maven"):
             m = re.search(r"cache: \$\{\{ (.*?) \}\}", js[name])
             ctx = lambda e: {"github.event_name": e}
-            self.assertEqual(ci_wiring.interpolate("${{ %s }}" % m.group(1), ctx("pull_request")), "maven", name)
-            for event in ("push", "merge_group", "workflow_dispatch"):
-                self.assertEqual(ci_wiring.interpolate("${{ %s }}" % m.group(1), ctx(event)), "", (name, event))
+            for event in ("pull_request", "push", "workflow_dispatch"):
+                self.assertEqual(ci_wiring.interpolate("${{ %s }}" % m.group(1), ctx(event)), "maven", (name, event))
+            self.assertEqual(ci_wiring.interpolate("${{ %s }}" % m.group(1), ctx("merge_group")), "", name)
 
     def test_the_build_and_the_queued_job_always_run(self):
         js = ci_wiring.jobs(self.ci)
