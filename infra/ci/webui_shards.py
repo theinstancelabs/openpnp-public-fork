@@ -12,8 +12,9 @@ import re
 import sys
 
 RUNNER = "src/test/web/run-webui-sim-test.sh"
-# One session for the scripts that share state: board-import after webui-sim; pad-profile and tip-setups after them
-# until BR-74 makes the SIM paste reproducible alone (then they become a leg of their own). A name ending in "?" joins
+# One session for the scripts that share state: board-import after webui-sim; pad-profile and tip-setups after them,
+# because they use the needle frame, landing and offsets those leave (Infra 11-04: not the SIM's randomness), and they
+# refuse to start alone (src/test/web/needs-before.cjs). A name ending in "?" joins
 # its leg once it is in ALL_SCRIPTS (never the rest): tip-flow needs tip-setups' needle frame, whichever PR lands first.
 SHARDS = {"main": ["webui-sim", "board-import", "pad-profile", "tip-setups", "tip-flow?"]}
 KEYS = tuple(SHARDS) + ("rest",)  # ci.yml's legs
