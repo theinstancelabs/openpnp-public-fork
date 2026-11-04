@@ -276,6 +276,70 @@ public class SimPasteTest {
         assertEquals(10, p.deposits(null).size(), "dots, no thread");
     }
 
+    static String turnB(double deg) {
+        return String.format(java.util.Locale.ROOT, "G1 B%.4f F64800", deg);
+    }
+
+    /** INF-06 §4 (Process): with newPhaseOnMotorOff every motor-off settles the screw at a new random angle. */
+    @Test
+    public void aMotorOffMovesTheScrewPhaseOnlyWhenTheSceneSaysSo() {
+        SimScene s = scene();
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        int phase = p.offsetSteps();
+        n.send("M18 B");
+        assertEquals(phase, p.offsetSteps(), "off by default: today's SIM");
+        s.paste.newPhaseOnMotorOff = true;
+        n.send("M18 Z");
+        n.send("M84 S0");
+        assertEquals(phase, p.offsetSteps(), "another axis, or only the idle timeout set: B stays powered");
+        n.send("M18 B");
+        int first = p.offsetSteps();
+        assertNotEquals(phase, first, "M18 B");
+        n.send("M84");
+        int second = p.offsetSteps();
+        assertNotEquals(first, second, "M84: every motor");
+        SimScene same = scene(); // a scene of its own: its first connection, as s had
+        same.paste.newPhaseOnMotorOff = true;
+        SimPaste again = paste(same);
+        SimNeedle m = needle(again, same);
+        m.send("M18 B");
+        m.send("M84");
+        assertEquals(second, again.offsetSteps(), "the same scene, connection and lines: the same phases");
+        s.paste.newPhaseOnMotorOff = false;
+        s.paste.offsetSteps = 100;
+        p.powerCycle();
+        assertEquals(100, p.offsetSteps(), "a pinned phase survives a power cycle while the flag is off");
+        s.paste.newPhaseOnMotorOff = true;
+        p.powerCycle();
+        assertNotEquals(100, p.offsetSteps(), "a power cycle unpowers the motor too");
+    }
+
+    @Test
+    public void anIdleLongerThanTheMotorTimeoutIsAMotorOff() {
+        SimScene s = scene();
+        s.paste.newPhaseOnMotorOff = true;
+        SimPaste p = paste(s);
+        SimNeedle n = needle(p, s);
+        n.send("M84 S10"); // the idle timeout, short
+        n.send(turnB(90));
+        int phase = p.offsetSteps();
+        n.send("G4 S5");
+        n.send(turnB(180));
+        assertEquals(phase, p.offsetSteps(), "5 s idle: still powered");
+        n.send("G4 S11");
+        n.send(turnB(270));
+        assertNotEquals(phase, p.offsetSteps(), "11 s idle: the motor timed out before this move");
+    }
+
+    @Test
+    public void theScrewPhaseIsTheTipsOwn() {
+        SimScene s = scene();
+        s.paste.byTip.put("k", new com.google.gson.JsonParser().parse("{\"offsetSteps\": 400}").getAsJsonObject());
+        s.physicalTip = "k";
+        assertEquals(400, paste(s).offsetSteps());
+    }
+
     @Test
     public void m114ReportsMarlinsCountWhichAReconnectResets() {
         SimScene s = scene();

@@ -72,6 +72,8 @@ public final class SimPaste {
     static final double THREAD_MAX_LIFT_MM = 2.0;
     /** A needle below the surface smears its dot to this axis ratio (counted as a string). */
     static final double SMEAR_RATIO = 2;
+    /** Marlin's stepper idle timeout after boot (s) until an M18/M84 S changes it (lumen-sim's bench firmware). */
+    static final double DEFAULT_MOTOR_TIMEOUT_S = 3600;
     /** A round dot's axis ratio is 1 + |N(0, 0.05)|. */
     static final double ROUNDNESS_SD = 0.05;
     static final String COUNT_PREFIX = "Count X:0 Y:0 Z:0 B:";
@@ -289,6 +291,11 @@ public final class SimPaste {
     private int connection;
     private Integer offset;
     private Random noise;
+    // A motor-off's new screw phase (newPhaseOnMotorOff, INF-06), the motor-offs this connection, the idle timeout.
+    private Integer jumped;
+    private int motorOffs;
+    private double motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
+    private Double lastMotionS;
     // The screw and the pneumatics.
     private double logicalB, machineB;
     private boolean absolute = true;
@@ -403,6 +410,14 @@ public final class SimPaste {
         connection = store.connect();
         offset = null;
         noise = null;
+        jumped = null;
+        motorOffs = 0;
+        motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
+        lastMotionS = null;
+        SimScene sc = scenes.get();
+        if (sc != null) {
+            motorOff(sc.pasteFor(physicalTip(sc))); // the motor was unpowered too
+        }
         logicalB = 0;
         machineB = 0;
         absolute = true;
@@ -452,7 +467,7 @@ public final class SimPaste {
         if (sc == null || sc.paste == null) {
             throw new IllegalStateException("the sim scene has no paste block");
         }
-        return offset(sc.paste);
+        return offset(sc.pasteFor(physicalTip(sc)));
     }
 
     /** Paste hanging on the tip (mg). */
@@ -525,6 +540,17 @@ public final class SimPaste {
             else if (number == 106 || number == 107) {
                 pressure(number == 106, words);
             }
+            else if (number == 18 || number == 84) {
+                Double secs = word(words, 'S');
+                String axes = code.trim().toUpperCase(Locale.ROOT).replaceFirst("^M0*(18|84)", "")
+                        .replaceAll("[^A-Z]", "");
+                if (secs != null) {
+                    motorTimeoutS = secs; // Marlin: with S only the idle timeout is set, nothing is switched off
+                }
+                else if (axes.isEmpty() || axes.indexOf('B') >= 0) {
+                    motorOff(p);
+                }
+            }
             else if (number == 114 && p != null && p.reportCount) {
                 return countLine();
             }
@@ -546,7 +572,9 @@ public final class SimPaste {
         if (dist < 1e-9) {
             return;
         }
+        idleCheck(p);
         store.advance(moveSeconds(dist, feedPerMin / 60, accel));
+        lastMotionS = store.timeS();
         if (dotOpen) {
             closeDot(sc, p);
         }
@@ -568,7 +596,9 @@ public final class SimPaste {
         machineB += deg;
         logicalB += deg;
         long c1 = count(); // the motor turns whole steps
+        idleCheck(p);
         store.advance(moveSeconds(Math.abs(deg), feedPerMin / 60, accel));
+        lastMotionS = store.timeS();
         if (p == null || c1 == c0) {
             return;
         }
@@ -705,6 +735,9 @@ public final class SimPaste {
     }
 
     private int offset(SimScene.Paste p) {
+        if (jumped != null) {
+            return jumped;
+        }
         if (p.offsetSteps != null) {
             return p.offsetSteps;
         }
@@ -712,6 +745,23 @@ public final class SimPaste {
             offset = new Random(p.seed + connection).nextInt(STEPS_PER_REV);
         }
         return offset;
+    }
+
+    /** Marlin switches the motors off after motorTimeoutS without motion (0: never): a motor-off before this one. */
+    private void idleCheck(SimScene.Paste p) {
+        if (lastMotionS != null && motorTimeoutS > 0 && store.timeS() - lastMotionS > motorTimeoutS) {
+            motorOff(p);
+        }
+    }
+
+    /**
+     * B unpowered (M18/M84, the idle timeout, a power cycle): with newPhaseOnMotorOff the screw, turned by the paste
+     * pressure while free, settles at a uniform random angle (Process: 2 of 2 motor-offs moved it far, INF-06 §4).
+     */
+    private void motorOff(SimScene.Paste p) {
+        if (p != null && p.newPhaseOnMotorOff) {
+            jumped = new Random((p.seed + connection) * 0x9E3779B97F4A7C15L + ++motorOffs).nextInt(STEPS_PER_REV);
+        }
     }
 
     /** The dose and thread noise: the scene's noiseSeed on every connection (BR-74), else seed + connection. */

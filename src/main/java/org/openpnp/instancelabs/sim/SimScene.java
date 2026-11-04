@@ -163,6 +163,8 @@ public final class SimScene {
         public boolean reportCount = true;
         /** The physical screw angle at count 0 (steps); null = drawn per connection from the seed. */
         public Integer offsetSteps;
+        /** Every motor-off (M18/M84 of B, the idle timeout, a power cycle) draws a new screw angle (INF-06 §4). */
+        public boolean newPhaseOnMotorOff;
         /**
          * BR-74: the seed of the dose and thread noise on every connection (null: seed + the connection's number, as
          * before), so a scene's paste is the same however often the controller reconnected (a test alone in a fresh
@@ -203,6 +205,7 @@ public final class SimScene {
             p.n2OffsetMm = n2OffsetMm == null ? null : n2OffsetMm.clone();
             p.reportCount = reportCount;
             p.offsetSteps = offsetSteps;
+            p.newPhaseOnMotorOff = newPhaseOnMotorOff;
             p.noiseSeed = noiseSeed;
             p.byTip = new LinkedHashMap<>(byTip);
             return p;
@@ -583,6 +586,8 @@ public final class SimScene {
             p.n2OffsetMm = n2;
         }
         p.reportCount = o.has("reportCount") ? o.get("reportCount").getAsBoolean() : p.reportCount;
+        p.newPhaseOnMotorOff = o.has("newPhaseOnMotorOff") ? o.get("newPhaseOnMotorOff").getAsBoolean()
+                : p.newPhaseOnMotorOff;
         if (o.has("noiseSeed")) {
             p.noiseSeed = o.get("noiseSeed").isJsonNull() ? null : Long.valueOf(o.get("noiseSeed").getAsLong());
         }
