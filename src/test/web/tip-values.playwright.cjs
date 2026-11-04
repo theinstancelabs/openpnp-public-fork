@@ -10,7 +10,8 @@
  * that left dots out after the prime says so; (2b) the touch-off follows the mounted tip's recipe: it opens at its ladder
  * (start 0.125 + touchOffSkipDots × step rounded up to 1 µm, skip + 10 steps; 0.125 and 6 with no skip), and Steps below
  * skip + 3 or a start whose counted dots begin below 0.125 mm are refused at their fields with why (the engine refuses
- * both), typed values kept; (3) no JavaScript errors.
+ * both), typed values kept; (2c) a touch-off the engine did not apply for its check dots (BR-89's landingProblem) offers
+ * no Use, the engine's words instead; (3) no JavaScript errors.
  * Nothing moves.
  *
  * Env: IL_BASE or IL_API_URL (the UI), PLAYWRIGHT_DIR, OUT_DIR (tip-values-results.json, tip-values.png).
@@ -157,6 +158,26 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     await page.waitForFunction(() => /first dot/.test((document.getElementById('to-ref') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
     const skipped1 = await page.evaluate(() => { const n = document.getElementById('to-ref'); return n ? n.textContent : null; });
     check('(2) one dot not counted: said in the singular', skipped1 === 'Normal dot 1.35 mm, from the tip’s ladder of 14:07. The first dot after the prime was not counted.', skipped1);
+
+    // ---- (2c) BR-89: the check dots say the tip may have moved, so the engine did not apply the touch-off; Use would apply
+    // it anyway (POST /api/needle/offset): never offered, the engine's words instead
+    const PROBLEM = 'the 2nd check dot landed 0.150 mm from where the first two counted dots landed (at most 0.1 mm): the tip may have moved; look at it from below and run the touch-off again';
+    const moved = touchOffRow(true, true, 3);
+    const movedDet = JSON.parse(moved.details);
+    Object.assign(movedDet.analysis, { dotsLaid: 15, checkGapMm: 0.125, landingShiftMm: 0.15, landingProblem: PROBLEM });
+    ST.touchOff = Object.assign(moved, { id: 990099, method: 'dot-ladder-touch-off (not applied: the tip may have moved)', details: JSON.stringify(movedDet) });
+    await page.evaluate(() => IL.pcr.loadCalibrations());
+    await page.waitForFunction(() => /0\.150 mm/.test((document.getElementById('to-sum') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
+    const mv = await page.evaluate(() => ({ use: !!document.getElementById('to-use'), sum: (document.getElementById('to-sum') || {}).textContent || '',
+      hist: [...document.querySelectorAll('#to-history-t tbody tr')].map((r) => r.textContent).find((t) => /not used|refused|shown only/.test(t)) || null }));
+    check('(2c) the check dots say the tip may have moved (BR-89): no "Use for the needle offset", the engine\'s words instead', !mv.use
+      && mv.sum.includes('Not applied: ' + PROBLEM + '.'), mv);
+    check('(2c) its row in the history says why it is not used (its check dots failed, whichever way), not "shown only"', /Touch-off \(not used: its check dots failed\)/.test(mv.hist || ''), mv.hist);
+    ST.touchOff = touchOffRow(true, true, 1);
+    await page.evaluate(() => IL.pcr.loadCalibrations());
+    await page.waitForFunction(() => !!document.getElementById('to-use'), null, { timeout: 8000 }).catch(() => null);
+    check('(2c) a touch-off without that problem offers Use again', await page.evaluate(() => !!document.getElementById('to-use')),
+      await page.evaluate(() => ({ era: !!document.getElementById('to-era'), sum: (document.getElementById('to-sum') || {}).textContent || '' })));
 
     // ---- (2b) the touch-off's smallest ladder follows the mounted tip's recipe (BR-85: skip + the reference pair + one) --
     const stepsField = () => page.evaluate(() => ({ unit: (document.querySelector('#to-steps-wrap .unit') || {}).textContent || null,

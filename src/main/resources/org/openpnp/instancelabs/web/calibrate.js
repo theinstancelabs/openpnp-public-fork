@@ -63,7 +63,7 @@
     const ladder = /dot-ladder-touch-off/.test(row.method || '');
     return { row, det, analysis: a, ladder, applied: !/not applied/.test(row.method || ''),
       delta: isNum(row.previous_offset_mm) ? row.z_offset_mm - row.previous_offset_mm : null,
-      method: ladder ? (/not applied/.test(row.method) ? 'Touch-off (shown only)' : 'Touch-off (used)') : /needle-frame/.test(row.method || '') ? 'Needle frame recorded' : /manual/.test(row.method || '') ? 'Offset entered or confirmed' : row.method,
+      method: ladder ? (a && a.landingProblem ? 'Touch-off (not used: its check dots failed)' : /not applied/.test(row.method) ? 'Touch-off (shown only)' : 'Touch-off (used)') : /needle-frame/.test(row.method || '') ? 'Needle frame recorded' : /manual/.test(row.method || '') ? 'Offset entered or confirmed' : row.method,
       note: det ? null : row.details };
   };
   /**
@@ -756,6 +756,8 @@
             isNum(a.referenceDiameterMm) ? el('div', { class: 'dim', id: 'to-ref', text: 'Normal dot ' + IL.fmt(a.referenceDiameterMm, 2) + ' mm' + (a.referenceFrom ? ', from ' + a.referenceFrom : '') + '.'
               + (a.skippedDots > 0 ? ' The first ' + (a.skippedDots === 1 ? 'dot after the prime was' : a.skippedDots + ' dots after the prime were') + ' not counted.' : '') }) : null,
             era ? el('div', { class: 'cal-to__old', id: 'to-era' }, IL.glyph('need', 'xs'), ' ' + eraText(era))
+              // BR-89: the check dots say the tip may have moved, so the engine did not apply it: Use would apply it anyway
+              : a.landingProblem ? el('div', { class: 'cal-to__old', id: 'to-moved' }, IL.glyph('block', 'xs'), ' Not applied: ' + a.landingProblem + '.')
               : inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
                 : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
           el('table', { class: 'tbl cal-to__t' }, el('thead', {}, el('tr', {}, el('th', { class: 'r' }, IL.unitText('Gap mm')), el('th', { class: 'r' }, IL.unitText('Dot Ø mm')), el('th', { text: '' }))),
