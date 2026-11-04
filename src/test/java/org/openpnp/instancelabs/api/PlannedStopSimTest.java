@@ -36,6 +36,8 @@ import org.openpnp.model.Configuration;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.model.Motion;
+import org.openpnp.spi.Machine;
+import org.openpnp.spi.MachineListener;
 import org.openpnp.spi.MotionPlanner;
 
 import com.google.gson.JsonArray;
@@ -264,7 +266,10 @@ public class PlannedStopSimTest {
         assertEquals(Boolean.FALSE, vac1.getLastActuationValue(), "VAC1 off: its lines went out on the open link");
         assertEquals(Boolean.FALSE, vac2.getLastActuationValue(), "VAC2 off: its lines went out on the open link");
         assertPlannedStopSent();
-        assertTrue(sim.server.sinceMark().indexOf("M410") > 0, "the outputs' lines first: " + sim.server.sinceMark());
+        List<String> l = sim.server.sinceMark();
+        assertTrue(l.indexOf("M410") > 0, "the outputs' lines first: " + l);
+        // re-review NIT 5: VAC2 off as on the machine: the valve vents (P3) before the pump stops (P2)
+        assertTrue(l.indexOf("M107 P3;") >= 0 && l.indexOf("M107 P3;") < l.indexOf("M107 P2;"), l.toString());
         assertFalse(sim.driver.isConnected());
     }
 
@@ -304,17 +309,193 @@ public class PlannedStopSimTest {
     }
 
     /**
-     * Review MINOR 3: once a planned stop has closed the screw's link, a real STOP sends nothing, and its answer says so:
-     * nothing can switch the screw's motor off until the next Start.
+     * Review MINOR 3, re-review NIT 2: after a planned stop (the machine off, the screw's link closed) a real STOP sends
+     * nothing, and its answer says so: nothing can switch the screw's motor off until the next Start.
      */
     @Test
-    public void aStopOnTheClosedLinkSaysItSendsNothing() throws Exception {
-        sim.driver.disconnect(); // as a planned stop leaves it, here with the machine still reading started
+    public void aStopAfterAPlannedStopSaysNothingCanSwitchTheScrewOff() throws Exception {
+        ok("POST", "/api/stop/planned", null);
         sim.server.mark();
-        String acts = ok("POST", "/api/stop", null).getAsJsonArray("actions").toString();
-        assertFalse(acts.contains("sends the driver's DISABLE_COMMAND"), acts);
-        assertTrue(acts.contains("no DISABLE_COMMAND") && acts.contains("until the next Start"), acts);
+        JsonObject r = ok("POST", "/api/stop", null);
+        String acts = r.getAsJsonArray("actions").toString();
+        assertTrue(acts.contains("machine was already stopped"), acts);
+        assertTrue(acts.contains("the screw's controller link is closed") && acts.contains("until the next Start"), acts);
         assertEquals(Collections.emptyList(), sim.server.sinceMark());
+    }
+
+    /**
+     * The PM (re-review, a safety fix): STOP is always allowed, and nothing in front of OpenPnP's Stop may skip it. With
+     * the lookup of the screw's link failing (an axis without a name makes it throw), POST /api/stop and Take control
+     * from a working holder still send the whole DISABLE_COMMAND (M410 first, valve, pump, N1's valve and pump, M18 B),
+     * the machine reads off and both answer 200.
+     */
+    @Test
+    public void aStopWhoseLinkLookupFailsStillSwitchesEverythingOff() throws Exception {
+        org.openpnp.spi.base.AbstractAxis a = null;
+        for (org.openpnp.spi.Axis x : sim.machine.getAxes()) {
+            if ("a".equals(x.getName())) {
+                a = (org.openpnp.spi.base.AbstractAxis) x; // N1's rotation: the lookup meets it before the screw's
+            }
+        }
+        try {
+            // Take control from an agent whose pressure hold is on (a working holder: it is stopped as STOP does)
+            sim.server.hostWatchdogCapability = false;
+            sim.towelUnderNeedle(svc);
+            String agent = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"hold\"}").get("token")
+                    .getAsString();
+            who = agent;
+            assertEquals("on", ok("POST", "/api/pressure/start", null).get("state").getAsString());
+            a.setName(null);
+            sim.server.mark();
+            who = UI;
+            JsonObject take = call("POST", "/api/lock/take", "{}");
+            assertEquals(200, lastStatus, lastBody);
+            assertTrue(take.getAsJsonObject("stopped").get("confirmed").getAsBoolean(), take.toString());
+            assertInOrder(sim.server.sinceMark(), ControllerCommands.STOP_SEQUENCE);
+            assertFalse(sim.machine.isEnabled());
+
+            a.setName("a");
+            sim.machine.setEnabled(true);
+            a.setName(null);
+            sim.server.mark();
+            who = null;
+            JsonObject stop = call("POST", "/api/stop", null);
+            assertEquals(200, lastStatus, lastBody);
+            assertTrue(stop.get("stopped").getAsBoolean(), stop.toString());
+            long until = System.currentTimeMillis() + 10_000;
+            while (sim.machine.isEnabled() && System.currentTimeMillis() < until) {
+                Thread.sleep(20);
+            }
+            assertFalse(sim.machine.isEnabled());
+            assertInOrder(sim.server.sinceMark(), ControllerCommands.STOP_SEQUENCE);
+        }
+        finally {
+            a.setName("a");
+        }
+    }
+
+    /** {@code expected} appear in {@code lines} in their order (other lines may come between). */
+    static void assertInOrder(List<String> lines, List<String> expected) {
+        int i = 0;
+        for (String l : lines) {
+            if (i < expected.size() && expected.get(i).equals(l)) {
+                i++;
+            }
+        }
+        assertEquals(expected.size(), i, "in order " + expected + ": " + lines);
+    }
+
+    /**
+     * Re-review M-1: a disable listener that throws stops OpenPnP's Stop before its drivers: the machine still reads
+     * started, the link is open, nothing of the planned stop went out. The answer says so, not "stopped": the deployer
+     * would quit OpenPnP, and the quit's disable sends the whole DISABLE_COMMAND, M18 B included.
+     */
+    @Test
+    public void aPlannedStopWhoseSwitchOffFailedSaysSo() throws Exception {
+        MachineListener throwing = new MachineListener.Adapter() {
+            @Override
+            public void machineAboutToBeDisabled(Machine machine, String reason) {
+                throw new IllegalStateException("a disable listener that throws");
+            }
+        };
+        sim.machine.addListener(throwing);
+        try {
+            sim.server.mark();
+            JsonObject r = call("POST", "/api/stop/planned", null);
+            assertEquals(409, lastStatus, lastBody);
+            String reason = r.get("reason").getAsString();
+            assertTrue(reason.startsWith("No planned stop: OpenPnP's Stop did not switch the machine off")
+                    && reason.endsWith("The real STOP is POST /api/stop"), reason);
+            assertTrue(sim.machine.isEnabled());
+            assertTrue(sim.driver.isConnected());
+            assertFalse(sim.server.sinceMark().contains("M410"), sim.server.sinceMark().toString());
+        }
+        finally {
+            sim.machine.removeListener(throwing);
+        }
+    }
+
+    /**
+     * Re-review M-2: the planned stop's override is its own thread's only. A disable of the driver on another thread in
+     * the planned stop's window (OpenPnP's own Stop) sends the whole DISABLE_COMMAND, M18 B included, counted once.
+     */
+    @Test
+    public void aDisableOnAnotherThreadInThePlannedStopsWindowSendsTheWholeDisableCommand() throws Exception {
+        CountDownLatch inWindow = new CountDownLatch(1);
+        CountDownLatch otherDone = new CountDownLatch(1);
+        MachineListener pause = new MachineListener.Adapter() {
+            @Override
+            public void machineAboutToBeDisabled(Machine machine, String reason) {
+                if (machine.isTask(Thread.currentThread())) { // the planned stop's thread, inside its window
+                    inWindow.countDown();
+                    try {
+                        otherDone.await(30, TimeUnit.SECONDS);
+                    }
+                    catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        };
+        sim.machine.addListener(pause);
+        try {
+            long counted = sim.driver.getDisableCommandsSent();
+            sim.server.mark();
+            CompletableFuture<HttpResponse<String>> planned = http.sendAsync(request("POST", "/api/stop/planned",
+                    null), HttpResponse.BodyHandlers.ofString());
+            assertTrue(inWindow.await(30, TimeUnit.SECONDS));
+            Thread other = new Thread(() -> {
+                try {
+                    sim.driver.setEnabled(false);
+                }
+                catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            other.start();
+            other.join(30_000);
+            otherDone.countDown();
+            assertEquals(200, planned.get(30, TimeUnit.SECONDS).statusCode());
+            List<String> l = sim.server.sinceMark();
+            assertEquals(1, Collections.frequency(l, "M18 B"), l.toString());
+            for (String s : PLANNED) {
+                assertEquals(2, Collections.frequency(l, s), s + " from both: " + l);
+            }
+            assertEquals(counted + 1, sim.driver.getDisableCommandsSent(), "the other thread's, counted once");
+        }
+        finally {
+            sim.machine.removeListener(pause);
+        }
+    }
+
+    /**
+     * Re-review NIT 4: a planned stop whose wait is interrupted (OpenPnP stops its web API: the request threads are
+     * interrupted) never runs later.
+     */
+    @Test
+    public void aPlannedStopWhoseWaitIsInterruptedNeverRuns() throws Exception {
+        CountDownLatch queued = new CountDownLatch(1);
+        CountDownLatch out = new CountDownLatch(1);
+        MachineEndpoints.plannedStopHook = () -> {
+            sim.machine.submit(() -> {
+                out.await(30, TimeUnit.SECONDS);
+                return null;
+            });
+            queued.countDown();
+        };
+        sim.server.mark();
+        http.sendAsync(request("POST", "/api/stop/planned", null), HttpResponse.BodyHandlers.ofString());
+        assertTrue(queued.await(30, TimeUnit.SECONDS));
+        Thread.sleep(200); // the route waits for its task
+        api.stop();
+        MachineEndpoints.plannedStopHook = null;
+        out.countDown();
+        sim.machine.submit(() -> null, null, true).get(30, TimeUnit.SECONDS); // the planned stop's task had its turn
+        assertEquals(Collections.emptyList(), sim.server.sinceMark(), "nothing sent, then or later");
+        assertTrue(sim.machine.isEnabled());
+        ApiSettings s = new ApiSettings();
+        s.port = 0;
+        api = ApiServer.start(Configuration.get(), s); // for after()
     }
 
     /** Review MINOR 6: the machine task checks again: work that began after the route's checks refuses it. */
@@ -638,7 +819,19 @@ public class PlannedStopSimTest {
 
     @Test
     public void withTheMachineOffItSendsNothingAndClosesTheLinkKeptOpen() throws Exception {
+        // re-review NIT 3: a jog's move not waited for no longer refuses it once the machine is off (only a Start clears
+        // that flag). Left by a disable that waits for nothing (outputs left as they are; the live ActuateOff waits)
+        ReferenceActuator vac1 = (ReferenceActuator) sim.machine.getDefaultHead().getActuatorByName("VAC1");
+        ReferenceActuator vac2 = (ReferenceActuator) sim.machine.getDefaultHead().getActuatorByName("VAC2");
+        vac1.setDisabledActuation(ReferenceActuator.MachineStateActuation.LeaveAsIs);
+        vac2.setDisabledActuation(ReferenceActuator.MachineStateActuation.LeaveAsIs);
+        sim.machine.execute(() -> {
+            sim.n1.moveTo(sim.n1.getLocation().add(new Location(LengthUnit.Millimeters, 1, 0, 0, 0)),
+                    Motion.MotionOption.JogMotion);
+            return null;
+        });
         sim.machine.setEnabled(false);
+        assertTrue(sim.driver.isMotionPending(), "nothing waited for the jog");
         assertTrue(sim.driver.isConnected(), "connection-keep-alive: the link stays open while the machine is off");
         sim.server.mark();
         JsonObject r = ok("POST", "/api/stop/planned", null);

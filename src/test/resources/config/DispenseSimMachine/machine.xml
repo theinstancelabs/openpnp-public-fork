@@ -143,8 +143,8 @@
                <text><![CDATA[{True:M106}{False:M107};]]></text>
             </command>
             <command head-mountable-id="ACT171086f27295ab60" type="ACTUATE_BOOLEAN_COMMAND">
-               <text><![CDATA[{True:M106 P2 S255}{False:M107 P2};]]></text>
-               <text><![CDATA[{True:M106 P3 S255}{False:M107 P3};]]></text>
+               <text><![CDATA[{True:M106 P2 S255}{False:M107 P3};]]></text>
+               <text><![CDATA[{True:M106 P3 S255}{False:M107 P2};]]></text>
             </command>
             <command type="SET_GLOBAL_OFFSETS_COMMAND">
                <text><![CDATA[G92 {X:X%.4f} {Y:Y%.4f} {Z:Z%.4f} {A:A%.4f} {B:B%.4f} ; reset coordinates]]></text>

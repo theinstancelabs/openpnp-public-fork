@@ -160,6 +160,9 @@ final class MachineEndpoints {
         }
         else {
             actions.add("machine was already stopped");
+            if (!sendsDisableCommand(svc)) {
+                actions.add(SCREW_LINK_CLOSED); // BR-75: after a planned stop the screw's motor stays powered
+            }
         }
         return Views.map("stopped", true, "machineEnabled", m.isEnabled(), "actions", actions);
     }
@@ -173,16 +176,23 @@ final class MachineEndpoints {
         }
     }
 
-    /** What a STOP's answer says when a planned stop closed the screw's link (BR-75 review). */
-    static final String SCREW_LINK_CLOSED = "the screw's controller link is closed (a planned stop): no DISABLE_COMMAND "
-            + "goes out, and nothing can switch the screw's motor off until the next Start";
+    /** What a STOP's answer says when the screw's link is closed, as a planned stop leaves it (BR-75 review). */
+    static final String SCREW_LINK_CLOSED = "the screw's controller link is closed (as a planned stop leaves it): no "
+            + "DISABLE_COMMAND goes out, and nothing can switch the screw's motor off until the next Start";
 
     /**
      * BR-75 review: whether OpenPnP's Stop sends the DISABLE_COMMAND to the screw's controller: not once a planned stop
-     * closed its link (unknown, without the engine: it does).
+     * closed its link. For the answer's words only: it never throws (unknown counts as sent), so it cannot keep a STOP
+     * from switching off (the PM, re-review); a few field reads, no lock.
      */
     static boolean sendsDisableCommand(DispenseService svc) {
-        return svc == null || svc.screwDriverConnected();
+        try {
+            return svc == null || svc.screwDriverConnected();
+        }
+        catch (RuntimeException e) {
+            Logger.warn(e, "STOP: whether the screw's controller link is open is not known");
+            return true;
+        }
     }
 
     // ------------------------------------------------------------------------------------------
@@ -231,6 +241,13 @@ final class MachineEndpoints {
                     actions.add("machine was already stopped");
                     return null;
                 }
+                if (m.isEnabled() || svc.screwDriverConnected()) {
+                    // a disable listener that threw ends OpenPnP's Stop before its drivers (SwitchOff logs it): a 200
+                    // would let the deployer quit OpenPnP, and the quit's disable sends the whole DISABLE_COMMAND
+                    return new IllegalStateException("OpenPnP's Stop did not switch the machine off (" + (m.isEnabled()
+                            ? "it still reads started" : "the screw's controller link is still open")
+                            + "; see the OpenPnP log)");
+                }
                 sent.addAll(p.acknowledged);
                 failed.addAll(p.failed);
                 actions.add("planned stop: OpenPnP Stop, its DISABLE_COMMAND without the screw-off line: "
@@ -248,6 +265,10 @@ final class MachineEndpoints {
         Object out;
         try {
             out = f.get(plannedStopWaitMs, TimeUnit.MILLISECONDS); // as long as a switch-off may take
+        }
+        catch (InterruptedException e) {
+            claimed.compareAndSet(false, true); // not started yet: it never runs (nobody hears its answer)
+            throw e;
         }
         catch (TimeoutException e) {
             // no f.cancel: a task a timeout claimed does nothing when it runs (a cancelled one keeps OpenPnP busy)
@@ -289,9 +310,11 @@ final class MachineEndpoints {
                 || !m.isTask(Thread.currentThread()) && m.isBusy()) {
             return "OpenPnP is busy (a home, a jog or a move)";
         }
-        // OpenPnP's tasks end without waiting for their moves: its window's jog of the screw (N2's rotation) may run on
+        // OpenPnP's tasks end without waiting for their moves: its window's jog of the screw (N2's rotation) may run on.
+        // Only with the machine started (off, only a Start clears the flag); the task's read on the machine thread is
+        // the reliable one (a plain field)
         GcodeDriver d = svc.screwDriver(m);
-        if (d != null && d.isMotionPending()) {
+        if (m.isEnabled() && d != null && d.isMotionPending()) {
             return "OpenPnP's last move was not waited for (a jog in its window): the screw may still turn; wait for it, "
                     + "then Home";
         }
