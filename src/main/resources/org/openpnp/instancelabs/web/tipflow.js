@@ -68,11 +68,13 @@
     const rows = [['lands', 'Where it lands', lands], ['height', 'Height', height], ['pressure', 'Pressure', pressure], ['dose', 'Dose', dose]];
     // the paste per pad Calibrate aims for (BR-85): the tip's own, else the one its pads' family shares; Process sets it
     const da = tip.doseAnchor;
-    if (da) {
+    if (da && isNum(da.massPerPadMg)) {
       const of = [da.padType, isNum(da.areaMm2) ? IL.fmt(da.areaMm2, 2) + ' mm²' : null].filter(Boolean);
+      const at = isNum(da.setAtMs) ? IL.fmtDateTime(IL.toClient(da.setAtMs)) : null;   // it lasts days: the date when not today
       rows.push(['anchor', 'Paste per pad (target)', { v: String(Number(Number(da.massPerPadMg).toFixed(3))) + ' mg per pad' + (of.length ? ' (' + of.join(', ') + ')' : ''),
-        how: da.fromFamily ? (da.source || 'the shared anchor') + ': this tip has no number of its own yet' : (da.source || 'set') + (isNum(da.setAtMs) ? ', ' + t(da.setAtMs) : ''),
-        until: 'this tip is weighed again' }]);
+        how: da.fromFamily ? (da.source || 'the number every tip uses for this pad size') + ': this tip has no number of its own yet'
+          : (da.source || 'set') + (at ? ', ' + at : ''),
+        until: da.fromFamily ? 'this tip is weighed, or the shared number changes' : 'this tip is weighed again' }]);
     }
     rows.push(['padsizes', 'Pad sizes', pads]);
     return rows;

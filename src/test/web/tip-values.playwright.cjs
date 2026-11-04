@@ -2,8 +2,9 @@
  * The mounted tip's own values (BR-85; Backend 11-04 03:5x: read-only in the UI, Process sets them through the API).
  * Until BR-85 lands its fields are stubbed here as Backend named them: `status.dispense.tip.doseAnchor` ({massPerPadMg,
  * areaMm2, mgPerMm2, padType, source, setAtMs, fromFamily}) and a touch-off's `referenceDotMm` / `referenceFrom` (in its
- * analysis). (1) Tip › On now: no row without the field; the tip's own anchor as "Paste per pad (target)" with its
- * number, pad, source and time; the family's says this tip has no number of its own yet; (2) Calibrate › the last
+ * analysis). (1) Tip › On now: no row without the field, with a null one or one without a number; the tip's own
+ * anchor as "Paste per pad (target)" with its number, pad, source and time; the family's says this tip has no number of
+ * its own yet; (2) Calibrate › the last
  * touch-off: "Normal dot 1.35 mm, from the tip's ladder of 14:07."; a touch-off without it shows no line; (3) no
  * JavaScript errors. Nothing moves.
  *
@@ -81,8 +82,16 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     await page.waitForFunction(() => window.IL && IL.S && IL.S.status && document.querySelector('#tipnow-evidence tr[data-k="dose"]'), null, { timeout: 30000 });
 
     // ---- (1) Tip › On now -------------------------------------------------------------------------------------------
-    await waitRow(page, null);
+    // each case is read after two status polls that carry it (the page polls every 0.7 s)
+    const settled = async () => { const s0 = await page.evaluate(() => IL.S.statusAt); await page.waitForFunction((x) => IL.S.statusAt > x + 1000, s0, { timeout: 8000 }).catch(() => null); };
+    await settled();
     check('(1) before BR-85 (no doseAnchor in the status): no "Paste per pad" row', (await anchorRow(page)) === null);
+    ST.anchor = null;
+    await settled();
+    check('(1) a null doseAnchor: no row', (await anchorRow(page)) === null);
+    ST.anchor = { massPerPadMg: null, areaMm2: 0.73, padType: '0603', source: null, setAtMs: null, fromFamily: true };
+    await settled();
+    check('(1) an anchor without a number: no row (never "0 mg" or "NaN mg")', (await anchorRow(page)) === null);
     ST.anchor = OWN;
     await waitRow(page, /weighed by Process/);
     const own = await anchorRow(page);
@@ -95,7 +104,8 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     await waitRow(page, /no number of its own/);
     const fam = await anchorRow(page);
     check('(1) the family\'s anchor: its number, and that this tip has no number of its own yet',
-      !!fam && fam[1] === '1.056 mg per pad (0603, 0.73 mm²)' && fam[2] === 'the 0603 bench anchor: this tip has no number of its own yet', fam);
+      !!fam && fam[1] === '1.056 mg per pad (0603, 0.73 mm²)' && fam[2] === 'the 0603 bench anchor: this tip has no number of its own yet'
+      && fam[3] === 'this tip is weighed, or the shared number changes', fam);
 
     // ---- (2) Calibrate › the last touch-off ---------------------------------------------------------------------------
     ST.touchOff = touchOffRow(true);
