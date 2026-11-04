@@ -489,24 +489,87 @@ final class MachineEndpoints {
         return encodeFrame(rgb).header("X-Frame-At", String.valueOf(at));
     }
 
-    /** JPEG, else PNG: never an empty 200. */
+    /** The camera frames' JPEG quality (0..1): light enough for a 2-5 per second view over the tailnet. */
+    static final float JPEG_QUALITY = 0.85f;
+    /** Tests' bound for a 1920 x 1080 frame at {@link #JPEG_QUALITY} (a PNG of it was 1.4-1.8 MB on 11-03). */
+    static final int FRAME_JPEG_BOUND_BYTES = 600_000;
+    /** Tests: OpenCV's encoder off (as a JVM without OpenCV). */
+    static volatile boolean openCvJpeg = true;
+
+    /**
+     * JPEG at {@link #JPEG_QUALITY}: ImageIO's writer, else OpenCV's (bundled with OpenPnP: the deployed JVM has no
+     * ImageIO JPEG writer, so frames went out as 1.4-1.8 MB PNGs, 11-03); PNG only when neither works. Never an empty
+     * 200.
+     */
     ApiServer.Response encodeFrame(BufferedImage rgb) throws IOException, ApiException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        if (ImageIO.write(rgb, "jpg", out) && out.size() > 0) {
-            return ApiServer.Response.bytes(200, "image/jpeg", out.toByteArray());
+        byte[] jpg = imageIoJpeg(rgb);
+        if (jpg == null && openCvJpeg) {
+            jpg = openCvJpeg(rgb);
         }
-        // ImageIO answers false (no exception) when it has no writer for the image. Seen in real mode on the bench
-        // ThinkPad (2026-10-28): the JVM's writers were tif, bmp, gif, wbmp, png, no JPEG. PNG is always there.
+        if (jpg != null) {
+            return ApiServer.Response.bytes(200, "image/jpeg", jpg);
+        }
         if (!noJpegLogged) {
             noJpegLogged = true;
-            Logger.warn("Top camera snapshot: no JPEG writer in this JVM (writers: {}); sending PNG",
-                    String.join(",", ImageIO.getWriterFormatNames()));
+            Logger.warn("Camera frames: no JPEG encoder (ImageIO writers: {}; OpenCV: {}); sending PNG",
+                    String.join(",", ImageIO.getWriterFormatNames()), openCvJpeg ? "failed" : "off");
         }
-        out.reset();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
         if (!ImageIO.write(rgb, "png", out) || out.size() == 0) {
             throw ApiException.unavailable("the camera frame could not be encoded (no JPEG or PNG writer)");
         }
         return ApiServer.Response.bytes(200, "image/png", out.toByteArray());
+    }
+
+    /** ImageIO's JPEG writer at {@link #JPEG_QUALITY}, or null when the JVM has none. */
+    private static byte[] imageIoJpeg(BufferedImage rgb) {
+        java.util.Iterator<javax.imageio.ImageWriter> it = ImageIO.getImageWritersByFormatName("jpg");
+        if (!it.hasNext()) {
+            return null;
+        }
+        javax.imageio.ImageWriter w = it.next();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (javax.imageio.stream.ImageOutputStream ios = ImageIO.createImageOutputStream(out)) {
+            w.setOutput(ios);
+            javax.imageio.ImageWriteParam p = w.getDefaultWriteParam();
+            p.setCompressionMode(javax.imageio.ImageWriteParam.MODE_EXPLICIT);
+            p.setCompressionQuality(JPEG_QUALITY);
+            w.write(null, new javax.imageio.IIOImage(rgb, null, null), p);
+            ios.flush();
+        }
+        catch (Exception e) {
+            return null;
+        }
+        finally {
+            w.dispose();
+        }
+        return out.size() > 0 ? out.toByteArray() : null;
+    }
+
+    /** OpenCV's JPEG encoder at {@link #JPEG_QUALITY}, or null when it fails. */
+    private static byte[] openCvJpeg(BufferedImage rgb) {
+        org.opencv.core.Mat m = null;
+        org.opencv.core.MatOfByte buf = null;
+        try {
+            m = org.openpnp.util.OpenCvUtils.toMat(rgb); // first: OpenCvUtils loads OpenCV's native library
+            buf = new org.opencv.core.MatOfByte();
+            boolean ok = org.opencv.imgcodecs.Imgcodecs.imencode(".jpg", m, buf, new org.opencv.core.MatOfInt(
+                    org.opencv.imgcodecs.Imgcodecs.IMWRITE_JPEG_QUALITY, Math.round(JPEG_QUALITY * 100)));
+            byte[] b = ok ? buf.toArray() : null;
+            return b != null && b.length > 0 ? b : null;
+        }
+        catch (Throwable t) {
+            Logger.warn("Camera frames: OpenCV's JPEG encoder failed: {}", t.toString());
+            return null;
+        }
+        finally {
+            if (m != null) {
+                m.release();
+            }
+            if (buf != null) {
+                buf.release();
+            }
+        }
     }
 
     void shutdown() {
