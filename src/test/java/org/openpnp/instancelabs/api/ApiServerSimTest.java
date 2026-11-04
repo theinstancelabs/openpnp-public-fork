@@ -1066,7 +1066,10 @@ public class ApiServerSimTest {
                     .setPort(proxy.port());
             sim.machine.setEnabled(true);
             sim.machine.home();
-            ok(post("/api/screw/start-angle", "{}"));
+            // BR-02: that Stop's DISABLE_COMMAND switched the screw's motor off (M18 B): the angle is measured again
+            double angle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile")
+                    .get("startAngleDeg").getAsDouble();
+            ok(post("/api/screw/start-angle", "{\"startAngleDeg\":" + angle + "}"));
             JsonObject plan = planTied(board);
             assertEquals(202, post("/api/run", "{\"planId\":\"" + plan.get("planId").getAsString() + "\"}").status);
             long t0 = System.currentTimeMillis();

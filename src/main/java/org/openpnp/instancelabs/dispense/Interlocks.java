@@ -43,12 +43,20 @@ public final class Interlocks {
         /** Top camera + dot vision present (I10 clean-pad check). */
         public boolean opticalCheckAvailable;
         /**
-         * When the B step count last restarted or may have (epoch ms; I11): a detected controller reset or a connect
-         * whose position could not be read (BR-02); null if neither was seen. A reconnect keeps the count.
+         * When the B step count last restarted or may have (epoch ms; I11): a detected controller reset, a connect
+         * whose position could not be read, or the screw's motor switched off (BR-02); null if none was seen. A
+         * reconnect keeps the count.
          */
         public Long controllerResetAtMs;
         /** When the last controller reset was detected (epoch ms; I11): the count restarted for sure; or null. */
         public Long controllerResetDetectedAtMs;
+        /**
+         * When the screw's motor was last switched off (epoch ms; I11, BR-02): unpowered, the screw may have turned, so
+         * an angle set before it is measured again; or null. It dates {@link #controllerResetAtMs} too.
+         */
+        public Long screwMotorOffAtMs;
+        /** Why, in plain words: "the screw motor was switched off at 16:20 (a STOP: ...)"; null with it. */
+        public String screwMotorOffWhy;
         /** BR-02: why the head's position is unknown (a controller reset not homed since), or null when known. */
         public String positionUnknownWhy;
         /**
@@ -667,6 +675,11 @@ public final class Interlocks {
                     && prof.startAngleSetAtMs < in.controllerResetDetectedAtMs) {
                 r.add("I11", "the controller was reset after the screw start angle was set; the B step count restarts "
                         + "at power-up, so the angle is lost: measure it again (Profiles)");
+            }
+            else if (in.screwMotorOffAtMs != null && prof.startAngleSetAtMs < in.screwMotorOffAtMs) {
+                // BR-02: the step count ran on, but the screw may have turned unpowered: no confirm can keep the angle
+                r.add("I11", in.screwMotorOffWhy + " after the screw start angle was set: the screw may have turned: "
+                        + "measure the start angle again (Profiles)");
             }
             else if (in.controllerResetAtMs != null && prof.startAngleSetAtMs < in.controllerResetAtMs) {
                 r.add("I11", "the controller was reset (or its position could not be read at a connect) after the "

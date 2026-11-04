@@ -15,6 +15,7 @@ import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
@@ -55,9 +56,15 @@ public class PowerCycleSimTest {
         sim.close();
     }
 
+    /** The machine lock's token this test holds (BR-72, sent with every call), or null. */
+    String lockToken;
+
     JsonObject call(String method, String path, String json) throws Exception {
         HttpRequest.Builder b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + api.getPort() + path))
                 .timeout(Duration.ofSeconds(120));
+        if (lockToken != null) {
+            b.header(MachineLock.TOKEN_HEADER, lockToken);
+        }
         if (json != null) {
             b.header("Content-Type", "application/json");
             b.method(method, HttpRequest.BodyPublishers.ofString(json));
@@ -305,6 +312,118 @@ public class PowerCycleSimTest {
             }
         }
         assertTrue(raise >= 0 && g28 > raise, "N1 raised (Z only) before G28: " + l);
+    }
+
+    /** The live machine's DISABLE_COMMAND (machine.xml, bench F9): its last line switches the screw's motor off. */
+    void liveDisableCommand() {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND,
+                "M410\nM107 P3\nM107 P2\nM107 P1\nM107 P0\nM18 B");
+    }
+
+    /** The journal's screw motor switch-offs. */
+    List<java.util.Map<String, Object>> motorOffs() throws Exception {
+        return svc.getDb().query("SELECT * FROM events WHERE code = ?", ControllerReset.EVENT_MOTOR_OFF);
+    }
+
+    /** The status's I11 item. */
+    JsonObject i11(JsonObject status) {
+        for (com.google.gson.JsonElement e : status.getAsJsonArray("interlocks")) {
+            if ("I11".equals(e.getAsJsonObject().get("id").getAsString())) {
+                return e.getAsJsonObject();
+            }
+        }
+        throw new AssertionError("no I11 in " + status);
+    }
+
+    /**
+     * BR-02: a STOP's DISABLE_COMMAND ends with M18 B: with its motor off the screw turns freely (118 deg became 226 deg
+     * on the bench), so the angle set before it must be measured again; a bare confirm is refused, as after a reset.
+     */
+    @Test
+    public void aStopThatSwitchesTheScrewMotorOffAsksForTheAngleToBeMeasuredAgain() throws Exception {
+        liveDisableCommand();
+        long setAt = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}").get("startAngleSetAtMs")
+                .getAsLong();
+        Thread.sleep(5);
+        sim.server.mark();
+        ok("POST", "/api/stop", null);
+        ok("POST", "/api/machine/enable", null); // waits for the switch-off to end; the controller stayed powered
+        assertTrue(sim.server.sinceMark().contains("M18 B"), sim.server.sinceMark().toString());
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
+        String why = String.valueOf(motorOffs().get(0).get("message"));
+        assertTrue(why.startsWith("the screw motor was switched off at ") && why.contains("(a STOP"), why);
+
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertFalse(m.getAsJsonObject("powerCycle").get("detected").getAsBoolean(), "not a reset: " + m);
+        assertTrue(m.get("positionKnown").getAsBoolean(), "M18 B leaves the head's motors on: " + m);
+        assertTrue(m.getAsJsonObject("screwMotorOff").get("atMs").getAsLong() > setAt, m.toString());
+        JsonObject status = ok("GET", "/api/status", null);
+        JsonObject p = status.getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertTrue(p.get("startAngleNeedsConfirm").getAsBoolean(), p.toString());
+        assertTrue(p.get("controllerResetAtMs").getAsLong() > setAt, "the screw count is dated by it: " + p);
+        JsonObject i11 = i11(status);
+        assertEquals("blocked", i11.get("state").getAsString(), i11.toString());
+        String text = i11.get("text").getAsString();
+        assertTrue(text.contains("the screw motor was switched off at ") && text.contains("(a STOP")
+                && text.contains("the screw may have turned: measure the start angle again"), text);
+        assertFalse(text.contains("confirm"), text);
+
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("the screw motor was switched off") && lastBody.contains("measure it again"),
+                lastBody);
+        JsonObject again = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":226}");
+        assertFalse(again.get("startAngleNeedsConfirm").getAsBoolean(), "measured again after it: " + again);
+        ok("POST", "/api/screw/start-angle", "{}"); // and a confirm of that one is fine
+        assertEquals("ok", i11(ok("GET", "/api/status", null)).get("state").getAsString());
+        assertEquals(1, motorOffs().size());
+    }
+
+    /**
+     * BR-02: a disable whose driver is already disconnected sends no DISABLE_COMMAND (a planned stop that disconnects
+     * first, BR-75): the screw's motor stays on and its angle holds.
+     */
+    @Test
+    public void aDisableWithTheDriverDisconnectedLeavesTheScrewMotorOn() throws Exception {
+        liveDisableCommand();
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        Thread.sleep(5);
+        sim.server.mark();
+        sim.driver.disconnect();
+        sim.machine.setEnabled(false);
+        assertFalse(sim.server.sinceMark().contains("M18 B"), sim.server.sinceMark().toString());
+        assertEquals(0, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
+        sim.machine.setEnabled(true);
+        JsonObject status = ok("GET", "/api/status", null);
+        JsonObject p = status.getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), "the angle holds: " + p);
+        assertEquals("ok", i11(status).get("state").getAsString(), i11(status).toString());
+        assertTrue(ok("GET", "/api/machine", null).getAsJsonObject("screwMotorOff").get("atMs").isJsonNull());
+        ok("POST", "/api/screw/start-angle", "{}");
+
+        // the same disable with the driver connected sends its M18 B: on record
+        sim.server.mark();
+        sim.machine.setEnabled(false);
+        assertTrue(sim.server.sinceMark().contains("M18 B"), sim.server.sinceMark().toString());
+        assertEquals(1, motorOffs().size());
+    }
+
+    /** BR-02: the API's G-code passthrough: its M18 B switches the screw's motor off as a STOP's does. */
+    @Test
+    public void aPassthroughM18BSwitchesTheScrewMotorOff() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        Thread.sleep(5);
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"screw\"}").get("token")
+                .getAsString();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 B30 F600\",\"M400\"]}");
+        assertEquals(0, motorOffs().size(), "a screw move leaves it on");
+        ok("POST", "/api/gcode", "{\"lines\":[\"M18 B\"]}");
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
+        String why = String.valueOf(motorOffs().get(0).get("message"));
+        assertTrue(why.endsWith(" (a G-code line: M18 B)"), why);
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("measure it again"), lastBody);
     }
 
     @Test

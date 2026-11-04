@@ -286,6 +286,193 @@ public class ControllerResetTest {
         assertTrue(reset(true, true).isPositionKnown());
     }
 
+    // ------------------------------------------------------------------------------------------
+    // The screw motor switched off (a STOP's M18 B, the engine's stop sequence, the controller's idle timeout)
+    // ------------------------------------------------------------------------------------------
+
+    static final long HOUR = 3600_000L;
+    /** The controller's idle timeout (Marlin's DEFAULT_STEPPER_DEACTIVE_TIME on the LumenPnP). */
+    long idleMs = HOUR;
+
+    /** A run of the engine that knows the controller's idle timeout and reads back what earlier runs journaled. */
+    ControllerReset withIdle() {
+        return new ControllerReset(() -> now, false, false, newestOfEach(), journal::add, () -> idleMs);
+    }
+
+    /**
+     * With its motor off the screw turns freely (118 deg became 226 deg on the bench): the start angle and the camera
+     * records of partial turns are dated by it as by a reset; the head's position is not concerned (M18 B).
+     */
+    @Test
+    public void aScrewMotorOffDatesTheScrewCountButNotThePosition() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.connected(reply(PARKED), 'B', null);
+        now = 2000;
+        r.screwMotorOff("a STOP");
+        assertEquals(Long.valueOf(2000), r.countEpochMs());
+        ControllerReset.Event off = r.lastScrewMotorOff();
+        assertEquals(2000, off.atMs);
+        assertTrue(off.message.startsWith("the screw motor was switched off at "), off.message);
+        assertTrue(off.message.endsWith(" (a STOP)"), off.message);
+        assertTrue(r.isPositionKnown(), "the head's motors stay on");
+        assertNull(r.detectedAtMs(), "not a reset");
+        assertEquals(Arrays.asList(ControllerReset.EVENT_MOTOR_OFF), codes());
+        assertEquals(2000, journal.get(0).atMs);
+        assertEquals(off.message, journal.get(0).message);
+        Map<String, Object> v = r.view();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> mo = (Map<String, Object>) v.get("screwMotorOff");
+        assertEquals(2000L, mo.get("atMs"));
+        assertEquals(off.message, mo.get("why"));
+    }
+
+    @Test
+    public void aScrewMotorOffStaysOnRecordAcrossAnEngineRestart() {
+        ControllerReset first = withIdle();
+        now = 2000;
+        first.screwMotorOff("a STOP");
+        now = 9000;
+        ControllerReset second = withIdle();
+        assertEquals(Long.valueOf(2000), second.countEpochMs());
+        assertEquals(2000, second.lastScrewMotorOff().atMs);
+        assertEquals(first.lastScrewMotorOff().message, second.lastScrewMotorOff().message);
+        assertTrue(second.isPositionKnown());
+        assertNull(withIdle().detectedAtMs());
+    }
+
+    /** Marlin switches an idle motor off after its timeout: dated then, when the state is next read, journaled once. */
+    @Test
+    public void anIdleScrewIsSwitchedOffByTheControllerOnceAtItsTimeout() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.screwMoved();
+        now = 1000 + HOUR - 1;
+        assertNull(r.countEpochMs(), "not idle long enough yet");
+        assertNull(r.lastScrewMotorOff());
+        assertTrue(journal.isEmpty());
+        now = 1000 + HOUR + 5000;
+        assertEquals(Long.valueOf(1000 + HOUR), r.countEpochMs(), "dated when the controller switched it off");
+        assertEquals(1000 + HOUR, r.lastScrewMotorOff().atMs);
+        assertTrue(r.lastScrewMotorOff().message.contains("the controller's idle timeout: no screw move for 60 min"),
+                r.lastScrewMotorOff().message);
+        now += 3 * HOUR;
+        r.countEpochMs();
+        r.lastScrewMotorOff();
+        r.view();
+        assertEquals(Arrays.asList(ControllerReset.EVENT_MOTOR_OFF), codes(), "journaled once");
+        assertEquals(1000 + HOUR, journal.get(0).atMs);
+        // the next move starts the idle clock again
+        r.screwMoved();
+        long moved = now;
+        now = moved + HOUR;
+        assertEquals(Long.valueOf(moved + HOUR), r.countEpochMs());
+        assertEquals(2, journal.size());
+    }
+
+    /** The timeout is the setting of the moment (dispense settings, screwIdleOffS). */
+    @Test
+    public void theIdleTimeoutIsTheSettingNow() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.screwMoved();
+        idleMs = 60_000;
+        now = 1000 + 60_000;
+        assertEquals(Long.valueOf(1000 + 60_000), r.countEpochMs());
+        assertTrue(r.lastScrewMotorOff().message.contains("no screw move for 1 min"), r.lastScrewMotorOff().message);
+        assertNull(reset(false, false).countEpochMs(), "without a timeout (tests): no idle switch-off");
+    }
+
+    /** A move long after the last one: the controller switched the motor off in between, though nothing read it then. */
+    @Test
+    public void aMoveAfterTheTimeoutStillPutsTheSwitchOffBeforeItOnRecord() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.screwMoved();
+        now = 1000 + 2 * HOUR;
+        r.screwMoved();
+        assertEquals(1000 + HOUR, r.lastScrewMotorOff().atMs);
+        now += HOUR - 1;
+        assertEquals(Long.valueOf(1000 + HOUR), r.countEpochMs(), "the move started the idle clock again");
+        assertEquals(1, journal.size());
+    }
+
+    /** A motor that is off has no idle timeout until a move switches it on again; a reset boots with it off. */
+    @Test
+    public void aMotorAlreadyOffHasNoIdleTimeoutUntilTheScrewMovesAgain() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.screwMoved();
+        now = 2000;
+        r.screwMotorOff("the engine's stop sequence: M18 B");
+        now = 1000 + 5 * HOUR;
+        assertEquals(Long.valueOf(2000), r.countEpochMs());
+        assertEquals(1, journal.size(), "no idle timeout of a motor that is off: " + codes());
+
+        now = 10 * HOUR;
+        r.screwMoved();
+        now += 1000;
+        r.connected(reply(BOOT), 'B', null);
+        now += 2 * HOUR;
+        assertEquals(Long.valueOf(10 * HOUR + 1000), r.countEpochMs(), "the reset's epoch, no idle switch-off after it");
+        assertEquals(Arrays.asList(ControllerReset.EVENT_MOTOR_OFF, ControllerReset.EVENT_RESET), codes());
+    }
+
+    /**
+     * OpenPnP restarted without a Stop (a crash, or a stop that disconnects first) leaves the motor on: the controller's
+     * idle clock runs on from the screw's last move on record.
+     */
+    @Test
+    public void theScrewsLastMoveOutlivesAnEngineRestart() {
+        ControllerReset first = withIdle();
+        now = 1000;
+        first.screwMoved();
+        first.journalScrewMotion();
+        assertEquals(Arrays.asList(ControllerReset.EVENT_SCREW_MOTION), codes());
+        assertEquals(1000, journal.get(0).atMs);
+        now = 1000 + HOUR / 2;
+        ControllerReset second = withIdle();
+        assertNull(second.countEpochMs(), "still on");
+        now = 1000 + HOUR;
+        assertEquals(Long.valueOf(1000 + HOUR), second.countEpochMs(), "the idle clock ran on across the restart");
+        now += HOUR;
+        assertEquals(Long.valueOf(1000 + HOUR), withIdle().countEpochMs(), "and its switch-off is on record once");
+        assertEquals(Arrays.asList(ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_MOTOR_OFF), codes());
+    }
+
+    /**
+     * The screw's moves are journaled at most every {@link ControllerReset#MOTION_JOURNAL_MS} (a restart may date the
+     * last one that much early: the idle switch-off then only comes sooner), and the first one after a switch-off at
+     * once (it must not read as older than the switch-off after a restart).
+     */
+    @Test
+    public void theScrewsMovesAreJournaledNowAndThen() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.journalScrewMotion();
+        assertTrue(journal.isEmpty(), "no move yet");
+        r.screwMoved();
+        r.journalScrewMotion();
+        now = 2000;
+        r.screwMoved();
+        r.journalScrewMotion();
+        assertEquals(1, journal.size(), "a minute later: not again");
+        now = 1000 + ControllerReset.MOTION_JOURNAL_MS;
+        r.screwMoved();
+        r.journalScrewMotion();
+        assertEquals(2, journal.size());
+        now += 1000;
+        r.screwMotorOff("a STOP");
+        now += 1000;
+        r.screwMoved();
+        r.journalScrewMotion();
+        assertEquals(Arrays.asList(ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_SCREW_MOTION,
+                ControllerReset.EVENT_MOTOR_OFF, ControllerReset.EVENT_SCREW_MOTION), codes());
+        long moved = now;
+        now = moved + HOUR;
+        assertEquals(Long.valueOf(moved + HOUR), withIdle().countEpochMs(), "after a restart, from the move after it");
+    }
+
     @Test
     public void theScrewCountEpochMovesOnlyOnAResetOrAnUnreadConnect() {
         ControllerReset r = reset(false, false);

@@ -151,6 +151,12 @@ public class DispenseConfig {
     public boolean honorBacklash = true;
     /** Timeout for one streamed command acknowledgement. */
     public long commandTimeoutMs = 10000;
+    /**
+     * BR-02: the controller switches the screw's motor off after this long without a move (Marlin's
+     * DEFAULT_STEPPER_DEACTIVE_TIME, 3600 s on the LumenPnP's board), s. Unpowered, the screw may turn, so a start
+     * angle set before then is measured again (I11); the engine counts from the last screw move it knows of.
+     */
+    public double screwIdleOffS = 3600;
 
     // --- manual prime / test dot at the waste place, calibration prime ---------------------------
     // Board runs purge on the purge row instead (I9), in the same pressure session as the work.
@@ -801,6 +807,10 @@ public class DispenseConfig {
         }
         if (bExtrudeSign != 1 && bExtrudeSign != -1) {
             p.add("bExtrudeSign must be +1 or -1");
+        }
+        if (!(screwIdleOffS > 0 && Double.isFinite(screwIdleOffS))) {
+            p.add("screwIdleOffS must be > 0 s: the controller's idle timeout of the screw's motor (Marlin's "
+                    + "DEFAULT_STEPPER_DEACTIVE_TIME, 3600 s on the LumenPnP)");
         }
         if (!(zLiftAccelMmS2 > 0 && zLiftAccelMmS2 <= 5000 && travelAccelMmS2 > 0 && travelAccelMmS2 <= 5000)) {
             p.add("travelAccelMmS2 and zLiftAccelMmS2 must be > 0 and <= 5000 (the screw's acceleration is the "

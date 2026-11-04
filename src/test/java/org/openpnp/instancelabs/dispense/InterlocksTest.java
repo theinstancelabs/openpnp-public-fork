@@ -177,6 +177,38 @@ public class InterlocksTest {
     }
 
     /**
+     * BR-02: with its motor off (a STOP's M18 B, the engine's stop sequence, the controller's idle timeout) the screw
+     * turns freely (118 deg became 226 deg on the bench), so an angle set before it is lost: measured again, never
+     * confirmed. The switch-off dates the screw count too.
+     */
+    @Test
+    public void i11AfterTheScrewMotorWasSwitchedOffTheAngleIsMeasuredAgain() {
+        Interlocks.Inputs in = ok();
+        in.screwMotorOffAtMs = 3500L;
+        in.screwMotorOffWhy = "the screw motor was switched off at 16:20 (a STOP)";
+        in.controllerResetAtMs = 3500L;
+        InterlockReport r = Interlocks.check(in);
+        assertTrue(r.has("I11"), r.toString());
+        assertTrue(r.toString().contains("the screw motor was switched off at 16:20 (a STOP) after the screw start "
+                + "angle was set: the screw may have turned: measure the start angle again"), r.toString());
+        assertFalse(r.toString().contains("confirm it"), r.toString());
+        assertFalse(r.toString().contains("controller was reset"), r.toString());
+        in.cfg.profile.startAngleSetAtMs = 3500L; // measured right after it
+        assertFalse(Interlocks.check(in).has("I11"), Interlocks.check(in).toString());
+        // a switch-off before the angle was set: nothing to measure
+        in.cfg.profile.startAngleSetAtMs = 4000L;
+        in.screwMotorOffAtMs = 3900L;
+        assertFalse(Interlocks.check(in).has("I11"));
+        // whole revolutions per dot do not depend on the angle
+        in = ok();
+        in.screwMotorOffAtMs = 3500L;
+        in.screwMotorOffWhy = "the screw motor was switched off at 16:20 (a STOP)";
+        in.cfg.profile.netStepsPerDot = 1600;
+        in.plan = GcodeStreamTest.toyPlan(in.cfg);
+        assertFalse(Interlocks.check(in).has("I11"), Interlocks.check(in).toString());
+    }
+
+    /**
      * BR-02: after a controller reset no task homes by itself (the home needs the operator's word that nothing is
      * below): the unknown position is a MACHINE violation, also for a task that would home first.
      */

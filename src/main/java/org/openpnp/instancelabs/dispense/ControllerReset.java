@@ -38,6 +38,16 @@ import java.util.regex.Pattern;
  * follow a power cycle that build saw and nobody answered: it dates the screw count once ({@link #EVENT_COUNT_EPOCH}),
  * so I11 asks for the start angle; the position is read at the connect as usual.</p>
  *
+ * <p>The screw's motor switched off dates the screw count as a reset does ({@link #EVENT_MOTOR_OFF}): unpowered, the
+ * screw turns freely (the bench measured 118 deg, then 226 deg after a motor-off), so the step count no longer gives
+ * its phase, and I11 wants the angle measured again (no confirm). The motor goes off at a STOP whose DISABLE_COMMAND
+ * sends M18 B, at the engine's own stop sequence (its M18 B), and when the controller's idle timeout passes without a
+ * screw move (Marlin's DEFAULT_STEPPER_DEACTIVE_TIME): that one is dated at the last move the engine knows of plus the
+ * timeout, found when the state is next read, and journaled once. Marlin restarts its idle clock on a move of any axis,
+ * and a move runs on after its acknowledgement: counting only the screw's acknowledged moves can find a switch-off
+ * that did not happen, not miss one. The last screw move is journaled now and then ({@link #EVENT_SCREW_MOTION}), so
+ * the idle clock outlives a restart that left the motor on.</p>
+ *
  * <p>Times are epoch ms from an injectable clock. Thread safe.</p>
  */
 public final class ControllerReset {
@@ -60,6 +70,15 @@ public final class ControllerReset {
     public static final String EVENT_COUNT_EPOCH = "SCREW_COUNT_EPOCH";
     /** The first start of an engine that journals: a database without it was used by an earlier build. */
     public static final String EVENT_JOURNAL = "RESET_JOURNAL";
+    /** The screw's motor was switched off (M18 B, the controller's idle timeout): the screw may have turned. */
+    public static final String EVENT_MOTOR_OFF = "SCREW_MOTOR_OFF";
+    /** The screw turned (its last move, journaled now and then): the controller's idle clock runs from it. */
+    public static final String EVENT_SCREW_MOTION = "SCREW_MOTION";
+    /**
+     * The screw's moves go on record at most this often: a restart may then date the last one this much early, which
+     * only brings the idle switch-off sooner.
+     */
+    public static final long MOTION_JOURNAL_MS = 10 * 60_000L;
     private static final double TOL = 1e-3;
     private static final Pattern WORD = Pattern.compile("(?:^|\\s)([A-Z]):(-?\\d+(?:\\.\\d+)?)");
 
@@ -78,16 +97,30 @@ public final class ControllerReset {
 
     private final LongSupplier clock;
     private final Consumer<Event> journal;
+    /** The controller's idle timeout now (ms), or null: no idle switch-off is counted. */
+    private final LongSupplier idleOffMs;
     private boolean positionKnown;
     private String unknownWhy;
     private boolean detected;
     private Long detectedAtMs;
     private Map<String, Double> reported;
     private Long countEpochMs;
+    /** The last time the screw's motor was switched off, and why ("the screw motor was switched off at ..."). */
+    private Event motorOff;
+    /** The screw's last move while its motor is on (the idle clock), or null: none since it was last off. */
+    private Long lastMoveMs;
+    /** The last move put on record, or null: the next move goes on record at once. */
+    private Long journaledMoveMs;
 
     /** Without a journal: nothing outlives this engine (tests). */
     public ControllerReset(LongSupplier clock, boolean enabledAtStart, boolean homedAtStart) {
         this(clock, enabledAtStart, homedAtStart, null, null);
+    }
+
+    /** Without the controller's idle timeout: only the M18s switch the screw's motor off (tests). */
+    public ControllerReset(LongSupplier clock, boolean enabledAtStart, boolean homedAtStart, List<Event> history,
+            Consumer<Event> journal) {
+        this(clock, enabledAtStart, homedAtStart, history, journal, null);
     }
 
     /**
@@ -96,16 +129,29 @@ public final class ControllerReset {
      * @param homedAtStart whether it was homed then
      * @param history what earlier engines journaled: the newest event of each code, oldest first (null = none)
      * @param journal where this engine's changes go, to be read back after a restart (null = nowhere)
+     * @param idleOffMs the controller's idle timeout of the moment, ms (the dispense settings); null = none
      */
     public ControllerReset(LongSupplier clock, boolean enabledAtStart, boolean homedAtStart, List<Event> history,
-            Consumer<Event> journal) {
+            Consumer<Event> journal, LongSupplier idleOffMs) {
         this.clock = clock == null ? System::currentTimeMillis : clock;
         this.journal = journal;
+        this.idleOffMs = idleOffMs;
         positionKnown = true;
         for (Event e : history == null ? Collections.<Event> emptyList() : history) {
             if (EVENT_RESET.equals(e.code)) {
                 detectedAtMs = e.atMs; // what it reported is not journaled: reported stays null
                 unknown(e.message, e.atMs);
+                stopIdleClock(e.atMs); // the controller boots with its motors off
+            }
+            else if (EVENT_MOTOR_OFF.equals(e.code)) {
+                switchedOff(e);
+            }
+            else if (EVENT_SCREW_MOTION.equals(e.code)) {
+                // a move after the last switch-off and reset: the motor stayed on, the idle clock runs on from it
+                if ((motorOff == null || e.atMs > motorOff.atMs) && (detectedAtMs == null || e.atMs > detectedAtMs)) {
+                    lastMoveMs = e.atMs;
+                    journaledMoveMs = e.atMs;
+                }
             }
             else if (EVENT_COUNT_EPOCH.equals(e.code)) {
                 countEpochMs = later(countEpochMs, e.atMs);
@@ -208,7 +254,104 @@ public final class ControllerReset {
             }
             unknown(String.format(Locale.ROOT, "the controller was reset (a power cycle: at connect it reported "
                     + "X 0, Y 0, Z 0 and %s), so the head may be anywhere", rot), now);
+            stopIdleClock(now); // it boots with its motors off: the count's epoch covers the screw
             record(EVENT_RESET, now, unknownWhy);
+        }
+    }
+
+    /**
+     * The screw's motor was switched off now: an M18 that names it (a STOP's DISABLE_COMMAND, the engine's stop
+     * sequence). Journaled; dates the screw count. {@code cause} in plain words ("a STOP: ...").
+     */
+    public synchronized void screwMotorOff(String cause) {
+        long now = clock.getAsLong();
+        idleCheck(now); // an idle switch-off before it goes on record first
+        Event e = new Event(EVENT_MOTOR_OFF, now, offText(now, cause));
+        switchedOff(e);
+        record(e.code, e.atMs, e.message);
+    }
+
+    /**
+     * The screw turned now (a G0/G1 of its axis was acknowledged): the controller's idle clock starts again. Cheap and
+     * without I/O, as the engine's stream calls it per line, unless the timeout passed before this move unread (then
+     * that switch-off is journaled first); the moves go on record with {@link #journalScrewMotion}.
+     */
+    public synchronized void screwMoved() {
+        long now = clock.getAsLong();
+        idleCheck(now);
+        lastMoveMs = now;
+    }
+
+    /**
+     * Puts the screw's last move on record, at most every {@link #MOTION_JOURNAL_MS} (the first after a switch-off at
+     * once): an OpenPnP restart that left the motor on then keeps the controller's idle clock. Called after a stream
+     * (never during one: a journal write between two lines would hold the needle at a dot).
+     */
+    public synchronized void journalScrewMotion() {
+        Long last = lastMoveMs;
+        if (last == null || (journaledMoveMs != null && last - journaledMoveMs < MOTION_JOURNAL_MS)) {
+            return;
+        }
+        journaledMoveMs = last;
+        record(EVENT_SCREW_MOTION, last, "the screw turned at " + ZCheck.clock(last) + idleNote());
+    }
+
+    /** The last switch-off of the screw's motor (atMs and the reason in plain words), or null: none on record. */
+    public synchronized Event lastScrewMotorOff() {
+        idleCheck(clock.getAsLong());
+        return motorOff;
+    }
+
+    /** ": the controller switches its motor off after 60 min without a move", or "" without a timeout. */
+    private String idleNote() {
+        Long t = idleOffMs == null ? null : idleOffMs.getAsLong();
+        return t == null || t <= 0 ? "" : ": the controller switches its motor off after " + duration(t)
+                + " without a move";
+    }
+
+    /** "the screw motor was switched off at 16:20 (a STOP)". */
+    private static String offText(long atMs, String cause) {
+        return "the screw motor was switched off at " + ZCheck.clock(atMs) + " (" + cause + ")";
+    }
+
+    /** "60 min", or "90 s" when it is no whole number of minutes. */
+    private static String duration(long ms) {
+        long s = Math.round(ms / 1000.0);
+        return s > 0 && s % 60 == 0 ? s / 60 + " min" : s + " s";
+    }
+
+    /**
+     * The controller's idle timeout passed since the screw's last move: it switched the motor off then. Journaled once
+     * (the idle clock stops with it), dated at the last move plus the timeout.
+     */
+    private void idleCheck(long now) {
+        Long t = idleOffMs == null ? null : idleOffMs.getAsLong();
+        if (lastMoveMs == null || t == null || t <= 0 || now - lastMoveMs < t) {
+            return;
+        }
+        long at = lastMoveMs + t;
+        Event e = new Event(EVENT_MOTOR_OFF, at, offText(at, "the controller's idle timeout: no screw move for "
+                + duration(t)));
+        switchedOff(e);
+        record(e.code, e.atMs, e.message);
+    }
+
+    /** A switch-off of the screw's motor (now or read back): the screw count is dated, the idle clock stops. */
+    private void switchedOff(Event e) {
+        if (motorOff == null || e.atMs >= motorOff.atMs) {
+            motorOff = e;
+        }
+        countEpochMs = later(countEpochMs, e.atMs);
+        stopIdleClock(e.atMs);
+    }
+
+    /** The motor is off since {@code atMs}: no idle timeout until a move switches it on; that move goes on record. */
+    private void stopIdleClock(long atMs) {
+        if (lastMoveMs != null && lastMoveMs <= atMs) {
+            lastMoveMs = null;
+        }
+        if (journaledMoveMs != null && journaledMoveMs <= atMs) {
+            journaledMoveMs = null;
         }
     }
 
@@ -249,26 +392,33 @@ public final class ControllerReset {
     }
 
     /**
-     * The status's view, read at once: positionKnown, positionUnknownWhy and powerCycle {detected, atMs, reported}
-     * (field by field, a home in between could show an unknown position without its reason).
+     * The status's view, read at once: positionKnown, positionUnknownWhy, powerCycle {detected, atMs, reported} and
+     * screwMotorOff {atMs, why} (field by field, a home in between could show an unknown position without its reason).
      */
     public synchronized Map<String, Object> view() {
+        idleCheck(clock.getAsLong());
         Map<String, Object> pc = new LinkedHashMap<>();
         pc.put("detected", detected);
         pc.put("atMs", detectedAtMs);
         pc.put("reported", reported());
+        Map<String, Object> off = new LinkedHashMap<>();
+        off.put("atMs", motorOff == null ? null : motorOff.atMs);
+        off.put("why", motorOff == null ? null : motorOff.message);
         Map<String, Object> v = new LinkedHashMap<>();
         v.put("positionKnown", positionKnown);
         v.put("positionUnknownWhy", unknownWhy());
         v.put("powerCycle", pc);
+        v.put("screwMotorOff", off);
         return v;
     }
 
     /**
-     * When the B step count last restarted or may have: a detected reset or a connect whose position could not be
-     * read; null if neither was seen since the engine started.
+     * When the B step count last restarted or may have, or stopped giving the screw's phase: a detected reset, a
+     * connect whose position could not be read, or the screw's motor switched off (it may have turned); null if none
+     * was seen.
      */
     public synchronized Long countEpochMs() {
+        idleCheck(clock.getAsLong());
         return countEpochMs;
     }
 

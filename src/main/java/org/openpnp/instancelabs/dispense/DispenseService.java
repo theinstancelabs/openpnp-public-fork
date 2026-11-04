@@ -148,6 +148,26 @@ public final class DispenseService {
     private final HomeTracker homeTracker;
     /** BR-02: a controller reset seen at a connect; the position is unknown until a home. */
     private final ControllerReset controllerReset;
+    /**
+     * BR-02: the line of the DISABLE_COMMAND that switches the screw's motor off, as the disable under way found it
+     * (machineAboutToBeDisabled; null: none, or the driver was not connected), journaled once the disable has ended.
+     */
+    private volatile String stopScrewOff;
+    /** BR-02: the engine's own screw moves (the controller's idle clock) and its stop sequence's M18 B. */
+    private final DispenseExecutor.ScrewWatch screwWatch = new DispenseExecutor.ScrewWatch() {
+        @Override
+        public void turned() {
+            controllerReset.screwMoved();
+        }
+
+        @Override
+        public void switchedOff(String line, boolean acknowledged) {
+            // a send that failed on a closed link put nothing on the wire (a stop that disconnects first)
+            if (acknowledged || screwDriverConnected()) {
+                controllerReset.screwMotorOff("the engine's stop sequence: " + line);
+            }
+        }
+    };
     /** BR-02: the CONNECT_COMMAND's G92 was warned about (once per engine). */
     private volatile boolean connectG92Warned;
     /** The last good open-air N1 baseline (the probe's part-on-N1 check across tasks). */
@@ -185,6 +205,16 @@ public final class DispenseService {
      * it there. Null in every other use.
      */
     static volatile java.util.function.Consumer<String> testHook;
+    /**
+     * Tests only: the clock of the controller reset journal and of the screw motor's idle timeout (BR-02), read at each
+     * call; null = the system clock.
+     */
+    static volatile java.util.function.LongSupplier testClock;
+
+    private static long resetClockMs() {
+        java.util.function.LongSupplier t = testClock;
+        return t != null ? t.getAsLong() : System.currentTimeMillis();
+    }
 
     private static void hook(String point) {
         java.util.function.Consumer<String> h = testHook;
@@ -310,8 +340,9 @@ public final class DispenseService {
         }
         Machine machine = configuration.getMachine();
         homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
-        controllerReset = new ControllerReset(null, machine != null && machine.isEnabled(),
-                machine != null && machine.isHomed(), resetHistory(dbExisted), this::journalReset);
+        controllerReset = new ControllerReset(DispenseService::resetClockMs, machine != null && machine.isEnabled(),
+                machine != null && machine.isHomed(), resetHistory(dbExisted), this::journalReset,
+                () -> Math.round(cfg.screwIdleOffS * 1000));
         if (machine != null) {
             machine.addListener(homeTracker);
             machineListener = new MachineListener.Adapter() {
@@ -331,6 +362,10 @@ public final class DispenseService {
 
                 @Override
                 public void machineAboutToBeDisabled(Machine m, String reason) {
+                    // BR-02: whether the DISABLE_COMMAND about to go out switches the screw's motor off, read while
+                    // the driver is still as the disable found it (a stop that disconnects first sends none of it);
+                    // journaled once the command has gone out (below), so no write holds back its M410
+                    stopScrewOff = screwOffLineOfDisable(m);
                     // Runs on the Stop thread right before the driver's DISABLE_COMMAND (M410, valve,
                     // pump, ...): stop the stream, then let a line that already passed its abort check
                     // reach the wire first, so no engine motion line can follow the M410.
@@ -345,6 +380,12 @@ public final class DispenseService {
                 public void machineDisabled(Machine m, String reason) {
                     bZeroed.set(false);
                     abort("machine disabled: " + reason);
+                    journalStopScrewOff();
+                }
+
+                @Override
+                public void machineDisableFailed(Machine m, String reason) {
+                    journalStopScrewOff(); // the lines before the failure, its M18 among them maybe, went out
                 }
             };
             machine.addListener(machineListener);
@@ -463,7 +504,8 @@ public final class DispenseService {
     /** BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. */
     private void journalReset(ControllerReset.Event e) {
         try {
-            String level = ControllerReset.EVENT_KNOWN.equals(e.code) ? "INFO" : "WARN";
+            String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
+                    e.code) ? "INFO" : "WARN";
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
         catch (SQLException ex) {
@@ -473,8 +515,9 @@ public final class DispenseService {
     }
 
     /**
-     * BR-02: what earlier engines journaled about controller resets (the newest of each kind), so a restart keeps the
-     * screw count's epoch and an unknown position. Unreadable, it counts as an unread connect: unknown until a home.
+     * BR-02: what earlier engines journaled about controller resets and the screw's motor (the newest of each kind),
+     * so a restart keeps the screw count's epoch, an unknown position and the controller's idle clock. Unreadable, it
+     * counts as an unread connect: unknown until a home.
      */
     private List<ControllerReset.Event> resetHistory(boolean dbExisted) {
         List<ControllerReset.Event> h = new ArrayList<>();
@@ -493,7 +536,8 @@ public final class DispenseService {
                         + "(BR-02)", now);
             }
             for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
-                    ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH)) {
+                    ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH, ControllerReset.EVENT_MOTOR_OFF,
+                    ControllerReset.EVENT_SCREW_MOTION)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }
@@ -505,6 +549,69 @@ public final class DispenseService {
                     + "reset"));
         }
         return h;
+    }
+
+    /** The screw's axis (the configured auger axis) when it is a controller axis on a GcodeDriver, else null. */
+    private ReferenceControllerAxis screwAxis(Machine m) {
+        if (m == null) {
+            return null;
+        }
+        for (org.openpnp.spi.Axis a : m.getAxes()) {
+            if (a.getName().equals(cfg.bAxisName) && a instanceof ReferenceControllerAxis
+                    && ((ReferenceControllerAxis) a).getDriver() instanceof GcodeDriver) {
+                return (ReferenceControllerAxis) a;
+            }
+        }
+        return null;
+    }
+
+    /** BR-02: the link to the screw's controller is open (unknown counts as open: the safe side). */
+    private boolean screwDriverConnected() {
+        ReferenceControllerAxis b = screwAxis(configuration.getMachine());
+        return b == null || ((GcodeDriver) b.getDriver()).isConnected();
+    }
+
+    /**
+     * BR-02: the line of the screw driver's DISABLE_COMMAND that switches the screw's motor off (an M18 or M84 naming
+     * its letter or no axis), when the driver is connected so that a disable sends it; else null. Read the command as
+     * MachineEndpoints' stop check does; no I/O (the Stop thread).
+     */
+    private String screwOffLineOfDisable(Machine m) {
+        ReferenceControllerAxis b = screwAxis(m);
+        GcodeDriver d = b == null ? null : (GcodeDriver) b.getDriver();
+        String dis = d != null && d.isConnected() ? d.getCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND) : null;
+        for (String l : dis == null ? new String[0] : dis.split("\n")) {
+            if (ControllerCommands.switchesScrewOff(l, b.getLetter())) {
+                return ControllerCommands.normalize(l);
+            }
+        }
+        return null;
+    }
+
+    /** BR-02: the disable that just ended sent the M18 its DISABLE_COMMAND has for the screw: on record. */
+    private void journalStopScrewOff() {
+        String line = stopScrewOff;
+        stopScrewOff = null;
+        if (line != null) {
+            controllerReset.screwMotorOff("a STOP: its DISABLE_COMMAND sends " + line);
+        }
+    }
+
+    /**
+     * BR-02: a line sent to the controller outside the engine's streams (the API's G-code passthrough): a G0/G1 of the
+     * screw restarts the controller's idle clock (and goes on record now and then), an M18/M84 that names the screw or
+     * no axis switches its motor off. Call it once the line was sent.
+     */
+    public void noteControllerLine(String line) {
+        ReferenceControllerAxis b = screwAxis(configuration.getMachine());
+        String letter = b == null ? null : b.getLetter(); // unknown: only an M18 of every motor counts
+        if (ControllerCommands.switchesScrewOff(line, letter)) {
+            controllerReset.screwMotorOff("a G-code line: " + ControllerCommands.normalize(line));
+        }
+        else if (ControllerCommands.turnsScrew(line, letter)) {
+            controllerReset.screwMoved();
+            controllerReset.journalScrewMotion();
+        }
     }
 
     /** The controller's M115 answer on the current connection. */
@@ -800,15 +907,22 @@ public final class DispenseService {
 
     /**
      * I11: sets (angle != null) or confirms the screw start angle for the current controller
-     * power-up (the B step count restarts at power-up).
+     * power-up (the B step count restarts at power-up). A confirm cannot keep an angle set before a detected reset or
+     * a switch-off of the screw's motor (BR-02): it must be measured again.
      */
     public synchronized DispenseProfile setStartAngle(Double angleDeg, String note) throws IOException {
         Long reset = controllerReset.detectedAtMs();
+        ControllerReset.Event off = controllerReset.lastScrewMotorOff();
         Long setAt = cfg.profile.startAngleSetAtMs;
         if (angleDeg == null && reset != null && (setAt == null || setAt < reset)) {
             // BR-02: the B step count restarted at that reset for sure, so the old angle cannot be confirmed
             throw new EngineRefusal(409, "refused", "the controller was reset after the screw start angle was set, so "
                     + "the angle is lost: measure it again and set it (a confirm cannot keep it)");
+        }
+        if (angleDeg == null && off != null && (setAt == null || setAt < off.atMs)) {
+            // BR-02: unpowered, the screw may have turned with its step count unchanged: only a measure tells
+            throw new EngineRefusal(409, "refused", off.message + " after the screw start angle was set: the screw may "
+                    + "have turned, so the angle is lost: measure it again and set it (a confirm cannot keep it)");
         }
         DispenseConfig c = cfg.copy();
         if (angleDeg != null) {
@@ -836,9 +950,10 @@ public final class DispenseService {
     }
 
     /**
-     * When the B step count last restarted or may have (BR-02: a detected controller reset, or a connect whose
-     * position could not be read), or null: the screw start angle (I11) and partial-turn records are checked
-     * against it. A reconnect of a powered controller keeps the count.
+     * When the B step count last restarted or may have, or stopped giving the screw's phase (BR-02: a detected
+     * controller reset, a connect whose position could not be read, or the screw's motor switched off), or null: the
+     * screw start angle (I11) and partial-turn records are checked against it. A reconnect of a powered controller
+     * keeps the count.
      */
     public Long getControllerResetAtMs() {
         return controllerReset.countEpochMs();
@@ -2460,6 +2575,9 @@ public final class DispenseService {
         in.scope = scope == null ? new Interlocks.Scope() : scope;
         in.controllerResetAtMs = controllerReset.countEpochMs();
         in.controllerResetDetectedAtMs = controllerReset.detectedAtMs();
+        ControllerReset.Event off = controllerReset.lastScrewMotorOff();
+        in.screwMotorOffAtMs = off == null ? null : off.atMs;
+        in.screwMotorOffWhy = off == null ? null : off.message;
         in.positionUnknownWhy = controllerReset.unknownWhy();
         in.boardRun = plan != null;
         in.purgeDots = plan == null ? 0 : DoseBlocks.purgeSpotsNeeded(plan, c);
@@ -3236,7 +3354,7 @@ public final class DispenseService {
         DispenseConfig c = cfg;
         OpenPnpRawMapper mapper = new OpenPnpRawMapper(m, nozzle, c.bAxisName);
         DispenseExecutor exec = new DispenseExecutor(c, new DriverGcodeChannel(mapper.getDriver()), mapper.letterB(),
-                System::currentTimeMillis);
+                System::currentTimeMillis).watchScrew(screwWatch);
         HomeReport rep = HomeReport.of(homePlan());
         activeExecutor = exec;
         try {
@@ -5896,7 +6014,7 @@ public final class DispenseService {
             m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
             mapper = new OpenPnpRawMapper(m, nozzle, c.bAxisName);
             channel = new DriverGcodeChannel(mapper.getDriver());
-            exec = new DispenseExecutor(c, channel, mapper.letterB(), System::currentTimeMillis);
+            exec = new DispenseExecutor(c, channel, mapper.letterB(), System::currentTimeMillis).watchScrew(screwWatch);
             activeExecutor = exec;
             boolean watchdog = probeKeepalive(); // also notes the simulator identity (M115) of this connection
             keepalive = c.keepaliveEnabled && watchdog;
@@ -5984,6 +6102,10 @@ public final class DispenseService {
                 r.message = String.valueOf(e.getMessage());
                 db.event(r.runId, "ERROR", "I1", "stream stopped, pneumatics off sent: " + r.message);
                 throw e;
+            }
+            finally {
+                // BR-02: the screw's last move on record once the stream has ended (never between its lines)
+                controllerReset.journalScrewMotion();
             }
             mapper.resync(p.finalPlanned, p.finalDriver, p.finalB);
             bZeroed.set(true);

@@ -1224,6 +1224,14 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     }
 
     /**
+     * Instance Labs (BR-02): the link to the controller is open, so a disable sends the DISABLE_COMMAND (a disable after
+     * {@link #disconnect} sends nothing).
+     */
+    public boolean isConnected() {
+        return connected;
+    }
+
+    /**
      * Instance Labs (BR-44): the link kept open while the machine was off has died (its reader ended on the dead port),
      * so Start opens it again.
      */

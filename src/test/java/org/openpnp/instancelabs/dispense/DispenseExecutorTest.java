@@ -340,4 +340,83 @@ public class DispenseExecutorTest {
         assertEquals(stop(false), critical);
         assertTrue(r.warnings.contains("cleared a pending error"), r.warnings.toString());
     }
+
+    /** BR-02: what the watch of the screw's motor hears (the controller's idle clock, the stop sequence's M18). */
+    static class Watch implements DispenseExecutor.ScrewWatch {
+        final List<Long> turned = new ArrayList<>();
+        final List<String> off = new ArrayList<>();
+        final FakeChannel ch;
+
+        Watch(FakeChannel ch) {
+            this.ch = ch;
+        }
+
+        @Override
+        public void turned() {
+            turned.add(ch.now);
+        }
+
+        @Override
+        public void switchedOff(String line, boolean acknowledged) {
+            off.add(line + (acknowledged ? "" : " (failed)"));
+        }
+    }
+
+    /** BR-02: every acknowledged screw move restarts the controller's idle clock; a stream sends no M18. */
+    @Test
+    public void theWatchHearsEveryScrewMoveOfAStream() throws Exception {
+        DispenseConfig c = GcodeStreamTest.toyConfig();
+        GcodeProgram p = program(c, false);
+        FakeChannel ch = new FakeChannel();
+        Watch w = new Watch(ch);
+        DispenseExecutor ex = new DispenseExecutor(c, ch, "B", () -> ch.now).watchScrew(w);
+        ex.stream(p, run(3), null);
+        long bMoves = ch.sent.stream().filter(l -> l.startsWith("G1 B")).count();
+        assertTrue(bMoves > 0);
+        assertEquals(bMoves, w.turned.size(), "one per G1 B line");
+        assertEquals(new ArrayList<String>(), w.off);
+    }
+
+    /** BR-02: the I1 shutdown's M18 B switches the screw's motor off: heard also when its send failed. */
+    @Test
+    public void theWatchHearsTheStopSequencesM18() throws Exception {
+        DispenseConfig c = GcodeStreamTest.toyConfig();
+        GcodeProgram p = program(c, false);
+        FakeChannel ch = new FakeChannel();
+        ch.failAt = 20;
+        Watch w = new Watch(ch);
+        DispenseExecutor ex = new DispenseExecutor(c, ch, "B", () -> ch.now).watchScrew(w);
+        assertThrows(Exception.class, () -> ex.stream(p, run(3), null));
+        assertEquals(Arrays.asList("M18 B"), w.off);
+        FakeChannel dead = new FakeChannel() {
+            @Override
+            public void send(String line, long timeoutMs) throws Exception {
+                throw new Exception("link closed");
+            }
+        };
+        Watch w2 = new Watch(dead);
+        new DispenseExecutor(c, dead, "B", () -> dead.now).watchScrew(w2).shutdown(run(0));
+        assertEquals(Arrays.asList("M18 B (failed)"), w2.off);
+    }
+
+    /** BR-02: the lines that switch the screw's motor off (Marlin's M18 / M84) and the lines that turn it. */
+    @Test
+    public void whichLinesSwitchTheScrewMotorOffOrTurnTheScrew() {
+        for (String l : new String[] {"M18 B", "m18 b ; screw off", "M84 B", "M18", "M84", "M018 B", "M18B", "M18 S60",
+            "M18 X Y B"}) {
+            assertTrue(ControllerCommands.switchesScrewOff(l, "B"), l);
+        }
+        for (String l : new String[] {"M18 X Y Z", "M18 A", "M17 B", "M180", "M410", "G1 B10", "; M18 B", "",
+            "M107 P3"}) {
+            assertFalse(ControllerCommands.switchesScrewOff(l, "B"), l);
+        }
+        assertTrue(ControllerCommands.switchesScrewOff("M18 A", "A"), "the screw's configured letter");
+        for (String l : new String[] {"G1 B12.3456 F10800", "G0 X5 B1", "g1 b-3"}) {
+            assertTrue(ControllerCommands.turnsScrew(l, "B"), l);
+        }
+        for (String l : new String[] {"G1 X10 F3000", "G92 B0", "M201 B10000", "M203 B2400", "G4 P100", "M18 B",
+            "G1 A5"}) {
+            assertFalse(ControllerCommands.turnsScrew(l, "B"), l);
+        }
+    }
 }

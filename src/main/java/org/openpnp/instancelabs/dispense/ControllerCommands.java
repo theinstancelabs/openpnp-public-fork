@@ -130,6 +130,48 @@ public final class ControllerCommands {
     }
 
     /**
+     * BR-02: whether a line switches the screw's motor off: Marlin's M18 or M84 naming the screw's axis {@code letter},
+     * or no axis at all (every motor). An S alone sets Marlin's idle timeout instead; it counts as off all the same, the
+     * safe side: an off missed would keep a start angle the screw may have lost.
+     */
+    public static boolean switchesScrewOff(String line, String letter) {
+        String s = normalize(line);
+        String w = word(s);
+        if (!"M18".equals(w) && !"M84".equals(w)) {
+            return false;
+        }
+        String axes = parameterLetters(s).replace("S", "");
+        return axes.isEmpty() || names(axes, letter);
+    }
+
+    /** BR-02: whether a line turns the screw: a G0 or G1 naming its axis {@code letter}. */
+    public static boolean turnsScrew(String line, String letter) {
+        String s = normalize(line);
+        String w = word(s);
+        return ("G0".equals(w) || "G1".equals(w)) && names(parameterLetters(s), letter);
+    }
+
+    /** The parameter letters of a normalized line after its command word ("BF" for "G1 B12.5 F600"). */
+    private static String parameterLetters(String normalized) {
+        Matcher m = WORD.matcher(normalized);
+        if (!m.find()) {
+            return "";
+        }
+        StringBuilder b = new StringBuilder();
+        for (char c : normalized.substring(m.end()).toCharArray()) {
+            if (c >= 'A' && c <= 'Z') {
+                b.append(c);
+            }
+        }
+        return b.toString();
+    }
+
+    private static boolean names(String letters, String letter) {
+        return letter != null && !letter.isEmpty()
+                && letters.indexOf(Character.toUpperCase(letter.charAt(0))) >= 0;
+    }
+
+    /**
      * Why the line may not be sent, or null if it may. Comments and blank lines are allowed (the
      * driver strips them).
      */

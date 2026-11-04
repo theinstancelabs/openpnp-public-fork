@@ -1429,10 +1429,15 @@ public class RegistrationSimTest {
         assertEquals("board-registration", last.get("kind").getAsString());
     }
 
-    /** Start (a controller connect) and the start-angle confirm of the new connection (I11). */
+    /**
+     * Start (a controller connect) and the start angle measured again (I11; BR-02: the stop sequence of the task the
+     * STOP ended switched the screw's motor off, so a confirm cannot keep the angle).
+     */
     void restart() throws Exception {
         ok(post("/api/machine/enable", null));
-        ok(post("/api/screw/start-angle", "{}"));
+        double angle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile")
+                .get("startAngleDeg").getAsDouble();
+        ok(post("/api/screw/start-angle", "{\"startAngleDeg\":" + angle + "}"));
     }
 
     boolean n1Low() throws Exception {

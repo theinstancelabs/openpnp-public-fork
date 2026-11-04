@@ -723,6 +723,80 @@ public class DispenseServiceSimTest {
         assertEquals(8, svc.getConfig().purgeRow.usedSpots, "spots reserved before streaming stay used");
     }
 
+    /** The journal's screw motor switch-offs (BR-02). */
+    List<java.util.Map<String, Object>> motorOffs() throws Exception {
+        return svc.getDb().query("SELECT * FROM events WHERE code = ?", ControllerReset.EVENT_MOTOR_OFF);
+    }
+
+    /**
+     * BR-02: the engine's I1 shutdown ends with M18 B (an error here; an abort or I7 alike): with its motor off the screw
+     * turns freely, so I11 asks for the angle to be measured again and a bare confirm is refused.
+     */
+    @Test
+    public void theEnginesStopSequenceSwitchesTheScrewMotorOff() throws Exception {
+        DispensePlan plan = plan();
+        sim.server.mark();
+        sim.server.failAtLine = 30; // inside the pressure session
+        RunResult r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.ERROR, r.status, r.toString());
+        assertTrue(sim.server.sinceMark().contains("M18 B"));
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(30)));
+        String why = String.valueOf(motorOffs().get(0).get("message"));
+        assertTrue(why.startsWith("the screw motor was switched off at ")
+                && why.endsWith(" (the engine's stop sequence: M18 B)"), why);
+        assertTrue(svc.getControllerResetAtMs() > svc.getConfig().profile.startAngleSetAtMs, "the screw count is dated");
+        assertTrue(svc.getControllerReset().isPositionKnown(), "the head's motors stayed on");
+        InterlockReport i = svc.checkInterlocks(plan, 0);
+        assertTrue(i.has("I11"), i.toString());
+        assertTrue(i.toString().contains(why + " after the screw start angle was set: the screw may have turned: "
+                + "measure the start angle again"), i.toString());
+        EngineRefusal e = assertThrows(EngineRefusal.class, () -> svc.setStartAngle(null, "not power-cycled"));
+        assertTrue(e.getMessage().contains("measure it again"), e.getMessage());
+        svc.setStartAngle(226.0, "measured again");
+        assertFalse(svc.checkInterlocks(plan, 0).has("I11"), svc.checkInterlocks(plan, 0).toString());
+    }
+
+    /**
+     * BR-02: Marlin switches an idle motor off after DEFAULT_STEPPER_DEACTIVE_TIME (the setting screwIdleOffS, 3600 s).
+     * A board run's screw moves restart that clock; an hour without one dates a switch-off at the last move plus the
+     * timeout, journaled once, and I11 asks for the angle to be measured again (the engine's clock is the test's).
+     */
+    @Test
+    public void anHourWithoutAScrewMoveSwitchesTheScrewMotorOff() throws Exception {
+        assertEquals(3600, new DispenseConfig().screwIdleOffS, 0);
+        assertEquals(3600, DispenseConfig.fromJson("{}").screwIdleOffS, 0, "a settings file from before it");
+        DispensePlan plan = plan();
+        long before = System.currentTimeMillis();
+        RunResult r = svc.runPlan(plan).get(60, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.OK, r.status, r.toString() + " " + r.interlocks);
+        long after = System.currentTimeMillis();
+        long hour = 3600_000L;
+        long[] now = {before + hour - 1};
+        DispenseService.testClock = () -> now[0];
+        try {
+            assertFalse(svc.checkInterlocks(plan, 0).has("I11"), "not idle for an hour since the run's last move");
+            assertNull(svc.getControllerResetAtMs());
+            now[0] = after + hour + 1000;
+            Long off = svc.getControllerResetAtMs();
+            assertTrue(off != null && off >= before + hour && off <= after + hour, "the last move + 1 h: " + off);
+            assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(30)));
+            assertEquals(off.longValue(), ((Number) motorOffs().get(0).get("ts")).longValue());
+            String why = String.valueOf(motorOffs().get(0).get("message"));
+            assertTrue(why.endsWith(" (the controller's idle timeout: no screw move for 60 min)"), why);
+            InterlockReport i = svc.checkInterlocks(plan, 0);
+            assertTrue(i.has("I11"), i.toString());
+            assertTrue(i.toString().contains(why + " after the screw start angle was set"), i.toString());
+            assertThrows(EngineRefusal.class, () -> svc.setStartAngle(null, "not power-cycled"));
+            now[0] += hour;
+            svc.getControllerResetAtMs();
+            svc.checkInterlocks(plan, 0);
+            assertEquals(1, motorOffs().size(), "journaled once");
+        }
+        finally {
+            DispenseService.testClock = null;
+        }
+    }
+
     @Test
     public void interlockRefusalSendsNothing() throws Exception {
         svc.recordNeedleChange(null, null); // I4

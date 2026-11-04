@@ -28,10 +28,23 @@ public class DispenseExecutor {
         DISPENSE, HOME, PROBE
     }
 
+    /** BR-02: hears what this executor's lines do to the screw's motor (the controller's idle clock, M18). */
+    public interface ScrewWatch {
+        /** A line that turns the screw (G0/G1 of its axis) was acknowledged. Called per line: no I/O. */
+        void turned();
+
+        /**
+         * The I1 shutdown sent a line that switches the screw's motor off (its M18), after the whole sequence;
+         * {@code acknowledged} false: its send failed, yet it may have reached the controller.
+         */
+        void switchedOff(String line, boolean acknowledged);
+    }
+
     private final DispenseConfig cfg;
     private final GcodeChannel channel;
     private final LongSupplier clock;
     private final String letterB;
+    private volatile ScrewWatch screwWatch;
     private volatile String abortReason;
     /** Guards the step "abort checked -> line handed to the channel" (see {@link #awaitLineWritten}). */
     private final Object gate = new Object();
@@ -46,6 +59,20 @@ public class DispenseExecutor {
         this.channel = channel;
         this.letterB = letterB;
         this.clock = clock == null ? System::currentTimeMillis : clock;
+    }
+
+    /** BR-02: tells {@code w} of this executor's screw moves and of its stop sequence's M18; returns this. */
+    public DispenseExecutor watchScrew(ScrewWatch w) {
+        screwWatch = w;
+        return this;
+    }
+
+    /** BR-02: an acknowledged line that turns the screw restarts the controller's idle clock. */
+    private void noteScrewMove(String line) {
+        ScrewWatch w = screwWatch;
+        if (w != null && ControllerCommands.turnsScrew(line, letterB)) {
+            w.turned();
+        }
     }
 
     /** Thread-safe; the streaming loop stops before its next line and shuts the pneumatics off. */
@@ -115,6 +142,7 @@ public class DispenseExecutor {
                 gate.notifyAll();
             }
         }
+        noteScrewMove(text);
     }
 
     /**
@@ -171,6 +199,7 @@ public class DispenseExecutor {
                 gate.notifyAll();
             }
         }
+        noteScrewMove(line);
         if (r != null) {
             r.linesSent++;
             r.streamedLines.add(line);
@@ -272,7 +301,11 @@ public class DispenseExecutor {
      */
     public void shutdown(RunResult result) {
         List<String> lines = GcodeStreamBuilder.abortLines(cfg, armed, letterB);
+        String screwOff = null;
+        boolean screwOffAcknowledged = false;
         for (String l : lines) {
+            boolean off = ControllerCommands.switchesScrewOff(l, letterB);
+            screwOff = off ? l : screwOff;
             try {
                 String note = channel.sendCritical(l, cfg.commandTimeoutMs);
                 if (note != null) {
@@ -280,6 +313,7 @@ public class DispenseExecutor {
                 }
                 result.linesSent++;
                 result.streamedLines.add(l);
+                screwOffAcknowledged = screwOffAcknowledged || off;
             }
             catch (Exception e) {
                 result.warnings.add("shutdown line '" + l + "' failed: " + e.getMessage());
@@ -288,5 +322,10 @@ public class DispenseExecutor {
         }
         armed = false;
         pressureOnMs = -1;
+        // BR-02: told after the whole sequence, so its journal write holds back none of the stop lines
+        ScrewWatch w = screwWatch;
+        if (w != null && screwOff != null) {
+            w.switchedOff(screwOff, screwOffAcknowledged);
+        }
     }
 }
