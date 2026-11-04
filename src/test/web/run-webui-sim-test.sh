@@ -35,7 +35,26 @@ export OUT_DIR="${OUT_DIR:-/tmp/il-webui-test-out}"
 [ -f "$BOARD" ] || { echo "test board not found: $BOARD" >&2; exit 2; }
 if ss -ltn | grep -q ":$IL_API_PORT "; then echo "port $IL_API_PORT is in use" >&2; exit 2; fi
 
-cleanup() { "$UINAV" --session "$SESSION" stop >/dev/null 2>&1 || true; }
+# After the session stopped: its dispense journal (every run, dot, pad calibration and dose record: dispense.db with its
+# WAL) into $OUT_DIR/dots, and each run with its dots as dots/<run_uuid>.json, so two CI runs can be compared dot by
+# dot (Infra's ask for BR-74: CI uploads OUT_DIR). It never fails the run.
+dump_dots() {
+  local db="${SESSION_CONFIG:-}/instancelabs/dispense.db"
+  [ -n "${SESSION_CONFIG:-}" ] && [ -f "$db" ] || return 0
+  mkdir -p "$OUT_DIR/dots"
+  cp -f "$db" "$OUT_DIR/dots/" && { cp -f "$db-wal" "$db-shm" "$OUT_DIR/dots/" 2>/dev/null || true; }
+  python3 -I - "$OUT_DIR/dots" <<'EOF'
+import json, os, sqlite3, sys
+out = sys.argv[1]
+c = sqlite3.connect(os.path.join(out, 'dispense.db'))
+c.row_factory = sqlite3.Row
+for run in c.execute('SELECT * FROM runs ORDER BY id').fetchall():
+    dots = [dict(d) for d in c.execute('SELECT * FROM dot_log WHERE run_uuid = ? ORDER BY dot_index, id', (run['run_uuid'],))]
+    with open(os.path.join(out, run['run_uuid'] + '.json'), 'w') as f:
+        json.dump({'run': dict(run), 'dots': dots}, f, indent=1)
+EOF
+}
+cleanup() { "$UINAV" --session "$SESSION" stop >/dev/null 2>&1 || true; dump_dots >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 # 1. the stage: a copy of the config with only the test board listed, and the SIM scene
