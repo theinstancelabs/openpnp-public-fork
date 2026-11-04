@@ -55,9 +55,12 @@ def jobs(text):
 
 
 def job_value(block, key):
-    """A job's one-line key (four spaces of indent), or None; a folded `>-` value is its lines joined by spaces."""
+    """A job's one-line key (four spaces of indent), or None; a folded `>-` value is its lines joined by spaces. A `>`
+    value keeps a newline after the ${{ }}, which GitHub reads as a string (an if: always true): refused."""
     m = re.search(rf"^    {re.escape(key)}: *(.*)$((?:\n      .*)*)", block, re.M)
-    if m and m.group(1).strip() in (">", ">-"):
+    if m and m.group(1).strip().startswith(">") and m.group(1).strip() != ">-":
+        raise ValueError(f"{key}: {m.group(1).strip()!r} keeps a trailing newline (use >-)")
+    if m and m.group(1).strip() == ">-":
         return " ".join(line.strip() for line in m.group(2).splitlines() if line.strip())
     return m.group(1).strip() if m else None
 
@@ -232,7 +235,9 @@ def gh_from_json(value):
         raise ValueError(f"fromJSON({value!r}): {e}")
 
 
-FUNCTIONS = {"format": gh_format, "contains": gh_contains, "fromJSON": gh_from_json}
+# the status functions as for a run being judged: never cancelled
+FUNCTIONS = {"format": gh_format, "contains": gh_contains, "fromJSON": gh_from_json, "cancelled": lambda: False,
+             "always": lambda: True}
 
 
 def interpolate(value, ctx):
@@ -303,6 +308,9 @@ def release_problems(text):
     if not cond:
         out.append("release has no if: it runs for every event")
     else:
+        if not re.search(r"!\s*cancelled\(\)|\balways\(\)", cond):
+            out.append("release's if has no !cancelled() or always(): GitHub then adds success() over every job before "
+                       "the gate, so a push that skipped a test job (job queued) never releases")
         if not _runs_release(cond, "push", INTEGRATION, "success"):
             out.append("release does not run for a green push to il/integration")
         for event, ref, gate in (("push", "refs/heads/il/scratch", "success"),
@@ -492,6 +500,10 @@ class Concurrency(unittest.TestCase):
         self.assertFalse(evaluate("contains(labels.*.name, 'full')", ctx))  # an element, not a part of one
         self.assertTrue(evaluate("contains(ref, 'IL/integ')", ctx))  # a string: a part of it, ignoring case
         self.assertTrue(evaluate("!contains(fromJSON(passed), 'maven') && contains(fromJSON(passed), 'ui-e2e')", ctx))
+        self.assertTrue(evaluate("!cancelled() && always()", ctx))  # a run being judged is not cancelled
+        with self.assertRaises(ValueError):  # `>` keeps a newline: GitHub reads that if as a string, always true
+            job_value("    if: >\n      ${{ x }}\n", "if")
+        self.assertEqual(job_value("    if: >-\n      ${{ x &&\n      y }}\n", "if"), "${{ x && y }}")
         for bad in ("startsWith(github.ref, 'x')", "fromJSON('[')", "github.ref = 'x'", "github.ref[0]", "'open"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 evaluate(bad, ctx)
@@ -564,6 +576,7 @@ class Release(unittest.TestCase):
                                                                    "github.event_name != 'pull_request'")),
             "any branch": text.replace(cond, cond.replace(" && github.ref == 'refs/heads/il/integration'", "")),
             "red gate": text.replace(cond, cond.replace(" && needs.gate.result == 'success'", "")),
+            "implicit success()": text.replace(cond, cond.replace("!cancelled() && ", "")),
             "no if": text.replace(f"    if: {cond}\n", ""),
             "more permissions": text.replace("      attestations: write\n",
                                              "      attestations: write\n      packages: write\n"),

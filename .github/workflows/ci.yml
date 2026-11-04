@@ -62,7 +62,8 @@ jobs:
   queued:
     # Which test jobs this commit's merge_group run passed, by job id (its gate's gate-needs artifact): a push skips
     # those. Only a push to il/integration asks; anything unexpected (an API error, no such run, no artifact) answers
-    # [] and every test job runs here.
+    # [] and every test job runs here. Every test job needs it, so if this job itself fails (a lost runner), they are
+    # skipped and the gate is red, as for a failed build.
     name: Passed in the merge queue
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -376,12 +377,14 @@ jobs:
         # gate (it would eject the PR): the push then runs every test job
         if: github.event_name == 'merge_group'
         continue-on-error: true
+        timeout-minutes: 1
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: echo "$NEEDS" > needs.json
       - uses: actions/upload-artifact@v7
         if: github.event_name == 'merge_group'
         continue-on-error: true
+        timeout-minutes: 2  # a hang would hold the required check until the queue ejects the PR
         with:
           name: gate-needs
           path: needs.json
@@ -392,7 +395,9 @@ jobs:
   release:
     name: Release (versioned build for the deployer)
     needs: [gate]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/il/integration' && needs.gate.result == 'success'
+    # !cancelled(): without a status function GitHub adds success() over every job before the gate, so a push whose
+    # test jobs were skipped (job queued) would never release
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/il/integration' && needs.gate.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

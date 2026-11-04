@@ -64,6 +64,12 @@ class MergeQueue(unittest.TestCase):
             for event in ("pull_request", "merge_group", "workflow_dispatch"):  # queued answers [] there
                 self.assertTrue(self.runs(name, event, labels=["full-ci"]), (name, event))
 
+    def test_the_queued_job_may_read_the_queue_runs_and_is_bounded(self):
+        block = ci_wiring.jobs(self.ci)["queued"]
+        self.assertEqual(ci_wiring.job_map(block, "permissions"), {"contents": "read", "actions": "read  # the commit's "
+                         "merge_group runs and their artifacts"})
+        self.assertRegex(block, r"\n    timeout-minutes: [1-5]\n")
+
     def test_the_build_and_the_queued_job_always_run(self):
         js = ci_wiring.jobs(self.ci)
         for name in ("build", "queued"):
@@ -82,6 +88,7 @@ class MergeQueue(unittest.TestCase):
         for i in keep:
             self.assertIn("if: github.event_name == 'merge_group'", steps[i])
             self.assertIn("continue-on-error: true", steps[i])
+            self.assertRegex(steps[i], r"\n\s+timeout-minutes: [12](\s+#[^\n]*)?\n")  # a hang must not hold the gate
         write, upload = (steps[i] for i in keep)
         self.assertIn("NEEDS: ${{ toJSON(needs) }}", write)
         self.assertIn('echo "$NEEDS" > needs.json', write)
@@ -99,8 +106,8 @@ class MergeQueue(unittest.TestCase):
         self.assertIn('all(.[]; .result == "success")', g)
 
     def test_releases_still_come_only_from_a_push_to_il_integration(self):
-        self.assertIn("if: github.event_name == 'push' && github.ref == 'refs/heads/il/integration' && "
-                      "needs.gate.result == 'success'", job(self.ci, "release"))
+        self.assertIn("if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/il/integration' "
+                      "&& needs.gate.result == 'success' }}", job(self.ci, "release"))  # !cancelled(): see release_problems
 
 
 import importlib.util
