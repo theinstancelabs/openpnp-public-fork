@@ -38,7 +38,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WHAT = 'Feed step 20 -> 21.5 psi, drool check';
 const ACTIONS = ['quick stop (M410)', 'valve off', 'pump off', 'N1 valve off', 'N1 pump off', 'screw off (M18 B)'];
 const ACTIONS_IDLE = ['valve off', 'pump off', 'N1 valve off', 'N1 pump off'];
-const stub = { holder: null, takenFrom: null, refuseWrites: false, takeFails: false, takes: 0, releases: 0, stops: 0, writes: [], noClient: [] };
+const stub = { holder: null, takenFrom: null, refuseWrites: false, takingOver: false, takeFails: false, takes: 0, releases: 0, stops: 0, writes: [], noClient: [] };
 // BR-72: never guarded (STOP, Pressure off, a pad calibration's cancel, the lock), and data-only writes (photos, board
 // import, plan, pad types and their rules, package mappings, coupon readings, tip-setup definitions but not a mount)
 const FREE = /^\/api\/(stop|pressure\/stop|lock\/.*|pad-calibrations\/[^/]+\/cancel)$/;
@@ -88,6 +88,7 @@ async function stubRoutes(context) {
     if (method !== 'GET' && !FREE.test(url.pathname) && !DATA_ONLY.test(url.pathname)) {
       stub.writes.push(method + ' ' + url.pathname);
       const agentHas = stub.holder && stub.holder.kind === 'agent';
+      if (stub.takingOver) return route.fulfill({ status: 409, json: { error: 'taking-over', reason: 'Take control is still stopping Process\'s work: a moment', lock: lockView() } });
       if (agentHas || stub.refuseWrites) {
         const h = stub.holder || agent(1, 1);
         return route.fulfill({ status: 409, json: { error: 'locked', reason: 'Process has the machine (feed step check, since ' + new Date(h.sinceMs).toTimeString().slice(0, 5) + '). Take control to use it.', lock: { holder: h, takenFrom: null } } });
@@ -280,6 +281,23 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     await waitCell(page, /^You/);
     check('(8) the strip reads You', /^You/.test((await cellText(page)).v), await cellText(page));
     await page.screenshot({ path: path.join(OUT, 'lock-unconfirmed.png') });
+
+    // ---- (9) a write while a take still stops the agent (409 taking-over): the reason, no second Take control -------------------
+    await page.evaluate(() => { IL.msg('lock', null); IL.openView('machine', { keep: true }); });
+    stub.holder = user(Date.now());
+    await waitCell(page, /^You/);
+    await sleep(900);
+    stub.takingOver = true;
+    const fix9 = await page.evaluate(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled && x.dataset.fix !== 'take-control'); return b ? b.dataset.fix : null; });
+    if (fix9) {
+      const sel = '#pv-machine-act button[data-fix="' + fix9 + '"]';
+      await page.click(sel);
+      if (await page.evaluate((s) => /Press again/.test(document.querySelector(s).textContent), sel)) { await sleep(450); await page.click(sel); }
+      await page.waitForSelector('#pv-machine-act .refusal', { timeout: 8000 }).catch(() => null);
+      const r9 = await page.evaluate(() => { const r = Array.from(document.querySelectorAll('#pv-machine-act .refusal')).pop(); return r ? { text: r.textContent.replace(/\s+/g, ' ').trim(), take: !!r.querySelector('button[data-fix="take-control"]') } : null; });
+      check('(9) a take still stopping the agent: the refusal says so, without another Take control', r9 && /still stopping Process's work/.test(r9.text) && !r9.take, r9);
+    } else check('(9) a machine control to press', false, fix9);
+    stub.takingOver = false;
 
     // ---- pictures for the people: dark theme, and a phone ---------------------------------------------------------------------
     await page.evaluate(() => { IL.msg('lock', null); IL.panel.close(); });

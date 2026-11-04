@@ -42,7 +42,8 @@
     press2Ms: 4000, press2MinMs: 300, toastMs: 4000,
     needleDriftMm: 1.0, wasteNearMm: 3.0, attestMs: 8 * 3600 * 1000,
     planDebounceMs: 300, planEveryMs: 10000, eventsEveryMs: 5000,
-    lockWorkingMs: 10000, takeTimeoutMs: 60000,
+    // a take waits up to 120 s for a home in progress and 20 s for the STOP's confirmation (BR-72, #19 review)
+    lockWorkingMs: 10000, takeTimeoutMs: 240000,
   };
   const L = IL.LIMITS;
   /** Every request this page sends says it is the UI's (X-IL-Client): the engine's machine lock tells the user's
@@ -2769,6 +2770,8 @@
     const lines = viol.length ? viol : codeFromMessage(e && e.message);
     // a form filled before a mount or a needle change (409 tip-changed / needle-changed, §22.3): its values are another
     // tip's or needle's; Reload reads the page again (the values are taken again from the mounted tip)
+    // an agent holds the machine: Take control in the refusal; a take still stopping the agent (409 taking-over): its
+    // reason alone, the take under way answers for every window
     if (e && e.code === 'locked') {
       box.appendChild(el('div', { class: 'btn-row' }, IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true }, { cls: 'btn--sm' })));
     }
