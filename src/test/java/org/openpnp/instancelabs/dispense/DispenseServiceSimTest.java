@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -769,6 +770,56 @@ public class DispenseServiceSimTest {
         RunResult shots = svc.runShots("waste", 360, 3, true).get(60, TimeUnit.SECONDS);
         assertEquals(RunResult.Status.OK, shots.status, shots.toString());
         assertEquals(3, shots.dotsDone);
+    }
+
+    /**
+     * BR-82 re-review: the recipe's own lift (3 mm, the machine's hop height 1.2) is the hop of every dot the service
+     * lays: the dose blocks' estimate (the pad calibration's preview), shots, dose blocks and the landing check's purge
+     * in its band.
+     */
+    @Test
+    public void everyDotHopsToTheRecipesOwnLift() throws Exception {
+        svc.updateConfigAtomically(live -> {
+            live.profile.liftMm = 3.0;
+            live.hopHeightMm = 1.2;
+            return live;
+        });
+        DoseBlocksRequest req = LandingCheckBlocksTest.ladder(svc, LandingCheckBlocksTest.row(98, 40, 3));
+        assertEquals(Collections.nCopies(8 + 3, 3.0), dotLifts(svc.estimateBlocks(req.blocks).text()),
+                "the purge row's 8 dots and the block's 3");
+        RunResult shots = svc.runShots("waste", 360, 2, true).get(60, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.OK, shots.status, shots.toString());
+        assertEquals(Arrays.asList(3.0, 3.0), dotLifts(shots.streamedLines));
+        // a landing check's step: its 8 purge dots in its own band, then the block's 3
+        req.landingCheck = true;
+        req.purgeXy = LandingCheckBlocksTest.row(98, 46, 8);
+        req.image = false;
+        DoseBlocksResult r = svc.runDoseBlocks(req).get(120, TimeUnit.SECONDS);
+        assertTrue(r.ok, r.message);
+        assertEquals(Collections.nCopies(8 + 3, 3.0), dotLifts(r.run.streamedLines));
+    }
+
+    /**
+     * Each dot's lift in a stream (mm): its Z down (the G1 Z before the screw's M204 and B turn) minus its lift (the next
+     * G1 Z) in raw Z, which runs the other way on N2's see-saw (z2 = 63 - raw).
+     */
+    static List<Double> dotLifts(List<String> lines) {
+        List<Double> l = new ArrayList<>();
+        for (int i = 0; i + 2 < lines.size(); i++) {
+            if (lines.get(i).startsWith("G1 Z") && lines.get(i + 1).startsWith("M204")
+                    && lines.get(i + 2).startsWith("G1 B")) {
+                int lift = i + 3;
+                while (!lines.get(lift).startsWith("G1 Z")) {
+                    lift++;
+                }
+                l.add(Math.round((rawZ(lines.get(i)) - rawZ(lines.get(lift))) * 1e4) / 1e4);
+            }
+        }
+        return l;
+    }
+
+    static double rawZ(String line) {
+        return Double.parseDouble(line.split("\\s+")[1].substring(1));
     }
 
     /**

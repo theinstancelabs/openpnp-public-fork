@@ -26,6 +26,7 @@ const { chromium } = require(path.join(process.env.PLAYWRIGHT_DIR, 'node_modules
 const BASE = String(process.env.IL_BASE || process.env.IL_API_URL || '').replace(/\/?$/, '/');
 const OUT = process.env.OUT_DIR || '/tmp/il-run-flow-test-out';
 fs.mkdirSync(OUT, { recursive: true });
+require('./needs-before.cjs')('run-flow', ['webui-sim'], path.join(OUT, 'run-flow-results.json'));
 
 const results = [];
 function check(name, cond, detail) {

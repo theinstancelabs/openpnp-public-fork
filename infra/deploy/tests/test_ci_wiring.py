@@ -11,6 +11,7 @@
   passes on that release, and a release anyone else put at the tag first fails the step (the run must not end green
   while its build is never released).
 """
+import json
 import os
 import re
 import shutil
@@ -54,8 +55,13 @@ def jobs(text):
 
 
 def job_value(block, key):
-    """A job's one-line key (four spaces of indent), or None."""
-    m = re.search(rf"^    {re.escape(key)}: *(.*)$", block, re.M)
+    """A job's one-line key (four spaces of indent), or None; a folded `>-` value is its lines joined by spaces. A `>`
+    value keeps a newline after the ${{ }}, which GitHub reads as a string (an if: always true): refused."""
+    m = re.search(rf"^    {re.escape(key)}: *(.*)$((?:\n      .*)*)", block, re.M)
+    if m and m.group(1).strip().startswith(">") and m.group(1).strip() != ">-":
+        raise ValueError(f"{key}: {m.group(1).strip()!r} keeps a trailing newline (use >-)")
+    if m and m.group(1).strip() == ">-":
+        return " ".join(line.strip() for line in m.group(2).splitlines() if line.strip())
     return m.group(1).strip() if m else None
 
 
@@ -98,13 +104,13 @@ def step_run(step):
 
 # --- a GitHub Actions expression evaluator: the part of the language ci.yml uses -----------------------------------
 _TOKEN = re.compile(r"\s*(?:(?P<str>'(?:[^']|'')*')|(?P<num>\d+)|(?P<op>==|!=|&&|\|\||[!(),])"
-                    r"|(?P<name>[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)*))")
+                    r"|(?P<name>[A-Za-z_][\w-]*(?:\.(?:[A-Za-z_][\w-]*|\*))*))")
 
 
 def evaluate(expr, ctx):
     """Evaluate an expression the way GitHub does: '...' strings ('' is a quote), numbers, true/false/null, context
-    paths (one not in ctx is null), ==/!= (strings compared case-insensitively), !, && and || (which return an
-    operand, not a boolean), parentheses and format(). Anything else raises ValueError, so a change to ci.yml the
+    paths (one not in ctx is null; `labels.*.name` is one path), ==/!= (strings compared case-insensitively), !, && and
+    || (which return an operand, not a boolean), parentheses, format(), contains() and fromJSON(). Anything else raises ValueError, so a change to ci.yml the
     evaluator cannot read fails the test instead of passing it."""
     expr, toks, pos = expr.strip(), [], 0
     while pos < len(expr):
@@ -181,9 +187,9 @@ def evaluate(expr, ctx):
                     take()
                     args.append(disjunction())
                 take("op", ")")
-                if v != "format":
+                if v not in FUNCTIONS:
                     raise ValueError(f"function {v}() is not known to this evaluator")
-                return gh_format(*args)
+                return FUNCTIONS[v](*args)
             return ctx.get(v)
         raise ValueError(f"unexpected {v!r} in {expr!r}")
 
@@ -213,6 +219,25 @@ def to_str(v):
 def gh_format(fmt, *args):
     return re.sub(r"\{\{|\}\}|\{(\d+)\}",
                   lambda m: {"{{": "{", "}}": "}"}.get(m.group(0)) or to_str(args[int(m.group(1))]), fmt)
+
+
+def gh_contains(search, item):
+    """GitHub's contains(): an element of an array, or a part of a string; strings ignore case."""
+    if isinstance(search, list):
+        return any(equal(x, item) for x in search)
+    return to_str(item).lower() in to_str(search).lower()
+
+
+def gh_from_json(value):
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"fromJSON({value!r}): {e}")
+
+
+# the status functions as for a run being judged: never cancelled
+FUNCTIONS = {"format": gh_format, "contains": gh_contains, "fromJSON": gh_from_json, "cancelled": lambda: False,
+             "always": lambda: True}
 
 
 def interpolate(value, ctx):
@@ -283,6 +308,9 @@ def release_problems(text):
     if not cond:
         out.append("release has no if: it runs for every event")
     else:
+        if not re.search(r"!\s*cancelled\(\)|\balways\(\)", cond):
+            out.append("release's if has no !cancelled() or always(): GitHub then adds success() over every job before "
+                       "the gate, so a push that skipped a test job (job queued) never releases")
         if not _runs_release(cond, "push", INTEGRATION, "success"):
             out.append("release does not run for a green push to il/integration")
         for event, ref, gate in (("push", "refs/heads/il/scratch", "success"),
@@ -467,7 +495,16 @@ class Concurrency(unittest.TestCase):
         self.assertEqual(evaluate("github.event_name == 'pull_request' && 'pr' || 'other'", ctx), "other")
         self.assertEqual(evaluate("!(n != 7) && 'it''s'", ctx), "it's")
         self.assertEqual(evaluate("format('{{{0}}}', 'x')", ctx), "{x}")
-        for bad in ("contains(github.ref, 'x')", "github.ref = 'x'", "github.ref[0]", "'open"):
+        ctx = {"labels.*.name": ["Full-CI"], "passed": '["infra", "ui-e2e"]', "ref": "refs/heads/il/integration"}
+        self.assertTrue(evaluate("contains(labels.*.name, 'full-ci')", ctx))  # an element, ignoring case
+        self.assertFalse(evaluate("contains(labels.*.name, 'full')", ctx))  # an element, not a part of one
+        self.assertTrue(evaluate("contains(ref, 'IL/integ')", ctx))  # a string: a part of it, ignoring case
+        self.assertTrue(evaluate("!contains(fromJSON(passed), 'maven') && contains(fromJSON(passed), 'ui-e2e')", ctx))
+        self.assertTrue(evaluate("!cancelled() && always()", ctx))  # a run being judged is not cancelled
+        with self.assertRaises(ValueError):  # `>` keeps a newline: GitHub reads that if as a string, always true
+            job_value("    if: >\n      ${{ x }}\n", "if")
+        self.assertEqual(job_value("    if: >-\n      ${{ x &&\n      y }}\n", "if"), "${{ x && y }}")
+        for bad in ("startsWith(github.ref, 'x')", "fromJSON('[')", "github.ref = 'x'", "github.ref[0]", "'open"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 evaluate(bad, ctx)
 
@@ -539,6 +576,7 @@ class Release(unittest.TestCase):
                                                                    "github.event_name != 'pull_request'")),
             "any branch": text.replace(cond, cond.replace(" && github.ref == 'refs/heads/il/integration'", "")),
             "red gate": text.replace(cond, cond.replace(" && needs.gate.result == 'success'", "")),
+            "implicit success()": text.replace(cond, cond.replace("!cancelled() && ", "")),
             "no if": text.replace(f"    if: {cond}\n", ""),
             "more permissions": text.replace("      attestations: write\n",
                                              "      attestations: write\n      packages: write\n"),
