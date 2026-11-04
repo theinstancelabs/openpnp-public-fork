@@ -570,17 +570,28 @@ public class GcodeStreamTest {
         GcodeProgram armed = board(c, mapper(), toyPlan(c), false, true, 0L);
         assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(armed, c, "B"));
         assertEquals(11, pausedLifts(armed.text(), 10));
+        // a ping interval below the 250 ms cap sets the pieces: every 100 ms, 500 ms are five G4 P100
+        c.profile.liftPauseMs = 500;
+        c.keepaliveIntervalMs = 100;
+        GcodeProgram fast = board(c, mapper(), toyPlan(c), false, true, 0L);
+        assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(fast, c, "B"));
+        assertEquals(11, pausedLifts(fast.text(), 5, "G4 P100"));
     }
 
     /** Lifts (G1 Z … F3000) followed by exactly {@code pieces} lines of G4 P250: the dots' pauses. */
     static int pausedLifts(List<String> t, int pieces) {
+        return pausedLifts(t, pieces, "G4 P250");
+    }
+
+    /** Lifts (G1 Z … F3000) followed by exactly {@code pieces} lines of {@code piece}. */
+    static int pausedLifts(List<String> t, int pieces, String piece) {
         int n = 0;
         for (int i = 0; i + pieces < t.size(); i++) {
             if (!t.get(i).matches("G1 Z-?\\d+\\.\\d{4} F3000")) {
                 continue;
             }
             int k = 0;
-            while (i + 1 + k < t.size() && t.get(i + 1 + k).equals("G4 P250")) {
+            while (i + 1 + k < t.size() && t.get(i + 1 + k).equals(piece)) {
                 k++;
             }
             n += k == pieces ? 1 : 0;

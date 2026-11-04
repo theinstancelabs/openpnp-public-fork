@@ -126,7 +126,7 @@ One profile per pressure session, the same for the purge row and the work. Defau
 | `screwAccelDegS2` | 20000 | Sent as `M204 S` around the B moves only (1000..30000). |
 | `dwellMs` | 250 | Dwell after the forward turn, before the suck-back: the dot-size knob at fixed pressure. |
 | `gapMm` | 0.10 | Needle-to-surface gap while dispensing (0.05..0.15; >= 0.20 misses dots). |
-| `liftPauseMs` | 0 | Pause at the lift height after each dot, the pressure on, before any X/Y travel (0..5000 ms; 0 = none). The plastic 25G 0603 recipe lifts 3 mm (`liftMm`) and waits 500 ms: the paste thread breaks there instead of being dragged across the board. Sent as `G4 P<ms>` right after the lift, split like the dwell while the watchdog is armed, counted in every estimate (I7's pressurised time, the dot clock). In both fingerprints only when > 0 (` pause=500`), so records and plans made without it keep theirs. |
+| `liftPauseMs` | 0 | Pause at the lift height after each dot, the pressure on, before any X/Y travel (0..5000 ms; 0 = none). The plastic 25G 0603 recipe lifts 3 mm (`liftMm`) and waits 500 ms: the paste thread breaks there instead of being dragged across the board. Sent right after the lift, after the dot's end marker (a STOP in it leaves the laid dot counted), in `G4` pieces of at most 250 ms (`MAX_SETTLE_PIECE_MS`) and of the ping interval while the watchdog is armed, like the pump and valve settles: a STOP's valve-off waits at most one piece. Counted in every estimate (I7's pressurised time, the dot clock). In both fingerprints only when > 0 (` pause=500`), so records and plans made without it keep theirs. |
 | `liftMm` | null | The lift after each dot above its dispense Z (mm; > 0 and <= 10; null = the machine's `hopHeightMm`). The recipe's own, so a tip mount brings it back with the pause (the plastic 25G 0603 recipe: 3). Every dot's hop uses it (`DispenseConfig.liftMm()`): board, purge row, shots, calibration blocks, dot ladder, touch-off (a dot at a place, like the prime, lifts to `travelSafeZMm`). In both fingerprints only when set (` lift=3.000`), so records and plans made without it keep theirs. |
 | `purgeDots` | 8 | Purge dots on the purge row before the work (>= 2 for a partial turn: the first sets the start angle, at least one normal dot flushes it). |
 | `notes` | | Operator notes. |
@@ -393,8 +393,8 @@ G1 B<rest + net + suck> F<screwRpm·360>  ; forward: 844 steps = 190.0901°
 G4 P<dwellMs>
 G1 B<rest + net> F<screwRpm·360>         ; suck-back: 44 steps
 M204 S<zLiftAccelMmS2>                   ; 2000 (M204 S also caps B, and governs X/Y/Z)
-G1 Z<hop> F<zLiftFeedMmS·60>
-G4 P<liftPauseMs>                        ; only if > 0: pressure on at the lift height (the 25G recipe's 500)
+G1 Z<hop> F<zLiftFeedMmS·60>             ; the dot's end (DOT_END): a dot is counted once it is lifted
+G4 P250 / … / G4 P<rest>                 ; liftPauseMs > 0 only: the pause, pressure on, in pieces <= 250 ms
 ```
 B targets are absolute from the session's `G92 B0`: origin + steps / `bStepsPerDeg`, printed `%.4f`, always whole
 motor steps (Marlin rounds each absolute target to steps), so the screw rests exactly `netStepsPerDot` further after

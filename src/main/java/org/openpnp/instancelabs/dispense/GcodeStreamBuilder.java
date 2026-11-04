@@ -670,22 +670,22 @@ public class GcodeStreamBuilder {
         add("M400", GcodeProgram.Marker.SYNC);
     }
 
-    /**
-     * The per-dot dwell and the pause after the lift (the profile's): one G4, or pieces of the watchdog's ping interval
-     * when it is armed.
-     */
+    /** The per-dot dwell (the profile's): one G4, or pieces of the watchdog's ping interval when it is armed. */
     public void dwell(int ms) {
         dwell(ms, keepalive ? Math.max(100, cfg.keepaliveIntervalMs) : ms);
     }
 
     /**
-     * The longest G4 of a pump or valve settle: the controller runs a G4 to its end before the lines behind it, so a
-     * STOP's valve-off waits at most one piece, with or without the host watchdog (review 10-31, a 3 s settle was one
-     * G4 P3000).
+     * The longest G4 of a pump or valve settle and of the pause after the lift: the controller runs a G4 to its end
+     * before the lines behind it, so a STOP's valve-off waits at most one piece, with or without the host watchdog
+     * (review 10-31, a 3 s settle was one G4 P3000).
      */
     public static final int MAX_SETTLE_PIECE_MS = 250;
 
-    /** A pump or valve settle, in pieces of at most {@link #MAX_SETTLE_PIECE_MS} (and the ping interval). */
+    /**
+     * A pump or valve settle and the profile's pause after the lift (the pressure on in all three), in pieces of at
+     * most {@link #MAX_SETTLE_PIECE_MS} (and the ping interval).
+     */
     private void settle(int ms) {
         int ping = Math.max(100, cfg.keepaliveIntervalMs);
         dwell(ms, keepalive ? Math.min(MAX_SETTLE_PIECE_MS, ping) : MAX_SETTLE_PIECE_MS);
