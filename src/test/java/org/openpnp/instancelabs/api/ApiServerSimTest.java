@@ -371,6 +371,9 @@ public class ApiServerSimTest {
         assertTrue(line.contains(" 200"), line);
         line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", origin, "Sec-Fetch-Site", "same-origin");
         assertTrue(line.contains(" 404"), line);
+        // a real write from the page: STOP
+        line = rawStatusLine("POST", "/api/stop", "Host", host, "Origin", origin, "Sec-Fetch-Site", "same-origin");
+        assertTrue(line.contains(" 200"), line);
         // 3. a foreign Origin; 4. a foreign Host; 5. the Host of one entry with the Origin of the other
         line = rawStatusLine("POST", "/api/nope", "Host", host, "Origin", "https://evil.example");
         assertTrue(line.contains(" 403"), line);

@@ -1,6 +1,7 @@
 package org.openpnp.instancelabs.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -95,9 +96,40 @@ public class ApiBrowserSafetyTest {
         String r = refusal("POST", HOST, TAILNET, "cross-site", t);
         assertNotNull(r);
         assertTrue(r.contains("Sec-Fetch-Site"), r);
-        // the refusal names what is allowed
+        // a DNS-rebinding page reads the 403 as same-origin: it must not learn the tailnet name (review of #18)
         r = refusal("GET", "evil.example", null, null, t);
-        assertTrue(r.contains(TAILNET), r);
+        assertFalse(r.contains("lumen-thinkpad"), r);
+        // a same-site page (another port on the name) is refused even with the trusted Origin
+        assertNotNull(refusal("POST", HOST, TAILNET, "same-site", t));
+        // HEAD is a read, as GET
+        assertNull(refusal("HEAD", HOST, "https://evil.example", null, t));
+    }
+
+    @Test
+    public void loopbackKeepsItsOwnRuleEvenWithALoopbackEntry() {
+        // a trusted entry naming loopback must not take the local UI's http Origin away (Stop included)
+        Set<String> t = trusted("https://127.0.0.1:18877", TAILNET);
+        assertNull(refusal("POST", "127.0.0.1:18877", "http://127.0.0.1:18877", "same-origin", t));
+        assertNotNull(refusal("POST", "127.0.0.1:18877", "https://127.0.0.1:18877", null, t));
+    }
+
+    @Test
+    public void lanAccessWithTrustedOrigins() {
+        Set<String> t = trusted(TAILNET);
+        // a LAN Host keeps "http://" + Host; the tailnet Host still needs its own origin
+        assertNull(ApiServer.browserSafetyRefusal("POST", "192.168.1.20:18877", "http://192.168.1.20:18877", null,
+                true, t));
+        assertNotNull(ApiServer.browserSafetyRefusal("POST", HOST, "http://" + HOST, null, true, t));
+        assertNull(ApiServer.browserSafetyRefusal("POST", HOST, TAILNET, null, true, t));
+    }
+
+    @Test
+    public void ipv6Entries() {
+        Set<String> t = trusted("https://[fd7a:115c:a1e0::1]:8877", "https://[fd7a:115c:a1e0::2]");
+        assertNull(refusal("GET", "[fd7a:115c:a1e0::1]:8877", null, null, t));
+        assertNull(refusal("GET", "[fd7a:115c:a1e0::2]", null, null, t));
+        assertNull(refusal("GET", "[fd7a:115c:a1e0::2]:443", null, null, t));
+        assertNotNull(refusal("GET", "[fd7a:115c:a1e0::1]", null, null, t));
     }
 
     @Test
@@ -140,8 +172,33 @@ public class ApiBrowserSafetyTest {
         s = ApiSettings.load(dir);
         assertEquals(new LinkedHashSet<>(Arrays.asList("https://a.example:8877", "https://b.example")),
                 s.trustedOriginSet());
-        // no file, no override: none
+        // an override set but empty clears the file's list
+        System.setProperty("instancelabs.api.trustedOrigins", " ");
+        assertTrue(ApiSettings.load(dir).trustedOriginSet().isEmpty());
+        // no file, no override: none (unless this computer's environment sets one)
         System.clearProperty("instancelabs.api.trustedOrigins");
+        org.junit.jupiter.api.Assumptions.assumeTrue(System.getenv("OPENPNP_IL_API_TRUSTED_ORIGINS") == null);
         assertTrue(ApiSettings.load(new File(dir, "missing")).trustedOriginSet().isEmpty());
+    }
+
+    @Test
+    public void aMistypedListKeepsTheOtherSettings() throws Exception {
+        File f = ApiSettings.fileFor(dir);
+        assertTrue(f.getParentFile().mkdirs());
+        // a string instead of a list: read as a comma-separated list, and lanAccess / enabled / port still apply
+        Files.write(f.toPath(), ("{\"port\": 18999, \"enabled\": false, \"lanAccess\": true, "
+                + "\"trustedOrigins\": \"" + TAILNET + ", https://b.example\"}").getBytes(StandardCharsets.UTF_8));
+        ApiSettings s = ApiSettings.load(dir);
+        assertEquals(18999, s.port);
+        assertFalse(s.enabled);
+        assertTrue(s.lanAccess);
+        assertEquals(new LinkedHashSet<>(Arrays.asList(TAILNET, "https://b.example")), s.trustedOriginSet());
+        // null and [null]: none
+        Files.write(f.toPath(), "{\"trustedOrigins\": null}".getBytes(StandardCharsets.UTF_8));
+        assertTrue(ApiSettings.load(dir).trustedOriginSet().isEmpty());
+        Files.write(f.toPath(), "{\"trustedOrigins\": [null], \"port\": 18998}".getBytes(StandardCharsets.UTF_8));
+        s = ApiSettings.load(dir);
+        assertTrue(s.trustedOriginSet().isEmpty());
+        assertEquals(18998, s.port);
     }
 }
