@@ -104,6 +104,13 @@ function checkEnds(paste) {
   L.check = { state: 'done', atMs: now, clean: L.pads.filter((p) => p.state === 'clean').length, stillPaste: paste.length };
 }
 
+/** A picture for the user: the card (or the band) in view, after the last toast has gone. */
+async function shot(page, name, cardInView) {
+  if (cardInView) await page.evaluate(() => document.getElementById('cal-testboard').scrollIntoView({ block: 'start' }));
+  await page.waitForFunction(() => { const t = document.getElementById('toast'); return !t || t.hidden; }, null, { timeout: 15000 }).catch(() => null);
+  await sleep(300);
+  await page.screenshot({ path: path.join(OUT, name) });
+}
 const card = (page) => page.evaluate(() => {
   const t = (id) => { const n = document.getElementById(id); return n && !n.hidden ? n.textContent.replace(/\s+/g, ' ').trim() : null; };
   const map = document.getElementById('tb-map');
@@ -137,7 +144,7 @@ const card = (page) => page.evaluate(() => {
     const m1 = await page.evaluate(() => ({ enabled: IL.S.status.machine.enabled, homed: IL.S.status.machine.homed }));
     check('(1) Board wiped waits for a started, homed machine', !!c1.btn && c1.btn.fix === 'board-wiped'
       && (m1.enabled && m1.homed ? !c1.btn.disabled : c1.btn.disabled && /connect|home/i.test(c1.btn.title)), { btn: c1.btn, machine: m1 });
-    await page.screenshot({ path: path.join(OUT, 'clean-pads-card.png') });
+    await shot(page, 'clean-pads-card.png', true);
 
     // ---- (2) an agent's whole-plan need (stated before its first run) -----------------------------------------------
     L.need = { pads: 30, by: 'Process', what: 'tonight’s tests', atMs: Date.now() };
@@ -190,7 +197,7 @@ const card = (page) => page.evaluate(() => {
     const wiped4 = new Date(L.wipedAtMs).toTimeString().slice(0, 5);
     check('(4) the check\'s result: "31 clean, 8 still have paste", those 8 marked', /^31 clean, 8 still have paste\b/.test(c4b.check || '') && c4b.used === 8, c4b);
     check('(4) the count after the wipe: "31 of 40 pads clean (R 15, D 16) · wiped hh:mm"', c4b.sum === '31 of 40 pads clean (R 15, D 16) · wiped ' + wiped4, c4b.sum);
-    await page.screenshot({ path: path.join(OUT, 'clean-pads-checked.png') });
+    await shot(page, 'clean-pads-checked.png', true);
     L.check = { state: 'failed', atMs: Date.now(), why: 'the top camera did not answer', clean: null, stillPaste: null };
     await page.waitForFunction(() => { const n = document.getElementById('tb-check'); return n && /failed/.test(n.textContent); }, null, { timeout: 8000 }).catch(() => null);
     const c4c = await card(page);
@@ -207,7 +214,7 @@ const card = (page) => page.evaluate(() => {
     check('(5) the band: "Process\'s pad calibration waits for clean pads: 10 clean, it needs 24." and Board wiped',
       !!band && band.text.startsWith('Process’s pad calibration waits for clean pads: 10 clean, it needs 24.') && /Wipe the board, then press Board wiped\./.test(band.text)
       && band.fix.includes('board-wiped'), band);
-    await page.screenshot({ path: path.join(OUT, 'clean-pads-band.png') });
+    await shot(page, 'clean-pads-band.png', false);
     L.waiting = null;
     const gone = await page.waitForFunction(() => !document.querySelector('#msg-area [data-msg="pads-wait"]'), null, { timeout: 8000 }).then(() => true, () => false);
     check('(5) the band goes when the run no longer waits', gone);

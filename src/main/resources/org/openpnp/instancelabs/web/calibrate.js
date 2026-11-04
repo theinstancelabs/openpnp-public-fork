@@ -337,7 +337,7 @@
     IL.show(host, pads.length > 0);
     const fixed = pads.filter((p) => p.state === 'fixed');
     IL.show($('tb-fixed'), fixed.length > 0);
-    IL.setText($('tb-fixed'), fixed.length ? 'Not counted, a wipe does not clean them: ' + fixed.map((p) => p.id + (p.note ? ' (' + p.note + ')' : '')).join(', ') + '.' : '');
+    IL.setText($('tb-fixed'), fixed.length ? 'Not counted, a wipe does not clean them: ' + fixed.map((p) => p.id + (p.note ? ' · ' + p.note : '')).join(', ') + '.' : '');
     if (!pads.length) return;
     if (!TB.view) TB.view = IL.boardview.create(host, { id: 'tb-svg', lite: true, aria: 'The test board: used pads marked' });
     const v = d.view || null;
