@@ -161,9 +161,9 @@ public final class PadInstances {
 
     /**
      * The check's inputs around these pads: the current pad types with their rules, the gate, the mounted tip, the
-     * profile's dose and recipe, the packages pasted partly. Dose evidence and anchors other than the validated types'
-     * are the caller's (none here). The tip is the mounted setup with its dot table ({@link DispenseService#mountedTip},
-     * tip setups design §22.2), not {@code cfg.tip}.
+     * profile's dose and recipe, the packages pasted partly, the mounted tip's own dose anchor under its pad type
+     * (BR-85). Dose evidence and the other setups' anchors are the caller's (none here). The tip is the mounted setup
+     * with its dot table ({@link DispenseService#mountedTip}, tip setups design §22.2), not {@code cfg.tip}.
      */
     public static CheckInputs inputs(List<PadInstance> pads, Collection<PadType> types, Map<String, PadRule> rules,
             DispenseConfig cfg, Collection<String> pastePartial, boolean planned, Tip tip) {
@@ -187,10 +187,10 @@ public final class PadInstances {
         }
         DispenseConfig.DoseAnchor own = cfg.doseAnchor;
         if (own != null && tip.key.equals(cfg.tip.key)) {
-            // BR-85: the mounted tip's own anchor replaces its pad type's family's (Calibrate's amount window too)
+            // BR-85: the mounted tip's own anchor, for its pad type only (Calibrate's amount window too)
             Anchor a = new Anchor(own.family, own.padType, null, own.massPerPadMg, own.areaMm2);
             a.tipName = tip.name;
-            in.anchors.put(own.family, a);
+            in.anchors.put(own.padType, a);
         }
         in.profileSteps = cfg.profile.netStepsPerDot;
         in.stepsPerRev = cfg.bStepsPerRev;
@@ -225,10 +225,10 @@ public final class PadInstances {
     }
 
     /**
-     * BR-85: the anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get under
-     * {@code cfg}, as the check picks it (the tip's own, else the family's: a validated pad type of any setup, or the
-     * bench for chips), from the check's inputs without the dose evidence and the dot table (no anchor needs them).
-     * {@link DispenseService#familyAnchor} caches it for the status.
+     * BR-85: the shared anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get under
+     * {@code cfg}, as the check picks it for any pad type but its own anchor's (a validated pad type of any setup, or
+     * the bench for chips), from the check's inputs without the dose evidence and the dot table (no anchor needs
+     * them). {@link DispenseService#familyAnchor} caches it for the status.
      */
     public static Anchor anchorFor(DispenseDb db, DispenseConfig cfg, String family, double areaMm2)
             throws SQLException {

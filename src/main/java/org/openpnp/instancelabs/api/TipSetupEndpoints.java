@@ -32,6 +32,7 @@ import org.openpnp.instancelabs.dispense.TipSetups;
 import org.openpnp.instancelabs.dispense.TipSpec;
 import org.openpnp.instancelabs.dispense.ZCheck;
 import org.openpnp.instancelabs.padprofile.Anchor;
+import org.openpnp.instancelabs.padprofile.Limits;
 import org.openpnp.instancelabs.padprofile.Tip;
 
 import com.google.gson.JsonObject;
@@ -246,7 +247,7 @@ final class TipSetupEndpoints {
 
     /**
      * BR-85 PUT /api/tip-setups/{key}/dose-anchor {massPerPadMg, padType, source?}: the tip's own dose anchor, the
-     * paste per pad Calibrate aims for on the pad type's family (the area is the type's opening, the time is stamped);
+     * paste per pad Calibrate aims for on that pad type only (the area is the type's opening, the time is stamped);
      * {@code {}} or {@code null} clears it (the family's again), no body is a 400. A guarded write (BR-72's lock, as a
      * live value Calibrate reads); for the mounted tip refused while the engine is busy. Returns the setup view.
      */
@@ -281,8 +282,8 @@ final class TipSetupEndpoints {
     }
 
     /**
-     * The anchor of a PUT dose-anchor body: 400 for a mass outside 0..20 mg, no pad type of that key, or a rate over 4 x
-     * the bench's (a typo: 19.5 for 1.95 mg on an 0603).
+     * The anchor of a PUT dose-anchor body: 400 for a mass outside 0..20 mg, no pad type of that key, a pad type that
+     * is not k 1 on an opening of at most 4 mm², or a rate over 4 x the bench's (a typo: 19.5 for 1.95 mg on an 0603).
      */
     private static DispenseConfig.DoseAnchor anchorOf(DispenseService svc, TipSetup s, JsonObject b) throws Exception {
         Double mass = Json.num(b, "massPerPadMg", null);
@@ -296,13 +297,20 @@ final class TipSetupEndpoints {
             throw ApiException.badRequest("'padType' must be the key of a pad type that is not retired (GET "
                     + "/api/pad-types)" + (key == null ? "" : ": not '" + key + "'"));
         }
+        double area = DotMath.padAreaMm2(t.padWMm, t.padHMm, t.padRoundness);
+        // the whole amount of a pad, as a validated type's anchor: centre and larger pads take the k placeholder
+        if (Math.abs(t.k - 1) > Limits.EPS || area > Limits.LARGE_PAD_MM2 + Limits.EPS) {
+            throw ApiException.badRequest("'padType' " + t.typeKey + " (k " + Views.num(t.k) + ", " + Views.num(area)
+                    + " mm²) cannot carry a dose anchor: an anchor needs k 1 and an opening of at most "
+                    + Views.num(Limits.LARGE_PAD_MM2) + " mm²");
+        }
         String source = Json.str(b, "source", null);
         if (source != null && source.length() > 200) {
             throw ApiException.badRequest("'source' must be at most 200 characters");
         }
         DispenseConfig.DoseAnchor a = new DispenseConfig.DoseAnchor();
         a.massPerPadMg = mass;
-        a.areaMm2 = DotMath.padAreaMm2(t.padWMm, t.padHMm, t.padRoundness);
+        a.areaMm2 = area;
         a.mgPerMm2 = mass / a.areaMm2;
         double max = 4 * Anchor.BENCH.mgPerMm2;
         if (!(a.mgPerMm2 <= max)) {

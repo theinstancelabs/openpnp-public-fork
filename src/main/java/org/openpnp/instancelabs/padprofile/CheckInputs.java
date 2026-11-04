@@ -27,9 +27,9 @@ public final class CheckInputs {
     /** Pooled fresh records per dose (§1.7, §7.6). */
     public Map<Integer, DoseEvidence> evidence = new HashMap<>();
     /**
-     * Anchors by family (BR-85: the mounted tip's own, {@link Anchor#tipName}): first in its family,
-     * before the validated types with a weighed mass per pad, in place of the bench and the other
-     * setups' ({@link #moreAnchors}); the chip family falls back to {@link Anchor#BENCH}.
+     * BR-85: the mounted tip's own anchors by pad type key ({@link Anchor#tipName}): each is the amount for its own pad
+     * type only, over every other anchor. Every other type and family keeps the shared ones: the validated types with
+     * a weighed mass per pad, the other setups' ({@link #moreAnchors}), else {@link Anchor#BENCH} for chips.
      */
     public Map<String, Anchor> anchors = new HashMap<>();
     /**

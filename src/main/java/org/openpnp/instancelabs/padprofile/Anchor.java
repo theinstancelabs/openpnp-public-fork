@@ -27,8 +27,8 @@ public final class Anchor {
      */
     public String setupName;
     /**
-     * BR-85: the mounted tip's name when this is its own anchor (set by Process for it: it replaces its family's),
-     * else null.
+     * BR-85: the mounted tip's name when this is its own anchor (set by Process for it: the amount for its pad type
+     * {@link #typeKey} only), else null.
      */
     public String tipName;
 

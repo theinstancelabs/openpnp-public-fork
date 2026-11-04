@@ -270,16 +270,12 @@ public final class ProfileCheck {
     }
 
     /**
-     * The anchors by family (§1.3): validated k = 1 types with a weighed mass per pad, in key order (ties in
-     * {@link #nearest}), and the other setups' (§22.2); the bench for chips without one. A family given in
-     * {@link CheckInputs#anchors} (BR-85: the mounted tip's own) has that one first, so it wins ties, and the tip's
-     * validated types after it: it replaces the bench and the other setups' anchors of its family.
+     * The shared anchors by family (§1.3): validated k = 1 types with a weighed mass per pad, in key order (ties in
+     * {@link #nearest}), and the other setups' (§22.2); the bench for chips without one. A tip's own anchor
+     * ({@link CheckInputs#anchors}, BR-85) is none of them: it is its pad type's only.
      */
     static Map<String, List<Anchor>> collectAnchors(CheckInputs in) {
         Map<String, List<Anchor>> anchors = new HashMap<>();
-        for (Map.Entry<String, Anchor> e : in.anchors.entrySet()) {
-            anchors.put(e.getKey(), new ArrayList<>(Collections.singletonList(e.getValue())));
-        }
         for (TypeInfo t : new TreeMap<>(in.types).values()) {
             if (!t.retired && TypeInfo.rank(t.status) == 3 && t.massPerPadMg != null && t.massPerPadMg > 0
                     && t.family != null && Math.abs(t.k - 1) <= Limits.EPS) {
@@ -290,7 +286,7 @@ public final class ProfileCheck {
         // §22.2: the amount a joint needs is the paste's and the pad's: other setups' validated pads anchor too
         if (in.moreAnchors != null) {
             for (Anchor a : in.moreAnchors) {
-                if (a != null && a.family != null && a.areaMm2 > 0 && !in.anchors.containsKey(a.family)) {
+                if (a != null && a.family != null && a.areaMm2 > 0) {
                     anchors.computeIfAbsent(a.family, f -> new ArrayList<>()).add(a);
                 }
             }
@@ -314,8 +310,8 @@ public final class ProfileCheck {
     }
 
     /**
-     * BR-85: the anchor a family's opening of {@code area} gets from these inputs, as the check picks it (the
-     * family's own, else null; chips always have one); no pads or evidence needed.
+     * BR-85: the shared anchor a family's opening of {@code area} gets from these inputs, as the check picks it for any
+     * pad type but a tip anchor's own (the family's, else null; chips always have one); no pads or evidence needed.
      */
     public static Anchor anchorFor(CheckInputs in, String family, double area) {
         return nearest(collectAnchors(in).get(family), area);
@@ -337,7 +333,8 @@ public final class ProfileCheck {
         r.tip.setupVersion = tip.setupVersion;
         r.tip.dispenser = tip.dispenser;
         r.tip.dots = tip.dotsSource();
-        Map<String, Anchor> used = new LinkedHashMap<>();
+        // by identity: a tip's own anchor and a validated version of its pad type share the type key (BR-85)
+        List<Anchor> used = new ArrayList<>();
         for (Group g : c.groups) {
             if (g.reason == null) {
                 continue;
@@ -345,8 +342,9 @@ public final class ProfileCheck {
             g.suggestion = Suggester.suggest(c, g);
             texts(c, g);
             r.groups.add(g);
-            if (g.anchor != null && g.suggestion != null && !Suggestion.NONE.equals(g.suggestion.kind)) {
-                used.putIfAbsent(g.anchor.bench ? "bench" : g.anchor.typeKey, g.anchor);
+            if (g.anchor != null && g.suggestion != null && !Suggestion.NONE.equals(g.suggestion.kind)
+                    && !used.contains(g.anchor)) {
+                used.add(g.anchor);
             }
             if (g.blocking && g.fixable) {
                 r.fixable++;
@@ -358,7 +356,7 @@ public final class ProfileCheck {
                 r.notes++;
             }
         }
-        for (Anchor a : used.values()) {
+        for (Anchor a : used) {
             Anchor v = a.copy();
             if (v.text == null) {
                 v.text = Suggester.anchorWords(c, a);
@@ -762,11 +760,14 @@ public final class ProfileCheck {
             g.minPitchMm = Double.isNaN(pitch) ? null : Suggester.r3(pitch);
             g.minEdgeGapMm = Double.isNaN(edge) ? null : Suggester.r3(edge);
         }
-        // §1.3 amount: the family's anchor, k, the fine-pitch cap for families with no anchor of their own
+        // §1.3 amount: the family's anchor, k, the fine-pitch cap for families with no anchor of their own; BR-85: a
+        // tip's own anchor is its pad type's only (reflow accepting it there says nothing of other openings)
         g.k = g.centre || g.area > Limits.LARGE_PAD_MM2 + Limits.EPS ? Limits.K_PLACEHOLDER : 1.0;
-        Anchor own = c.anchorFor(family, g.area);
+        Anchor own = g.typeKey == null ? null : c.in.anchors.get(g.typeKey);
+        if (own == null) {
+            own = c.anchorFor(family, g.area);
+        }
         g.ownAnchor = own != null;
-        // a family with no anchor of its own scales from the chips' (BR-85: the tip's own chip anchor when it has one)
         g.anchor = own != null ? own : c.anchorFor(Family.CHIP, g.area);
         g.uncappedTarget = g.anchor.mgPerMm2 * g.area * g.k;
         g.target = g.uncappedTarget;

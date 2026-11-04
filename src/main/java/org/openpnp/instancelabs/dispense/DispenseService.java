@@ -1013,7 +1013,8 @@ public final class DispenseService {
     /**
      * Restores the previous mount exactly (setup, profile, frame, offset, trim, landing and the needle token) within
      * 2 min of a mount of another setup when no task ran and nothing was measured since; a {@code tip_mounts} row
-     * {@code undo}. Otherwise 409 "Too late to undo: ...".
+     * {@code undo}. What was set for a tip since stays with it (BR-85: the incoming tip parks with the recipe and the
+     * dose anchor it has now). Otherwise 409 "Too late to undo: ...".
      */
     public synchronized MountResult undoMount(String operator) throws IOException, SQLException {
         UndoSnapshot u = undo;
@@ -1055,6 +1056,11 @@ public final class DispenseService {
             c.needleChangedAtMs = b.needleChangedAtMs;
             DispenseConfig.ParkedTip nowParked = c.parkedTips.get(b.tip.key);
             DispenseConfig.DoseAnchor nowOn = c.doseAnchor;
+            // the recipe set for the incoming tip while it was on (the start angle aside: the machine's, it stays on)
+            DispenseProfile recipe = cfg.profile.copy();
+            recipe.startAngleDeg = u.after.profile.startAngleDeg;
+            recipe.startAngleSetAtMs = u.after.profile.startAngleSetAtMs;
+            boolean recipeSet = !new Gson().toJson(recipe).equals(new Gson().toJson(u.after.profile));
             // the undo puts back the mount, nothing else: the two entries it changed; the other tips keep theirs as
             // they are now (a setup added since, BR-85 an anchor or a recipe set since)
             Map<String, DispenseConfig.ParkedTip> was = b.copy().parkedTips;
@@ -1066,15 +1072,20 @@ public final class DispenseService {
                     c.parkedTips.remove(k);
                 }
             }
-            // BR-85: a dose anchor is the tip's, not the mount's: one set since the mount stays with its tip
+            // BR-85: a dose anchor and a recipe are the tip's, not the mount's: set since the mount, they stay with it
             c.doseAnchor = nowParked != null ? nowParked.doseAnchor : b.doseAnchor;
-            if (nowOn != null && !c.parkedTips.containsKey(u.toKey)) {
+            if ((nowOn != null || recipeSet) && !c.parkedTips.containsKey(u.toKey)) {
                 // a tip with no entry before the mount gets one as the mount made it (TipSetups.newEntry), to keep it
                 c.parkedTips.put(u.toKey, TipSetups.newEntry(c, c.profile, c.tip.key, u.after.tip.name));
             }
             DispenseConfig.ParkedTip off = c.parkedTips.get(u.toKey);
             if (off != null) {
                 off.doseAnchor = nowOn;
+                if (recipeSet) {
+                    recipe.startAngleDeg = off.profile.startAngleDeg;
+                    recipe.startAngleSetAtMs = off.profile.startAngleSetAtMs;
+                    off.profile = recipe;
+                }
             }
             writeConfig(c);
             undo = null;
@@ -1935,15 +1946,15 @@ public final class DispenseService {
     }
 
     /**
-     * BR-85: the anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get
-     * ({@link PadInstances#anchorFor}), cached until the mounted tip, its own anchor, a pad type or a tip setup changes:
-     * the status asks at every poll, and a hit reads no table. Read-only, as {@link Anchor#BENCH} is.
+     * BR-85: the shared anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get
+     * ({@link PadInstances#anchorFor}; not the tip's own, its pad type's only), cached until the mounted tip, a pad
+     * type or a tip setup changes: the status asks at every poll, and a hit reads no table. Read-only, as
+     * {@link Anchor#BENCH} is.
      */
     public Anchor familyAnchor(String family, double areaMm2) throws SQLException {
         DispenseConfig c = cfg;
         // the writes counted first: one made while the anchor is found makes the next call find it again
-        String key = db.typeWrites() + "|" + family + "|" + areaMm2 + "|" + new Gson().toJson(c.tip) + "|"
-                + new Gson().toJson(c.doseAnchor);
+        String key = db.typeWrites() + "|" + family + "|" + areaMm2 + "|" + new Gson().toJson(c.tip);
         Map.Entry<String, Anchor> hit = anchorCache;
         if (hit != null && key.equals(hit.getKey())) {
             return hit.getValue();

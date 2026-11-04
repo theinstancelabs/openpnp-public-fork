@@ -72,6 +72,10 @@ public class TipSetupValuesSimTest {
         assertEquals("the 25G straight's recipe skips the first 2 dots after the prime (touchOffSkipDots), the "
                 + "reference takes the next two and a dot after them shows the contact: lay at least 5 dots", TipSim
                         .str(few, "reason"));
+        // the ranges' text says the real minimum, skip + 3
+        String ranges = " to 20, step 0 to 0.5 mm, start gap at most 2 mm, pitch and jump ratio above 0";
+        assertEquals("steps 5" + ranges, TipSim.str(TipSim.refused(t.post("/api/calibrations/touch-off",
+                "{\"steps\":1}"), 400, "bad-request"), "reason"));
         // parked with the 25G's recipe while the 22G is on
         t.mount(TipSim.SEED);
         assertEquals(2, skipOf(TipSim.K25));
@@ -79,6 +83,8 @@ public class TipSetupValuesSimTest {
         JsonObject two = TipSim.refused(t.post("/api/calibrations/touch-off", "{\"steps\":2}"), 400, "bad-request");
         assertEquals("the reference takes the first two dots after the prime and a dot after them shows the contact: "
                 + "lay at least 3 dots", TipSim.str(two, "reason"));
+        assertEquals("steps 3" + ranges, TipSim.str(TipSim.refused(t.post("/api/calibrations/touch-off",
+                "{\"steps\":21}"), 400, "bad-request"), "reason"));
     }
 
     @Test
@@ -195,6 +201,33 @@ public class TipSetupValuesSimTest {
             }
         }
         assertEquals(1.95, setup(TipSim.K25).getAsJsonObject("doseAnchor").get("massPerPadMg").getAsDouble(), 0);
+    }
+
+    /**
+     * BR-85 re-review: an anchor is a pad's whole amount, so only a pad type of k 1 on an opening of at most 4 mm² can
+     * carry one, as the check aims at k 1 (§1.3: centre pads and larger ones take the k 0.5 placeholder). The seeded QFN
+     * centre pad (k 0.5) and a 5 mm² opening are refused; 4 mm² is not.
+     */
+    @Test
+    public void aDoseAnchorNeedsAPadTypeOfKOneOnAtMostFourMm2() throws Exception {
+        t.add25();
+        String path = "/api/tip-setups/" + TipSim.K25 + "/dose-anchor";
+        JsonObject centre = TipSim.refused(t.call("PUT", path, "{\"massPerPadMg\":4.0,\"padType\":\"qfn-centre\"}"),
+                400, "bad-request");
+        assertEquals("'padType' qfn-centre (k 0.5, 9.61 mm²) cannot carry a dose anchor: an anchor needs k 1 and an "
+                + "opening of at most 4 mm²", TipSim.str(centre, "reason"));
+        for (String name : new String[] {"Big", "Square"}) {
+            TipSim.ok(t.post("/api/pad-types", "{\"forSetup\":\"" + TipSim.SEED + "\",\"family\":\"Custom\",\"name\":\""
+                    + name + "\",\"padWMm\":" + ("Big".equals(name) ? 2.5 : 2.0) + ",\"padHMm\":2.0}"));
+        }
+        JsonObject big = TipSim.refused(t.call("PUT", path, "{\"massPerPadMg\":6.0,\"padType\":\"custom-big\"}"), 400,
+                "bad-request");
+        assertEquals("'padType' custom-big (k 1, 5 mm²) cannot carry a dose anchor: an anchor needs k 1 and an opening "
+                + "of at most 4 mm²", TipSim.str(big, "reason"));
+        assertTrue(setup(TipSim.K25).get("doseAnchor").isJsonNull(), "nothing set");
+        JsonObject square = TipSim.ok(t.call("PUT", path, "{\"massPerPadMg\":6.0,\"padType\":\"custom-square\"}"))
+                .getAsJsonObject("doseAnchor");
+        assertEquals(4.0, square.get("areaMm2").getAsDouble(), 1e-12);
     }
 
     /**

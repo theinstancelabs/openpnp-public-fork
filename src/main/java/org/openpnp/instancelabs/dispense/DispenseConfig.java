@@ -217,9 +217,9 @@ public class DispenseConfig {
      */
     public Map<String, ParkedTip> parkedTips = new LinkedHashMap<>();
     /**
-     * BR-85: the mounted tip's own dose anchor, the paste per pad Calibrate aims for on its pad type's family; null =
-     * the family's ({@code padprofile.Anchor}: the bench 0603 half turn, or a validated pad type). Set only by PUT
-     * /api/tip-setups/{key}/dose-anchor; parked and brought back with the tip.
+     * BR-85: the mounted tip's own dose anchor, the paste per pad Calibrate aims for on its pad type only; null (and
+     * every other type) = the shared ones ({@code padprofile.Anchor}: the bench 0603 half turn, or a validated pad
+     * type). Set only by PUT /api/tip-setups/{key}/dose-anchor; parked and brought back with the tip.
      */
     public DoseAnchor doseAnchor = null;
     /** The paste in the syringe; "New paste loaded" stamps it. */
@@ -260,7 +260,7 @@ public class DispenseConfig {
 
     /**
      * A tip's own dose anchor (BR-85): the weighed paste per pad of a pad type's opening, so Calibrate's amount window
-     * for that family follows this tip, not the 22G's half turn.
+     * for that pad type follows this tip, not the 22G's half turn.
      */
     public static class DoseAnchor {
         /** The largest paste per pad an anchor may say (mg). */

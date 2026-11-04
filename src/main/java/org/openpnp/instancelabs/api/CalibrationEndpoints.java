@@ -219,11 +219,12 @@ final class CalibrationEndpoints {
         }
         // without a pitch: 1.6 mm, or the smallest that leaves room between larger dots (F14)
         req.pitchMm = Json.num(b, "pitchMm", NeedleTouchOff.defaultPitchMm(req, svc.getConfig()));
+        int skip = svc.getConfig().profile.touchOffSkipDots;
         if (req.steps < 2 || req.steps > 20 || req.stepMm <= 0 || req.stepMm > 0.5 || req.startGapMm > 2
                 || req.pitchMm <= 0 || req.jumpRatio <= 0) {
-            throw ApiException.badRequest("steps 2 to 20, step 0 to 0.5 mm, start gap at most 2 mm, pitch and jump ratio above 0");
+            throw ApiException.badRequest("steps " + (skip + 3) + " to 20, step 0 to 0.5 mm, start gap at most 2 mm, "
+                    + "pitch and jump ratio above 0");
         }
-        int skip = svc.getConfig().profile.touchOffSkipDots;
         if (req.steps < skip + 3) {
             throw ApiException.badRequest((skip == 0 ? "the reference takes the first two dots after the prime"
                     : String.format(java.util.Locale.ROOT, "the %s's recipe skips the first %d dots after the prime "

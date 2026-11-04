@@ -656,8 +656,8 @@ public final class Suggester {
             why.add("no fresh camera check of " + DoseModel.turnName(x.steps) + " dots on the blank yet");
         }
         if (!g.ownAnchor) {
-            why.add("no validated " + g.family + " pads yet: the amount is scaled from " + (g.anchor.tipName != null
-                    ? anchorShort(c, g.anchor) : "the 0603 half turn")
+            why.add("no validated " + g.family + " pads yet: the amount is scaled from " + (g.anchor.bench
+                    ? "the 0603 half turn" : anchorShort(c, g.anchor))
                     + (g.capped ? " and capped at a " + Texts.mm(Limits.CAP_PRINT_MM) + " mm print at this "
                             + Texts.mm(g.pitch) + " mm pitch" : ""));
         }

@@ -98,12 +98,14 @@ Fields and defaults:
   setup's entry: a copy of a recipe, no frame, the mounted offset as a placeholder with both times null, a zero trim
   noted `new tip`, no landing, no dose anchor);
 - BR-85 `doseAnchor {massPerPadMg, areaMm2, mgPerMm2, padType, family, source, setAtMs}` or null (protected; set only by
-  `PUT /api/tip-setups/{key}/dose-anchor`): the mounted tip's own anchor; `PadInstances.inputs` puts it in
-  `CheckInputs.anchors` (`Anchor.tipName`), where it comes first in its family (it wins ties) before the tip's own
-  validated, weighed pad types and replaces the bench's and the other setups' anchors of it, so Calibrate's amount
-  window (`Decider`) and the suggestions follow it; a family with no anchor of its own scales from the chips' (§1.3),
-  so from a chip anchor of the tip's too; `DispenseService.familyAnchor(family, area)` is the one that applies (cached
-  until the mounted tip, its anchor, a pad type or a tip setup is written: `DispenseDb.typeWrites()`);
+  `PUT /api/tip-setups/{key}/dose-anchor`): the mounted tip's own anchor, for its own pad type only (the type it was
+  weighed on: reflow accepting it there says nothing of bigger pads); `PadInstances.inputs` puts it in
+  `CheckInputs.anchors` under the pad type's key (`Anchor.tipName`), and the check aims that type's groups at it, over
+  every other anchor (the tip's own validated version of the type too), so Calibrate's amount window (`Decider`) and
+  the suggestions follow it there. Every other pad type and family keeps the shared anchors as before: validated,
+  weighed pad types of any setup, else the bench's 0603 half turn (§1.3); `DispenseService.familyAnchor(family,
+  area)` is the shared one (cached until the mounted tip, a pad type or a tip setup is written:
+  `DispenseDb.typeWrites()`);
 - motion: `travelFeedMmS 200`, `travelAccelMmS2 2000`, `zDownFeedMmS 50`, `zLiftFeedMmS 50`, `zLiftAccelMmS2 2000`
   (each <= 5000), `bMaxFeedDegS 2400` (sent as `M203 B`; <= 400 rpm, the Vieweg maximum), `bStepsPerDeg 4.44`
   (Marlin `M92 B`; one screw revolution of 1600 steps is 360.36°), `bStepsPerRev 1600`, `bExtrudeSign +1`,
@@ -578,8 +580,8 @@ dose the tip does not know (no NaN reaches a comparison or a view); `isMeasured(
 it has a weighing). A tip without the bench model and not measured gets no suggestions but `measure-tip`;
 `characterized` without the bench model needs S's own evidence for every dose; the control compares with the bench
 only for the seed, else with S's own dots, or passes as `first measurement of this tip`. Anchors (the amount a joint
-needs) stay shared across setups, unless a tip has its own (BR-85 `doseAnchor`: it replaces the bench's and the other
-setups' anchors of its pad type's family; the tip's own validated pads of the family stay, after it).
+needs) stay shared across setups, but on the pad type of a tip's own anchor (BR-85 `doseAnchor`: that type's only, over
+the shared anchors and the tip's own validated version of it; every other type and family keeps the shared ones).
 
 **Needle changes and mounting.** `recordNeedleChange(why, operator) → NeedleChange` (synchronized, never refuses): a
 running engine task is stopped first (`abort("the needle was reported changed")`), `needleChangedAtMs` = max(now,
@@ -593,7 +595,8 @@ view, one config write without the start-angle and trim stamping (restored value
 row `mount` and a `TIP` event. `undoMount(operator)`: within 2 min of a mount of another setup, no task run and
 nothing measured since, the previous mount exactly from a snapshot in memory (`too-late` otherwise): the two parked
 entries the mount changed, the other tips' as they are now (a setup added or an anchor or recipe set since); a dose
-anchor set since stays with its tip; `undoUntilMs()`.
+anchor or a recipe set since stays with its tip (the incoming tip parks with the recipe it has now, but not the start
+angle, the machine's; one without an entry gets one to keep them); `undoUntilMs()`.
 Every value measured for a needle carries the token (`setNeedleAnchor`, `setNeedleZOffset`, `setXyTrim`, `setLanding`,
 `keepLanding`: `EngineRefusal` 409 `needle-changed`), every pad-type write its setup (`savePadType`: `tip-changed`,
 `pad-changed`), and a pad calibration's every dose-blocks step its setup and token (`DoseBlocksRequest.forTip`,

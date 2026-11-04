@@ -336,6 +336,56 @@ public class MountTest {
         }
     }
 
+    /**
+     * BR-85 re-review: the recipe set for the incoming tip while it was on stays with it after an undo, as its anchor
+     * does, but not the start angle (the machine's: it stays on); a tip mounted without an entry gets one to keep it.
+     */
+    @Test
+    public void anUndoKeepsTheRecipeSetForTheIncomingTipWhileItWasOn() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            svc.updateConfigAtomically(live -> {
+                live.parkedTips.get(K25).profile.startAngleDeg = 45;
+                live.parkedTips.get(K25).profile.startAngleSetAtMs = 1000L;
+                return live;
+            });
+            f.mount(K25);
+            svc.updateConfigAtomically(live -> {
+                live.profile.touchOffSkipDots = 2;
+                live.profile.pressurePsi = 13.7;
+                return live;
+            });
+            svc.setStartAngle(120.0, "measured");
+            svc.undoMount("tester");
+            DispenseConfig c = svc.getConfig();
+            assertEquals(Tip.SEED_KEY, c.tip.key);
+            DispenseProfile p25 = c.parkedTips.get(K25).profile;
+            assertEquals(2, p25.touchOffSkipDots, "the 25G's recipe, set while it was on");
+            assertEquals(13.7, p25.pressurePsi, 0);
+            assertEquals(45, p25.startAngleDeg, 0, "its parked start angle: the live one is the machine's");
+            assertEquals(1000L, (long) p25.startAngleSetAtMs);
+            assertEquals(0, c.profile.touchOffSkipDots, "the 22G's own recipe");
+            assertEquals(120, c.profile.startAngleDeg, 0, "the live angle stays on");
+            f.mount(K25);
+            assertEquals(2, svc.getConfig().profile.touchOffSkipDots, "back with the 25G");
+
+            TipSetup bare = svc.getDb().insertTipSetupVersion(straight27("27g-straight", "27G straight"));
+            f.mount(bare.key);
+            svc.updateConfigAtomically(live -> {
+                live.profile.touchOffSkipDots = 3;
+                return live;
+            });
+            svc.undoMount("tester");
+            c = svc.getConfig();
+            assertEquals(K25, c.tip.key);
+            assertEquals(3, c.parkedTips.get(bare.key).profile.touchOffSkipDots, "no entry before: it gets one");
+            assertNull(c.parkedTips.get(bare.key).doseAnchor);
+            assertEquals(2, c.profile.touchOffSkipDots);
+            assertTrue(c.validate().isEmpty(), c.validate().toString());
+        }
+    }
+
     @Test
     public void theLiveStartAngleIsKeptAcrossAMount() throws Exception {
         try (TipFixture f = new TipFixture()) {
