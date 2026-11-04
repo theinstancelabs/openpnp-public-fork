@@ -187,7 +187,7 @@ final class DispenseEndpoints {
                 cfg.needleZOffsetMm, "setAtMs", cfg.needleZOffsetSetAtMs, "changedAtMs", cfg.needleChangedAtMs, "gapMm",
                 cfg.gapMm(), "anchored", cfg.isNeedleAnchored(), "anchor", cfg.needleAnchor,
                 "anchorOffsetMm", cfg.needleAnchor == null ? null : cfg.needleAnchor.offsetMm(), "xyTrim",
-                cfg.needleXyTrim, "kRefusal", svc.needleFrameFromKRefusal());
+                cfg.needleXyTrim, "kRefusal", svc.needleFrameFromKRefusal(), "zFrameMovedAtMs", cfg.zFrameMovedAtMs);
         needle.putAll(landingStatus(svc, cfg));
         d.put("needle", needle);
         d.put("tip", tipStatus(svc, cfg));

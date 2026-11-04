@@ -451,6 +451,25 @@ public class DispenseServiceSimTest {
         assertFalse(r.homedFirst, "homed by the test: no home of its own");
     }
 
+    /**
+     * BR-02 (#11 review 11-04): the Z frame's move at a reset's home is the engine's stamp: a configuration copied
+     * before it (a settings form left open) cannot take it back when it is saved.
+     */
+    @Test
+    public void aCopyFromBeforeAResetsHomeKeepsTheZFrameMove() throws Exception {
+        DispenseConfig open = svc.getConfig();
+        assertNull(open.zFrameMovedAtMs);
+        Thread.sleep(5);
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.enableAndHome(); // OpenPnP's own home after the reset: it moved the Z frame
+        Long moved = svc.getConfig().zFrameMovedAtMs;
+        assertNotNull(moved);
+        svc.updateConfig(open);
+        assertEquals(moved, svc.getConfig().zFrameMovedAtMs);
+        assertFalse(svc.getConfig().isNeedleAnchored(), "the frame from before it is still not current");
+    }
+
     /** A disable and a home (a reconnect; the start angle is confirmed again, as before BR-02: harmless). */
     void homeAgain() throws Exception {
         Thread.sleep(5);

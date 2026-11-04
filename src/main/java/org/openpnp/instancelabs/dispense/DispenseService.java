@@ -148,6 +148,10 @@ public final class DispenseService {
     private final HomeTracker homeTracker;
     /** BR-02: a controller reset seen at a connect; the position is unknown until a home. */
     private final ControllerReset controllerReset;
+    /** BR-02: guards {@link #connection} and {@link #connectHandled} ({@link #claimConnect}). */
+    private final Object connectLock = new Object();
+    /** BR-02: the current connection's number (the Stops and failed Starts seen), and the one whose connect was read. */
+    private long connection, connectHandled = -1;
     /**
      * BR-02: the screw driver's DISABLE_COMMANDs and OpenPnP moves seen so far
      * ({@link GcodeDriver#getDisableCommandsSent}, {@link GcodeDriver#getMotionCommandsSent}): a count that moved on is
@@ -158,8 +162,8 @@ public final class DispenseService {
     private volatile GcodeDriver watchedDriver;
     private final java.util.function.Consumer<String> tripWatcher = this::watchForWatchdogTrip;
     /**
-     * BR-02: writes the journal for the reader thread (a trip heard there): no "ok" behind it, a STOP's included, waits
-     * for an insert.
+     * BR-02: writes the journal for the reader thread and the streams (a trip heard there, a stream's arm): no "ok"
+     * behind it, a STOP's included, and no line waits for an insert.
      */
     private final java.util.concurrent.ExecutorService journalWriter = java.util.concurrent.Executors
             .newSingleThreadExecutor(r -> {
@@ -188,6 +192,7 @@ public final class DispenseService {
         @Override
         public void watchdogArmed() {
             controllerReset.watchdogArmed();
+            flushLater(); // on record soon, not only after the stream: OpenPnP may die in it
         }
 
         @Override
@@ -317,7 +322,6 @@ public final class DispenseService {
             startError = t.toString();
             throw t;
         }
-        instance.askIdentityOnConnect();
         Logger.info("Instance Labs dispense service started: {}", instance.isAvailable() ? "available"
                 : "unavailable (" + instance.unavailableReason + ")");
         return instance;
@@ -370,10 +374,10 @@ public final class DispenseService {
         }
         Machine machine = configuration.getMachine();
         homeTracker = new HomeTracker(null, machine != null && machine.isHomed());
-        controllerReset = new ControllerReset(DispenseService::resetClockMs, machine != null && machine.isEnabled(),
-                machine != null && machine.isHomed(), resetHistory(dbExisted), this::journalReset,
-                () -> Math.round(cfg.screwIdleOffS * 1000));
-        stampZFrameMoved(); // BR-02: a reset's home on record (or homed at the start) that the settings miss
+        // BR-02: whether the machine is started is read once the listeners are in (catchUpConnect)
+        controllerReset = new ControllerReset(DispenseService::resetClockMs, false, false, resetHistory(dbExisted),
+                this::journalReset, () -> Math.round(cfg.screwIdleOffS * 1000));
+        stampZFrameMoved(); // BR-02: a reset's home on record that the settings miss
         GcodeDriver screwDriver = screwDriver(machine);
         if (screwDriver != null) {
             // what it sent before this engine started is not this engine's to record
@@ -383,6 +387,8 @@ public final class DispenseService {
             watchedDriver = screwDriver;
         }
         if (machine != null) {
+            hook("listeners");
+            askIdentityOnConnect();
             machine.addListener(homeTracker);
             machineListener = new MachineListener.Adapter() {
                 @Override
@@ -397,7 +403,9 @@ public final class DispenseService {
                 public void machineEnabled(Machine m) {
                     bZeroed.set(false);
                     passthroughAt.clear(); // BR-02: OpenPnP read where the axes are
-                    readPositionAtConnect(m);
+                    if (claimConnect(m) >= 0) {
+                        readPositionAtConnect(m, false);
+                    }
                 }
 
                 @Override
@@ -407,6 +415,7 @@ public final class DispenseService {
 
                 @Override
                 public void machineEnableFailed(Machine m, String reason) {
+                    connectionEnded();
                     // BR-02: OpenPnP rolls back a Start that failed after the driver connected: its DISABLE_COMMAND
                     // went out, though no disable is announced
                     journalSentDisable(m, "a Start that failed: OpenPnP switched the driver off again");
@@ -426,6 +435,7 @@ public final class DispenseService {
 
                 @Override
                 public void machineDisabled(Machine m, String reason) {
+                    connectionEnded();
                     bZeroed.set(false);
                     abort("machine disabled: " + reason);
                     // BR-02: after the DISABLE_COMMAND went out (no write held back its M410); none on a link closed
@@ -435,10 +445,13 @@ public final class DispenseService {
 
                 @Override
                 public void machineDisableFailed(Machine m, String reason) {
+                    connectionEnded();
                     journalSentDisable(m, "a STOP"); // the lines before the failure, its M18 among them maybe, went out
                 }
             };
             machine.addListener(machineListener);
+            hook("catch-up");
+            catchUpConnect(machine);
         }
     }
 
@@ -448,7 +461,7 @@ public final class DispenseService {
         if (watched != null && watched.getReceivedLineWatcher() == tripWatcher) {
             watched.setReceivedLineWatcher(null);
         }
-        journalWriter.shutdown(); // a trip handed on goes on record before the database closes
+        journalWriter.shutdown(); // a write handed on goes on record before the database closes
         try {
             journalWriter.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
         }
@@ -464,6 +477,7 @@ public final class DispenseService {
             machine.removeListener(identityListener);
             SimGuard.askAtConnect(machine, null);
         }
+        controllerReset.flush(); // BR-02: what is only in memory yet (a stream's arm) goes on record
         try {
             db.close();
         }
@@ -483,18 +497,7 @@ public final class DispenseService {
         if (machine == null) {
             return;
         }
-        SimGuard.askAtConnect(machine, () -> {
-            connectionSimulated = null;
-            if (!(machine instanceof ReferenceMachine) || nozzle == null) {
-                return null;
-            }
-            OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
-            DriverGcodeChannel ch = new DriverGcodeChannel(mapper.getDriver());
-            List<String> m115 = ch.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
-            connectionSimulated = SimGuard.isSimulatorIdentity(m115);
-            readWatchdogTripAtConnect(ch, m115); // BR-02
-            return m115;
-        });
+        SimGuard.askAtConnect(machine, () -> identityAtConnect(machine));
         identityListener = new MachineListener.Adapter() {
             @Override
             public void machineEnableFailed(Machine m, String reason) {
@@ -514,11 +517,116 @@ public final class DispenseService {
         machine.addListener(identityListener);
     }
 
+    /** The controller's M115 on this connection (and, BR-02, its host watchdog's report); null without a nozzle. */
+    private List<String> identityAtConnect(Machine machine) throws Exception {
+        connectionSimulated = null;
+        List<String> m115 = watchdogAtConnect(machine);
+        if (m115 != null) {
+            connectionSimulated = SimGuard.isSimulatorIdentity(m115);
+        }
+        return m115;
+    }
+
+    /** BR-02: M115, and where it names the host watchdog its M990 report (a trip on record); null without a nozzle. */
+    private List<String> watchdogAtConnect(Machine machine) throws Exception {
+        if (!(machine instanceof ReferenceMachine) || nozzle == null) {
+            return null;
+        }
+        OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
+        DriverGcodeChannel ch = new DriverGcodeChannel(mapper.getDriver());
+        List<String> m115 = ch.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
+        readWatchdogTripAtConnect(ch, m115);
+        return m115;
+    }
+
+    /**
+     * BR-02: the current connection's connect is this caller's to handle, its position read once (the listener, or the
+     * engine's start for a connect made before it): its number, or -1 when handled already or the machine is not
+     * started.
+     */
+    private long claimConnect(Machine m) {
+        synchronized (connectLock) {
+            if (connectHandled == connection || !m.isEnabled()) {
+                return -1;
+            }
+            connectHandled = connection;
+            return connection;
+        }
+    }
+
+    /** BR-02: a Stop (or a failed Start) ended the connection: the next Start is another one. */
+    private void connectionEnded() {
+        synchronized (connectLock) {
+            connection++;
+        }
+    }
+
+    private boolean isConnection(long c) {
+        synchronized (connectLock) {
+            return connection == c;
+        }
+    }
+
+    /**
+     * BR-02: the web API and this engine start in no fixed order (Configuration keeps its listeners in a set), and
+     * Start does not wait for the engine: OpenPnP may have connected before its listeners existed. That connect is
+     * handled now as they would have: its time (I11 asks a confirm), a home that followed it, and on the machine
+     * thread the host watchdog's report and, unless homed, the position, once ({@link #claimConnect}). Until that read
+     * the position counts as unknown; it is waited for up to the command timeout, and every engine task queues behind
+     * it. Whether the controller is the simulator is left to the first engine task, as for any connect not heard.
+     */
+    private void catchUpConnect(Machine m) {
+        if (!m.isEnabled()) {
+            return;
+        }
+        homeTracker.connectedBeforeStart();
+        boolean homed = m.isHomed();
+        if (homed && controllerReset.homed()) {
+            stampZFrameMoved(); // OpenPnP clears homed at every disable: this home followed the connect
+        }
+        long connect = homed ? -1 : claimConnect(m);
+        if (connect >= 0) {
+            controllerReset.startedUnhomed();
+        }
+        Callable<Object> read = () -> {
+            try {
+                // a home queued before this read followed the connect, as one before the engine's start does
+                if (connect >= 0 && isConnection(connect) && m.isEnabled() && !m.isHomed()) {
+                    readPositionAtConnect(m, true);
+                }
+                if (m.isEnabled()) {
+                    watchdogAtConnect(m);
+                }
+            }
+            catch (Exception e) {
+                Logger.warn("dispense: the host watchdog's report was not read at the engine's start: {}",
+                        e.getMessage());
+            }
+            return null;
+        };
+        try {
+            if (m.isTask(Thread.currentThread())) {
+                read.call();
+            }
+            else {
+                m.submit(read, null, true).get(cfg.commandTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        catch (Exception e) {
+            Logger.warn("dispense: the connect made before the engine started is still being read ({})", e.toString());
+        }
+    }
+
     /**
      * BR-02: right after a connect, before anything can move (machine listeners run on the machine thread, inside the
-     * enable), reads the controller's position once: the boot position means it was reset.
+     * enable), reads the controller's position once: the boot position means it was reset. {@code late}: read by the
+     * engine's start after the connect ({@link #catchUpConnect}): any other position may follow a move made since (the
+     * passthrough needs no engine), so the connect counts as unread.
      */
-    private void readPositionAtConnect(Machine machine) {
+    private void readPositionAtConnect(Machine machine, boolean late) {
         List<String> m114 = null;
         String error = null;
         char letterB = 'B'; // the mapper's letter once it is resolved
@@ -535,6 +643,10 @@ public final class DispenseService {
         }
         catch (Exception e) {
             error = String.valueOf(e.getMessage());
+        }
+        if (late && m114 != null && !ControllerReset.isBootPosition(ControllerReset.parsePosition(m114), letterB)) {
+            m114 = null;
+            error = "OpenPnP connected before the engine started, which read it only later";
         }
         controllerReset.connected(m114, letterB, error); // journals a reset or an unread position to the events
         String why = controllerReset.unknownWhy();
@@ -726,13 +838,19 @@ public final class DispenseService {
      */
     private void watchForWatchdogTrip(String line) {
         if (ControllerCommands.isHostWatchdogTrip(line)) {
-            String cause = "the controller's host watchdog tripped: " + line.trim();
-            try {
-                journalWriter.execute(() -> controllerReset.watchdogTripped(cause, false)); // never this thread's insert
-            }
-            catch (java.util.concurrent.RejectedExecutionException e) {
-                Logger.warn("dispense: {} after the engine stopped: not on record", cause);
-            }
+            // in memory now, in the wire's order with the arms and resets around it; never this thread's insert
+            controllerReset.watchdogTripHeard("the controller's host watchdog tripped: " + line.trim());
+            flushLater();
+        }
+    }
+
+    /** BR-02: the journal's pending changes are written on the journal thread (no insert on a stream's thread). */
+    private void flushLater() {
+        try {
+            journalWriter.execute(controllerReset::flush);
+        }
+        catch (java.util.concurrent.RejectedExecutionException e) {
+            // the engine is stopping: shutdown() writes them
         }
     }
 
@@ -776,6 +894,7 @@ public final class DispenseService {
         }
         else if (ControllerCommands.armsWatchdog(line)) {
             controllerReset.watchdogArmed();
+            controllerReset.flush(); // at once: OpenPnP may die right after it, and the firmware trip then
         }
         else if ("G92".equals(ControllerCommands.word(ControllerCommands.normalize(line)))) {
             passthroughAt.putAll(ControllerCommands.axisWords(line)); // the axes are there now, without a move
@@ -1931,7 +2050,7 @@ public final class DispenseService {
         r.anchor = cfg.needleAnchor;
         r.offsetMm = offsetMm;
         Object[] pf = previousFrame;
-        if (pf != null && c.tip.key.equals(pf[0])) {
+        if (pf != null && c.tip.key.equals(pf[0]) && !beforeZFrameMove(c, (Long) pf[2])) {
             r.question = frameQuestion(c, offsetMm, (Double) pf[1], (Long) pf[2]);
         }
         r.warning = Interlocks.frameTooClose(cfg);
@@ -1949,9 +2068,13 @@ public final class DispenseService {
     public synchronized NeedleFrameResult setNeedleAnchor(double surfaceZMm, double needleContactZMm, Double xMm,
             Double yMm, Double rawSumMm, Long needleChangedAtMs) throws IOException, SQLException {
         requireToken(needleChangedAtMs);
+        String noK = rawSumMm == null ? null : needleFrameFromKRefusal(); // under the lock: a home's stamp counts
+        if (noK != null) {
+            throw new IllegalStateException(noK);
+        }
         DispenseConfig c = cfg.copy();
         DispenseConfig.NeedleAnchor was = c.needleAnchor;
-        if (was != null && !c.isNeedleAnchored()) {
+        if (was != null && !c.isNeedleAnchored() && !beforeZFrameMove(c, was.setAtMs)) {
             previousFrame = new Object[] {c.tip.key, was.offsetMm(), was.setAtMs};
         }
         double prev = c.needleZOffsetMm;
@@ -1970,7 +2093,7 @@ public final class DispenseService {
         r.anchor = c.needleAnchor;
         r.offsetMm = c.needleZOffsetMm;
         Object[] pf = previousFrame;
-        if (pf != null && c.tip.key.equals(pf[0])) {
+        if (pf != null && c.tip.key.equals(pf[0]) && !beforeZFrameMove(c, (Long) pf[2])) {
             r.question = frameQuestion(c, c.needleZOffsetMm, (Double) pf[1], (Long) pf[2]);
         }
         r.warning = Interlocks.frameTooClose(cfg);
@@ -1978,6 +2101,14 @@ public final class DispenseService {
             db.event(null, "WARN", TIP_EVENT, r.question);
         }
         return r;
+    }
+
+    /**
+     * BR-02: a frame recorded before a reset's home moved the Z frame: its offset is of another frame, so a frame now
+     * that differs from it says nothing about the tip (no question).
+     */
+    private static boolean beforeZFrameMove(DispenseConfig c, Long frameAtMs) {
+        return c.zFrameMovedAtMs != null && frameAtMs != null && frameAtMs <= c.zFrameMovedAtMs;
     }
 
     /**
@@ -2016,7 +2147,8 @@ public final class DispenseService {
      * the needle's), so it holds for the home and the needle it was measured with only: a home that moved the Z
      * zero moves K by about twice the shift, and a frame "from K" then gives the old offset (63 - K) whatever N1
      * just touched (review: the needle 2 x 0.8 mm into the board after the Z-moved remedy). So while the Z check of
-     * this home failed, and after a needle change, the frame is measured with both tips touching the same spot.
+     * this home failed, after a needle change and after a reset's home (BR-02), the frame is measured with both tips
+     * touching the same spot. {@link #setNeedleAnchor} checks it again under its lock.
      */
     public String needleFrameFromKRefusal() {
         DispenseConfig c = cfg;
@@ -2026,15 +2158,20 @@ public final class DispenseService {
                     + "and K moves by about twice that. Record the needle frame with both tips touching the same spot",
                     z.deltaMm, ZCheck.clock(z.homeAtMs));
         }
-        if (c.isZFrameMovedSinceAnchor()) {
-            // BR-02: the home after the controller's reset moved the Z frame
-            return "K was measured before the controller was reset: its home at " + ZCheck.clock(c.zFrameMovedAtMs)
-                    + " moved the Z frame, and K moves by about twice that. Record the needle frame with both tips "
-                    + "touching the same spot";
-        }
-        if (c.needleAnchor != null && !c.isNeedleAnchored()) {
+        if (c.needleAnchor != null && !c.isNeedleAnchored() && !c.isZFrameMovedSinceAnchor()) {
             return "K was measured with the needle before the change at " + ZCheck.clock(c.needleChangedAtMs)
                     + ": record the needle frame with both tips touching the same spot";
+        }
+        // BR-02: the home after the controller's reset moved the Z frame: until a frame is recorded after it, with or
+        // without one before (the controller's time too: the settings are stamped a moment after the home)
+        Long moved = c.zFrameMovedAtMs, homed = controllerReset.frameMovedAtMs();
+        if (homed != null && (moved == null || homed > moved)) {
+            moved = homed;
+        }
+        if (moved != null && (c.needleAnchor == null || c.needleAnchor.setAtMs <= moved)) {
+            return "K was measured before the controller was reset: its home at " + ZCheck.clock(moved) + " moved the Z "
+                    + "frame, and K moves by about twice that. Record the needle frame with both tips touching the same "
+                    + "spot";
         }
         return null;
     }

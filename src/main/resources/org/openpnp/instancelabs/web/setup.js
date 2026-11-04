@@ -27,7 +27,7 @@
    *  tip setups (PROFILE_CALIBRATION_DESIGN.md §22.1) the mounted tip, what the other tips keep, where the needle lands
    *  and its trim are set by Setup › Dispenser & tip, Check where it lands and the trim panel. */
   const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleZOffsetHomeAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces',
-    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim']);
+    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs']);
   const STAMPED_NESTED = new Set(['profile.startAngleSetAtMs', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
   const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe']);
   /** Maps PUT /api/config replaces whole: the editor diffs them per entry and Save sends the server's map as it is then

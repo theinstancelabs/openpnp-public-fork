@@ -57,7 +57,9 @@ import java.util.regex.Pattern;
  * ({@link #EVENT_WATCHDOG_TRIP}, {@link #EVENT_WATCHDOG_ARMED}); a reset ends it too (the firmware boots without it).</p>
  *
  * <p>Journal writes happen after the lock is released, one writer at a time, in the order the changes were made: a
- * status poll writing a switch-off never makes the stream's next move wait for the insert.</p>
+ * status poll writing a switch-off never makes the stream's next move wait for the insert. Changes made where no I/O
+ * may happen (a stream's moves and arms, a trip heard on the reader thread) are in memory at once and written by
+ * {@link #flush}.</p>
  *
  * <p>After a switch-off or a reset a start angle can only be set once the screw has turned since (the dot pair that
  * measures it turns it; {@link #whyNoAngle}): the angle shown before it, one click away, would otherwise clear I11.</p>
@@ -103,8 +105,9 @@ public final class ControllerReset {
     /** The host watchdog was armed again after a trip on record: the firmware forgot the trip. */
     public static final String EVENT_WATCHDOG_ARMED = "HOST_WATCHDOG_ARMED";
     /**
-     * The home after a detected reset moved the Z frame (K by twice the shift, the process engineer 11-04): the needle
-     * frame and its touch-off are recorded again (I4).
+     * The home after a detected reset moved the Z frame (K by twice the shift, the process engineer 11-04), or after a
+     * connect whose position was not read (it may have been one): the needle frame and its touch-off are recorded again
+     * (I4).
      */
     public static final String EVENT_FRAME_MOVED = "Z_FRAME_MOVED";
     private static final double TOL = 1e-3;
@@ -143,7 +146,7 @@ public final class ControllerReset {
     private Long journaledMoveMs;
     /** A host watchdog trip on record that no arm or reset has ended since (its M990 still reports it), or null. */
     private Long watchdogTripAtMs;
-    /** A detected reset no home has followed yet: the next home moves the Z frame. */
+    /** A detected reset (or an unread connect: maybe one) no home has followed yet: the next home moves the Z frame. */
     private boolean resetUnhomed;
     /** When the last home after a detected reset moved the Z frame, or null. */
     private Long frameMovedAtMs;
@@ -180,10 +183,10 @@ public final class ControllerReset {
         Long tripAt = null, tripEndedAt = null, resetAt = null, knownAt = null;
         for (Event e : history == null ? Collections.<Event> emptyList() : history) {
             // the times what follows the loop is decided from
-            if (EVENT_RESET.equals(e.code)) {
-                resetAt = e.atMs;
+            if (EVENT_RESET.equals(e.code) || EVENT_UNREAD.equals(e.code)) {
+                resetAt = later(resetAt, e.atMs); // a reset, or a connect that may have been one
             }
-            else if (EVENT_KNOWN.equals(e.code)) {
+            if (EVENT_KNOWN.equals(e.code)) {
                 knownAt = e.atMs;
             }
             else if (EVENT_FRAME_MOVED.equals(e.code)) {
@@ -234,7 +237,17 @@ public final class ControllerReset {
             // OpenPnP clears its homed flag at every disable and a reset needs a reconnect: this home came after it
             homed();
         }
-        else if (enabledAtStart && positionKnown) {
+        else if (enabledAtStart) {
+            startedUnhomed();
+        }
+    }
+
+    /**
+     * The machine was started, and not homed, before the engine saw the connect: the position is unknown until a home.
+     * In memory only: the engine reads the controller next ({@link #connected}).
+     */
+    public synchronized void startedUnhomed() {
+        if (positionKnown) {
             positionKnown = false;
             unknownWhy = "the machine was started but not homed when the engine started: its position was never "
                     + "checked";
@@ -307,6 +320,7 @@ public final class ControllerReset {
                     + (readError != null ? readError : "no position in its M114 reply")
                     + "), so it may have been reset", now);
             watchdogTripAtMs = null; // maybe a reset: a trip reported now is a new one
+            resetUnhomed = true; // and its home may move the Z frame (the conservative side)
             record(EVENT_UNREAD, now, unknownWhy);
             return;
         }
@@ -356,25 +370,38 @@ public final class ControllerReset {
     public boolean watchdogTripped(String cause, boolean reported) {
         boolean recorded;
         synchronized (this) {
-            recorded = !reported || watchdogTripAtMs == null;
-            if (recorded) {
-                long now = clock.getAsLong();
-                idleCheck(now);
-                Event e = new Event(EVENT_MOTOR_OFF, now, offText(now, cause));
-                switchedOff(e);
-                toWrite.add(e);
-                watchdogTripAtMs = now;
-                record(EVENT_WATCHDOG_TRIP, now, "the host watchdog tripped at " + ZCheck.clock(now) + ": its M990 "
-                        + "reports it until the host arms it again");
-            }
+            recorded = trippedLocked(cause, reported);
         }
         writeOut();
         return recorded;
     }
 
     /**
+     * A trip heard as it happens (its error, on the driver's reader thread): recorded now, in the wire's order with the
+     * arms and resets around it. No I/O: {@link #flush} writes it.
+     */
+    public synchronized void watchdogTripHeard(String cause) {
+        trippedLocked(cause, false);
+    }
+
+    private boolean trippedLocked(String cause, boolean reported) {
+        if (reported && watchdogTripAtMs != null) {
+            return false;
+        }
+        long now = clock.getAsLong();
+        idleCheck(now);
+        Event e = new Event(EVENT_MOTOR_OFF, now, offText(now, cause));
+        switchedOff(e);
+        toWrite.add(e);
+        watchdogTripAtMs = now;
+        record(EVENT_WATCHDOG_TRIP, now, "the host watchdog tripped at " + ZCheck.clock(now) + ": its M990 reports it "
+                + "until the host arms it again");
+        return true;
+    }
+
+    /**
      * The engine armed the host watchdog (M990 S: a run, the pressure hold): the firmware forgets its trip, so one it
-     * reports later is a new one. No I/O (a stream's line): written by the next call that writes.
+     * reports later is a new one. No I/O (a stream's line): {@link #flush} writes it.
      */
     public synchronized void watchdogArmed() {
         if (watchdogTripAtMs != null) {
@@ -509,6 +536,14 @@ public final class ControllerReset {
     }
 
     /**
+     * Writes the changes not written yet: those made without I/O (a stream's moves and arms, a trip heard on the reader
+     * thread). The engine calls it off those threads, and when it stops.
+     */
+    public void flush() {
+        writeOut();
+    }
+
+    /**
      * Writes the changes made so far, outside this lock and in their order: one writer at a time drains them all, so a
      * later writer finds the earlier changes written.
      */
@@ -551,7 +586,7 @@ public final class ControllerReset {
 
     /**
      * A home succeeded (the engine's, the API's or OpenPnP's own): the position is known. Returns whether it is the
-     * first home after a detected reset: it moved the Z frame ({@link #frameMovedAtMs}).
+     * first home after a detected reset or an unread connect: it moved the Z frame ({@link #frameMovedAtMs}).
      */
     public boolean homed() {
         boolean moved;

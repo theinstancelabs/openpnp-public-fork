@@ -172,6 +172,7 @@ final class MachineEndpoints {
 
     Object enable() throws Exception {
         Machine m = ctx.machine();
+        refuseWhileEngineStarts("Start");
         // BR-52: a machine switching off still reads started; start it again once the switch-off has ended
         if (!ctx.switchOff.awaitEnd(START_WAITS_FOR_SWITCH_OFF_MS)) {
             throw ApiException.refused("OpenPnP is still switching the machine off after "
@@ -194,8 +195,21 @@ final class MachineEndpoints {
         return Views.map("enabled", m.isEnabled(), "homed", m.isHomed());
     }
 
+    /**
+     * BR-02 (#11 review 11-04): OpenPnP starts the web API and the engine in no fixed order; until the engine runs it
+     * is not watching the connect, so a Start or a Home then would skip its reset checks (a home after a reset that
+     * moves no Z frame). "failed" is not waited for: the status says why.
+     */
+    private void refuseWhileEngineStarts(String what) throws ApiException {
+        if (ctx.svcOrNull() == null && "starting".equals(DispenseService.startState())) {
+            throw ApiException.refused("the dispense engine is still starting (it reads the controller at Start): "
+                    + "press " + what + " again in a few seconds");
+        }
+    }
+
     Object home(ApiServer.Request r) throws Exception {
         Machine m = ctx.machine();
+        refuseWhileEngineStarts("Home");
         if (!m.isEnabled()) {
             throw ApiException.refused("the machine is not started: press Start first");
         }
