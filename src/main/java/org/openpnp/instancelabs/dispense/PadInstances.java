@@ -210,8 +210,8 @@ public final class PadInstances {
         List<PadType> types = svc.getPadTypes();
         CheckInputs in = inputs(pads, types, db.currentPadRules(), cfg, db.pastePartialPackages(), planned, tip);
         long since = in.nowMs - (long) (cfg.padCalibration.doseRecordMaxAgeH * 3600e3); // older ones are stale
-        in.evidence = DoseRecords.evidence(db.doseRecords(null, since), cfg, new DoseRecord.Epochs(
-                svc.getControllerResetAtMs(), svc.isSimulatorConfirmed()), in.nowMs, db.flaggedJobs());
+        in.evidence = DoseRecords.evidence(db.doseRecords(null, since), cfg, svc.doseEpochs(), in.nowMs,
+                db.flaggedJobs());
         others(db, tip.key, types, in);
         return in;
     }

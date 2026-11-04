@@ -1431,10 +1431,12 @@ public class RegistrationSimTest {
 
     /**
      * Start (a controller connect) and the start angle measured again (I11; BR-02: the stop sequence of the task the
-     * STOP ended switched the screw's motor off, so a confirm cannot keep the angle).
+     * STOP ended switched the screw's motor off, so a confirm cannot keep the angle; the dot pair that measures it turns
+     * the screw first).
      */
     void restart() throws Exception {
         ok(post("/api/machine/enable", null));
+        svc.noteControllerLine("G1 B30 F600");
         double angle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile")
                 .get("startAngleDeg").getAsDouble();
         ok(post("/api/screw/start-angle", "{\"startAngleDeg\":" + angle + "}"));

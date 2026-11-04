@@ -676,8 +676,9 @@ public final class Interlocks {
                 r.add("I11", "the controller was reset after the screw start angle was set; the B step count restarts "
                         + "at power-up, so the angle is lost: measure it again (Profiles)");
             }
-            else if (in.screwMotorOffAtMs != null && prof.startAngleSetAtMs < in.screwMotorOffAtMs) {
+            else if (in.screwMotorOffAtMs != null && prof.startAngleSetAtMs <= in.screwMotorOffAtMs) {
                 // BR-02: the step count ran on, but the screw may have turned unpowered: no confirm can keep the angle
+                // (one set in the millisecond of the switch-off may have been set before it)
                 r.add("I11", in.screwMotorOffWhy + " after the screw start angle was set: the screw may have turned: "
                         + "measure the start angle again (Profiles)");
             }

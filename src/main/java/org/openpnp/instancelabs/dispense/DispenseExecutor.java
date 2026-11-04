@@ -30,8 +30,11 @@ public class DispenseExecutor {
 
     /** BR-02: hears what this executor's lines do to the screw's motor (the controller's idle clock, M18). */
     public interface ScrewWatch {
-        /** A line that turns the screw (G0/G1 of its axis) was acknowledged. Called per line: no I/O. */
-        void turned();
+        /**
+         * A move (G0, G1, G28) was acknowledged: the controller restarts its idle clock on any; {@code screw}: it turned
+         * the screw (G0/G1 of its axis). Called per line: no I/O.
+         */
+        void moved(boolean screw);
 
         /**
          * The I1 shutdown sent a line that switches the screw's motor off (its M18), after the whole sequence;
@@ -67,11 +70,11 @@ public class DispenseExecutor {
         return this;
     }
 
-    /** BR-02: an acknowledged line that turns the screw restarts the controller's idle clock. */
+    /** BR-02: an acknowledged move restarts the controller's idle clock (a screw move also switches it on). */
     private void noteScrewMove(String line) {
         ScrewWatch w = screwWatch;
-        if (w != null && ControllerCommands.turnsScrew(line, letterB)) {
-            w.turned();
+        if (w != null && ControllerCommands.isMove(line)) {
+            w.moved(ControllerCommands.turnsScrew(line, letterB));
         }
     }
 

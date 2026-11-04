@@ -1224,7 +1224,8 @@ final class DispenseEndpoints {
 
     /**
      * I11: set ({"startAngleDeg": a}) or confirm ({} or {"confirm": true}) the screw start angle for
-     * the current controller power-up (the B step count restarts at power-up).
+     * the current controller power-up (the B step count restarts at power-up). {@code measuredAtMs}: when the evidence
+     * of a set angle was made (BR-02: refused when it is from before the screw's motor last went off).
      */
     Object startAngle(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
@@ -1236,7 +1237,8 @@ final class DispenseEndpoints {
         if (a != null && !(a >= 0 && a < 360)) {
             throw ApiException.badRequest("startAngleDeg must be 0 to < 360");
         }
-        svc.setStartAngle(a, Json.str(b, "note", null));
+        Double measured = Json.num(b, "measuredAtMs", null); // BR-02: when its evidence (the dot pair) was made
+        svc.setStartAngle(a, Json.str(b, "note", null), measured == null ? null : measured.longValue());
         return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs(),
                 svc.getControllerResetAtMs());
     }

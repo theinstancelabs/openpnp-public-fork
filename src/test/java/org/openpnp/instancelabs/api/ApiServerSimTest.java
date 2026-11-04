@@ -809,7 +809,8 @@ public class ApiServerSimTest {
         Res confirm = post("/api/screw/start-angle", "{}");
         assertEquals(409, confirm.status, confirm.toString());
         assertTrue(confirm.body.contains("measure it again"), confirm.toString());
-        // measured again, the same angle: the plan stays valid
+        // measured again (a dot pair turns the screw: no set before it, BR-02), the same angle: the plan stays valid
+        svc.noteControllerLine("G1 B30 F600");
         long t0 = System.currentTimeMillis();
         JsonObject conf = ok(post("/api/screw/start-angle", "{\"startAngleDeg\":298,\"note\":\"measured again\"}"));
         assertEquals(298, conf.get("startAngleDeg").getAsDouble(), 1e-9);
@@ -1066,7 +1067,9 @@ public class ApiServerSimTest {
                     .setPort(proxy.port());
             sim.machine.setEnabled(true);
             sim.machine.home();
-            // BR-02: that Stop's DISABLE_COMMAND switched the screw's motor off (M18 B): the angle is measured again
+            // BR-02: that Stop's DISABLE_COMMAND switched the screw's motor off (M18 B): the angle is measured again (a dot
+            // pair turns the screw first)
+            svc.noteControllerLine("G1 B30 F600");
             double angle = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile")
                     .get("startAngleDeg").getAsDouble();
             ok(post("/api/screw/start-angle", "{\"startAngleDeg\":" + angle + "}"));

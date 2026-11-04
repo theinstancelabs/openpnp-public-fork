@@ -2,6 +2,7 @@ package org.openpnp.instancelabs.dispense;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -354,7 +355,7 @@ public class ControllerResetTest {
         now = 1000 + HOUR + 5000;
         assertEquals(Long.valueOf(1000 + HOUR), r.countEpochMs(), "dated when the controller switched it off");
         assertEquals(1000 + HOUR, r.lastScrewMotorOff().atMs);
-        assertTrue(r.lastScrewMotorOff().message.contains("the controller's idle timeout: no screw move for 60 min"),
+        assertTrue(r.lastScrewMotorOff().message.contains("the controller's idle timeout: no move for 60 min"),
                 r.lastScrewMotorOff().message);
         now += 3 * HOUR;
         r.countEpochMs();
@@ -379,7 +380,7 @@ public class ControllerResetTest {
         idleMs = 60_000;
         now = 1000 + 60_000;
         assertEquals(Long.valueOf(1000 + 60_000), r.countEpochMs());
-        assertTrue(r.lastScrewMotorOff().message.contains("no screw move for 1 min"), r.lastScrewMotorOff().message);
+        assertTrue(r.lastScrewMotorOff().message.contains("no move for 1 min"), r.lastScrewMotorOff().message);
         assertNull(reset(false, false).countEpochMs(), "without a timeout (tests): no idle switch-off");
     }
 
@@ -471,6 +472,88 @@ public class ControllerResetTest {
         long moved = now;
         now = moved + HOUR;
         assertEquals(Long.valueOf(moved + HOUR), withIdle().countEpochMs(), "after a restart, from the move after it");
+    }
+
+    /**
+     * Marlin restarts its idle clock on any queued move: while the screw's motor is on, a move of another axis keeps it
+     * on too; while it is off (until the screw turns again) nothing times out.
+     */
+    @Test
+    public void anyMoveWhileTheMotorIsOnRestartsTheIdleClock() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.axisMoved(); // the motor's state is not known yet: no clock
+        now = 1000 + 2 * HOUR;
+        assertNull(r.countEpochMs());
+        r.screwMoved();
+        long turned = now;
+        now = turned + HOUR / 2;
+        r.axisMoved(); // an X move restarts it
+        long moved = now;
+        now = turned + HOUR + 1000;
+        assertNull(r.countEpochMs(), "the X move kept it on");
+        now = moved + HOUR;
+        assertEquals(Long.valueOf(moved + HOUR), r.countEpochMs());
+        now += 3 * HOUR;
+        r.axisMoved(); // off now: a move of another axis does not switch it on
+        now += 2 * HOUR;
+        r.countEpochMs();
+        assertEquals(Arrays.asList(ControllerReset.EVENT_MOTOR_OFF), codes());
+    }
+
+    /**
+     * A move between a stream's lines journals nothing (a write there would hold the needle at a dot): the switch-off
+     * it finds goes on record after the stream, before the move.
+     */
+    @Test
+    public void aMoveFindsASwitchOffButJournalsItOnlyAfterTheStream() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.screwMoved();
+        now = 1000 + 2 * HOUR;
+        r.screwMoved();
+        r.axisMoved();
+        assertTrue(journal.isEmpty(), "nothing written between two lines: " + codes());
+        r.journalScrewMotion(); // after the stream
+        assertEquals(Arrays.asList(ControllerReset.EVENT_MOTOR_OFF, ControllerReset.EVENT_SCREW_MOTION), codes());
+        assertEquals(1000 + HOUR, journal.get(0).atMs);
+    }
+
+    /**
+     * A start angle is measured with the screw turning (a dot pair): after a switch-off or a reset none is set until the
+     * screw has turned since, nor one whose evidence was made before it.
+     */
+    @Test
+    public void anAngleIsSetOnlyOnceTheScrewTurnedSinceItsMotorWentOff() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        assertNull(r.whyNoAngle(null), "nothing switched it off");
+        r.screwMoved();
+        now = 2000;
+        r.screwMotorOff("a STOP");
+        now = 3000;
+        r.axisMoved(); // an X move is no turn of the screw
+        String why = r.whyNoAngle(null);
+        assertTrue(why != null && why.startsWith("the screw has not turned since its motor was switched off at ")
+                && why.endsWith(": measure the start angle (a dot pair) first"), why);
+        now = 4000;
+        r.screwMoved();
+        assertNull(r.whyNoAngle(null), "turned since: the dot pair");
+        assertNull(r.whyNoAngle(4000L));
+        String old = r.whyNoAngle(1500L);
+        assertTrue(old != null && old.startsWith("the start angle was measured at ")
+                && old.contains(", before its motor was switched off at "), old);
+        assertNotNull(r.whyNoAngle(2000L), "measured in the millisecond of the switch-off");
+        r.journalScrewMotion();
+        assertNull(withIdle().whyNoAngle(null), "after a restart the turn on record counts");
+        // a reset boots with the motor off: the same until the screw turns
+        now = 5000;
+        r.connected(reply(BOOT), 'B', null);
+        assertTrue(r.whyNoAngle(null).startsWith("the screw has not turned since the controller was reset at "),
+                r.whyNoAngle(null));
+        now = 6000;
+        r.screwMoved();
+        assertNull(r.whyNoAngle(null));
     }
 
     @Test

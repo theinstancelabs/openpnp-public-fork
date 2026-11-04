@@ -153,8 +153,8 @@ public class DispenseConfig {
     public long commandTimeoutMs = 10000;
     /**
      * BR-02: the controller switches the screw's motor off after this long without a move (Marlin's
-     * DEFAULT_STEPPER_DEACTIVE_TIME, 3600 s on the LumenPnP's board), s. Unpowered, the screw may turn, so a start
-     * angle set before then is measured again (I11); the engine counts from the last screw move it knows of.
+     * DEFAULT_STEPPER_DEACTIVE_TIME, 3600 s on the LumenPnP's board), s, at most 3600. Unpowered, the screw may turn, so
+     * a start angle set before then is measured again (I11); the engine counts from the last move it knows of.
      */
     public double screwIdleOffS = 3600;
 
@@ -808,9 +808,9 @@ public class DispenseConfig {
         if (bExtrudeSign != 1 && bExtrudeSign != -1) {
             p.add("bExtrudeSign must be +1 or -1");
         }
-        if (!(screwIdleOffS > 0 && Double.isFinite(screwIdleOffS))) {
-            p.add("screwIdleOffS must be > 0 s: the controller's idle timeout of the screw's motor (Marlin's "
-                    + "DEFAULT_STEPPER_DEACTIVE_TIME, 3600 s on the LumenPnP)");
+        if (!(screwIdleOffS > 0 && screwIdleOffS <= 3600)) {
+            p.add("screwIdleOffS must be > 0 and <= 3600 s: the controller's idle timeout of the screw's motor (Marlin's "
+                    + "DEFAULT_STEPPER_DEACTIVE_TIME, 3600 s on the LumenPnP; a longer one would miss its switch-off)");
         }
         if (!(zLiftAccelMmS2 > 0 && zLiftAccelMmS2 <= 5000 && travelAccelMmS2 > 0 && travelAccelMmS2 <= 5000)) {
             p.add("travelAccelMmS2 and zLiftAccelMmS2 must be > 0 and <= 5000 (the screw's acceleration is the "

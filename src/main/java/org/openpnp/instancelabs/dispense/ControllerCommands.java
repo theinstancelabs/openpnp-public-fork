@@ -151,6 +151,37 @@ public final class ControllerCommands {
         return ("G0".equals(w) || "G1".equals(w)) && names(parameterLetters(s), letter);
     }
 
+    /** BR-02: whether a line queues a move (G0, G1, G28): Marlin restarts its idle clock on every queued move. */
+    public static boolean isMove(String line) {
+        String w = word(normalize(line));
+        return "G0".equals(w) || "G1".equals(w) || "G28".equals(w);
+    }
+
+    /** The il/safety firmware's host watchdog tripping (SERIAL_ERROR_MSG "host watchdog"); not its M990 report. */
+    private static final Pattern WATCHDOG_TRIP = Pattern.compile("(?i)\\berror:\\s*host watchdog\\b");
+    /** Its M990 report, "echo:Host watchdog: off|armed S<ms>[ tripped]": tripped until the host arms it again. */
+    private static final Pattern WATCHDOG_TRIPPED = Pattern.compile("(?i)host watchdog:.*\\btripped\\b");
+
+    /**
+     * BR-02: a controller line that says the host watchdog tripped: it quick-stopped, switched the outputs and the
+     * screw's driver off (host_watchdog.cpp).
+     */
+    public static boolean isHostWatchdogTrip(String line) {
+        return line != null && WATCHDOG_TRIP.matcher(line).find();
+    }
+
+    /** BR-02: an M990 reply that reports a trip since the watchdog was last armed. */
+    public static boolean reportsWatchdogTrip(List<String> reply) {
+        if (reply != null) {
+            for (String l : reply) {
+                if (l != null && WATCHDOG_TRIPPED.matcher(l).find()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /** The parameter letters of a normalized line after its command word ("BF" for "G1 B12.5 F600"). */
     private static String parameterLetters(String normalized) {
         Matcher m = WORD.matcher(normalized);

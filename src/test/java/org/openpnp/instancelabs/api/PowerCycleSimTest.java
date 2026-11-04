@@ -2,6 +2,7 @@ package org.openpnp.instancelabs.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
@@ -213,6 +214,12 @@ public class PowerCycleSimTest {
         call("POST", "/api/screw/start-angle", "{}");
         assertEquals(409, lastStatus, lastBody);
         assertTrue(lastBody.contains("measure"), lastBody);
+        // nor can one be set before the screw has turned since (a dot pair measures it): the old value would pass
+        call("POST", "/api/screw/start-angle", "{\"startAngleDeg\":298}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("the screw has not turned since the controller was reset at ")
+                && lastBody.contains("measure the start angle (a dot pair) first"), lastBody);
+        turnScrew();
         JsonObject p = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
         assertFalse(p.get("startAngleNeedsConfirm").getAsBoolean(), "a new angle after the reset: " + p);
         ok("POST", "/api/screw/start-angle", "{}"); // and a confirm of that one is fine
@@ -372,7 +379,16 @@ public class PowerCycleSimTest {
         assertEquals(409, lastStatus, lastBody);
         assertTrue(lastBody.contains("the screw motor was switched off") && lastBody.contains("measure it again"),
                 lastBody);
-        JsonObject again = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":226}");
+        // the old angle, one click away, would clear I11: no set before the screw has turned since
+        call("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("the screw has not turned since its motor was switched off at "), lastBody);
+        turnScrew(); // the dot pair that measures it
+        call("POST", "/api/screw/start-angle", "{\"startAngleDeg\":226,\"measuredAtMs\":" + setAt + "}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("before its motor was switched off at "), "evidence from before it: " + lastBody);
+        JsonObject again = ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":226,\"measuredAtMs\":"
+                + System.currentTimeMillis() + "}");
         assertFalse(again.get("startAngleNeedsConfirm").getAsBoolean(), "measured again after it: " + again);
         ok("POST", "/api/screw/start-angle", "{}"); // and a confirm of that one is fine
         assertEquals("ok", i11(ok("GET", "/api/status", null)).get("state").getAsString());
@@ -424,6 +440,111 @@ public class PowerCycleSimTest {
         call("POST", "/api/screw/start-angle", "{}");
         assertEquals(409, lastStatus, lastBody);
         assertTrue(lastBody.contains("measure it again"), lastBody);
+    }
+
+    /** The screw turns (a dot pair measures the start angle): a G1 B through the passthrough, as the lock's agent. */
+    void turnScrew() throws Exception {
+        if (lockToken == null) {
+            lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"start angle\"}")
+                    .get("token").getAsString();
+        }
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 B30 F600\",\"M400\"]}");
+    }
+
+    /**
+     * BR-02: a Start that fails after the screw's driver connected is rolled back by OpenPnP: the driver's
+     * DISABLE_COMMAND goes out (its M18 B) though only machineEnableFailed fires: on record all the same.
+     */
+    @Test
+    public void aFailedStartsDisableCommandSwitchesTheScrewMotorOff() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        sim.machine.setEnabled(false); // the test config has no DISABLE_COMMAND: nothing switched off
+        assertEquals(0, motorOffs().size());
+        liveDisableCommand();
+        org.openpnp.machine.reference.driver.NullDriver failing = new org.openpnp.machine.reference.driver.NullDriver() {
+            @Override
+            public void setEnabled(boolean enabled) throws Exception {
+                if (enabled) {
+                    throw new Exception("a second controller did not answer");
+                }
+                super.setEnabled(false);
+            }
+        };
+        Thread.sleep(5);
+        sim.machine.addDriver(failing); // enabled after the screw's driver: its failure rolls that one back
+        try {
+            sim.server.mark();
+            assertThrows(Exception.class, () -> sim.machine.setEnabled(true));
+            assertTrue(sim.server.sinceMark().contains("M18 B"), "the rollback's DISABLE_COMMAND: "
+                    + sim.server.sinceMark());
+        }
+        finally {
+            sim.machine.removeDriver(failing);
+        }
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
+        String why = String.valueOf(motorOffs().get(0).get("message"));
+        assertTrue(why.contains("(a Start that failed"), why);
+        sim.machine.setEnabled(true);
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, lastBody);
+    }
+
+    /**
+     * BR-02: the il/safety firmware's host watchdog trips when the host falls silent while it is armed: it switches the
+     * screw's driver off and says "Error:host watchdog".
+     */
+    @Test
+    public void aHostWatchdogTripSwitchesTheScrewMotorOff() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        Thread.sleep(5);
+        sim.server.say("Error:host watchdog");
+        long t0 = System.currentTimeMillis();
+        while (motorOffs().isEmpty() && System.currentTimeMillis() - t0 < 5000) {
+            Thread.sleep(20);
+        }
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
+        String why = String.valueOf(motorOffs().get(0).get("message"));
+        assertTrue(why.contains("(the controller's host watchdog tripped"), why);
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, lastBody);
+    }
+
+    /**
+     * BR-02: a trip while OpenPnP was gone (no one heard it) is in the firmware's M990 report until the next arm: read at
+     * every connect, only where M115 names the watchdog.
+     */
+    @Test
+    public void aWatchdogTripReportedAtTheConnectSwitchesTheScrewMotorOff() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        Thread.sleep(5);
+        sim.server.watchdogReport = "echo:Host watchdog: off tripped";
+        sim.server.hostWatchdogCapability = false;
+        sim.server.mark();
+        reconnect();
+        assertFalse(sim.server.sinceMark().contains("M990"), "no watchdog in M115: not asked " + sim.server.sinceMark());
+        assertEquals(0, motorOffs().size());
+        sim.server.hostWatchdogCapability = true;
+        sim.server.mark();
+        reconnect();
+        assertTrue(sim.server.sinceMark().contains("M990"), sim.server.sinceMark().toString());
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
+        String why = String.valueOf(motorOffs().get(0).get("message"));
+        assertTrue(why.contains("(the controller's host watchdog tripped") && why.contains("M990"), why);
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, lastBody);
+        sim.server.watchdogReport = "echo:Host watchdog: off";
+        reconnect();
+        assertEquals(1, motorOffs().size(), "no trip reported: nothing new");
+    }
+
+    /** BR-02: the controller's idle timeout is at most Marlin's 3600 s (a longer one would miss its switch-off). */
+    @Test
+    public void theIdleTimeoutIsAtMostTheControllers() throws Exception {
+        call("PUT", "/api/config", "{\"screwIdleOffS\":3601}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("screwIdleOffS"), lastBody);
+        ok("PUT", "/api/config", "{\"screwIdleOffS\":1800}");
+        assertEquals(1800, svc.getConfig().screwIdleOffS, 0);
     }
 
     @Test

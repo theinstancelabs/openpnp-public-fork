@@ -193,7 +193,9 @@ public class InterlocksTest {
                 + "angle was set: the screw may have turned: measure the start angle again"), r.toString());
         assertFalse(r.toString().contains("confirm it"), r.toString());
         assertFalse(r.toString().contains("controller was reset"), r.toString());
-        in.cfg.profile.startAngleSetAtMs = 3500L; // measured right after it
+        in.cfg.profile.startAngleSetAtMs = 3500L; // in the millisecond of the switch-off: maybe before it
+        assertTrue(Interlocks.check(in).has("I11"), Interlocks.check(in).toString());
+        in.cfg.profile.startAngleSetAtMs = 3501L; // measured after it
         assertFalse(Interlocks.check(in).has("I11"), Interlocks.check(in).toString());
         // a switch-off before the angle was set: nothing to measure
         in.cfg.profile.startAngleSetAtMs = 4000L;

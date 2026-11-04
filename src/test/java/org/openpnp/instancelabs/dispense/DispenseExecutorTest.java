@@ -343,7 +343,8 @@ public class DispenseExecutorTest {
 
     /** BR-02: what the watch of the screw's motor hears (the controller's idle clock, the stop sequence's M18). */
     static class Watch implements DispenseExecutor.ScrewWatch {
-        final List<Long> turned = new ArrayList<>();
+        /** Per acknowledged move: true when it turned the screw. */
+        final List<Boolean> moved = new ArrayList<>();
         final List<String> off = new ArrayList<>();
         final FakeChannel ch;
 
@@ -352,8 +353,8 @@ public class DispenseExecutorTest {
         }
 
         @Override
-        public void turned() {
-            turned.add(ch.now);
+        public void moved(boolean screw) {
+            moved.add(screw);
         }
 
         @Override
@@ -362,9 +363,12 @@ public class DispenseExecutorTest {
         }
     }
 
-    /** BR-02: every acknowledged screw move restarts the controller's idle clock; a stream sends no M18. */
+    /**
+     * BR-02: every acknowledged move restarts the controller's idle clock (Marlin's, on any queued move), a screw move
+     * also switches the motor on; a stream sends no M18.
+     */
     @Test
-    public void theWatchHearsEveryScrewMoveOfAStream() throws Exception {
+    public void theWatchHearsEveryMoveOfAStream() throws Exception {
         DispenseConfig c = GcodeStreamTest.toyConfig();
         GcodeProgram p = program(c, false);
         FakeChannel ch = new FakeChannel();
@@ -372,8 +376,11 @@ public class DispenseExecutorTest {
         DispenseExecutor ex = new DispenseExecutor(c, ch, "B", () -> ch.now).watchScrew(w);
         ex.stream(p, run(3), null);
         long bMoves = ch.sent.stream().filter(l -> l.startsWith("G1 B")).count();
-        assertTrue(bMoves > 0);
-        assertEquals(bMoves, w.turned.size(), "one per G1 B line");
+        long others = ch.sent.stream().filter(l -> (l.startsWith("G0 ") || l.startsWith("G1 ")) && !l.startsWith("G1 B"))
+                .count();
+        assertTrue(bMoves > 0 && others > 0);
+        assertEquals(bMoves, w.moved.stream().filter(b -> b).count(), "one per G1 B line");
+        assertEquals(others, w.moved.stream().filter(b -> !b).count(), "one per X/Y/Z move");
         assertEquals(new ArrayList<String>(), w.off);
     }
 
@@ -418,5 +425,30 @@ public class DispenseExecutorTest {
             "G1 A5"}) {
             assertFalse(ControllerCommands.turnsScrew(l, "B"), l);
         }
+        for (String l : new String[] {"G0 X1", "G1 Z10 F600", "g1 b3", "G28", "G28 X Y"}) {
+            assertTrue(ControllerCommands.isMove(l), l);
+        }
+        for (String l : new String[] {"G92 X0", "G4 P100", "M400", "M18 B", "G280", ""}) {
+            assertFalse(ControllerCommands.isMove(l), l);
+        }
+    }
+
+    /**
+     * BR-02: the il/safety firmware's host watchdog (M990) switches the screw's motor off when it trips: its
+     * "Error:host watchdog", and the "tripped" its M990 report keeps until the next arm.
+     */
+    @Test
+    public void theHostWatchdogsTripAndItsReport() {
+        assertTrue(ControllerCommands.isHostWatchdogTrip("Error:host watchdog"));
+        assertTrue(ControllerCommands.isHostWatchdogTrip("error: Host watchdog"));
+        assertFalse(ControllerCommands.isHostWatchdogTrip("echo:Host watchdog: off tripped"), "the report is no trip");
+        assertFalse(ControllerCommands.isHostWatchdogTrip("Error:M990 S must be 0 or 100..3600000"));
+        assertFalse(ControllerCommands.isHostWatchdogTrip(null));
+        assertTrue(ControllerCommands.reportsWatchdogTrip(Arrays.asList("echo:Host watchdog: off tripped", "ok")));
+        assertTrue(ControllerCommands.reportsWatchdogTrip(Arrays.asList("echo:Host watchdog: armed S3000 tripped")));
+        assertFalse(ControllerCommands.reportsWatchdogTrip(Arrays.asList("echo:Host watchdog: armed S3000", "ok")));
+        assertFalse(ControllerCommands.reportsWatchdogTrip(Arrays.asList("echo:Host watchdog: off", "ok")));
+        assertFalse(ControllerCommands.reportsWatchdogTrip(Arrays.asList("ok")));
+        assertFalse(ControllerCommands.reportsWatchdogTrip(null));
     }
 }
