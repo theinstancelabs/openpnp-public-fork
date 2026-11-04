@@ -749,9 +749,10 @@
   /** What a control that needs the position says until that home. */
   IL.positionUnknownReason = (status) => 'The position is unknown (' + IL.positionUnknownWhy(status).replace(/[.:]\s*$/, '') + '): Home first, after checking that nothing is under either tool';
   /**
-   * The start angle's question (I11): 'off' (whole turns), 'never', 'measure' (the controller was reset after the angle
-   * was set: its step count started again, a bare confirm is refused, BR-02), 'confirm' (a reconnect: was it switched
-   * off?) or 'ok'. Reads profile.startAngleNeedsConfirm and machine.powerCycle.atMs, never powerCycle.detected (§7).
+   * The start angle's question (I11): 'off' (whole turns), 'never', 'measure' (after the angle was set the controller was
+   * reset, so its step count started again, or the screw motor was switched off, so the screw may have turned: a bare
+   * confirm is refused, BR-02), 'confirm' (a reconnect: was it switched off?) or 'ok'. Reads
+   * profile.startAngleNeedsConfirm, machine.powerCycle.atMs and machine.screwMotorOff.atMs, never powerCycle.detected (§7).
    */
   IL.angleState = function (status) {
     const s = status || S.status || {};
@@ -759,13 +760,28 @@
     const i11 = IL.interlock(s, 'I11');
     if ((i11 && i11.state === 'off') || prof.partialTurn === false) return 'off';
     if (!prof.startAngleSetAtMs) return 'never';
-    const pc = s.machine && s.machine.powerCycle;
-    if (pc && isNum(pc.atMs) && pc.atMs > prof.startAngleSetAtMs) return 'measure';
+    const m = s.machine || {};
+    if ([m.powerCycle, m.screwMotorOff].some((e) => e && isNum(e.atMs) && e.atMs > prof.startAngleSetAtMs)) return 'measure';
     return prof.startAngleNeedsConfirm || (i11 && i11.state === 'blocked') ? 'confirm' : 'ok';
   };
-  /** "The controller was switched off or reset at 16:20: the screw's step count started again." */
+  /** The later of the two (BR-02): the screw motor's switch-off ('motor') or the controller's reset ('reset'). */
+  IL.angleResetCause = function (status) {
+    const m = (status || S.status || {}).machine || {};
+    const off = m.screwMotorOff, pc = m.powerCycle;
+    return off && isNum(off.atMs) && !(pc && isNum(pc.atMs) && pc.atMs > off.atMs) ? 'motor' : 'reset';
+  };
+  /**
+   * Why the angle no longer holds: "The controller was switched off or reset at 16:20: the screw's step count started
+   * again", or the engine's why: "The screw motor was switched off at 16:20 (a STOP: …): the screw may have turned".
+   */
   IL.angleResetText = function (status) {
-    const pc = ((status || S.status || {}).machine || {}).powerCycle || {};
+    const m = (status || S.status || {}).machine || {};
+    if (IL.angleResetCause(status) === 'motor') {
+      const off = m.screwMotorOff;
+      const why = off.why ? off.why.charAt(0).toUpperCase() + off.why.slice(1) : 'The screw motor was switched off at ' + IL.fmtTime(off.atMs - S.skewMs);
+      return why + ': the screw may have turned';
+    }
+    const pc = m.powerCycle || {};
     return 'The controller was switched off or reset' + (isNum(pc.atMs) ? ' at ' + IL.fmtTime(pc.atMs - S.skewMs) : '') + ": the screw's step count started again";
   };
   /**
@@ -1807,7 +1823,7 @@
     const knowsResets = !!m.powerCycle && prof.partialTurn !== false;   // BR-02: the engine detects a reset, nobody is asked
     const angleSt = IL.angleState(s);
     if (knowsResets && angleSt === 'measure') {
-      steps.push({ key: 'angle', title: 'The controller was switched off', state: 'need', wait: !m.enabled, done: false,
+      steps.push({ key: 'angle', title: IL.angleResetCause(s) === 'motor' ? 'The screw motor was switched off' : 'The controller was switched off', state: 'need', wait: !m.enabled, done: false,
         detail: IL.angleResetText(s) + ': measure the start angle again (I11)', fixes: [{ href: '#calibrate/angle', label: 'Measure again', primary: true }] });
     } else if (knowsResets && angleSt !== 'confirm') {
       steps.push({ key: 'angle', title: 'Start angle', wait: !m.enabled, done: !!m.enabled,
@@ -2326,6 +2342,7 @@
       const i11 = IL.interlock(s, 'I11');
       if ((i11 && i11.state === 'off') || prof.partialTurn === false) setCell(ac, 'off', 'Whole turns', 'Whole turns per dot: the start angle does not matter (I11 off)');
       else if (!prof.startAngleSetAtMs) setCell(ac, 'block', 'Not set', 'The screw start angle was never set: measure it (Calibrate, I11)');
+      else if (IL.angleState(s) === 'measure') setCell(ac, 'need', 'Measure', IL.angleResetText(s) + ': measure the start angle again (I11)');
       else if (prof.startAngleNeedsConfirm) setCell(ac, 'need', 'Confirm', 'The controller reconnected after the angle was set: was it switched off? (I11)');
       else if (S.recovery && !(s.machine && s.machine.enabled)) setCell(ac, 'need', 'Confirm', 'After STOP: asked after Connect: was the controller switched off? (I11)');
       else setCell(ac, 'ok', IL.fmtDeg(prof.startAngleDeg, 1), 'Screw start angle ' + IL.fmtDeg(prof.startAngleDeg, 1) + ', confirmed ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) + ' for this controller power-up (I11)');
@@ -3516,7 +3533,7 @@
       const prof = (s.dispense && s.dispense.profile) || {};
       const a = IL.fmtDeg(prof.startAngleDeg, 1);
       const state = !prof.partialTurn ? 'off' : IL.angleState(s);
-      IL.keyed($('pv-angle-q'), state + a + prof.startAngleSetAtMs, () => {
+      IL.keyed($('pv-angle-q'), state + a + prof.startAngleSetAtMs + (state === 'measure' ? IL.angleResetText(s) : ''), () => {
         if (state === 'measure') {
           return el('div', { class: 'ri ri--need' }, IL.glyph('need'),
             el('div', {}, el('div', { class: 'ri__t', text: 'Measure the start angle again' }),

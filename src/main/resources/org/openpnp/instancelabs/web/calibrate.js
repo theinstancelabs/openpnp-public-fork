@@ -647,7 +647,7 @@
       ['Controller connected', p.controllerConnectedAtMs ? IL.fmtDateTime(p.controllerConnectedAtMs - S.skewMs) : '—'],
     ]);
     // after a controller reset (BR-02) only a new measurement clears it: a bare confirm is refused then
-    IL.keyed($('cal-angle-ask'), state + p.startAngleDeg, () => (state === 'measure' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),
+    IL.keyed($('cal-angle-ask'), state + p.startAngleDeg + (state === 'measure' ? IL.angleResetText(s) : ''), () => (state === 'measure' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),
       el('div', {}, el('div', { class: 'ri__t', text: 'Measure the start angle again' }),
         el('div', { class: 'ri__d', text: IL.angleResetText(s) + '. Measure it below.' })),
       el('abbr', { class: 'icode', title: 'Interlock I11', text: 'I11' })) : state === 'confirm' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),

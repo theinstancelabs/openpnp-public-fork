@@ -7,8 +7,11 @@
  * tool by hand), Cancel sends nothing, Home sends `clearBelowAttested: true`; no "Home raises N1 first" then; the
  * controls that need the position wait for that home; a MACHINE refusal's Home asks the same;
  * (2) the start angle after a reset: only "measure it again" (a bare confirm is refused then), in the angle view,
- * Calibrate's card and the menu; after a reconnect without a reset the question keeps both answers;
- * (3) Recovery after a STOP reads the reset instead of asking: no reset, no question; a reset, measure again;
+ * Calibrate's card and the menu; after a reconnect without a reset the question keeps both answers; (2b) the screw motor
+ * switched off after the angle was set (a STOP's M18 B, the idle timeout: an unpowered screw can turn): measure again,
+ * with the engine's why, also in the strip; switched off before it was set: the angle holds;
+ * (3) Recovery after a STOP reads the reset instead of asking: no reset, no question; a reset, measure again; a STOP
+ * that switched the screw motor off, measure again, saying so;
  * (4) Pressure on sends `park: 'waste'` unless I12 reads ok; "Pump only (read the gauge)" is offered only by a backend
  * with I12 (an older one would open the valve) and sends `mode: 'pump'`; the busy refusal is shown as given;
  * no JavaScript errors, no native dialogs. Nothing here runs a real machine.
@@ -33,7 +36,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const WHY = 'The controller was reset at 16:20 (switched off, or its reset button): the head position is unknown';
 // the stub: what the status says (applied to the simulator's own answer), and what this page sent
-const stub = { reset: null, angleSetAgoMs: null, i12: null, ready: true, homes: [], pressures: [], angles: [], stops: 0, pressureAnswer: null };
+const stub = { reset: null, motorOff: null, angleSetAgoMs: null, i12: null, ready: true, homes: [], pressures: [], angles: [], stops: 0, pressureAnswer: null };
 function patch(s) {
   const now = s.server && s.server.timeMs ? s.server.timeMs : Date.now();
   const m = s.machine = s.machine || {};
@@ -54,11 +57,15 @@ function patch(s) {
     m.home = Object.assign({}, m.home, { n1Low: false, lowTool: null, n1Z: null });
     p.controllerResetAtMs = atMs;
   }
+  // BR-02: the screw motor's last switch-off ({atMs, why}, both null when none); it dates the step count as a reset does
+  const offAt = stub.motorOff ? now - stub.motorOff.agoMs : null;
+  m.screwMotorOff = { atMs: offAt, why: stub.motorOff ? stub.motorOff.why : null };
+  if (offAt !== null && !(p.controllerResetAtMs > offAt)) p.controllerResetAtMs = offAt;
   if (stub.angleSetAgoMs !== null) {
     p.partialTurn = true;
     p.startAngleDeg = 226;
     p.startAngleSetAtMs = now - stub.angleSetAgoMs;
-    p.startAngleNeedsConfirm = !!(stub.reset && p.startAngleSetAtMs < p.controllerResetAtMs) || !!stub.reconnected;
+    p.startAngleNeedsConfirm = !!((stub.reset || stub.motorOff) && p.startAngleSetAtMs < p.controllerResetAtMs) || !!stub.reconnected;
     // I11 follows the profile, as the engine keeps them
     s.interlocks = (s.interlocks || []).map((i) => (i.id === 'I11' ? Object.assign({}, i, { state: p.startAngleNeedsConfirm ? 'blocked' : 'ok' }) : i));
   }
@@ -181,6 +188,29 @@ const visibleFixes = (page, root) => page.evaluate((r) => Array.from(document.qu
     check('(2) a reconnect without a reset since the angle was set: both answers', ang.some((b) => b.fix === 'I11-confirm') && ang.some((b) => /measure/i.test(b.text)) && /Was the controller switched off/.test(pt), { ang, pt: pt.slice(0, 300) });
     stub.reconnected = false;
 
+    // ---- (2b) the screw motor switched off after the angle was set: an unpowered screw can turn, so measure it again -------
+    const OFF_WHY = 'the screw motor was switched off at 16:40 (a STOP: its DISABLE_COMMAND sends M18 B)';
+    stub.motorOff = { agoMs: 600000, why: OFF_WHY };
+    await page.evaluate(() => IL.openView('angle', { keep: true }));
+    await sleep(1500);
+    ang = await visibleFixes(page, '#panel');
+    pt = await panelText(page);
+    const st2b = await page.evaluate(() => IL.angleState(IL.S.status));
+    check('(2b) the screw motor switched off after the angle was set: only "measure it again"', st2b === 'measure' && ang.some((b) => /measure/i.test(b.text)) && !ang.some((b) => b.fix === 'I11-confirm'), { st2b, ang });
+    check('(2b) the angle view gives the engine\'s why: the screw may have turned', pt.includes('The screw motor was switched off at 16:40 (a STOP: its DISABLE_COMMAND sends M18 B)')
+      && /may have turned/.test(pt) && !/step count started again|Was the controller switched off/.test(pt), pt.slice(0, 400));
+    const chip = await page.evaluate(() => { const c = document.getElementById('chip-angle'); return { v: c.querySelector('.cell__v').textContent.trim(), title: c.title }; });
+    check('(2b) the strip\'s angle chip says measure again, with the why, not "Confirm"', /Measure/.test(chip.v) && chip.title.includes('M18 B') && !/reconnected/.test(chip.title), chip);
+    await page.evaluate(() => IL.go('#calibrate/angle'));
+    await sleep(1200);
+    const cal2b = await page.evaluate(() => { const w = document.getElementById('ws-calibrate'); return { text: w.textContent.replace(/\s+/g, ' '), confirm: !!w.querySelector('button[data-fix="I11-confirm"]:not([hidden])') }; });
+    check('(2b) Calibrate\'s Start angle card: no bare confirm, the engine\'s why', !cal2b.confirm && cal2b.text.includes('a STOP: its DISABLE_COMMAND sends M18 B'), { confirm: cal2b.confirm });
+    stub.motorOff = { agoMs: 5400000, why: 'the screw motor was switched off at 15:30 (the controller\'s idle timeout: no screw move for 60 min)' };
+    await page.waitForFunction(() => /15:30/.test((IL.S.status.machine.screwMotorOff || {}).why || ''), null, { timeout: 5000 }).catch(() => null);
+    const st2c = await page.evaluate(() => IL.angleState(IL.S.status));
+    check('(2b) switched off before the angle was set: the angle holds', st2c === 'ok', st2c);
+    stub.motorOff = null;
+
     // ---- (3) Recovery after a STOP reads the reset instead of asking -----------------------------------------------------
     stub.reset = { agoMs: 7200000, detected: false, known: true };
     stub.angleSetAgoMs = 3600000;
@@ -197,6 +227,15 @@ const visibleFixes = (page, root) => page.evaluate((r) => Array.from(document.qu
     rec = await page.evaluate(() => document.querySelector('#panel').textContent.replace(/\s+/g, ' '));
     check('(3) a reset detected: Recovery says so and offers measuring the angle again', /switched off|reset/i.test(rec) && /measure/i.test(rec) && !/No, it stayed on/.test(rec), rec.slice(0, 900));
     await page.screenshot({ path: path.join(OUT, 'rhp-recovery.png') });
+    // a STOP whose M18 B switched the screw motor off (BR-02): measure again, saying so, not "the controller was off"
+    stub.reset = { agoMs: 7200000, detected: false, known: true };
+    stub.motorOff = { agoMs: 5000, why: 'the screw motor was switched off at 16:59 (a STOP: its DISABLE_COMMAND sends M18 B)' };
+    await sleep(1500);
+    rec = await page.evaluate(() => document.querySelector('#panel').textContent.replace(/\s+/g, ' '));
+    check('(3) a STOP that switched the screw motor off: Recovery says so and offers measuring the angle again', /The screw motor was switched off/.test(rec)
+      && rec.includes('a STOP: its DISABLE_COMMAND sends M18 B') && /measure/i.test(rec) && !/No, it stayed on|The controller was switched off/.test(rec), rec.slice(0, 900));
+    await page.screenshot({ path: path.join(OUT, 'rhp-recovery-motor-off.png') });
+    stub.motorOff = null;
     // back to a clean state: the angle measured after the reset
     stub.angleSetAgoMs = 1000;
 
