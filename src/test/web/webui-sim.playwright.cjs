@@ -759,6 +759,36 @@ async function runFirstDots(page, n) {
       await blankRow.locator('input[data-axis=z]').fill('10');
       await blankRow.locator('button[data-action=save]').click();
       await waitStatus(page, (s) => s.dispense.locations.blank && s.dispense.locations.blank.x === 150, 10000);
+      // ---- the places' "Used for" and Scale shots' picker follow #12's paste zones: paste only on the sinks (the waste,
+      // the towel, a cup: "cup" or "scale" as a part of the name), the coupons and the probed blank; every other place is
+      // moves and Z only. Extra places stubbed into the status (nothing is saved); "backup" and "cupboard" are not cups
+      {
+        const coupon = await page.evaluate(() => (((IL.S.config || {}).padCalibration || {}).couponPlaces || ['coupon1'])[0]);
+        const extra = ['backup', 'cup1', 'cupboard', 'scale-2', 'towel', coupon, 'park'];
+        await page.route('**/api/status', async (route) => {
+          try {
+            const res = await route.fetch();
+            const body = await res.json();
+            extra.forEach((n, i) => { body.dispense.locations[n] = { x: 200 + 8 * i, y: 200, z: 10 }; });
+            await route.fulfill({ response: res, json: body });
+          } catch (e) { /* unrouted while it was being answered */ }
+        });
+        const uses = await page.waitForFunction((names) => { const u = Object.fromEntries([...document.querySelectorAll('tr[data-place]')]
+          .map((tr) => [tr.dataset.place, ((tr.querySelector('td.use') || {}).textContent || '').trim()])); return names.every((n) => u[n]) ? u : null; },
+        extra, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        const wantUse = { waste: 'prime, test dot, pressure on', blank: 'touch-off, dot ladder', cup1: 'scale shots', 'scale-2': 'scale shots',
+          towel: 'drool while pressure is on', [coupon]: 'pad calibration coupon', backup: 'moves and Z only: no paste', cupboard: 'moves and Z only: no paste',
+          park: 'moves and Z only: no paste' };
+        check('places: "Used for" follows the paste zones of #12 (sinks, coupons, the blank; the others moves and Z only)', !!uses
+          && Object.entries(wantUse).every(([n, u]) => uses[n] === u), { uses, wantUse });
+        await page.evaluate(() => IL.go('#calibrate/shots'));
+        const shots = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
+          return sel && [...sel.options].some((o) => o.value === 'cup1') ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value } : null; },
+        null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        check('Scale shots: the places that take paste only (the waste, the towel, the cups), a cup chosen; not "backup" or "cupboard"', !!shots
+          && shots.chosen === 'cup1' && JSON.stringify(shots.opts.slice().sort()) === JSON.stringify(['cup1', 'scale-2', 'towel', 'waste']), shots);
+        await page.unroute('**/api/status');
+      }
       await nav(page, 'calibrate');
       await page.evaluate(() => IL.go('#calibrate/touch-off'));
       await page.waitForSelector('#to-pitch', { state: 'visible', timeout: 15000 });
