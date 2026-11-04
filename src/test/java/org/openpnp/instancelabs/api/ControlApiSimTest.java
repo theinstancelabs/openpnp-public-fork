@@ -122,6 +122,42 @@ public class ControlApiSimTest {
         refused(400, "10 mm", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":10.5}", UI));
         refused(400, "2 mm", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":2.5}", UI));
         refused(400, "tool", call("POST", "/api/jog", "{\"tool\":\"n9\",\"dx\":1}", UI));
+        // X/Y or Z, never both in one press (re-review MINOR 2: X/Y only at travel height)
+        refused(400, "not both", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1,\"dz\":-1}", UI));
+        // one motion at a time: a second press while the first runs answers at once
+        sim.server.delayBeforeOkMs.put("M400", 1500L);
+        CompletableFuture<Res> first = CompletableFuture.supplyAsync(() -> {
+            try {
+                return call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1}", UI);
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        Thread.sleep(400);
+        refused(409, "another move", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1}", UI));
+        ok(first.get());
+        sim.server.delayBeforeOkMs.clear();
+    }
+
+    /**
+     * Re-review MINOR 3 and 5: the needle without a current frame stays in its safe zone, and a nozzle left below a
+     * floor that rose (the frame went stale) can always be pressed up.
+     */
+    @Test
+    public void aNozzleBelowAFloorThatRoseCanGoUp() throws Exception {
+        needleFrameAndBlank();
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        for (int i = 0; i < 5; i++) {
+            ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        }
+        double low = sim.n2.getSafeZ().convertToUnits(LengthUnit.Millimeters).getValue();
+        assertTrue(loc(sim.n2).getZ() < low, "the needle below its safe zone: " + loc(sim.n2));
+        // a new needle: its frame is stale, its floor is its safe zone now
+        ok(call("POST", "/api/needle/changed", "{}", UI));
+        refused(409, "safe zone", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-0.1}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":2}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-2}", UI)); // N1 down raises the needle
     }
 
     @Test

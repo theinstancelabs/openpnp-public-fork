@@ -85,6 +85,10 @@ final class ControlEndpoints {
         if (dx == 0 && dy == 0 && dz == 0) {
             throw ApiException.badRequest("dx, dy or dz: how far to move");
         }
+        if (dz != 0 && (dx != 0 || dy != 0)) {
+            // X/Y only at travel height: a press that also changes Z would leave it on the way (re-review MINOR 2)
+            throw ApiException.badRequest("one press moves X/Y or Z, not both");
+        }
         if ("camera".equals(tool) && dz != 0) {
             throw ApiException.refused("the camera has no Z of its own: jog N1 or the needle up or down");
         }
@@ -153,9 +157,17 @@ final class ControlEndpoints {
         try {
             long stops = ctx.stops.get();
             requireFree(m);
+            // OpenPnP busy (its own task: a home, a jog of its window): refused at once, never queued behind it (a
+            // task OpenPnP drops would leave this press unanswered for minutes; re-review MINOR 1)
+            ctx.requireMachineIdle();
+            ctx.passthrough.resyncIfStale();
             Future<Object> f = m.submit(() -> {
                 try {
                     requireFree(m);
+                    if (ctx.passthrough.positionStale()) {
+                        throw ApiException.refused("OpenPnP's position is not re-read after the G-code passthrough yet: "
+                                + "try again in a moment");
+                    }
                     return task.run();
                 }
                 catch (Exception e) {
@@ -167,9 +179,10 @@ final class ControlEndpoints {
                 out = f.get(MOVE_TIMEOUT_S, TimeUnit.SECONDS);
             }
             catch (TimeoutException e) {
-                f.cancel(false); // queued and not begun: it never runs
-                throw ApiException.refused("the " + what + " did not start or end within " + MOVE_TIMEOUT_S + " s: "
-                        + "nothing more is sent for it; look at the machine");
+                boolean neverRan = f.cancel(false); // queued and not begun: it never runs
+                throw ApiException.refused("the " + what + " did not " + (neverRan ? "start within " + MOVE_TIMEOUT_S
+                        + " s: it will not run" : "end within " + MOVE_TIMEOUT_S + " s: look at the machine, press "
+                                + "STOP if it still moves"));
             }
             catch (ExecutionException e) {
                 out = e.getCause();
@@ -236,6 +249,9 @@ final class ControlEndpoints {
         AxesLocation target = new AxesLocation(m).put(((AbstractHeadMountable) hm).toRaw(hm.toHeadLocation(to)));
         for (HeadMountable n : nozzles()) {
             Location at = mm(n.toHeadMountableLocation(((AbstractHeadMountable) n).toTransformed(target)));
+            if (at.getZ() >= mm(n.getLocation()).getZ() - 1e-9) {
+                continue; // going up (or not moving): always allowed, also out of a spot below a floor that rose
+            }
             boolean needle = isNeedle(n);
             double floor = needle ? needleFloor(n, at.getX(), at.getY()) : n1Floor(at.getX(), at.getY());
             if (Double.isFinite(floor) && at.getZ() < floor - 1e-9) {
@@ -263,7 +279,7 @@ final class ControlEndpoints {
             return safeLow(needle);
         }
         DispenseConfig c = svc.getConfig();
-        if (!c.isNeedleAnchored() || !c.isNeedleTouchedOff()) {
+        if (!needleFrameCurrent(svc)) {
             return safeLow(needle);
         }
         double floor = c.needleFloorZMm();
@@ -276,10 +292,22 @@ final class ControlEndpoints {
 
     private String needleFloorWhy() {
         DispenseService svc = ctx.svcOrNull();
-        DispenseConfig c = svc == null ? null : svc.getConfig();
-        return c != null && c.isNeedleAnchored() && c.isNeedleTouchedOff()
-                ? "the surface under it, or its I4 floor"
-                : "its safe zone: its Z frame is not set for this needle";
+        return svc != null && needleFrameCurrent(svc) ? "the surface under it, or its I4 floor"
+                : "its safe zone: its Z frame is not set for this needle, or this home's Z check failed";
+    }
+
+    /**
+     * The needle's Z frame holds now: anchored and touched off since the last needle change, and no failed Z check
+     * of this home (re-review MINOR 5: after "Z moved" the frame's surface + offset is not to be trusted).
+     */
+    private static boolean needleFrameCurrent(DispenseService svc) {
+        DispenseConfig c = svc.getConfig();
+        if (!c.isNeedleAnchored() || !c.isNeedleTouchedOff()) {
+            return false;
+        }
+        DispenseService.ZCheckPlan zc = svc.zCheckPlan(null, false);
+        return zc == null || zc.last == null || zc.last.pass || !java.util.Objects.equals(zc.last.homeAtMs,
+                zc.homeAtMs);
     }
 
     /** The highest probed surface under (x, y) (N1-contact Z), NaN where none is known. */
@@ -305,8 +333,8 @@ final class ControlEndpoints {
         return top;
     }
 
-    /** N1 and the needle (the engine's), else the head's nozzles. */
-    private List<HeadMountable> nozzles() {
+    /** N1 and the needle (the engine's), else every nozzle of the head (the engine starting or failed). */
+    private List<HeadMountable> nozzles() throws ApiException {
         List<HeadMountable> l = new ArrayList<>();
         DispenseService svc = ctx.svcOrNull();
         if (svc != null) {
@@ -315,6 +343,17 @@ final class ControlEndpoints {
             }
             if (svc.getDispenserNozzle() != null) {
                 l.add(svc.getDispenserNozzle());
+            }
+        }
+        if (l.isEmpty()) {
+            try {
+                Head h = ctx.machine().getDefaultHead();
+                if (h != null) {
+                    l.addAll(h.getNozzles());
+                }
+            }
+            catch (Exception e) {
+                throw ApiException.unavailable("the machine has no head: " + e.getMessage());
             }
         }
         return l;
