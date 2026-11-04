@@ -37,7 +37,10 @@ public final class DoseBlocksRequest {
      * and every new blob in its frames is kept ({@link DoseBlocksResult#newBlobs}).
      */
     public boolean landingCheck;
-    /** Explicit N2 X/Y of the purge dots (the landing check purges in its own band); null = the purge row's next spots. */
+    /**
+     * Explicit N2 X/Y of the purge dots (the landing check purges in its own band); null = the purge row's next spots.
+     * BR-77: {x, y, raiseMm}: a throwaway on wet paste is laid that much higher.
+     */
     public List<double[]> purgeXy;
     /**
      * Explicit spots the camera looks at before and after (frame centres covering the landing check's band, which must

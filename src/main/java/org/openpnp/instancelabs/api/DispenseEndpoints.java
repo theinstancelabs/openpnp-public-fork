@@ -16,6 +16,7 @@ import org.openpnp.instancelabs.dispense.BoardRegistration;
 import org.openpnp.instancelabs.dispense.Calibration;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
+import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseDb;
 import org.openpnp.instancelabs.dispense.DispensePlan;
 import org.openpnp.instancelabs.dispense.DispenseService;
@@ -1305,7 +1306,9 @@ final class DispenseEndpoints {
     /**
      * I11: set ({"startAngleDeg": a}) or confirm ({} or {"confirm": true}) the screw start angle for
      * the current controller power-up (the B step count restarts at power-up). {@code measuredAtMs}: when the evidence
-     * of a set angle was made (BR-02: refused when it is from before the screw's motor last went off).
+     * of a set angle was made (BR-02: refused when it is from before the screw's motor last went off). BR-77
+     * {@code evidence: {runId}}: a start-angle measure of this session (its job id); its feature is stored with the angle
+     * and its own measuredAtMs dates the set (a client's feature value is never taken).
      */
     Object startAngle(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
@@ -1318,7 +1321,24 @@ final class DispenseEndpoints {
             throw ApiException.badRequest("startAngleDeg must be 0 to < 360");
         }
         Double measured = Json.num(b, "measuredAtMs", null); // BR-02: when its evidence (the dot pair) was made
-        svc.setStartAngle(a, Json.str(b, "note", null), measured == null ? null : measured.longValue());
+        DispenseProfile.StartAngleFeature f = null;
+        if (b.has("evidence")) {
+            JsonElement ev = b.get("evidence");
+            String runId = ev.isJsonObject() ? Json.str(ev.getAsJsonObject(), "runId", null) : null;
+            if (runId == null || a == null || measured != null) {
+                throw ApiException.badRequest("'evidence' is {runId} (the job of POST /api/screw/start-angle/measure), "
+                        + "with startAngleDeg and without measuredAtMs (the measure's own)");
+            }
+            PadCalibrationJob j = ctx.padCalJobs.get(runId);
+            f = j == null ? null : j.measuredFeature();
+            if (f == null) {
+                throw ApiException.refused("measure first: " + (j == null ? "no measure " + runId + " in this session "
+                        + "(kept until OpenPnP restarts: measure again)" : runId + " is no finished start-angle measure "
+                                + "that found an angle"));
+            }
+            measured = (double) f.measuredAtMs;
+        }
+        svc.setStartAngle(a, Json.str(b, "note", null), measured == null ? null : measured.longValue(), f);
         return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs(),
                 svc.getControllerResetAtMs());
     }

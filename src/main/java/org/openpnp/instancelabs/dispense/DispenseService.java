@@ -2946,6 +2946,13 @@ public final class DispenseService {
         return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope, false, false));
     }
 
+    /** As above for a task that checks Z itself after its home (BR-77's measure): Z data older than the home are a note. */
+    public InterlockReport checkInterlocks(Interlocks.Scope scope, double estimatedPressurisedSeconds,
+            boolean zCheckFirst) {
+        return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope, false,
+                zCheckFirst));
+    }
+
     /** CONFIG and MACHINE only (Register board, the surface probe, the Z check): they never dispense. */
     public InterlockReport checkBasicInterlocks(boolean homeFirst) {
         return Interlocks.checkBasic(interlockInputs(cfg.copy(), null, 0, null, homeFirst, false));
@@ -5598,13 +5605,16 @@ public final class DispenseService {
         }
     }
 
-    /** The landing check's purge dots (§22.3): at the request's spots in its band, on the first block's surface. */
+    /**
+     * The landing check's purge dots (§22.3), BR-77 the measure's throwaways: at the request's spots, on the first block's
+     * surface, each raised by its own height (never below the gap).
+     */
     private static List<GcodeStreamBuilder.DotSpec> bandPurge(DispenseConfig c, DoseBlocksRequest req) {
         List<GcodeStreamBuilder.DotSpec> l = new ArrayList<>();
         SurfacePlane plane = planeOf(c, req.blocks.get(0).surfaceName);
         for (int i = 0; plane != null && i < req.purgeXy.size(); i++) {
             double[] xy = req.purgeXy.get(i);
-            double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
+            double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm() + (xy.length > 2 ? Math.max(0, xy[2]) : 0);
             l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.hopHeightMm, c.profile.netDeg(c),
                     GcodeStreamBuilder.PURGE_INDEX, "purge#band" + i));
         }

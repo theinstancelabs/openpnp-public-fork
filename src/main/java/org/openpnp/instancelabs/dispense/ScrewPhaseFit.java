@@ -45,28 +45,35 @@ public final class ScrewPhaseFit {
         public double startDeg, x, xSe;
     }
 
-    public static final class Halves {
+    /** What a fit found: its confidence (high | low | none) and why it is not high. */
+    public abstract static class Fit {
         public String confidence = NONE;
         public final List<String> why = new ArrayList<>();
+
+        /** The feature an apply keeps the recipe's offset from, or null when nothing could be fitted (none). */
+        public abstract Double featureDeg();
+    }
+
+    public static final class Halves extends Fit {
         public final List<Row> rows = new ArrayList<>();
         public Double peakDeg, a, peakSeDeg, balancedStartDeg;
 
-        /** The flow's peak, or null when nothing could be fitted. */
+        /** The flow's peak. */
+        @Override
         public Double featureDeg() {
             return NONE.equals(confidence) ? null : peakDeg;
         }
     }
 
-    public static final class Quarters {
-        public String confidence = NONE;
-        public final List<String> why = new ArrayList<>();
+    public static final class Quarters extends Fit {
         public Double deadQuarterStartDeg, gridDeadStartDeg;
         /** The means of the three quarters but the grid's dead one, by start angle. */
         public final Map<Double, Double> liveQuarterAreas = new TreeMap<>();
         /** Each angle's cv (sample SD / mean); null for a dead quarter. Never pooled over the live quarters. */
         public final Map<Double, Double> cvPerAngle = new TreeMap<>();
 
-        /** The dead quarter's start, interpolated, or null when nothing could be fitted. */
+        /** The dead quarter's start, interpolated (not the grid's). */
+        @Override
         public Double featureDeg() {
             return NONE.equals(confidence) ? null : deadQuarterStartDeg;
         }
