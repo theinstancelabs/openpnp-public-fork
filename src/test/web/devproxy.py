@@ -12,7 +12,7 @@ UI development without rebuilding the jar: serves DIR/index.html at / and DIR/<n
                             import, the fallback of a board file) and goes to the session
   POST /api/plan, GET /api/plan/<id>
                             a plan of a board file listed in DIR/art/board-map-generated.json or DIR/board-map.json
-                            ({"ftp.board.xml": "e9f9b4ff764f3a63"}: an art id or a file in DIR; keys starting with "_"
+                            ({"ftp.board.xml": "1ce5a9319ff2fe88"}: an art id or a file in DIR; keys starting with "_"
                             are notes; board-map.json's entries win; a uinav "00-" prefix of the file name is
                             ignored) gets the plan's "board" block: toMachine = T(x, y)·R(rotation) of the plan's seat,
                             the drawing's size and fiducials, art {id, kind}; plus synthetic per-dot times (0.6 s per dot:

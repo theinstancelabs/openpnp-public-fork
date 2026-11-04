@@ -164,8 +164,10 @@ final class DispenseEndpoints {
         out.put("run", run);
         PadCalibrationJob pcal = ctx.padCalJobs.current();
         out.put("padCalibration", pcal == null || svc == null ? null : pcal.view());
-        // an upload holds the import pipeline: every engine endpoint refuses until it has read the file
-        out.put("boardImport", Views.map("reading", BoardImporter.reading()));
+        // an upload holds the import pipeline: every engine endpoint refuses until it has read the file; BR-88: when
+        // the last save, replace or attach succeeded, so a page sees an upload made in another tab
+        out.put("boardImport", Views.map("reading", BoardImporter.reading(), "savedAtMs",
+                BoardArtStore.forDir(ctx.configuration.getConfigurationDirectory()).savedAtMs()));
         if (svc == null) {
             String state = DispenseService.startState();
             d.put("state", state);

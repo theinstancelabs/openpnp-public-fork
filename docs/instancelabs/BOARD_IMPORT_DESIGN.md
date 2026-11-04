@@ -514,7 +514,7 @@ what to do, in plain words with units; internal names (regexes, setting keys) st
 | 3 | `BAD_NUMBER` | warn | Line 1203: a number could not be read or is out of range; that item was skipped. |
 | 3 | `BOARD_PASTE_GRAPHIC` / `PASTE_ZONE_IGNORED` | warn | 2 paste shapes are drawn on the board outside any part: drawn only, no paste. |
 | 3 | `ART_REDUCED` | warn | The board is too detailed to draw in full: tracks are not drawn. |
-| 4 notes (collapsed) | `BOTTOM_SKIPPED` | info | 6 bottom-side parts get no paste (only the top is dispensed): J1, … |
+| 4 notes (collapsed) | `BOTTOM_SKIPPED` | info | 6 bottom-side footprints get no paste (not read yet): J1, … |
 | 4 | `PACKAGE_SUFFIXED` / `PART_SUFFIXED` | info | R_0603_1608Metric already exists in OpenPnP with other pads, so this board's copy is saved as R_0603_1608Metric~2. Other boards are not affected. (Raised to group 3 when `PACKAGE_MAPPING_LOST` applies to it.) |
 | 4 | `PAD_NAME_EMPTY` / `PAD_NAME_DUPLICATE` | info | U2: 9 paste windows without a name are 33~1 … 33~9. |
 | 4 | `PASTE_POLY` | info | IC3: the paste shape drawn on F.Paste is opening 33~1 (1.27 × 1.27 mm). |

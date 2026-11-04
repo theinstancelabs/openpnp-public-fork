@@ -125,6 +125,11 @@ public final class BoardArtIndex {
         return rel == null ? null : inside(rel);
     }
 
+    /** BR-88: every drawing the index knows, art id → path relative to the root (current or history; a copy). */
+    public synchronized Map<String, String> arts() {
+        return new TreeMap<>(data().arts);
+    }
+
     /**
      * Records a board's drawing and the art paths that changed (the new art, and on a replace where the displaced
      * one went), in one atomic write.
@@ -216,7 +221,7 @@ public final class BoardArtIndex {
         return p.startsWith(r + File.separator) ? f : null;
     }
 
-    private static String canonical(File f) {
+    static String canonical(File f) {
         try {
             return f.getCanonicalPath();
         }

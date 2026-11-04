@@ -84,6 +84,7 @@ public class KicadFtpTest {
         // the only notable warning on ftp
         assertEquals(1, p.warnings.size(), p.warnings.toString());
         assertEquals("BOTTOM_SKIPPED", p.warnings.get(0).code);
+        assertEquals("1 bottom-side footprint gets no paste (not read yet): G2.", p.warnings.get(0).text);
         assertTrue(ftp.pcb.setup.viasTentedFront, "viasonmask no");
     }
 
