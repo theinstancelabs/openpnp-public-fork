@@ -58,6 +58,11 @@ public class SimPasteTest {
         return p;
     }
 
+    /** The raw head XY of a needle target (machine XY) in this scene: what the engine commands for it. */
+    static double[] raw(SimScene s, double x, double y) {
+        return new double[] {x - s.paste.n2OffsetMm[0], y - s.paste.n2OffsetMm[1]};
+    }
+
     static SimNeedle needle(SimPaste p, SimScene s) {
         return new SimNeedle(p, s.paste.n2OffsetMm);
     }
@@ -395,14 +400,21 @@ public class SimPasteTest {
         c.purgeRow.y0Mm = 240.0;
         c.purgeRow.pitchXMm = 2.5;
         c.purgeRow.spots = 2;
-        SimPaste.EngineAims a = SimPaste.aims(c, new double[] {2.4, -0.4});
-        assertArrayEquals(new double[] {202 - 2.5, 100 + 0.45}, a.testDot, 1e-9);
+        double[] ho = {25.291, -75.926}; // OpenPnP's N2 head offset: the aims are raw head XY
+        SimPaste.EngineAims a = SimPaste.aims(c, new double[] {2.4, -0.4}, ho);
+        assertArrayEquals(new double[] {202 - 2.5 - ho[0], 100 + 0.45 - ho[1]}, a.testDot, 1e-9);
+        assertEquals(1.0, a.testDotRadius, 1e-9);
         assertEquals(2, a.purge.size());
-        assertArrayEquals(new double[] {300 - 2.5, 240 + 0.45}, a.purge.get(0), 1e-9);
-        assertArrayEquals(new double[] {302.5 - 2.5, 240 + 0.45}, a.purge.get(1), 1e-9);
+        assertArrayEquals(new double[] {300 - 2.5 - ho[0], 240 + 0.45 - ho[1]}, a.purge.get(0), 1e-9);
+        assertArrayEquals(new double[] {302.5 - 2.5 - ho[0], 240 + 0.45 - ho[1]}, a.purge.get(1), 1e-9);
+        c.testDotOffsetXMm = 0.8;
+        assertEquals(0.4, SimPaste.aims(c, new double[] {0, 0}, ho).testDotRadius, 1e-9, "under half the waste's distance");
+        c.testDotOffsetXMm = 0;
+        assertEquals(1.0, SimPaste.aims(c, new double[] {0, 0}, ho).testDotRadius, 1e-9,
+                "the test dot at the waste: every contact there counts as it");
         c.locations.clear();
         c.purgeRow.x0Mm = null;
-        a = SimPaste.aims(c, new double[] {0, 0});
+        a = SimPaste.aims(c, new double[] {0, 0}, ho);
         assertNull(a.testDot, "no waste: no test dot");
         assertTrue(a.purge.isEmpty(), "no purge row: no phase dot spots");
     }
@@ -416,8 +428,7 @@ public class SimPasteTest {
         SimScene s = exact();
         s.paste.wholeTurnsOnly = true;
         SimPaste p = paste(s);
-        p.engineAims(() -> new SimPaste.EngineAims(null, java.util.Arrays.asList(new double[] {300, 240},
-                new double[] {302.5, 240})));
+        p.engineAims(() -> new SimPaste.EngineAims(null, java.util.Arrays.asList(raw(s, 300, 240), raw(s, 302.5, 240))));
         SimNeedle n = needle(p, s);
         n.pressurize();
         n.dot(310, 240, BLANK_Z, 800); // a ladder's first dot, half a turn, off the purge row
@@ -427,6 +438,36 @@ public class SimPasteTest {
         n.pressurize();
         n.dot(302.6, 240.1, BLANK_Z, 1324); // the next session's phase dot, on purge spot 2
         assertEquals(1, p.deposits("blank").size(), "the phase dot on a purge spot is laid");
+        assertEquals(1, p.unmodelledContacts());
+    }
+
+    /**
+     * Review round 5: the engine aims in OpenPnP's frame (raw head + its N2 head offset), which a scene's n2OffsetMm
+     * need not equal; the aims are raw head XY, so the match does not depend on it. And with the engine a purge spot
+     * is the phase dot's place wherever it lies (here on a coupon).
+     */
+    @Test
+    public void theEnginesTargetsAreMatchedInItsOwnFrame() {
+        SimScene s = exact();
+        s.paste.wholeTurnsOnly = true;
+        SimPaste p = paste(s);
+        double[] ho = {s.paste.n2OffsetMm[0] - 2.4, s.paste.n2OffsetMm[1] + 0.4}; // OpenPnP's N2 head offset differs
+        DispenseConfig c = new DispenseConfig();
+        c.locations.put(c.wasteLocationName, new DispenseConfig.NamedLocation(200, 100, 6));
+        c.purgeRow.x0Mm = 350.0;
+        c.purgeRow.y0Mm = 55.0; // on coupon 1
+        c.purgeRow.spots = 1;
+        SimPaste.EngineAims a = SimPaste.aims(c, new double[] {0, 0}, ho);
+        p.engineAims(() -> a);
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        double[] phase = a.purge.get(0); // where the engine sends the head; this scene's needle lands n2OffsetMm from it
+        n.dot(phase[0] + s.paste.n2OffsetMm[0], phase[1] + s.paste.n2OffsetMm[1], COUPON_Z, 1324);
+        assertEquals(1, p.deposits(null).size(), "the phase dot on the purge row is laid");
+        assertEquals(0, p.unmodelledContacts());
+        double[] t = a.testDot;
+        n.dot(t[0] + s.paste.n2OffsetMm[0], t[1] + s.paste.n2OffsetMm[1], s.contactZ(SimScene.Region.BED, 200, 100), 400);
+        assertEquals(1, p.deposits(null).size(), "a quarter-turn test dot lays nothing");
         assertEquals(1, p.unmodelledContacts());
     }
 
@@ -655,8 +696,8 @@ public class SimPasteTest {
         s.paste.landingBiasMm = new double[] {2.4, -0.4}; // the tip lands (2.4, -0.4) from where it is commanded
         SimPaste p = paste(s);
         // the engine's waste at (200, 100), its test dot 2 mm +X, its landing calibrated: it aims at (199.6, 100.4)
-        p.engineAims(() -> new SimPaste.EngineAims(new double[] {199.6, 100.4},
-                java.util.Collections.singletonList(new double[] {300, 240})));
+        p.engineAims(() -> new SimPaste.EngineAims(raw(s, 199.6, 100.4), java.util.Collections.singletonList(raw(s, 300,
+                240))));
         SimNeedle n = needle(p, s);
         n.pressurize();
         n.dot(300, 240, BLANK_Z, 1324); // the phase dot, on the purge row

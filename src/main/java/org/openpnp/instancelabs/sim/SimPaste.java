@@ -196,7 +196,9 @@ public final class SimPaste {
         /**
          * This power-up's number in the scene's current version: 0 for its first. A scene file's version is its stamp
          * (each OpenPnP connect reads the file into a new SimScene, the same version); a file written again, or a scene
-         * built in code anew, starts over, so the phase draws repeat from the first (BR-74).
+         * built in code anew, starts over, so the phase draws repeat from the first (BR-74) from the next power-up on:
+         * a connection already open keeps drawing from its own stream, so a test that needs the first draws writes its
+         * scene, then reconnects or power-cycles.
          */
         synchronized int powerUp(SimScene sc) {
             boolean same = sc.fileVersion != null ? sc.fileVersion.equals(powerUpFile) : powerUpScene.get() == sc;
@@ -848,24 +850,27 @@ public final class SimPaste {
 
     /**
      * A contact something measures: the board, a coupon, the blank, and on the bed the engine's I9 test dot. Spared: the
-     * rest of the bed (the waste), and a pressure session's first contact where the engine lays its phase dot (it turns
-     * the screw to its start angle on a purge-row spot; without an engine, any first contact on the blank). Phase dots
-     * the engine lays mid-session (at a block switch) are refused: only partial-turn blocks have them, whose dots are
-     * refused too. The region is judged where the paste lands, the engine's targets where it aims (needle XY).
+     * rest of the bed (the waste), and a pressure session's first contact at a purge-row spot, where the engine lays its
+     * phase dot (it turns the screw to its start angle; without an engine: a first contact on the blank). Phase dots the
+     * engine lays mid-session (at a block switch) are refused: only partial-turn blocks have them, whose dots are
+     * refused too. The region is judged where the paste lands, the engine's targets where it sends the head.
      * shortcut: ignores the gap, so a sub-turn contact in the air over the blank is refused and its paste lost (it
      * would hang on the tip); judge the gap too if a test ever turns in the air there.
      */
     private boolean measured(SimScene sc, SimScene.Paste p, int sessionDot) {
-        double x = dotX + p.n2OffsetMm[0], y = dotY + p.n2OffsetMm[1];
-        SimScene.Region r = sc.regionAt(x + p.landingBiasMm[0], y + p.landingBiasMm[1]);
+        SimScene.Region r = sc.regionAt(dotX + p.n2OffsetMm[0] + p.landingBiasMm[0],
+                dotY + p.n2OffsetMm[1] + p.landingBiasMm[1]);
         EngineAims a = engineAims.get();
+        if (a == null) {
+            return r != SimScene.Region.BED && !(sessionDot == 0 && r == SimScene.Region.BLANK);
+        }
+        if (sessionDot == 0 && a.purge.stream().anyMatch(t -> Math.hypot(dotX - t[0], dotY - t[1]) <= AIM_RADIUS_MM)) {
+            return false;
+        }
         if (r == SimScene.Region.BED) {
-            return a != null && a.testDot != null && Math.hypot(x - a.testDot[0], y - a.testDot[1]) <= a.testDotRadius;
+            return a.testDot != null && Math.hypot(dotX - a.testDot[0], dotY - a.testDot[1]) <= a.testDotRadius;
         }
-        if (sessionDot != 0 || r != SimScene.Region.BLANK) {
-            return true;
-        }
-        return a != null && a.purge.stream().noneMatch(s -> Math.hypot(x - s[0], y - s[1]) <= AIM_RADIUS_MM);
+        return true;
     }
 
     static boolean wholeTurns(long net) {
@@ -874,8 +879,9 @@ public final class SimPaste {
     }
 
     /**
-     * Where the engine aims the needle (machine XY, as commanded: a place minus the tip's landing and trim,
-     * GcodeStreamBuilder.trimX): its I9 test dot (imaged by TestDotCheck) and its purge-row spots (a session's phase dot).
+     * Where the engine sends the head (raw head XY: a place minus the tip's landing and trim, GcodeStreamBuilder.trimX,
+     * minus OpenPnP's N2 head offset), so the match does not depend on the scene's n2OffsetMm: its I9 test dot (imaged
+     * by TestDotCheck) and its purge-row spots (a session's phase dot).
      */
     static final class EngineAims {
         final double[] testDot;
@@ -894,9 +900,13 @@ public final class SimPaste {
         }
     }
 
-    /** The engine's aims for its config and its landing in effect (DispenseService.landingInEffect). */
-    static EngineAims aims(DispenseConfig c, double[] landing) {
-        double dx = landing[0] + c.needleXyTrim.dxMm, dy = landing[1] + c.needleXyTrim.dyMm;
+    /**
+     * The engine's aims for its config, its landing in effect (DispenseService.landingInEffect) and OpenPnP's N2 head
+     * offset. The test dot's radius stays under half its distance from the waste; at the waste itself every contact
+     * there counts as it (the two cannot be told apart).
+     */
+    static EngineAims aims(DispenseConfig c, double[] landing, double[] headOffset) {
+        double dx = landing[0] + c.needleXyTrim.dxMm + headOffset[0], dy = landing[1] + c.needleXyTrim.dyMm + headOffset[1];
         DispenseConfig.NamedLocation w = c.location(c.wasteLocationName);
         double[] t = w == null ? null : new double[] {w.x + c.testDotOffsetXMm - dx, w.y + c.testDotOffsetYMm - dy};
         List<double[]> purge = new ArrayList<>();
@@ -907,13 +917,15 @@ public final class SimPaste {
                 purge.add(new double[] {at[0] - dx, at[1] - dy});
             }
         }
-        return new EngineAims(t, purge, Math.min(AIM_RADIUS_MM, Math.hypot(c.testDotOffsetXMm, c.testDotOffsetYMm) / 2));
+        double apart = Math.hypot(c.testDotOffsetXMm, c.testDotOffsetYMm);
+        return new EngineAims(t, purge, apart > 0 ? Math.min(AIM_RADIUS_MM, apart / 2) : AIM_RADIUS_MM);
     }
 
-    /** The running engine's aims, or null: no engine (the unit tests). */
+    /** The running engine's aims, or null: no engine (the unit tests) or no dispense nozzle. */
     static EngineAims engineAims() {
         DispenseService svc = DispenseService.get();
-        return svc == null ? null : aims(svc.getConfig(), svc.landingInEffect());
+        double[] ho = svc == null ? null : svc.headOffsetNow();
+        return ho == null ? null : aims(svc.getConfig(), svc.landingInEffect(), ho);
     }
 
     /** For tests: the engine's aims, instead of the running engine's. */
