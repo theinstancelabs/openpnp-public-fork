@@ -47,13 +47,18 @@ public final class NeedleTouchOff {
     public static final String STRUNG = "dots touch or are strung together";
     /** {@link Analysis#referenceFrom} when the steady dot is the dose model's (the bench 22G's, §1.4). */
     public static final String MODEL_REFERENCE = "the 22G model";
+    /**
+     * The default start gap (mm): with no dot skipped the reference pair sits here and one step lower. BR-85: dots a
+     * recipe skips go above it, so the reference sits there as without a skip.
+     */
+    public static final double REFERENCE_GAP_MM = 0.125;
 
     private NeedleTouchOff() {
     }
 
     public static class Request {
         /** Largest commanded gap (mm, relative to the current offset). */
-        public double startGapMm = 0.125;
+        public double startGapMm = REFERENCE_GAP_MM;
         public double stepMm = 0.025;
         public int steps = 6;
         /**

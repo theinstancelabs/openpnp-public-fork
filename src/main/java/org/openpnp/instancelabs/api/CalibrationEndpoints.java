@@ -206,8 +206,10 @@ final class CalibrationEndpoints {
         JsonObject b = r.json();
         DispenseService svc = ctx.availableSvc();
         NeedleTouchOff.Request req = new NeedleTouchOff.Request();
-        req.startGapMm = Json.num(b, "startGapMm", req.startGapMm);
+        int skip = svc.getConfig().profile.touchOffSkipDots;
         req.stepMm = Json.num(b, "stepMm", req.stepMm);
+        // BR-85: without a start gap the skipped dots go above the reference gap, the reference sits as without a skip
+        req.startGapMm = Json.num(b, "startGapMm", NeedleTouchOff.REFERENCE_GAP_MM + skip * req.stepMm);
         req.steps = Json.integer(b, "steps", req.steps);
         req.rotationDeg = Json.num(b, "rotationDeg", req.rotationDeg);
         req.locationName = Json.str(b, "locationName", null);
@@ -219,7 +221,6 @@ final class CalibrationEndpoints {
         }
         // without a pitch: 1.6 mm, or the smallest that leaves room between larger dots (F14)
         req.pitchMm = Json.num(b, "pitchMm", NeedleTouchOff.defaultPitchMm(req, svc.getConfig()));
-        int skip = svc.getConfig().profile.touchOffSkipDots;
         if (req.steps < 2 || req.steps > 20 || req.stepMm <= 0 || req.stepMm > 0.5 || req.startGapMm > 2
                 || req.pitchMm <= 0 || req.jumpRatio <= 0) {
             throw ApiException.badRequest("steps " + (skip + 3) + " to 20, step 0 to 0.5 mm, start gap at most 2 mm, "
@@ -234,6 +235,16 @@ final class CalibrationEndpoints {
         String pitch = NeedleTouchOff.pitchProblem(req, svc.getConfig());
         if (pitch != null) {
             throw ApiException.badRequest(pitch);
+        }
+        double reference = req.startGapMm - skip * req.stepMm; // 0.175 - 2 x 0.025 is 0.12499999999999999 in doubles
+        if (skip > 0 && reference < NeedleTouchOff.REFERENCE_GAP_MM - 1e-9) {
+            double min = NeedleTouchOff.REFERENCE_GAP_MM + skip * req.stepMm;
+            throw ApiException.badRequest(String.format(java.util.Locale.ROOT, "the %s's recipe skips the first %d "
+                    + "dots after the prime (touchOffSkipDots): with a start gap of %.3f mm its reference dots would "
+                    + "sit at %.3f mm and %.3f mm, possibly at contact; start at %.3f mm or more, so they sit at "
+                    + "%.3f mm and %.3f mm as without a skip", svc.getConfig().tip.name, skip, req.startGapMm,
+                    reference, reference - req.stepMm, Math.ceil(min * 1000 - 1e-9) / 1000,
+                    NeedleTouchOff.REFERENCE_GAP_MM, NeedleTouchOff.REFERENCE_GAP_MM - req.stepMm));
         }
         double lowest = req.startGapMm - (req.steps - 1) * req.stepMm;
         if (lowest < -0.1 - 1e-9) { // F16: 0.30 - 8 x 0.05 is -0.10000000000000003 in doubles
