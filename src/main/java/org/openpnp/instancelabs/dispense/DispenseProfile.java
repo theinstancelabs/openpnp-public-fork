@@ -57,7 +57,8 @@ public class DispenseProfile {
     public double gapMm = 0.10;
     /**
      * Pause at the lift height after each dot, the pressure on, before any X/Y travel (ms; 0 = none): the plastic 25G
-     * recipe waits 500 ms after its 3 mm lift, so the paste thread breaks there instead of across the board.
+     * recipe waits 500 ms after its 3 mm lift, so the paste thread breaks there instead of across the board. Needs
+     * {@link #liftMm}: the pause is set for one lift height, not for whatever hop height the last tip left.
      */
     public int liftPauseMs = 0;
     /**
@@ -231,6 +232,9 @@ public class DispenseProfile {
         }
         if (!(liftPauseMs >= 0 && liftPauseMs <= 5000)) {
             p.add("profile liftPauseMs must be 0 to 5000");
+        }
+        else if (liftPauseMs > 0 && liftMm == null) {
+            p.add("profile liftPauseMs needs the recipe's own liftMm (the pause is set for one lift height)");
         }
         if (liftMm != null && !(liftMm > 0 && liftMm <= 10)) {
             p.add("profile liftMm must be > 0 and <= 10 (null: the machine's hopHeightMm)");

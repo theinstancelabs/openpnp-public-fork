@@ -226,6 +226,7 @@ public class DispenseProfileTest {
         assertNotEquals(plan, p.fingerprint());
         assertEquals("pause none -> 500", DispenseProfile.fingerprintDiff(dose, p.doseFingerprint()));
         assertEquals(500, p.copy().liftPauseMs);
+        p.liftMm = 3.0; // a pause needs the recipe's own lift
         for (int ok : new int[] {0, 500, 5000}) {
             p.liftPauseMs = ok;
             assertTrue(p.validate(C).isEmpty(), ok + ": " + p.validate(C));
@@ -270,6 +271,23 @@ public class DispenseProfileTest {
         assertRefused(x -> x.liftMm = 0.0, "liftMm must be > 0 and <= 10");
         assertRefused(x -> x.liftMm = 10.1, "liftMm must be > 0 and <= 10");
         assertNull(DispenseConfig.fromJson("{\"profile\":{\"dwellMs\":250}}").profile.liftMm, "older files: none");
+    }
+
+    /**
+     * BR-82 re-review: the pause is set for one lift height, so it needs the recipe's own lift. On the machine's hop
+     * height it paused at whatever the last tip left (the 25G's 500 ms at the 22G's 1 mm, its records still fresh).
+     */
+    @Test
+    public void aPauseNeedsTheRecipesOwnLift() {
+        assertRefused(x -> x.liftPauseMs = 500,
+                "profile liftPauseMs needs the recipe's own liftMm (the pause is set for one lift height)");
+        DispenseProfile p = new DispenseProfile();
+        p.liftPauseMs = 500;
+        p.liftMm = 3.0;
+        assertTrue(p.validate(C).isEmpty(), p.validate(C).toString());
+        p.liftPauseMs = 0;
+        p.liftMm = null;
+        assertTrue(p.validate(C).isEmpty(), p.validate(C).toString());
     }
 
     /** Screw angle = Marlin's M114 step count of B ("Count ... B:<n>"), never the B position. */
