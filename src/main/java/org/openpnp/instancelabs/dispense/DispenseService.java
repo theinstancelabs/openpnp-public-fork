@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
 
 import org.openpnp.ConfigurationListener;
 import org.openpnp.instancelabs.board.EdtRunner;
+import org.openpnp.instancelabs.padprofile.Anchor;
 import org.openpnp.instancelabs.padprofile.DoseModel;
 import org.openpnp.instancelabs.padprofile.LadderStats;
 import org.openpnp.instancelabs.padprofile.Limits;
@@ -227,6 +228,8 @@ public final class DispenseService {
     private final PhotoStore photoStore;
     /** The mounted setup with its dot table and the identity it was made for ({@link #mountedTip}). */
     private volatile TipCache tipCache;
+    /** The anchor {@link #familyAnchor} found last and what it was found for. */
+    private volatile Map.Entry<String, Anchor> anchorCache;
     /** The last mount of another setup, kept for its undo (§22.3), or null. */
     private volatile UndoSnapshot undo;
     /** The token the last needle change wrote and the one it replaced {new, old} (old null: none), for the undo. */
@@ -1620,6 +1623,7 @@ public final class DispenseService {
             park.needleZOffsetHomeAtMs = c.needleZOffsetHomeAtMs;
             park.needleXyTrim = c.needleXyTrim;
             park.needleLanding = c.needleLanding;
+            park.doseAnchor = c.doseAnchor;
             park.parkedAtMs = now;
             park.profileFrom = was == null ? null : was.profileFrom;
             DispenseConfig.ParkedTip e = c.parkedTips.remove(key);
@@ -1648,6 +1652,7 @@ public final class DispenseService {
             c.needleZOffsetHomeAtMs = e.needleZOffsetHomeAtMs;
             c.needleXyTrim = e.needleXyTrim != null ? e.needleXyTrim : new DispenseConfig.NeedleXyTrim();
             c.needleLanding = e.needleLanding;
+            c.doseAnchor = e.doseAnchor;
             c.tip = in.toSpec();
             List<String> invalid = c.validate();
             if (!invalid.isEmpty()) {
@@ -1702,7 +1707,8 @@ public final class DispenseService {
     /**
      * Restores the previous mount exactly (setup, profile, frame, offset, trim, landing and the needle token) within
      * 2 min of a mount of another setup when no task ran and nothing was measured since; a {@code tip_mounts} row
-     * {@code undo}. Otherwise 409 "Too late to undo: ...".
+     * {@code undo}. What was set for a tip since stays with it (BR-85: the incoming tip parks with the recipe and the
+     * dose anchor it has now). Otherwise 409 "Too late to undo: ...".
      */
     public synchronized MountResult undoMount(String operator) throws IOException, SQLException {
         UndoSnapshot u = undo;
@@ -1742,11 +1748,37 @@ public final class DispenseService {
             c.needleXyTrim = b.needleXyTrim;
             c.needleLanding = b.needleLanding;
             c.needleChangedAtMs = b.needleChangedAtMs;
-            c.parkedTips = new java.util.LinkedHashMap<>(b.copy().parkedTips);
-            for (Map.Entry<String, DispenseConfig.ParkedTip> e : cfg.parkedTips.entrySet()) {
-                // a setup added since the mount keeps its entry: the undo puts back the mount, nothing else
-                if (!e.getKey().equals(b.tip.key)) {
-                    c.parkedTips.putIfAbsent(e.getKey(), e.getValue());
+            DispenseConfig.ParkedTip nowParked = c.parkedTips.get(b.tip.key);
+            DispenseConfig.DoseAnchor nowOn = c.doseAnchor;
+            // the recipe set for the incoming tip while it was on (the start angle aside: the machine's, it stays on)
+            DispenseProfile recipe = cfg.profile.copy();
+            recipe.startAngleDeg = u.after.profile.startAngleDeg;
+            recipe.startAngleSetAtMs = u.after.profile.startAngleSetAtMs;
+            boolean recipeSet = !new Gson().toJson(recipe).equals(new Gson().toJson(u.after.profile));
+            // the undo puts back the mount, nothing else: the two entries it changed; the other tips keep theirs as
+            // they are now (a setup added since, BR-85 an anchor or a recipe set since)
+            Map<String, DispenseConfig.ParkedTip> was = b.copy().parkedTips;
+            for (String k : new String[] {b.tip.key, u.toKey}) {
+                if (was.containsKey(k)) {
+                    c.parkedTips.put(k, was.get(k));
+                }
+                else {
+                    c.parkedTips.remove(k);
+                }
+            }
+            // BR-85: a dose anchor and a recipe are the tip's, not the mount's: set since the mount, they stay with it
+            c.doseAnchor = nowParked != null ? nowParked.doseAnchor : b.doseAnchor;
+            if ((nowOn != null || recipeSet) && !c.parkedTips.containsKey(u.toKey)) {
+                // a tip with no entry before the mount gets one as the mount made it (TipSetups.newEntry), to keep it
+                c.parkedTips.put(u.toKey, TipSetups.newEntry(c, c.profile, c.tip.key, u.after.tip.name));
+            }
+            DispenseConfig.ParkedTip off = c.parkedTips.get(u.toKey);
+            if (off != null) {
+                off.doseAnchor = nowOn;
+                if (recipeSet) {
+                    recipe.startAngleDeg = off.profile.startAngleDeg;
+                    recipe.startAngleSetAtMs = off.profile.startAngleSetAtMs;
+                    off.profile = recipe;
                 }
             }
             writeConfig(c);
@@ -2629,6 +2661,25 @@ public final class DispenseService {
         tip.mgPerStepConfirmed = table.mgPerStepConfirmed;
         tipCache = new TipCache(key, tip); // one write: a tip is never paired with another identity's key
         return copyTip(tip);
+    }
+
+    /**
+     * BR-85: the shared anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get
+     * ({@link PadInstances#anchorFor}; not the tip's own, its pad type's only), cached until the mounted tip, a pad
+     * type or a tip setup changes: the status asks at every poll, and a hit reads no table. Read-only, as
+     * {@link Anchor#BENCH} is.
+     */
+    public Anchor familyAnchor(String family, double areaMm2) throws SQLException {
+        DispenseConfig c = cfg;
+        // the writes counted first: one made while the anchor is found makes the next call find it again
+        String key = db.typeWrites() + "|" + family + "|" + areaMm2 + "|" + new Gson().toJson(c.tip);
+        Map.Entry<String, Anchor> hit = anchorCache;
+        if (hit != null && key.equals(hit.getKey())) {
+            return hit.getValue();
+        }
+        Anchor a = PadInstances.anchorFor(db, c, family, areaMm2);
+        anchorCache = new java.util.AbstractMap.SimpleImmutableEntry<>(key, a);
+        return a;
     }
 
     /** The mounted setup's dot table (the setup view's dots, §22.6). */
@@ -3570,7 +3621,10 @@ public final class DispenseService {
                 throw refused(pitch);
             }
             double dotMm = NeedleTouchOff.expectedDotDiameterMm(req, c);
-            double steadyMm = NeedleTouchOff.steadyDotMm(req, c);
+            // BR-85: the reference is judged against the mounted tip's own dots of the dose when it has them
+            Tip tip = mountedTip();
+            double steadyMm = NeedleTouchOff.steadyDotMm(req, c, tip);
+            String referenceFrom = NeedleTouchOff.referenceFrom(req, c, tip);
             Session s = new Session(c, r);
             SurfacePlane plane = planeOf(c, blankName);
             if (Double.isNaN(req.rotationDeg)) {
@@ -3592,7 +3646,9 @@ public final class DispenseService {
             }
             List<SpotDot> seen = s.imageSpots(specs, req.primeAtWaste, primeExtra, NeedleTouchOff.cutMm(dotMm),
                     req.pitchMm / 2);
-            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen, req.jumpRatio, steadyMm);
+            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen, req.jumpRatio, steadyMm,
+                    c.profile.touchOffSkipDots);
+            res.analysis.referenceFrom = referenceFrom;
             res.previousOffsetMm = c.needleZOffsetMm;
             java.util.Map<String, Object> det = new java.util.LinkedHashMap<>();
             det.put("analysis", res.analysis);

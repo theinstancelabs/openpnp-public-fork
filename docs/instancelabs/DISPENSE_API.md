@@ -95,9 +95,18 @@ Fields and defaults:
   check or Keep): the needle lands at camera + N2 head offset + landing + trim, so every dispensed target is moved by
   minus (landing + trim);
 - *tips:* `parkedTips {setupKey: {profile, needleAnchor, needleZOffsetMm, needleZOffsetSetAtMs, needleZOffsetHomeAtMs,
-  needleXyTrim, needleLanding, parkedAtMs, profileFrom}}`: what every setup that is not mounted keeps (a new setup's
-  entry: a copy of a recipe, no frame, the mounted offset as a placeholder with both times null, a zero trim noted
-  `new tip`, no landing);
+  needleXyTrim, needleLanding, doseAnchor, parkedAtMs, profileFrom}}`: what every setup that is not mounted keeps (a new
+  setup's entry: a copy of a recipe, no frame, the mounted offset as a placeholder with both times null, a zero trim
+  noted `new tip`, no landing, no dose anchor);
+- BR-85 `doseAnchor {massPerPadMg, areaMm2, mgPerMm2, padType, family, source, setAtMs}` or null (protected; set only by
+  `PUT /api/tip-setups/{key}/dose-anchor`): the mounted tip's own anchor, for its own pad type only (the type it was
+  weighed on: reflow accepting it there says nothing of bigger pads); `PadInstances.inputs` puts it in
+  `CheckInputs.anchors` under the pad type's key (`Anchor.tipName`), and the check aims that type's groups at it, over
+  every other anchor (the tip's own validated version of the type too), so Calibrate's amount window (`Decider`) and
+  the suggestions follow it there. Every other pad type and family keeps the shared anchors as before: validated,
+  weighed pad types of any setup, else the bench's 0603 half turn (§1.3); `DispenseService.familyAnchor(family,
+  area)` is the shared one (cached until the mounted tip, a pad type or a tip setup is written:
+  `DispenseDb.typeWrites()`);
 - motion: `travelFeedMmS 200`, `travelAccelMmS2 2000`, `zDownFeedMmS 50`, `zLiftFeedMmS 50`, `zLiftAccelMmS2 2000`
   (each <= 5000), `bMaxFeedDegS 2400` (sent as `M203 B`; <= 400 rpm, the Vieweg maximum), `bStepsPerDeg 4.44`
   (Marlin `M92 B`; one screw revolution of 1600 steps is 360.36°), `bStepsPerRev 1600`, `bExtrudeSign +1`,
@@ -131,6 +140,7 @@ One profile per pressure session, the same for the purge row and the work. Defau
 | `liftPauseMs` | 0 | Pause at the lift height after each dot, the pressure on, before any X/Y travel (0..5000 ms; 0 = none). A pause needs the recipe's own `liftMm` (it is set for one lift height; a pause without it is refused). The plastic 25G 0603 recipe lifts 3 mm (`liftMm`) and waits 500 ms: the paste thread breaks there instead of being dragged across the board. Sent right after the lift, after the dot's end marker (a STOP in it leaves the laid dot counted), in `G4` pieces of at most 250 ms (`MAX_SETTLE_PIECE_MS`) and of the ping interval while the watchdog is armed, like the pump and valve settles: a STOP's valve-off waits at most one piece. Counted in every estimate (I7's pressurised time, the dot clock). In both fingerprints only when > 0 (` pause=500`), so records and plans made without it keep theirs. |
 | `liftMm` | null | The lift after each dot above its dispense Z (mm; > 0 and <= 10; null = the machine's `hopHeightMm`). The recipe's own, so a tip mount brings it back with the pause (the plastic 25G 0603 recipe: 3). Every dot's hop uses it (`DispenseConfig.liftMm()`): board, purge row, shots, calibration blocks, dot ladder, touch-off (a dot at a place, like the prime, lifts to `travelSafeZMm`). In both fingerprints only when set (` lift=3.000`), so records and plans made without it keep theirs. |
 | `purgeDots` | 8 | Purge dots on the purge row before the work (>= 2 for a partial turn: the first sets the start angle, at least one normal dot flushes it). |
+| `touchOffSkipDots` | 0 | BR-85: dots the needle touch-off leaves out after the prime, before its reference pair (0..5; the plastic 25G's start blob: 2 at 13.7 psi, 3 above drool). Parked and restored with the tip's recipe; not in the fingerprints. |
 | `notes` | | Operator notes. |
 
 Derived: `netDeg(c)` = 800 / 4.44 = 180.1802°, `forwardDeg(c)` = 844 / 4.44 = 190.0901°, `suckBackSteps(c)` = 44,
@@ -459,13 +469,14 @@ acknowledged (queued in Marlin, not executed); `lastDotEndMs` is the completion 
 | Signature | Notes |
 |---|---|
 | `public Future<DotLadderCalibration.Result> runDotLadder(DotLadderCalibration.Request req) throws Exception` | Request: `rotationsDeg` (default 30/45/58/75/90), `repeats` 5, `pitchMm` 1.5, `locationName` (default blank), `primeAtWaste`. Every dot at the probed blank plane under it + offset + gap (the profile's suck-back, dwell and screw feed). Before images (pressure off) → one pressure session → after images → `DotInspector` → one `dot_ladder` row per rotation on the current calibration record. Requires I4 (incl. the blank surface). |
-| `public Future<DispenseService.TouchOffResult> runNeedleTouchOff(NeedleTouchOff.Request req, boolean apply) throws Exception` | §6.1 option 1. Gaps `startGapMm` 0.125 down by `stepMm` 0.025, `steps` 6, relative to the current offset, each above the probed blank plane at that dot; `rotationDeg` NaN (default) = one profile dot; `pitchMm` 1.6 (F14: at least the expected dot diameter, `DoseModel.dHiMm` of the dot's turn, + 0.4 mm, else REFUSED before anything is sent: `NeedleTouchOff.pitchProblem`). Each after frame is measured at the spots of all the ladder's dots (`DotImager.inspectSpots`: the new paste opened with a disc 0.45 × the expected dot, so strings and necks thinner than that go; the piece at each spot is its dot), F9. Contact = midpoint between the last normal dot and the first squashed (`> (1+jumpRatio)·reference`) or missing one; new offset = old + contact. The reference is the first two dots, which must both form, agree within `jumpRatio` (a contact needs two steady dots before it) and be at least `MIN_REFERENCE_SHARE` 60 % of the steady dot of their dose (`NeedleTouchOff.steadyDotMm`, `DoseModel.dLoMm`: 1.16 mm for a half turn; smaller ones are droplets from a needle too high, which would make the first full dot look squashed); paste at a spot that is not one dot (joined to a neighbour, strings) before the contact refuses the conclusion (`dots touch or are strung together: …; use a larger pitch`), never "no dot". `apply` writes it (sets `needleZOffsetSetAtMs`, clears I4). The only I4 waiver (named): it needs the needle frame and the blank surface; while not touched off its prime is `touchOffPrimeExtraClearanceMm` higher. |
+| `public Future<DispenseService.TouchOffResult> runNeedleTouchOff(NeedleTouchOff.Request req, boolean apply) throws Exception` | §6.1 option 1. Gaps `startGapMm` 0.125 down by `stepMm` 0.025, `steps` 6, relative to the current offset, each above the probed blank plane at that dot; `rotationDeg` NaN (default) = one profile dot; `pitchMm` 1.6 (F14: at least the expected dot diameter, `DoseModel.dHiMm` of the dot's turn, + 0.4 mm, else REFUSED before anything is sent: `NeedleTouchOff.pitchProblem`). Each after frame is measured at the spots of all the ladder's dots (`DotImager.inspectSpots`: the new paste opened with a disc 0.45 × the expected dot, so strings and necks thinner than that go; the piece at each spot is its dot), F9. Contact = midpoint between the last normal dot and the first squashed (`> (1+jumpRatio)·reference`) or missing one; new offset = old + contact. The reference is the first two dots after the recipe's `profile.touchOffSkipDots` (BR-85: a start blob left out; `Analysis.skippedDots`), which must both form, agree within `jumpRatio` (a contact needs two steady dots before it) and be at least `MIN_REFERENCE_SHARE` 60 % of the steady dot of their dose (smaller ones are droplets from a needle too high, which would make the first full dot look squashed): BR-85 `NeedleTouchOff.steadyDotMm(req, c, mountedTip())`, the tip's own dot of the dose (`Tip.measured`, its dot table) when it is not the bench 22G and has one, else `DoseModel.dLoMm` (1.16 mm for a half turn); `Analysis.referenceFrom` names it (`the tip's dots at 1600 steps (11-04 14:07)` or `NeedleTouchOff.MODEL_REFERENCE` `the 22G model`); paste at a spot that is not one dot (joined to a neighbour, strings) before the contact refuses the conclusion (`dots touch or are strung together: …; use a larger pitch`), never "no dot". `apply` writes it (sets `needleZOffsetSetAtMs`, clears I4). The only I4 waiver (named): it needs the needle frame and the blank surface; while not touched off its prime is `touchOffPrimeExtraClearanceMm` higher. |
 | `recordScaleShots` / `recordScaleDots` | See §3. |
 
 Pure helpers usable without a machine: `DispenseProfile.*` (`phaseSteps`, `startAngles`, `angleOfCount`, `validate`),
 `NeedleTouchOff.analyze(double[] gapsMm, Double[] diametersMm[, String[] unmeasured], double jumpRatio)` and
-`analyze(double[] gapsMm, Double[] diametersMm, String[] unmeasured, double jumpRatio, double steadyDotMm)` and
-`analyze(double[] gapsMm, List<SpotDot> seen, double jumpRatio, double steadyDotMm)`, `NeedleTouchOff.pitchProblem(...)`,
+`analyze(double[] gapsMm, Double[] diametersMm, String[] unmeasured, double jumpRatio, double steadyDotMm[, int skip])` and
+`analyze(double[] gapsMm, List<SpotDot> seen, double jumpRatio, double steadyDotMm[, int skip])`,
+`NeedleTouchOff.steadyDotMm(req, c, tip)` / `referenceFrom(req, c, tip)` (BR-85), `NeedleTouchOff.pitchProblem(...)`,
 `vision.DotInspector.inspectSpots(...)`, `DotLadderCalibration.analyze(...)`,
 `DotSizer.layout(...)`, `DotMath.*`, `DispenseService.parseBCount(List<String>, String)` (package-private),
 `GcodeStreamBuilder.forPlan(...)` / `forDots(...)` / `abortLines(...)`, `vision.PadCleanCheck.measure(...)`.
@@ -579,7 +590,8 @@ dose the tip does not know (no NaN reaches a comparison or a view); `isMeasured(
 it has a weighing). A tip without the bench model and not measured gets no suggestions but `measure-tip`;
 `characterized` without the bench model needs S's own evidence for every dose; the control compares with the bench
 only for the seed, else with S's own dots, or passes as `first measurement of this tip`. Anchors (the amount a joint
-needs) stay shared across setups.
+needs) stay shared across setups, but on the pad type of a tip's own anchor (BR-85 `doseAnchor`: that type's only, over
+the shared anchors and the tip's own validated version of it; every other type and family keeps the shared ones).
 
 **Needle changes and mounting.** `recordNeedleChange(why, operator) → NeedleChange` (synchronized, never refuses): a
 running engine task is stopped first (`abort("the needle was reported changed")`), `needleChangedAtMs` = max(now,
@@ -587,11 +599,14 @@ previous + 1) (the **needle token**: strictly increasing), every coupon waiting 
 (`skipCoupon`), a `tip_mounts` row `needle` and a `TIP` event. `switchTip(key, why, operator) → MountResult` (the API
 runs it inside `PadCalibrationJobs.whileNoJob` and the engine holds its busy flag around the write): refused while a
 task runs, the pressure is held, or for a retired or incomplete setup; parks S (profile, frame, offset with its times,
-trim, landing, `parkedAtMs`), brings in the incoming entry (its recipe takes the live start angle and its time; one
+trim, landing, dose anchor, `parkedAtMs`), brings in the incoming entry (its recipe takes the live start angle and its time; one
 that no longer validates is reset to the default profile named `{name} (reset: {problem})`), `cfg.tip` = the incoming
 view, one config write without the start-angle and trim stamping (restored values keep their times), a `tip_mounts`
 row `mount` and a `TIP` event. `undoMount(operator)`: within 2 min of a mount of another setup, no task run and
-nothing measured since, the previous mount exactly from a snapshot in memory (`too-late` otherwise); `undoUntilMs()`.
+nothing measured since, the previous mount exactly from a snapshot in memory (`too-late` otherwise): the two parked
+entries the mount changed, the other tips' as they are now (a setup added or an anchor or recipe set since); a dose
+anchor or a recipe set since stays with its tip (the incoming tip parks with the recipe it has now, but not the start
+angle, the machine's; one without an entry gets one to keep them); `undoUntilMs()`.
 Every value measured for a needle carries the token (`setNeedleAnchor`, `setNeedleZOffset`, `setXyTrim`, `setLanding`,
 `keepLanding`: `EngineRefusal` 409 `needle-changed`), every pad-type write its setup (`savePadType`: `tip-changed`,
 `pad-changed`), and a pad calibration's every dose-blocks step its setup and token (`DoseBlocksRequest.forTip`,

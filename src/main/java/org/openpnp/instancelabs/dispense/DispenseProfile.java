@@ -76,6 +76,12 @@ public class DispenseProfile {
      */
     public int purgeDots = 8;
     /**
+     * Dots the needle touch-off leaves out after the prime (0 to 5), before its reference pair (BR-85): the plastic
+     * 25G's start blob lands on the first ones (2 at 13.7 psi, 3 above drool). Not part of a dot, so not in the
+     * fingerprints.
+     */
+    public int touchOffSkipDots = 0;
+    /**
      * Highest paste demand (mg/s) a block of dots may ask of the screw (§1.2 R7): the bench saw 2.56
      * mg/s sustained at 18 psi (36 one-turn dots at 180 rpm and 250 ms dwell, runs/p18_blank). A
      * screw asked for more pulls in air. Not part of a dot, so not in the fingerprints.
@@ -253,6 +259,9 @@ public class DispenseProfile {
         if (!(sustainedFeedMgS > 0 && sustainedFeedMgS <= 10)) {
             p.add("profile sustainedFeedMgS must be > 0 and <= 10 mg/s (the bench saw 2.56 at 18 psi)");
         }
+        if (!(touchOffSkipDots >= 0 && touchOffSkipDots <= 5)) {
+            p.add("profile touchOffSkipDots must be 0 to 5");
+        }
         return p;
     }
 
@@ -273,6 +282,7 @@ public class DispenseProfile {
         x.purgeDots = purgeDots;
         x.sustainedFeedMgS = sustainedFeedMgS;
         x.notes = notes;
+        x.touchOffSkipDots = touchOffSkipDots;
         return x;
     }
 }
