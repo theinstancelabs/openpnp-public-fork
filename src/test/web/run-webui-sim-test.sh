@@ -75,3 +75,6 @@ node "$HERE/board-import.playwright.cjs"
 # missing paste profiles and the pad calibration (PROFILE_CALIBRATION_DESIGN.md §14.4): moves the SIM, ≈ 6 min
 SHOTS_DIR="${PP_SHOTS_DIR:-$OUT_DIR/pad-profile-shots}" node "$HERE/pad-profile.playwright.cjs"
 SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.playwright.cjs"
+# the home after a controller reset, the start angle measured again, Pressure on's park (BR-02, BR-03: §7 of
+# docs/backend-requests.md; the new status fields stubbed, the writes caught: nothing moves)
+node "$HERE/reset-home-pressure.playwright.cjs"
