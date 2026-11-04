@@ -226,6 +226,10 @@ public class DispenseProfileTest {
         assertEquals("pc-1", c.copy().profile.startAngleFeature.runId, "kept in the file");
         assertEquals(new DispenseProfile().fingerprint(), p.fingerprint());
         assertEquals(new DispenseProfile().doseFingerprint(), p.doseFingerprint());
+        // the copies share it: nothing may change it in place
+        for (java.lang.reflect.Field f : DispenseProfile.StartAngleFeature.class.getDeclaredFields()) {
+            assertTrue(java.lang.reflect.Modifier.isFinal(f.getModifiers()), f.getName() + " is final");
+        }
     }
 
     /** Screw angle = Marlin's M114 step count of B ("Count ... B:<n>"), never the B position. */

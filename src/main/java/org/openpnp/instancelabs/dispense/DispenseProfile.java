@@ -78,18 +78,15 @@ public class DispenseProfile {
     public String notes = "Window is narrow: 16 psi starved the screw, 20 psi drooled. Never run the screw "
             + "faster than the paste feeds it (it pulls in air; 30-50 turns to recover).";
 
-    /** BR-77: a feature of the screw's flow ripple a start-angle measure found (count angles). */
+    /** BR-77: a feature of the screw's flow ripple a start-angle measure found (count angles); immutable (shared). */
     public static final class StartAngleFeature {
         /** "halves": the flow's peak; "quarters": the start of the dead quarter. */
-        public String mode;
-        public double deg;
+        public final String mode;
+        public final double deg;
         /** When its evidence was made (the measure's first dot step started), epoch ms. */
-        public Long measuredAtMs;
-        /** The measure's job id (its evidence). */
-        public String runId;
-
-        public StartAngleFeature() {
-        }
+        public final Long measuredAtMs;
+        /** The measure's job id (its evidence; the job itself is kept only while it is among the last few). */
+        public final String runId;
 
         public StartAngleFeature(String mode, double deg, Long measuredAtMs, String runId) {
             this.mode = mode;

@@ -128,4 +128,63 @@ public class StartAngleBlocksTest {
             assertTrue(svc.getConfig().profile.startAngleSetAtMs >= now);
         }
     }
+
+    /**
+     * A measure's apply reads the stored angle and its feature and sets the new one under the service's lock: new start =
+     * start + (measured feature - stored feature); refused when the stored feature is gone or of the other mode.
+     */
+    @Test
+    public void anApplyKeepsTheRecipesOffsetUnderOneLock() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            long t0 = System.currentTimeMillis();
+            svc.setStartAngle(0.4, "measure pc-1", t0, new DispenseProfile.StartAngleFeature("halves", 180.41, t0,
+                    "pc-1"));
+            DispenseProfile.StartAngleFeature quarters = new DispenseProfile.StartAngleFeature("quarters", 300, t0,
+                    "pc-2");
+            EngineRefusal other = assertThrows(EngineRefusal.class, () -> svc.applyStartAngle(quarters));
+            assertTrue(other.getMessage().contains("no measured quarters feature"), other.getMessage());
+            long t1 = System.currentTimeMillis();
+            double[] ft = svc.applyStartAngle(new DispenseProfile.StartAngleFeature("halves", 88.7, t1, "pc-3"));
+            assertEquals(0.4, ft[0], 0);
+            assertEquals(268.69, ft[1], 1e-9);
+            DispenseProfile p = svc.getConfig().profile;
+            assertEquals(268.69, p.startAngleDeg, 1e-9);
+            assertEquals("pc-3", p.startAngleFeature.runId);
+            svc.setStartAngle(10.0, "typed");
+            assertThrows(EngineRefusal.class, () -> svc.applyStartAngle(new DispenseProfile.StartAngleFeature("halves",
+                    90, System.currentTimeMillis(), "pc-4")), "a set without a measure dropped the feature");
+            assertEquals(10, svc.getConfig().profile.startAngleDeg, 0);
+        }
+    }
+
+    /**
+     * A measure step without the controller's B step count (M114 Count) is refused before it homes, checks Z or looks:
+     * nothing moves and the camera takes no frame.
+     */
+    @Test
+    public void aMeasureStepWithoutTheStepCountIsRefusedBeforeItHomesOrLooks() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            svc.setDotImager(new LandingCheckBlocksTest.BandImager());
+            svc.updateConfigAtomically(live -> {
+                live.homeBeforeRun = DispenseConfig.HOME_ALWAYS;
+                return live;
+            });
+            f.sim.server.reportBCount = false;
+            f.sim.server.mark();
+            DoseBlocksRequest req = LandingCheckBlocksTest.ladder(svc, LandingCheckBlocksTest.row(98, 40, 4));
+            req.purgeXy = LandingCheckBlocksTest.row(98, 46, 2);
+            req.startAngleDeg = 100.0;
+            req.measuresStartAngle = true;
+            DoseBlocksResult r = svc.runDoseBlocks(req).get(120, TimeUnit.SECONDS);
+            assertFalse(r.ok);
+            assertTrue(r.message.contains("I11: the controller did not report the B step count (M114 Count)"),
+                    r.message);
+            assertEquals(0, r.frames, "no camera frame");
+            for (String l : f.sim.server.sinceMark()) {
+                assertFalse(l.startsWith("G28") || l.startsWith("G0 ") || l.startsWith("G1 "), "nothing moved: " + l);
+            }
+        }
+    }
 }

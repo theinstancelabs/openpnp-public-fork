@@ -1317,6 +1317,24 @@ public final class DispenseService {
         return c.profile.copy();
     }
 
+    /**
+     * BR-77: a measure's apply under this lock (a set between a read and the write would be lost): new start = start +
+     * (measured feature - stored feature), set with the measured feature as {@link #setStartAngle} sets it (BR-02's
+     * checks). Refused when the stored feature is gone or of the other mode. Returns {from, to} (deg).
+     */
+    public synchronized double[] applyStartAngle(DispenseProfile.StartAngleFeature measured) throws IOException {
+        DispenseProfile p = cfg.profile;
+        DispenseProfile.StartAngleFeature old = p.startAngleFeature;
+        if (old == null || !old.mode.equals(measured.mode)) {
+            throw new EngineRefusal(409, "refused", "the start angle has no measured " + measured.mode + " feature (it "
+                    + "was set without a measure since): nothing was set");
+        }
+        double from = p.startAngleDeg, to = ScrewPhaseFit.norm(from + measured.deg - old.deg);
+        setStartAngle(to, String.format(java.util.Locale.ROOT, "measure %s: %s %.1f→%.1f", measured.runId,
+                measured.mode, from, to), measured.measuredAtMs, measured);
+        return new double[] {from, to};
+    }
+
     /** The purge row was wiped: all its spots are free again. */
     public synchronized void resetPurgeRow() throws IOException {
         DispenseConfig c = cfg.copy();
@@ -5126,6 +5144,11 @@ public final class DispenseService {
             }
         }
         Session s = t.start(c);
+        if (req.measuresStartAngle && s.readBCount(false) == null) {
+            // BR-77: asked before the home, the Z check and the camera tour
+            throw refused("I11: the controller did not report the B step count (M114 Count): the start angle cannot be "
+                    + "measured. Nothing was sent.");
+        }
         HomeTracker.Plan hp = homePlan();
         t.detail.put("home", homeDetail(hp));
         t.detail.put("blocks", req.blocks.size());
