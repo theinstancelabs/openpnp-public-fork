@@ -1211,7 +1211,7 @@ public final class DispenseService {
         return null;
     }
 
-    /** BR-03: where the valve and the screw may switch on now (the configuration's places, rows and surfaces). */
+    /** BR-03: where the valve and the screw may switch on now (the sinks, rows, coupons, the board and the blank). */
     public OutputZones outputZones() {
         return OutputZones.of(cfg, bottomCameraXY());
     }
