@@ -638,14 +638,19 @@
   }
   function renderAngle(s) {
     const p = (s.dispense && s.dispense.profile) || {};
-    const state = !p.partialTurn ? 'off' : !p.startAngleSetAtMs ? 'never' : p.startAngleNeedsConfirm ? 'confirm' : 'ok';
-    setState('cal-angle', { ok: 'ok', confirm: 'need', never: 'block', off: 'off' }[state], { ok: IL.fmtDeg(p.startAngleDeg, 1), confirm: 'Confirm', never: 'Not set', off: 'Whole turns' }[state]);
+    const state = !p.partialTurn ? 'off' : IL.angleState(s);
+    setState('cal-angle', { ok: 'ok', confirm: 'need', measure: 'need', never: 'block', off: 'off' }[state],
+      { ok: IL.fmtDeg(p.startAngleDeg, 1), confirm: 'Confirm', measure: 'Measure again', never: 'Not set', off: 'Whole turns' }[state]);
     IL.kv($('cal-angle-kv'), [
       ['Start angle', IL.fmtDeg(p.startAngleDeg, 1) + (p.partialTurn && p.startAngles ? ' · dots alternate ' + IL.startAnglesText(p) : '')],
       ['Set or confirmed', p.startAngleSetAtMs ? IL.fmtDateTime(p.startAngleSetAtMs - S.skewMs) : 'never'],
       ['Controller connected', p.controllerConnectedAtMs ? IL.fmtDateTime(p.controllerConnectedAtMs - S.skewMs) : '—'],
     ]);
-    IL.keyed($('cal-angle-ask'), state + p.startAngleDeg, () => (state === 'confirm' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),
+    // after a controller reset (BR-02) only a new measurement clears it: a bare confirm is refused then
+    IL.keyed($('cal-angle-ask'), state + p.startAngleDeg, () => (state === 'measure' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),
+      el('div', {}, el('div', { class: 'ri__t', text: 'Measure the start angle again' }),
+        el('div', { class: 'ri__d', text: IL.angleResetText(s) + '. Measure it below.' })),
+      el('abbr', { class: 'icode', title: 'Interlock I11', text: 'I11' })) : state === 'confirm' ? el('div', { class: 'ri ri--need cal-ask' }, IL.glyph('need'),
       el('div', {}, el('div', { class: 'ri__t', text: 'Was the controller switched off since ' + IL.fmtTime(p.startAngleSetAtMs - S.skewMs) + '?' }),
         el('div', { class: 'ri__d', text: 'If it stayed on, the angle still holds. If it was off, measure again below.' })),
       el('abbr', { class: 'icode', title: 'Interlock I11', text: 'I11' }),

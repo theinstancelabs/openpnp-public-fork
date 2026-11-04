@@ -538,7 +538,7 @@
   function renderAngle(s) {
     const p = srvProfile(s) || {};
     const a = IL.fmtDeg(p.startAngleDeg, 1);
-    const state = !p.partialTurn ? 'off' : !p.startAngleSetAtMs ? 'never' : p.startAngleNeedsConfirm ? 'confirm' : 'ok';
+    const state = !p.partialTurn ? 'off' : IL.angleState(s);
     const setAt = p.startAngleSetAtMs ? p.startAngleSetAtMs - S.skewMs : null;
     const conAt = p.controllerConnectedAtMs ? p.controllerConnectedAtMs - S.skewMs : null;
     IL.setText($('pf-angle-v'), a);
@@ -550,20 +550,22 @@
     ]);
     const warn = $('pf-angle-warn');
     const wtext = state === 'confirm' ? 'Was the controller switched off since ' + IL.fmtTime(setAt) + '? OpenPnP reconnected' + (conAt ? ' at ' + IL.fmtTime(conAt) : '') + ' after the angle was set. Answer before the next board (I11).'
-      : state === 'never' ? 'The start angle has never been set: measure it before a board run (I11).' : '';
+      : state === 'measure' ? IL.angleResetText(s) + ': measure the start angle again before the next board (I11).'
+        : state === 'never' ? 'The start angle has never been set: measure it before a board run (I11).' : '';
     IL.setText(warn, wtext);
     IL.setClass(warn, 'notebox ' + (state === 'never' ? 'notebox--block' : 'notebox--need'));
     IL.show(warn, !!wtext);
     IL.setText($('pf-angle-q'), state === 'ok' ? 'After the next reconnect, answer here (or in the strip):' : state === 'off' ? 'Whole turns: the start angle does not matter.' : '');
     const st = $('pf-angle-state');
-    const kind = { ok: 'ok', confirm: 'need', never: 'block', off: 'off' }[state];
-    const text = { ok: 'Holds', confirm: 'Confirm', never: 'Not set', off: 'Whole turns' }[state];
+    const kind = { ok: 'ok', confirm: 'need', measure: 'need', never: 'block', off: 'off' }[state];
+    const text = { ok: 'Holds', confirm: 'Confirm', measure: 'Measure again', never: 'Not set', off: 'Whole turns' }[state];
     if (st.dataset.sig !== kind + text) { st.dataset.sig = kind + text; st.className = 'card__state card__state--' + kind; st.replaceChildren(IL.glyph(kind, 'sm'), text); }
     const confirm = $('btn-pf-angle-confirm');
     if (!IL.isArmed(confirm) && confirm.getAttribute('aria-busy') !== 'true') IL.setText(confirm, 'Controller stayed on: ' + a + ' still holds');
-    IL.show(confirm, state !== 'off' && state !== 'never');
+    // after a controller reset (BR-02) only a new measurement clears it: a bare confirm is refused then
+    IL.show(confirm, state !== 'off' && state !== 'never' && state !== 'measure');
     IL.show($('btn-pf-angle-measure'), state !== 'off');
-    IL.setText($('btn-pf-angle-measure'), state === 'never' ? 'Measure the angle' : 'It was switched off: measure again');
+    IL.setText($('btn-pf-angle-measure'), state === 'never' ? 'Measure the angle' : state === 'measure' ? 'Measure again' : 'It was switched off: measure again');
     IL.gate(confirm, IL.lockReason(s, { pressureOff: false }), $('pf-angle-reason'));
   }
 
@@ -1421,6 +1423,7 @@
     nav(s) {
       const p = srvProfile(s) || {};
       if (PF.dirty.size) return { sub: 'Unsaved changes', kind: 'need', dirty: true, title: 'Unsaved profile changes: they stay here until you save or discard them' };
+      if (p.partialTurn && IL.angleState(s) === 'measure') return { sub: 'Measure angle', kind: 'need' };
       if (p.partialTurn && p.startAngleNeedsConfirm) return { sub: 'Confirm angle', kind: 'need' };
       if (p.partialTurn && !p.startAngleSetAtMs) return { sub: 'Measure angle', kind: 'block' };
       for (const f of IL.pt.navSubs) { const x = f(s); if (x) return x; }

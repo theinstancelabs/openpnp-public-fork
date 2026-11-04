@@ -737,6 +737,44 @@
   IL.n1LowText = function (status) {
     return IL.lowToolShort(status) + ': look at the board under it. Home ' + IL.lowTool(status).lift + ' first, then homes.';
   };
+  // ---------------------------------------------------------------------------------- a controller reset (BR-02)
+  /** A controller reset left the head position unknown (status machine.positionKnown false) until an attested home. */
+  IL.positionUnknown = (status) => { const m = (status || S.status || {}).machine; return !!m && m.positionKnown === false; };
+  IL.positionUnknownWhy = (status) => ((status || S.status || {}).machine || {}).positionUnknownWhy || 'The controller was reset: the head position is unknown';
+  /** What a control that needs the position says until that home. */
+  IL.positionUnknownReason = (status) => 'The position is unknown (' + IL.positionUnknownWhy(status).replace(/[.:]\s*$/, '') + '): Home first, after checking that nothing is under either tool';
+  /**
+   * The start angle's question (I11): 'off' (whole turns), 'never', 'measure' (the controller was reset after the angle
+   * was set: its step count started again, a bare confirm is refused, BR-02), 'confirm' (a reconnect: was it switched
+   * off?) or 'ok'. Reads profile.startAngleNeedsConfirm and machine.powerCycle.atMs, never powerCycle.detected (§7).
+   */
+  IL.angleState = function (status) {
+    const s = status || S.status || {};
+    const prof = (s.dispense && s.dispense.profile) || {};
+    const i11 = IL.interlock(s, 'I11');
+    if ((i11 && i11.state === 'off') || prof.partialTurn === false) return 'off';
+    if (!prof.startAngleSetAtMs) return 'never';
+    const pc = s.machine && s.machine.powerCycle;
+    if (pc && isNum(pc.atMs) && pc.atMs > prof.startAngleSetAtMs) return 'measure';
+    return prof.startAngleNeedsConfirm || (i11 && i11.state === 'blocked') ? 'confirm' : 'ok';
+  };
+  /** "The controller was switched off or reset at 16:20: the screw's step count started again." */
+  IL.angleResetText = function (status) {
+    const pc = ((status || S.status || {}).machine || {}).powerCycle || {};
+    return 'The controller was switched off or reset' + (isNum(pc.atMs) ? ' at ' + IL.fmtTime(pc.atMs - S.skewMs) : '') + ": the screw's step count started again";
+  };
+  /**
+   * Pressure on's body (BR-03): the hold parks the needle over the waste first unless I12 reads ok (the needle is over a
+   * sink); a backend before BR-03 ignores `park`. pump: the pump only, the valve stays closed (read the gauge).
+   */
+  IL.pressureStartBody = function (status, pump) {
+    if (pump) return { mode: 'pump' };
+    const i12 = IL.interlock(status || S.status, 'I12');
+    return i12 && i12.state === 'ok' ? {} : { park: 'waste' };
+  };
+  /** A backend with BR-03's zones (I12 in the status) knows `mode: 'pump'`; an older one would open the valve. */
+  IL.hasPumpOnly = (status) => !!IL.interlock(status || S.status, 'I12');
+
   /**
    * Why a control is locked now, or null. need: {connected, homed, idle (default true), pressureOff (default true),
    * engine, homes (the task homes by itself: it waits while N1 is low)}. Texts are the spec's (§13 "Locked control").
@@ -759,6 +797,7 @@
     if (n.pressureOff && pr.state && pr.state !== 'off') return 'Pressure is held: switch it off first';
     if (n.connected && !m.enabled) return 'Not connected: connect first';
     if (n.homed && !m.homed) return 'Not homed: home first';
+    if ((n.homed || n.homes) && m.positionKnown === false) return IL.positionUnknownReason(s);
     // a task that homes by itself (Register board, Probe the blank, the pad calibration) waits, as Run does, while a STOP
     // left N1 low: an automatic home must not drag N1 across the board (AUTO_REGISTER_DESIGN.md §8.2)
     if (n.homes && IL.n1Low(s)) return IL.n1LowText(s);
@@ -1071,6 +1110,11 @@
         detail: 'Not connected to the controller.', fixes: [{ fix: 'connect', label: 'Connect', primary: true }] });
     } else if (!m.homed && m.busy) {
       add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'live', value: 'homing', short: 'homing', detail: 'Homing…' });
+    } else if (m.positionKnown === false && !m.busy) {
+      // BR-02: a controller reset; nothing homes by itself, the person checks the way first (the Home confirm)
+      add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'block', value: 'position unknown', short: 'home',
+        detail: IL.positionUnknownWhy(s).replace(/[.:]\s*$/, '') + '. Home first, after checking that nothing is under either tool.',
+        fixes: [{ fix: 'home', label: 'Home', primary: true }] });
     } else if (IL.n1Low(s)) {
       const low = IL.lowTool(s).needle ? 'needle low' : 'N1 low';
       add({ key: 'machine', code: 'MACHINE', title: 'Machine', state: 'need', value: low, short: low, detail: IL.n1LowText(s),
@@ -1108,6 +1152,9 @@
     } else if (!prof.startAngleSetAtMs) {
       add({ key: 'angle', code: 'I11', title: 'Start angle', state: 'block', value: 'not set', short: 'start angle',
         detail: 'The start angle was never set.', fixes: [{ href: '#calibrate/angle', label: 'Measure the angle' }] });
+    } else if (IL.angleState(s) === 'measure') {
+      add({ key: 'angle', code: 'I11', title: 'Start angle', state: 'need', value: 'measure again', short: 'start angle',
+        detail: IL.angleResetText(s) + ': measure the start angle again.', fixes: [{ href: '#calibrate/angle', label: 'Measure again', primary: true }] });
     } else if (prof.startAngleNeedsConfirm || (i11 && i11.state === 'blocked')) {
       add({ key: 'angle', code: 'I11', title: 'Start angle', state: 'need', value: 'confirm', short: 'start angle',
         detail: 'The controller reconnected after the start angle was set'
@@ -1719,7 +1766,15 @@
       fixes: m.enabled ? [] : [{ fix: 'connect', label: 'Connect', primary: true }] });
     const angleOk = !prof.startAngleNeedsConfirm;
     const angleSetAfter = rec && prof.startAngleSetAtMs && prof.startAngleSetAtMs - S.skewMs > rec.atMs;
-    steps.push({ key: 'angle', title: 'Was the controller switched off?', wait: !m.enabled, done: !!m.enabled && angleOk,
+    const knowsResets = !!m.powerCycle && prof.partialTurn !== false;   // BR-02: the engine detects a reset, nobody is asked
+    const angleSt = IL.angleState(s);
+    if (knowsResets && angleSt === 'measure') {
+      steps.push({ key: 'angle', title: 'The controller was switched off', state: 'need', wait: !m.enabled, done: false,
+        detail: IL.angleResetText(s) + ': measure the start angle again (I11)', fixes: [{ href: '#calibrate/angle', label: 'Measure again', primary: true }] });
+    } else if (knowsResets && angleSt !== 'confirm') {
+      steps.push({ key: 'angle', title: 'Start angle', wait: !m.enabled, done: !!m.enabled,
+        detail: angleSt === 'never' ? 'not set yet (I11)' : 'no controller reset since it was set: ' + IL.fmtDeg(prof.startAngleDeg, 1) + ' holds (I11)', fixes: [] });
+    } else steps.push({ key: 'angle', title: 'Was the controller switched off?', wait: !m.enabled, done: !!m.enabled && angleOk,
       detail: m.enabled ? (angleOk ? 'start angle ' + IL.fmtDeg(prof.startAngleDeg, 1) + (angleSetAfter ? ', set ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) : ' holds')
         : 'STOP and Connect keep the screw step count; only switching the controller off loses it (I11)')
         : 'STOP keeps the screw step count; asked after Connect (I11)',
@@ -2141,6 +2196,13 @@
         IL.setText(homed, 'Not homed');
         homedVisible(false);
         showStart = true;
+      } else if (m.positionKnown === false && !m.busy) {
+        // BR-02: a controller reset; OpenPnP may still read homed, the engine knows better
+        setCell(mc, 'block', undefined, IL.positionUnknownWhy(s).replace(/[.:]\s*$/, '') + '. Home first, after checking that nothing is under either tool.');
+        IL.setText(conn, 'Connected');
+        IL.setText(homed, 'Position unknown');
+        homedVisible(true);
+        showHome = !IL.taskRunning(s) && (!s.pressure || s.pressure.state === 'off');
       } else if (!m.homed) {
         IL.setText(conn, 'Connected');
         homedVisible(true);
@@ -2242,6 +2304,7 @@
     if (name === 'setup' || name === 'calibrate') return running ? { sub: 'Locked · running' } : {};
     if (name === 'profile') {
       const p = d.profile || {};
+      if (p.partialTurn && IL.angleState(s) === 'measure') return { sub: 'Measure angle', kind: 'need' };
       if (p.startAngleNeedsConfirm) return { sub: 'Confirm angle', kind: 'need' };
       return { sub: p.name || '' };
     }
@@ -2800,7 +2863,8 @@
     const msg = String(message || '');
     switch (code) {
       case 'MACHINE': return m.enabled ? [{ fix: 'home', label: 'Home' }] : [{ fix: 'connect', label: 'Connect' }];
-      case 'I11': return [{ fix: 'I11-confirm', label: 'Controller stayed on: confirm' }, { href: '#calibrate/angle', label: 'Measure again' }];
+      case 'I11': return IL.angleState(status) === 'measure' || /measure it again/i.test(String(msg || '')) ? [{ href: '#calibrate/angle', label: 'Measure again', primary: true }]
+        : [{ fix: 'I11-confirm', label: 'Controller stayed on: confirm' }, { href: '#calibrate/angle', label: 'Measure again' }];
       case 'I9': return row.defined && row.spots < IL.purgeNeed(row)
         ? [{ href: '#setup/purge', label: 'Purge row: more spots' }, { href: '#profile', label: 'Profile: purge dots' }]
         : [{ fix: 'purge-reset', label: 'Wiped: reset row', icon: 'i-wipe' }];
@@ -2866,9 +2930,35 @@
     gate: (s) => (S.online === false ? IL.lockReason(s) : null) });
   // the home's own answer (wait): a home that fails says why (`homing failed: …`, the pressure hold, a STOP before it
   // started), as the strip alone cannot; the engine waits up to 5 min for it
-  IL.fix('home', { press2: 'home', gate: (s) => IL.lockReason(s, { connected: true }),
-    run: () => { IL.toast('Homing…'); return IL.api('POST', '/api/machine/home', { wait: true }, { timeoutMs: 320000 }); },
-    ok: (r) => (r && isNum(r.n1RaisedFromZ) ? 'Homed: N1 was raised from Z ' + IL.fmt(r.n1RaisedFromZ, 2) + ' mm first.' : 'Homed.') });
+  IL.fix('home', { press2: (s) => (IL.positionUnknown(s) ? null : 'home'), gate: (s) => IL.lockReason(s, { connected: true }),
+    run: async () => {
+      if (IL.positionUnknown(S.status)) {
+        if (!(await askHomeUnknown())) return null;
+        IL.toast('Homing…');
+        return IL.api('POST', '/api/machine/home', { wait: true, clearBelowAttested: true }, { timeoutMs: 320000 });
+      }
+      IL.toast('Homing…');
+      return IL.api('POST', '/api/machine/home', { wait: true }, { timeoutMs: 320000 });
+    },
+    ok: (r) => (!r ? null : isNum(r.n1RaisedFromZ) ? 'Homed: N1 was raised from Z ' + IL.fmt(r.n1RaisedFromZ, 2) + ' mm first.' : 'Homed.') });
+  /**
+   * The home after a controller reset (BR-02, §7): the board's G28 has no Z clearance, so the person checks the path
+   * first. Resolves true for Home, false for Cancel (Esc, or the dialog closed).
+   */
+  function askHomeUnknown() {
+    return new Promise((resolve) => {
+      let answer = false;
+      const cancel = el('button', { type: 'button', class: 'btn', 'data-k': 'cancel', text: 'Cancel' });
+      const go = el('button', { type: 'button', class: 'btn btn--primary', 'data-k': 'home', text: 'Nothing is in the way: Home' });
+      const h = IL.dialog.open({ id: 'dlg-home-unknown', size: 'sm', eyebrow: 'Home after a controller reset', title: 'Is the way to the homing corner clear?',
+        body: [el('p', { class: 'notebox notebox--need', text: IL.positionUnknownWhy(S.status).replace(/[.:]\s*$/, '') + '.' }),
+          el('p', { text: 'The home first drives the head to its homing corner (X, then Y) at the height the tools are at now, then homes Z there.' }),
+          el('p', {}, el('b', { text: 'Nothing is under N1 or the needle or in their way to that corner (I levelled them by hand if one was low).' }))],
+        foot: [el('span', { class: 'spacer' }), cancel, go], initialFocus: null, onClose: () => resolve(answer) });
+      cancel.addEventListener('click', () => h.close('cancel'));
+      go.addEventListener('click', () => { answer = true; h.close('home'); });
+    });
+  }
   IL.fix('I11-confirm', {
     gate: (s) => IL.lockReason(s, { connected: true, pressureOff: false }),
     run: async () => { const p = await IL.api('POST', '/api/screw/start-angle', {}); IL.planRefreshSoon(); return p; },
@@ -2896,10 +2986,18 @@
   IL.fix('pressure-on', {
     gate: (s) => (s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
       : IL.lockReason(s, { connected: true, homed: true, engine: true })),
-    // two presses unless the needle is over the waste (≤ 3 mm)
-    press2: (s) => { const dist = IL.wasteDistance(s); return dist !== null && dist <= L.wasteNearMm ? null : 'pressure on'; },
-    run: () => IL.api('POST', '/api/pressure/start'),
+    // two presses unless the needle is over the waste (≤ 3 mm); BR-03: the needle parks over the waste first unless I12
+    // reads it over a sink
+    press2: (s) => { const dist = IL.wasteDistance(s); return dist !== null && dist <= L.wasteNearMm ? null : IL.pressureStartBody(s).park ? 'park, pressure on' : 'pressure on'; },
+    run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status)),
     ok: (r) => (r && (r.note || r.lastEvent)) || 'Pressure switching on',
+  });
+  // BR-03: the pump only, the valve stays closed (read the gauge), anywhere; offered only by a backend with I12
+  IL.fix('pressure-pump', {
+    gate: (s) => (s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
+      : IL.lockReason(s, { connected: true, engine: true })),
+    run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status, true)),
+    ok: (r) => (r && (r.note || r.lastEvent)) || 'Pump on, valve closed: read the gauge',
   });
   IL.fix('attest-regulator', {
     run: async (btn, arg, s) => {
@@ -3178,7 +3276,9 @@
         const on = IL.fixButton({ fix: 'pressure-on', label: 'Pressure on', icon: 'i-gauge' });
         const off = IL.fixButton({ fix: 'pressure-off', label: 'Pressure off', primary: true });
         const reads = IL.fixButton({ fix: 'attest-regulator', label: 'Reads … psi' });
-        p.foot.append(el('div', { class: 'btn-row', id: 'pv-pr-act', 'data-refusals': '', 'data-own-reason': '' }, on, off, reads),
+        const pump = IL.fixButton({ fix: 'pressure-pump', label: 'Pump only (read the gauge)', title: 'Switches the pump on with the valve closed, so the gauge shows the feed pressure. Nothing moves; nothing comes out.' });
+        pump.hidden = true;
+        p.foot.append(el('div', { class: 'btn-row', id: 'pv-pr-act', 'data-refusals': '', 'data-own-reason': '' }, on, off, reads, pump),
           el('div', { class: 'reason', id: 'pv-pr-reason', hidden: true }),
           el('div', { class: 'reason', text: 'Switches off by itself after the on-time limit (I7). Prime, test dot and runs are locked while it is on.' }));
       }
@@ -3202,7 +3302,8 @@
         ['Last error', pr.lastError || 'none'],
         ['Gauge read', reg ? 'you, ' + IL.fmtTime(reg.atMs) + ' (' + IL.fmtPsi(reg.value) + ' psi)' : 'not yet'],
       ]);
-      const [bOn, bOff, bReads] = $('pv-pr-act').children;
+      const [bOn, bOff, bReads, bPump] = $('pv-pr-act').children;
+      IL.show(bPump, IL.hasPumpOnly(s));
       const holding = pr.state && pr.state !== 'off';
       const lockOn = holding ? null : IL.lockReason(s, { connected: true, homed: true, engine: true });
       IL.gate(bOn, holding ? (pr.state === 'vent_failed' ? 'Pressure is NOT off: press Pressure off' : 'Pressure is already on') : lockOn);
@@ -3222,8 +3323,15 @@
       if (first) p.body.append(el('div', { id: 'pv-angle-q' }), el('dl', { class: 'kv kv--wrap', id: 'pv-angle-kv' }));
       const prof = (s.dispense && s.dispense.profile) || {};
       const a = IL.fmtDeg(prof.startAngleDeg, 1);
-      const state = !prof.partialTurn ? 'off' : !prof.startAngleSetAtMs ? 'never' : prof.startAngleNeedsConfirm ? 'confirm' : 'ok';
+      const state = !prof.partialTurn ? 'off' : IL.angleState(s);
       IL.keyed($('pv-angle-q'), state + a + prof.startAngleSetAtMs, () => {
+        if (state === 'measure') {
+          return el('div', { class: 'ri ri--need' }, IL.glyph('need'),
+            el('div', {}, el('div', { class: 'ri__t', text: 'Measure the start angle again' }),
+              el('div', { class: 'ri__d', text: IL.angleResetText(s) + '. The angle set ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) + ' no longer holds.' })),
+            el('abbr', { class: 'icode', title: 'Interlock I11', text: 'I11' }),
+            fixRow([{ href: '#calibrate/angle', label: 'Measure again', primary: true }]));
+        }
         if (state === 'confirm') {
           return el('div', { class: 'ri ri--need', 'data-refusals': '' }, IL.glyph('need'),
             el('div', {}, el('div', { class: 'ri__t', text: 'Was the controller switched off since ' + IL.fmtTime(prof.startAngleSetAtMs - S.skewMs) + '?' }),
