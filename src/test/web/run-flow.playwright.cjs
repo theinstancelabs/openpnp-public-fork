@@ -123,12 +123,14 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
       for (let i = 0; i < 120 && job && job.id; i++) {
         await sleep(2000);
         const j = await page.evaluate((id) => IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(id)).catch(() => null), job.id);
-        if (j && !/^(running|queued|starting|waiting)$/.test(String(j.state))) break;
+        if (j && /^(done|stopped|cancelled|failed)$/.test(String(j.state))) break;   // the engine's ended(): deciding and planning still run
       }
+      // and the page's own status: a click while it still shows the job is refused ("Locked while the pad calibration runs")
+      await page.waitForFunction(() => !IL.taskRunning(IL.S.status) && !IL.padProfile.jobLock(IL.S.status), null, { timeout: 15000 }).catch(() => null);
       st0 = await page.evaluate(() => IL.api('GET', '/api/status'));
     }
     check('(0) the setup with the board\'s pad types is on, its needle frame recorded, where it lands kept', !!use && st0.dispense.tip.key === use.key
-      && st0.dispense.needle.anchored && st0.dispense.needle.xyChecked !== false, { use: use && use.key, tip: st0.dispense.tip.key, needle: st0.dispense.needle });
+      && st0.dispense.needle.anchored && st0.dispense.needle.xyChecked !== false, { use: use && use.key, tip: st0.dispense.tip.key, needle: st0.dispense.needle, run: st0.run });
 
     // ---- (1) Run opens Start while nothing runs ---------------------------------------------------------------------
     const needsFirst = await toStart(page);
