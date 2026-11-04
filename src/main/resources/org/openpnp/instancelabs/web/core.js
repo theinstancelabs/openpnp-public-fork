@@ -1383,39 +1383,47 @@
     const runChecking = s.run && s.run.running && s.run.label === 'clean-pad check';
     // "0 of 160 clean": the board position is wrong, not every pad dirty (§13): check the position, do not wipe
     const posWrong = IL.cleanPositionWrong(cc) && !runChecking;
-    if (posWrong) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: 'position?', short: 'check position', posWrong: true,
+    // a board with a clean-pad ledger (BR-76): a run that needs more clean pads than it has is refused before anything
+    // moves; with enough, its numbers lead the line
+    const pl = plan && plan.padLedger;
+    const add9 = pl ? (it) => add(Object.assign(it, { detail: 'Clean pads · ' + pl.clean + ', this run needs ' + pl.needed + '. ' + it.detail })) : add;
+    if (pl && pl.clean < pl.needed) {
+      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'block', value: pl.clean + ' of ' + pl.needed, short: 'wipe the board',
+        detail: 'Wipe the board first: ' + pl.clean + ' clean, this run needs ' + pl.needed + '.',
+        fixes: [{ fix: 'board-wiped', arg: pl.board, label: 'Board wiped', icon: 'i-wipe', primary: true }, { href: '#calibrate/test-board', label: 'Test board' }] });
+    } else if (posWrong) {
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: 'position?', short: 'check position', posWrong: true,
         detail: IL.cleanSummary(cc) + ' Check the board X/Y and rotation in the Board step, then check the pads again.'
           + (cpc.enabled ? '' : ' The check before each board is off: the run will not look again.'),
         fixes: [{ href: '#run/board', label: 'Check the board position', primary: true }, { fix: 'clean-check', label: 'Check again' }] });
     } else if (!cpc.enabled && cc && !cc.ok && !runChecking) {
       // the check is off, but a check of this plan found paste: never "ready" next to red pads (the run will not look again)
       const n = (cc.dirtyPadIds || IL.dirtyPads(cc)).length;
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: n + ' dirty', short: n ? 'wipe ' + IL.plural(n, 'pad') : 'check pads',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: n + ' dirty', short: n ? 'wipe ' + IL.plural(n, 'pad') : 'check pads',
         detail: IL.cleanSummary(cc) + ' The check before each board is off: the run will not look again.',
         dirty: IL.dirtyPads(cc), fixes: [{ fix: 'clean-check', label: 'Wiped: check again' }] });
     } else if (!cpc.enabled) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'off', value: 'off', short: 'pads clean',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: pl ? 'ok' : 'off', value: pl ? pl.clean + ' clean' : 'off', short: 'pads clean',
         detail: sim && !(s.server && s.server.simulatorConfirmed) ? 'Off (simulator): the simulated camera is a static picture.' : 'Off: not checked before a board.' });
     } else if (i10 && i10.state === 'blocked') {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'block', value: 'no camera', short: 'pad check camera',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'block', value: 'no camera', short: 'pad check camera',
         detail: 'Clean-pad check is on but there is no top camera.', fixes: [{ href: '#setup/settings', label: 'Switch the check off in Settings' }] });
     } else if (!plan) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'wait', value: '—', short: 'pads clean', detail: 'Known after planning.' });
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'wait', value: '—', short: 'pads clean', detail: 'Known after planning.' });
     } else if (plan.cleanCheckRunning || runChecking) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'live', value: 'checking', short: 'pad check', detail: 'The top camera visits every pad (pressure off).' });
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'live', value: 'checking', short: 'pad check', detail: 'The top camera visits every pad (pressure off).' });
     } else if (!cc) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: 'not checked', short: 'check pads',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: 'not checked', short: 'check pads',
         detail: 'Not checked yet. The run checks every pad first (≈ 3 min); checking now lets you wipe before the run.',
         fixes: [{ fix: 'clean-check', label: 'Check pads' }] });
     } else if (cc.ok) {
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'ok', value: 'clean ' + IL.fmtTime(cc.checkedAtMs), short: 'pads clean',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'ok', value: 'clean ' + IL.fmtTime(cc.checkedAtMs), short: 'pads clean',
         detail: IL.cleanSummary(cc) });
     } else {
       const dirty = IL.dirtyPads(cc);
       const named = dirty.slice(0, 3).map((x) => x.padId + (x.share === null || x.share === undefined ? '' : ' (' + IL.fmt(x.share, 2) + ')')).join(', ');
       const n = (cc.dirtyPadIds || dirty).length;
-      add({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: n + ' dirty', short: n ? 'wipe ' + IL.plural(n, 'pad') : 'check pads',
+      add9({ key: 'clean', code: 'I10', title: 'Pads clean', state: 'need', value: n + ' dirty', short: n ? 'wipe ' + IL.plural(n, 'pad') : 'check pads',
         detail: IL.cleanSummary(cc) + (named ? ' Paste on ' + named + (dirty.length > 3 ? ' and ' + (dirty.length - 3) + ' more' : '') + '.' : ''),
         dirty, fixes: [{ fix: 'clean-check', label: 'Wiped: check again' }] });
     }
@@ -2161,6 +2169,17 @@
    * The In control cell (P0): who holds the machine, what it does and since when; Take control beside it while an agent
    * holds it. Hidden while this OpenPnP reports no lock (before BR-72).
    */
+  /** BR-76: a run (an agent's) waits for clean pads: a band on every page until it no longer waits. */
+  function renderPadsWait(s) {
+    const w = ((s && s.padLedgers) || []).find((x) => x.waiting);
+    if (!w) { IL.msg('pads-wait', null); return; }
+    const x = w.waiting;
+    IL.msg('pads-wait', { kind: 'need', alert: false,
+      text: (x.by ? x.by + '\u2019s ' : '') + (x.what || 'run') + ' waits for clean pads: ' + x.clean + ' clean, it needs ' + x.needed + '.',
+      sub: 'Wipe the board, then press Board wiped.',
+      actions: [IL.fixButton({ fix: 'board-wiped', arg: w.board, label: 'Board wiped', icon: 'i-wipe', primary: true }, { cls: 'btn--sm' }),
+        IL.fixButton({ href: '#calibrate/test-board', label: 'Test board' }, { cls: 'btn--sm' })] });
+  }
   function renderLockCell(s, off, since) {
     const lc = $('cell-lock'), bt = $('btn-take');
     if (!lc) return;
@@ -2251,6 +2270,7 @@
     if (!showHome && armed && armed.btn === bh) disarm();
     IL.show(bh, showHome);
     renderLockCell(s, off, since);
+    renderPadsWait(s);
 
     // pressure, start angle, purge row
     const pc = $('pill-pressure'), ac = $('chip-angle'), uc = $('chip-purge');
@@ -2983,6 +3003,14 @@
     gate: (s) => IL.lockReason(s),
     run: async () => { const r = await IL.api('POST', '/api/purge-row/reset'); IL.planRefreshSoon(); return r; },
     ok: (r) => 'Purge row reset: ' + (r && isNum(r.spotsLeft) ? r.spotsLeft + ' spots free' : 'all spots free') + '.',
+  });
+  // BR-76: the board's pads wiped by hand. The engine counts them clean again, then the top camera checks every pad (the
+  // head moves, nothing touches the board) and a pad still carrying paste stays used
+  IL.fix('board-wiped', {
+    press2: 'board wiped',
+    gate: (s) => IL.lockReason(s, { connected: true, homed: true }),
+    run: (btn, board) => IL.api('POST', '/api/boards/' + encodeURIComponent(board) + '/wiped', {}),
+    ok: (r) => 'Board wiped: the camera checks every pad' + (r && r.check && isNum(r.check.etaS) ? ' (≈ ' + IL.fmtClock(r.check.etaS) + ')' : '') + '. Nothing touches the board.',
   });
   IL.fix('pressure-off', { run: () => IL.api('POST', '/api/pressure/stop'), ok: 'Pressure off · valve closed, then pump off' });
   IL.fix('pressure-on', {
