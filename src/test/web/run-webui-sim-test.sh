@@ -35,7 +35,26 @@ export OUT_DIR="${OUT_DIR:-/tmp/il-webui-test-out}"
 [ -f "$BOARD" ] || { echo "test board not found: $BOARD" >&2; exit 2; }
 if ss -ltn | grep -q ":$IL_API_PORT "; then echo "port $IL_API_PORT is in use" >&2; exit 2; fi
 
-cleanup() { "$UINAV" --session "$SESSION" stop >/dev/null 2>&1 || true; }
+# After the session stopped: its dispense journal (every run, dot, pad calibration and dose record: dispense.db with its
+# WAL) into $OUT_DIR/dots, and each run with its dots as dots/<run_uuid>.json, so two CI runs can be compared dot by
+# dot (Infra's ask for BR-74: CI uploads OUT_DIR). It never fails the run.
+dump_dots() {
+  local db="${SESSION_CONFIG:-}/instancelabs/dispense.db"
+  [ -n "${SESSION_CONFIG:-}" ] && [ -f "$db" ] || return 0
+  mkdir -p "$OUT_DIR/dots"
+  cp -f "$db" "$OUT_DIR/dots/" && { cp -f "$db-wal" "$db-shm" "$OUT_DIR/dots/" 2>/dev/null || true; }
+  python3 -I - "$OUT_DIR/dots" <<'EOF'
+import json, os, sqlite3, sys
+out = sys.argv[1]
+c = sqlite3.connect(os.path.join(out, 'dispense.db'))
+c.row_factory = sqlite3.Row
+for run in c.execute('SELECT * FROM runs ORDER BY id').fetchall():
+    dots = [dict(d) for d in c.execute('SELECT * FROM dot_log WHERE run_uuid = ? ORDER BY dot_index, id', (run['run_uuid'],))]
+    with open(os.path.join(out, run['run_uuid'] + '.json'), 'w') as f:
+        json.dump({'run': dict(run), 'dots': dots}, f, indent=1)
+EOF
+}
+cleanup() { "$UINAV" --session "$SESSION" stop >/dev/null 2>&1 || true; dump_dots >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 # 1. the stage: a copy of the config with only the test board listed, and the SIM scene
@@ -70,13 +89,16 @@ export IL_API_URL="http://127.0.0.1:$IL_API_PORT/"
 export UINAV UINAV_SESSION="$SESSION"
 export SIM_SCENE="$SESSION_CONFIG/instancelabs/sim-scene.json"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/il-webui-pw-browsers}"
-# The scripts in their order. WEBUI_SCRIPTS="pad-profile tip-setups" runs only the ones named (in this order, whatever
-# the order given): CI runs them as parallel jobs, each in a fresh session, and each passes alone with the same counts as
-# in the full run (Infra's ask, 10-31). A script that needs another's state makes it itself.
+# The scripts in their order. WEBUI_SCRIPTS="lock lock-real" runs only the ones named (in this order, whatever the order
+# given): CI runs them as parallel legs, each in a fresh session (infra/ci/webui_shards.py). pad-profile and tip-setups
+# use the state webui-sim and board-import (and pad-profile) leave in their session, and refuse to start without them:
+# each script gets WEBUI_RAN, the scripts that ran before it in this session (needs-before.cjs).
 # tip-flow: the Tip flow of the agreed mockups (docs/ui-flows/tip-setup-flow.md), after tip-setups, on the tips it set up
+# jog and jog-real: Machine › Control (jog, move to a place, the cameras: BR-49 + BR-53), stubbed, then against the
+# engine's own routes (jog-real skips on an OpenPnP without them; it presses STOP on the SIM at its end)
 # lock and lock-real: who has the machine and Take control (P0, BR-72), the stubbed states, then the engine's own lock
 # (lock presses STOP on the SIM at its end)
-ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups tip-flow lock lock-real"
+ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups tip-flow jog jog-real lock lock-real tip-values"
 WEBUI_SCRIPTS="${WEBUI_SCRIPTS:-$ALL_SCRIPTS}"
 for name in $WEBUI_SCRIPTS; do
   case " $ALL_SCRIPTS " in *" $name "*) ;; *) echo "WEBUI_SCRIPTS: unknown script '$name' (known: $ALL_SCRIPTS)" >&2; exit 2 ;; esac
@@ -89,6 +111,7 @@ run_script() {
     *) node "$HERE/$1.playwright.cjs" ;;
   esac
 }
+RAN=""
 for name in $ALL_SCRIPTS; do
-  case " $WEBUI_SCRIPTS " in *" $name "*) run_script "$name" ;; esac
+  case " $WEBUI_SCRIPTS " in *" $name "*) WEBUI_RAN="$RAN" run_script "$name"; RAN="${RAN:+$RAN }$name" ;; esac
 done

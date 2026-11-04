@@ -8,6 +8,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.openpnp.instancelabs.dispense.DispenseConfig;
@@ -49,7 +50,8 @@ final class ControlEndpoints {
     /** A surface counts under a tool within this margin of its probed points' extent. */
     static final double SURFACE_MARGIN_MM = 2;
     static final long MAX_SETTLE_MS = 2000;
-    private static final long MOVE_TIMEOUT_S = 120;
+    /** How long a motion request waits for its move (tests shorten it). */
+    static volatile long moveTimeoutMs = 120_000;
 
     private final ApiContext ctx;
     private final MachineEndpoints machine;
@@ -161,7 +163,13 @@ final class ControlEndpoints {
             // task OpenPnP drops would leave this press unanswered for minutes; re-review MINOR 1)
             ctx.requireMachineIdle();
             ctx.passthrough.resyncIfStale();
+            // claimed by the task when it begins, or by the timeout first: then it does nothing (cancel(false) is true
+            // for a running task too, so it cannot tell; #21 review MAJOR 1)
+            AtomicBoolean claimed = new AtomicBoolean();
             Future<Object> f = m.submit(() -> {
+                if (!claimed.compareAndSet(false, true)) {
+                    return null; // the request timed out before this began: nothing is done
+                }
                 try {
                     requireFree(m);
                     if (ctx.passthrough.positionStale()) {
@@ -176,13 +184,16 @@ final class ControlEndpoints {
             }, null, true);
             Object out;
             try {
-                out = f.get(MOVE_TIMEOUT_S, TimeUnit.SECONDS);
+                out = f.get(moveTimeoutMs, TimeUnit.MILLISECONDS);
             }
             catch (TimeoutException e) {
-                boolean neverRan = f.cancel(false); // queued and not begun: it never runs
-                throw ApiException.refused("the " + what + " did not " + (neverRan ? "start within " + MOVE_TIMEOUT_S
-                        + " s: it will not run" : "end within " + MOVE_TIMEOUT_S + " s: look at the machine, press "
-                                + "STOP if it still moves"));
+                // no f.cancel: a cancelled task left in OpenPnP's queue keeps the machine busy after the task ahead of
+                // it ends (follow-up review); a task the timeout claimed returns null when it runs
+                boolean neverRan = claimed.compareAndSet(false, true);
+                long s = moveTimeoutMs / 1000;
+                throw ApiException.refused("the " + what + " did not " + (neverRan ? "start within " + s
+                        + " s: it will not run" : "end within " + s + " s: look at the machine, press STOP if it still "
+                                + "moves"));
             }
             catch (ExecutionException e) {
                 out = e.getCause();
