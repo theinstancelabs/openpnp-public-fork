@@ -24,6 +24,11 @@ import com.google.gson.JsonParser;
 public class SimPasteReferenceTest {
     static final long TURN = SimPaste.STEPS_PER_REV;
     static final int WARM_UP_DOTS = 6; // the transient after the idle (oozeFirst, refillDip): not the steady state
+
+    /** The dots before the steady state: the power-up's empty ones (every connection boots), then the transient. */
+    static int warmUp(SimScene s) {
+        return s.paste.emptyDotsAfterPowerCycle + WARM_UP_DOTS;
+    }
     /** Spots on the bench blank (X 280-365, Y 225-250), 2.5 mm apart: 32 a row, 9 rows. */
     static final double X0 = 282.5, Y0 = 227.5, PITCH = 2.5;
     int spot;
@@ -42,6 +47,7 @@ public class SimPasteReferenceTest {
         SimScene s = SimPasteTest.scene();
         s.paste = SimScene.apply(p, s.paste.copy());
         SimScene.check(s.paste, preset + ": ");
+        s.paste.newPhaseOnMotorOff = false; // the check pins start angles itself (the jump is SimPasteTest's)
         return s;
     }
 
@@ -116,7 +122,7 @@ public class SimPasteReferenceTest {
         SimScene s = scene("22g-bent");
         SimPaste p = paste(s);
         SimNeedle n = primed(s, p, 0.20);
-        for (int i = 0; i < WARM_UP_DOTS; i++) {
+        for (int i = 0; i < warmUp(s); i++) {
             dot(s, p, n, TURN / 2, null, null);
         }
         // §2-3: 16 start angles evenly, 4 dots each: the phase-averaged mean and the area swing
@@ -152,7 +158,7 @@ public class SimPasteReferenceTest {
         SimScene s = scene("25g-plastic");
         SimPaste p = paste(s);
         SimNeedle n = primed(s, p, 0.20);
-        for (int i = 0; i < WARM_UP_DOTS; i++) {
+        for (int i = 0; i < warmUp(s); i++) {
             dot(s, p, n, TURN, null, null);
         }
         // §2: whole turns on bare Cu at gap 0.20; the rows say 1.29 (S0a) and 1.58-1.71 (ladder): their midpoint ±15 %
