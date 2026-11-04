@@ -94,9 +94,13 @@ Fields and defaults:
   check or Keep): the needle lands at camera + N2 head offset + landing + trim, so every dispensed target is moved by
   minus (landing + trim);
 - *tips:* `parkedTips {setupKey: {profile, needleAnchor, needleZOffsetMm, needleZOffsetSetAtMs, needleZOffsetHomeAtMs,
-  needleXyTrim, needleLanding, parkedAtMs, profileFrom}}`: what every setup that is not mounted keeps (a new setup's
-  entry: a copy of a recipe, no frame, the mounted offset as a placeholder with both times null, a zero trim noted
-  `new tip`, no landing);
+  needleXyTrim, needleLanding, doseAnchor, parkedAtMs, profileFrom}}`: what every setup that is not mounted keeps (a new
+  setup's entry: a copy of a recipe, no frame, the mounted offset as a placeholder with both times null, a zero trim
+  noted `new tip`, no landing, no dose anchor);
+- BR-85 `doseAnchor {massPerPadMg, areaMm2, mgPerMm2, padType, family, source, setAtMs}` or null (protected; set only by
+  `PUT /api/tip-setups/{key}/dose-anchor`): the mounted tip's own anchor; `PadInstances.inputs` puts it in
+  `CheckInputs.anchors` (`Anchor.tipName`), where it replaces its family's anchors, so Calibrate's amount window
+  (`Decider`) and the suggestions follow it; `PadInstances.anchorFor(svc, family, area)` is the one that applies;
 - motion: `travelFeedMmS 200`, `travelAccelMmS2 2000`, `zDownFeedMmS 50`, `zLiftFeedMmS 50`, `zLiftAccelMmS2 2000`
   (each <= 5000), `bMaxFeedDegS 2400` (sent as `M203 B`; <= 400 rpm, the Vieweg maximum), `bStepsPerDeg 4.44`
   (Marlin `M92 B`; one screw revolution of 1600 steps is 360.36°), `bStepsPerRev 1600`, `bExtrudeSign +1`,
@@ -571,7 +575,7 @@ dose the tip does not know (no NaN reaches a comparison or a view); `isMeasured(
 it has a weighing). A tip without the bench model and not measured gets no suggestions but `measure-tip`;
 `characterized` without the bench model needs S's own evidence for every dose; the control compares with the bench
 only for the seed, else with S's own dots, or passes as `first measurement of this tip`. Anchors (the amount a joint
-needs) stay shared across setups.
+needs) stay shared across setups, unless a tip has its own (BR-85 `doseAnchor`: it replaces its pad type's family's).
 
 **Needle changes and mounting.** `recordNeedleChange(why, operator) → NeedleChange` (synchronized, never refuses): a
 running engine task is stopped first (`abort("the needle was reported changed")`), `needleChangedAtMs` = max(now,
@@ -579,7 +583,7 @@ previous + 1) (the **needle token**: strictly increasing), every coupon waiting 
 (`skipCoupon`), a `tip_mounts` row `needle` and a `TIP` event. `switchTip(key, why, operator) → MountResult` (the API
 runs it inside `PadCalibrationJobs.whileNoJob` and the engine holds its busy flag around the write): refused while a
 task runs, the pressure is held, or for a retired or incomplete setup; parks S (profile, frame, offset with its times,
-trim, landing, `parkedAtMs`), brings in the incoming entry (its recipe takes the live start angle and its time; one
+trim, landing, dose anchor, `parkedAtMs`), brings in the incoming entry (its recipe takes the live start angle and its time; one
 that no longer validates is reset to the default profile named `{name} (reset: {problem})`), `cfg.tip` = the incoming
 view, one config write without the start-angle and trim stamping (restored values keep their times), a `tip_mounts`
 row `mount` and a `TIP` event. `undoMount(operator)`: within 2 min of a mount of another setup, no task run and

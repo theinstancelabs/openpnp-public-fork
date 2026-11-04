@@ -28,7 +28,8 @@ public final class CheckInputs {
     public Map<Integer, DoseEvidence> evidence = new HashMap<>();
     /**
      * Anchors by family, overriding the ones derived from validated types with a weighed mass per
-     * pad; the chip family falls back to {@link Anchor#BENCH}.
+     * pad (BR-85: the mounted tip's own, {@link Anchor#tipName}); the chip family falls back to
+     * {@link Anchor#BENCH}.
      */
     public Map<String, Anchor> anchors = new HashMap<>();
     /**

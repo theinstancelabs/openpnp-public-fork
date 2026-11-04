@@ -538,6 +538,10 @@ public final class Suggester {
 
     /** "the half turn you validated on 0603 pads (1.06 mg on 0.73 mm²)". */
     static String anchorShort(ProfileCheck.Ctx c, Anchor a) {
+        if (a.tipName != null) {
+            return "the " + a.tipName + "'s own (" + Texts.mg(a.massPerPadMg) + " mg on " + Texts.mm(a.areaMm2)
+                    + " mm²)";
+        }
         if (a.bench) {
             return "the half turn you validated on 0603 pads (" + Texts.mg(a.massPerPadMg) + " mg on " + Texts.mm(a.areaMm2)
                     + " mm²)";

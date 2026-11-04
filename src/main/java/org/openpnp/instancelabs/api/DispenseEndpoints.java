@@ -30,9 +30,12 @@ import org.openpnp.instancelabs.dispense.LandingResult;
 import org.openpnp.instancelabs.dispense.NeedleChange;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
 import org.openpnp.instancelabs.dispense.PadCleanReport;
+import org.openpnp.instancelabs.dispense.PadInstances;
 import org.openpnp.instancelabs.dispense.Photo;
 import org.openpnp.instancelabs.dispense.RunResult;
 import org.openpnp.instancelabs.dispense.TipSetup;
+import org.openpnp.instancelabs.padprofile.Anchor;
+import org.openpnp.instancelabs.padprofile.Family;
 import org.openpnp.instancelabs.sim.SimGuard;
 import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.model.Board;
@@ -57,12 +60,13 @@ final class DispenseEndpoints {
     static final String TEST_DOT_LOCATION = "waste-test-dot";
     /**
      * Settings that only their own endpoints may change: the needle's (they record a needle_touchoff row), and since
-     * the tip setups (§22.1) the mounted tip, what the other tips keep, and where the needle lands with its trim.
+     * the tip setups (§22.1) the mounted tip, what the other tips keep, and where the needle lands with its trim; the
+     * mounted tip's dose anchor (BR-85).
      */
     static final java.util.Set<String> PROTECTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "needleZOffsetMm", "needleZOffsetSetAtMs", "needleZOffsetHomeAtMs", "needleChangedAtMs", "needleAnchor",
             "surfaces", "schemaVersion", "boardRegistrations", "newSeatAtMs", "tip", "parkedTips", "needleLanding",
-            "needleXyTrim"));
+            "needleXyTrim", "doseAnchor"));
     /** Protected settings that Register board and POST /api/board/new-seat stamp (not the needle's). */
     static final java.util.Set<String> REGISTRATION_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "boardRegistrations", "newSeatAtMs"));
@@ -583,7 +587,7 @@ final class DispenseEndpoints {
         Map<String, Object> m = Views.map("key", cfg.tip.key, "name", cfg.tip.name, "setupVersion",
                 cfg.tip.setupVersion, "dispenser", cfg.tip.dispenser, "form", cfg.tip.form, "bendToward",
                 cfg.tip.bendToward, "summary", null, "complete", null, "mountedAtMs", null, "dots", null, "thumbUrl",
-                null, "undoUntilMs", null);
+                null, "undoUntilMs", null, "doseAnchor", null);
         try {
             DispenseDb db = svc.getDb();
             TipSetup s = db.currentTipSetup(cfg.tip.key);
@@ -594,6 +598,8 @@ final class DispenseEndpoints {
             Photo main = db.mainPhoto(cfg.tip.key);
             m.put("thumbUrl", main == null ? null : Views.photoUrl(main.id, true));
             m.put("undoUntilMs", svc.undoUntilMs());
+            m.put("doseAnchor", cfg.doseAnchor != null ? Views.doseAnchor(cfg.doseAnchor)
+                    : Views.familyAnchor(PadInstances.anchorFor(svc, Family.CHIP, Anchor.BENCH.areaMm2)));
         }
         catch (Exception e) {
             m.put("error", MachineEndpoints.rootMessage(e));
@@ -764,6 +770,9 @@ final class DispenseEndpoints {
         if ("parkedTips".equals(key)) {
             return "The tips that are not mounted keep their recipe and needle values here: mounting a tip sets them "
                     + "(Setup › Dispenser & tip).";
+        }
+        if ("doseAnchor".equals(key)) {
+            return "The tip's dose anchor is set with PUT /api/tip-setups/{key}/dose-anchor.";
         }
         if ("needleLanding".equals(key) || "needleXyTrim".equals(key)) {
             return "Where the needle lands is set by Check where it lands and the trim panel (POST /api/needle/landing, "

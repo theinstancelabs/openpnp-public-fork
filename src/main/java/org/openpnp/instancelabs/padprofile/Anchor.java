@@ -26,6 +26,11 @@ public final class Anchor {
      * shared by every setup); null = the mounted setup's or the bench.
      */
     public String setupName;
+    /**
+     * BR-85: the mounted tip's name when this is its own anchor (set by Process for it: it replaces its family's),
+     * else null.
+     */
+    public String tipName;
 
     public Anchor() {
     }
@@ -58,6 +63,7 @@ public final class Anchor {
         a.bench = bench;
         a.text = text;
         a.setupName = setupName;
+        a.tipName = tipName;
         return a;
     }
 }

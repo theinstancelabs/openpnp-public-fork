@@ -926,6 +926,7 @@ public final class DispenseService {
             park.needleZOffsetHomeAtMs = c.needleZOffsetHomeAtMs;
             park.needleXyTrim = c.needleXyTrim;
             park.needleLanding = c.needleLanding;
+            park.doseAnchor = c.doseAnchor;
             park.parkedAtMs = now;
             park.profileFrom = was == null ? null : was.profileFrom;
             DispenseConfig.ParkedTip e = c.parkedTips.remove(key);
@@ -954,6 +955,7 @@ public final class DispenseService {
             c.needleZOffsetHomeAtMs = e.needleZOffsetHomeAtMs;
             c.needleXyTrim = e.needleXyTrim != null ? e.needleXyTrim : new DispenseConfig.NeedleXyTrim();
             c.needleLanding = e.needleLanding;
+            c.doseAnchor = e.doseAnchor;
             c.tip = in.toSpec();
             List<String> invalid = c.validate();
             if (!invalid.isEmpty()) {
@@ -1048,12 +1050,20 @@ public final class DispenseService {
             c.needleXyTrim = b.needleXyTrim;
             c.needleLanding = b.needleLanding;
             c.needleChangedAtMs = b.needleChangedAtMs;
+            // BR-85: a dose anchor is the tip's, not the mount's: one set since the mount stays with its tip
+            DispenseConfig.ParkedTip nowParked = c.parkedTips.get(b.tip.key);
+            DispenseConfig.DoseAnchor nowOn = c.doseAnchor;
             c.parkedTips = new java.util.LinkedHashMap<>(b.copy().parkedTips);
             for (Map.Entry<String, DispenseConfig.ParkedTip> e : cfg.parkedTips.entrySet()) {
                 // a setup added since the mount keeps its entry: the undo puts back the mount, nothing else
                 if (!e.getKey().equals(b.tip.key)) {
                     c.parkedTips.putIfAbsent(e.getKey(), e.getValue());
                 }
+            }
+            c.doseAnchor = nowParked != null ? nowParked.doseAnchor : b.doseAnchor;
+            DispenseConfig.ParkedTip off = c.parkedTips.get(u.toKey);
+            if (off != null) {
+                off.doseAnchor = nowOn;
             }
             writeConfig(c);
             undo = null;

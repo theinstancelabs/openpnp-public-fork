@@ -14,6 +14,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.padprofile.Family;
 import org.openpnp.instancelabs.padprofile.Tip;
 
 import com.google.gson.Gson;
@@ -228,6 +229,55 @@ public class MountTest {
             f.mount(K25);
             assertEquals(K25, svc.getConfig().tip.key);
             assertFalse(svc.getConfig().isNeedleAnchored(), "the 25G's frame is stale after the change");
+        }
+    }
+
+    /** A dose anchor of {@code mg} per chip-0603 pad (BR-85). */
+    static DispenseConfig.DoseAnchor anchor(double mg) {
+        DispenseConfig.DoseAnchor a = new DispenseConfig.DoseAnchor();
+        a.massPerPadMg = mg;
+        a.areaMm2 = 0.7257;
+        a.mgPerMm2 = mg / a.areaMm2;
+        a.padType = "chip-0603";
+        a.family = Family.CHIP;
+        a.source = "test";
+        a.setAtMs = System.currentTimeMillis();
+        return a;
+    }
+
+    /**
+     * BR-85: a tip's dose anchor is its own calibration value: parked with it at a mount, back with it at the next, and
+     * kept by an undo of the mount (an anchor set meanwhile stays the tip's it was set for).
+     */
+    @Test
+    public void aTipsDoseAnchorStaysWithItThroughMountsAndAnUndo() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            f.mount(K25);
+            svc.updateConfigAtomically(live -> {
+                live.doseAnchor = anchor(1.95);
+                live.parkedTips.get(Tip.SEED_KEY).doseAnchor = anchor(1.10);
+                return live;
+            });
+            svc.undoMount("tester");
+            DispenseConfig c = svc.getConfig();
+            assertEquals(Tip.SEED_KEY, c.tip.key);
+            assertEquals(1.10, c.doseAnchor.massPerPadMg, 0, "the 22G's, set while it was parked");
+            assertEquals(1.95, c.parkedTips.get(K25).doseAnchor.massPerPadMg, 0, "the 25G's, set while it was on");
+            f.mount(K25);
+            assertEquals(1.95, svc.getConfig().doseAnchor.massPerPadMg, 0);
+            assertEquals(1.10, svc.getConfig().parkedTips.get(Tip.SEED_KEY).doseAnchor.massPerPadMg, 0);
+            f.mount(Tip.SEED_KEY);
+            assertEquals(1.10, svc.getConfig().doseAnchor.massPerPadMg, 0);
+            assertEquals(1.95, svc.getConfig().parkedTips.get(K25).doseAnchor.massPerPadMg, 0);
+            assertNull(TipSetups.newEntry(svc.getConfig(), null, "default").doseAnchor, "a new tip has none");
+            // a settings file edited by hand: a mass of 0 or over 20 mg is no anchor, mounted or parked
+            DispenseConfig bad = svc.getConfig().copy();
+            bad.doseAnchor.massPerPadMg = 0;
+            bad.parkedTips.get(K25).doseAnchor.massPerPadMg = 21;
+            assertEquals(2, bad.validate().stream().filter(p -> p.contains("doseAnchor needs a mass per pad")).count(),
+                    bad.validate().toString());
         }
     }
 

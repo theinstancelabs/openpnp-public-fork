@@ -16,6 +16,7 @@ import org.openpnp.instancelabs.padprofile.DoseEvidence;
 import org.openpnp.instancelabs.padprofile.DotGeometry;
 import org.openpnp.instancelabs.padprofile.Limits;
 import org.openpnp.instancelabs.padprofile.PadInstance;
+import org.openpnp.instancelabs.padprofile.ProfileCheck;
 import org.openpnp.instancelabs.padprofile.Tip;
 import org.openpnp.instancelabs.padprofile.TypeInfo;
 import org.openpnp.model.Board;
@@ -184,6 +185,13 @@ public final class PadInstances {
         for (TypeInfo t : in.types.values()) {
             t.setupName = tip.name;
         }
+        DispenseConfig.DoseAnchor own = cfg.doseAnchor;
+        if (own != null && tip.key.equals(cfg.tip.key)) {
+            // BR-85: the mounted tip's own anchor replaces its pad type's family's (Calibrate's amount window too)
+            Anchor a = new Anchor(own.family, own.padType, null, own.massPerPadMg, own.areaMm2);
+            a.tipName = tip.name;
+            in.anchors.put(own.family, a);
+        }
         in.profileSteps = cfg.profile.netStepsPerDot;
         in.stepsPerRev = cfg.bStepsPerRev;
         in.bStepsPerDeg = cfg.bStepsPerDeg;
@@ -214,6 +222,19 @@ public final class PadInstances {
                 svc.getControllerConnectedAtMs(), svc.isSimulatorConfirmed()), in.nowMs, db.flaggedJobs());
         others(db, tip.key, types, in);
         return in;
+    }
+
+    /**
+     * BR-85: the anchor the mounted tip's pads of {@code family} with an opening of {@code areaMm2} get, as the check
+     * picks it (the tip's own, else the family's: a validated pad type of any setup, or the bench for chips), from the
+     * check's inputs without the dose evidence (the status asks at every poll).
+     */
+    public static Anchor anchorFor(DispenseService svc, String family, double areaMm2) throws SQLException {
+        DispenseConfig cfg = svc.getConfig();
+        List<PadType> types = TipSetups.typesFor(svc.getDb(), cfg.tip.key);
+        CheckInputs in = inputs(new ArrayList<>(), types, null, cfg, null, false, svc.mountedTip());
+        others(svc.getDb(), cfg.tip.key, types, in);
+        return ProfileCheck.anchorFor(in, family, areaMm2);
     }
 
     /**

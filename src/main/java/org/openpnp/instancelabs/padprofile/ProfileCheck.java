@@ -238,7 +238,7 @@ public final class ProfileCheck {
             tipMeasured = (in.tip.benchModel || in.tip.isMeasured()) && tipView.known;
             dTip = tipMeasured ? tipView.dGap : Double.NaN;
             typesFingerprint = fingerprint(in.types);
-            collectAnchors();
+            anchors.putAll(collectAnchors(in));
         }
 
         Tip tip() {
@@ -254,41 +254,9 @@ public final class ProfileCheck {
             return view(t.dotSteps != null ? t.dotSteps : in.profileSteps).known;
         }
 
-        /** Validated k = 1 types with a weighed mass per pad (§1.3), in key order (ties in anchorFor). */
-        private void collectAnchors() {
-            for (TypeInfo t : new TreeMap<>(in.types).values()) {
-                if (!t.retired && TypeInfo.rank(t.status) == 3 && t.massPerPadMg != null && t.massPerPadMg > 0
-                        && t.family != null && Math.abs(t.k - 1) <= Limits.EPS) {
-                    anchors.computeIfAbsent(t.family, f -> new ArrayList<>())
-                            .add(new Anchor(t.family, t.key, t.version, t.massPerPadMg, t.calArea()));
-                }
-            }
-            for (Map.Entry<String, Anchor> e : new TreeMap<>(in.anchors).entrySet()) {
-                anchors.computeIfAbsent(e.getKey(), f -> new ArrayList<>()).add(e.getValue());
-            }
-            // §22.2: the amount a joint needs is the paste's and the pad's: other setups' validated pads anchor too
-            if (in.moreAnchors != null) {
-                for (Anchor a : in.moreAnchors) {
-                    if (a != null && a.family != null && a.areaMm2 > 0) {
-                        anchors.computeIfAbsent(a.family, f -> new ArrayList<>()).add(a);
-                    }
-                }
-            }
-            anchors.computeIfAbsent(Family.CHIP, f -> new ArrayList<>());
-            if (anchors.get(Family.CHIP).isEmpty()) {
-                anchors.get(Family.CHIP).add(Anchor.BENCH);
-            }
-        }
-
         /** The family's anchor nearest in log area, or null. */
         Anchor anchorFor(String family, double area) {
-            Anchor best = null;
-            for (Anchor a : anchors.getOrDefault(family, Collections.emptyList())) {
-                if (best == null || Math.abs(Math.log(area / a.areaMm2)) < Math.abs(Math.log(area / best.areaMm2))) {
-                    best = a;
-                }
-            }
-            return best;
+            return nearest(anchors.get(family), area);
         }
 
         boolean usable(TypeInfo t) {
@@ -299,6 +267,57 @@ public final class ProfileCheck {
         boolean otherTip(TypeInfo t) {
             return t != null && !Tip.setupOf(t.tipKey).equals(tip().key);
         }
+    }
+
+    /**
+     * The anchors by family (§1.3): validated k = 1 types with a weighed mass per pad, in key order (ties in
+     * {@link #nearest}), and the other setups' (§22.2); a family given in {@link CheckInputs#anchors} has that one
+     * alone (BR-85: the mounted tip's own replaces its family's); the bench for chips without one.
+     */
+    static Map<String, List<Anchor>> collectAnchors(CheckInputs in) {
+        Map<String, List<Anchor>> anchors = new HashMap<>();
+        for (TypeInfo t : new TreeMap<>(in.types).values()) {
+            if (!t.retired && TypeInfo.rank(t.status) == 3 && t.massPerPadMg != null && t.massPerPadMg > 0
+                    && t.family != null && Math.abs(t.k - 1) <= Limits.EPS) {
+                anchors.computeIfAbsent(t.family, f -> new ArrayList<>())
+                        .add(new Anchor(t.family, t.key, t.version, t.massPerPadMg, t.calArea()));
+            }
+        }
+        // §22.2: the amount a joint needs is the paste's and the pad's: other setups' validated pads anchor too
+        if (in.moreAnchors != null) {
+            for (Anchor a : in.moreAnchors) {
+                if (a != null && a.family != null && a.areaMm2 > 0) {
+                    anchors.computeIfAbsent(a.family, f -> new ArrayList<>()).add(a);
+                }
+            }
+        }
+        for (Map.Entry<String, Anchor> e : in.anchors.entrySet()) {
+            anchors.put(e.getKey(), new ArrayList<>(Collections.singletonList(e.getValue())));
+        }
+        anchors.computeIfAbsent(Family.CHIP, f -> new ArrayList<>());
+        if (anchors.get(Family.CHIP).isEmpty()) {
+            anchors.get(Family.CHIP).add(Anchor.BENCH);
+        }
+        return anchors;
+    }
+
+    /** Of these anchors (null: none), the one nearest {@code area} in log area, or null. */
+    static Anchor nearest(List<Anchor> anchors, double area) {
+        Anchor best = null;
+        for (Anchor a : anchors == null ? Collections.<Anchor>emptyList() : anchors) {
+            if (best == null || Math.abs(Math.log(area / a.areaMm2)) < Math.abs(Math.log(area / best.areaMm2))) {
+                best = a;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * BR-85: the anchor a family's opening of {@code area} gets from these inputs, as the check picks it (the
+     * family's own, else null; chips always have one); no pads or evidence needed.
+     */
+    public static Anchor anchorFor(CheckInputs in, String family, double area) {
+        return nearest(collectAnchors(in).get(family), area);
     }
 
     /** The check of a plan, a board file or an upload preview. */

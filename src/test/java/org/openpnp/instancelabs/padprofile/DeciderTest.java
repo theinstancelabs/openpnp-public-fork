@@ -213,6 +213,42 @@ public class DeciderTest {
         assertTrue(d.notes.contains("you can raise it by hand after a test board"));
     }
 
+    /**
+     * BR-85: Calibrate's amount window follows the mounted tip's own anchor. The 25G's whole turn on the nano's 0603
+     * capacitors weighs 1.95 mg: far above the window of the family's anchor (the 22G's validated 0603, 1.06 mg on 0.73
+     * mm², §22.2), on target with the tip's own rate, weighed on 0805 openings (1.40 mm²): it replaces the family's
+     * anchors, also the one whose opening is nearer. An anchor of another family leaves the chips' window as it was.
+     */
+    @Test
+    public void theAmountWindowFollowsTheTipsOwnAnchor() {
+        Decider.Inputs in = inputs("nano", "C_0603_1608Metric", 1600, 1, measured(1600, 1.10, 1.16, 1.95, 2));
+        Anchor g22 = new Anchor(Family.CHIP, "chip-0603", 4, DoseModel.HALF_MASS_MG, Anchor.BENCH.areaMm2);
+        g22.setupName = Tip.SEED_NAME;
+        in.check.moreAnchors.add(g22);
+        Decider.Check family = check(Decider.decide(in), "amount");
+        assertFalse(family.ok, family.predicted + " / " + family.measured);
+        double rate = 1.95 / in.check.pads.get(0).areaMm2();
+        Anchor own = new Anchor(Family.CHIP, "chip-0805", null, rate * 1.40, 1.40);
+        own.tipName = "25G taper";
+        in.check.anchors.put(Family.CHIP, own);
+        Decider.Decision d = Decider.decide(in);
+        Decider.Check amount = check(d, "amount");
+        assertTrue(amount.ok, amount.text);
+        assertEquals("1.95 mg per pad", amount.predicted, "the target");
+        assertEquals(1.95, d.targetMg, 0.0005);
+        assertEquals(0, d.errorPct);
+        ProfileCheck.Result r = ProfileCheck.of(in.check);
+        assertEquals(1, r.anchors.size(), r.anchors.toString());
+        assertEquals("the 25G taper's own (" + Texts.mg(own.massPerPadMg) + " mg on 1.40 mm²)", r.anchors.get(0).text);
+        // without it (null), today's window; another family's leaves the chips' as it was
+        in.check.anchors.clear();
+        assertEquals(family.predicted, check(Decider.decide(in), "amount").predicted);
+        Anchor qfn = own.copy();
+        qfn.family = Family.NO_LEAD;
+        in.check.anchors.put(Family.NO_LEAD, qfn);
+        assertEquals(family.predicted, check(Decider.decide(in), "amount").predicted);
+    }
+
     @Test
     public void validatedIsNeverWritten() {
         Decider.Inputs in = inputs("mobo", "SOIC-8_3.9x4.9mm_P1.27mm", 400, 2, measured(400, 0.84, 0.92, 0.5275, 2));

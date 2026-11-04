@@ -34,6 +34,7 @@ import org.openpnp.instancelabs.dispense.TipPictureResult;
 import org.openpnp.instancelabs.dispense.TipSetup;
 import org.openpnp.instancelabs.dispense.TipSetups;
 import org.openpnp.instancelabs.dispense.VacuumProber;
+import org.openpnp.instancelabs.padprofile.Anchor;
 import org.openpnp.instancelabs.padprofile.DoseModel;
 import org.openpnp.instancelabs.padprofile.Texts;
 import org.openpnp.instancelabs.padprofile.Tip;
@@ -612,6 +613,7 @@ final class Views {
         DispenseConfig.NeedleLanding l = mounted ? cfg.needleLanding : parked == null ? null : parked.needleLanding;
         m.put("landing", l == null ? null : map("dxMm", l.dxMm, "dyMm", l.dyMm, "setAtMs", l.setAtMs, "checked",
                 mounted && svc.isNeedleXyChecked(), "note", l.note, "jobId", l.jobId, "photoId", l.photoId));
+        m.put("doseAnchor", doseAnchor(mounted ? cfg.doseAnchor : parked == null ? null : parked.doseAnchor));
         m.put("padTypes", padTypeCounts(TipSetups.typesFor(db, s.key)));
         if (mounted) {
             m.put("dots", dots(svc.mountedTip(), cfg.bStepsPerRev));
@@ -635,6 +637,20 @@ final class Views {
         }
         m.put("photos", photos);
         return m;
+    }
+
+    /** BR-85: a tip's own dose anchor (the setup view, status.dispense.tip), or null. */
+    static Map<String, Object> doseAnchor(DispenseConfig.DoseAnchor a) {
+        return a == null ? null : map("massPerPadMg", a.massPerPadMg, "areaMm2", a.areaMm2, "mgPerMm2", a.mgPerMm2,
+                "padType", a.padType, "family", a.family, "source", a.source, "setAtMs", a.setAtMs, "fromFamily",
+                false);
+    }
+
+    /** BR-85: the family's anchor as status.dispense.tip shows it for a tip without its own ({@code fromFamily}). */
+    static Map<String, Object> familyAnchor(Anchor a) {
+        return a == null ? null : map("massPerPadMg", a.massPerPadMg, "areaMm2", a.areaMm2, "mgPerMm2", a.mgPerMm2,
+                "padType", a.typeKey, "family", a.family, "source", a.bench ? Anchor.BENCH.text : "validated on a board"
+                        + (a.setupName == null ? "" : " with the " + a.setupName), "setAtMs", null, "fromFamily", true);
     }
 
     /** A setup's calibrated pad types (§22.6 padTypes): counts per status above not-started, and their names. */
