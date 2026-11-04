@@ -1149,6 +1149,9 @@ public class BoardImportSimTest {
         assertEquals(8, blocked, "4 LEDs below the gate, J3, SW1, Y1 and IC3");
         JsonObject saved = importBoard(nano, "NanoV3.3.kicad_pcb", "Arduino Nano V3.3", false);
         assertEquals("arduino-nano-v3-3", saved.get("slug").getAsString());
+        // BR-88 (a): the board list keeps what the upload's preview listed as getting no paste
+        JsonObject listed = byId(ok(get("/api/boards")).getAsJsonArray("files"), "file", saved.get("file").getAsString());
+        assertEquals(pv.getAsJsonObject("skipped"), listed.getAsJsonObject("imported").getAsJsonObject("skipped"));
         JsonObject plan = plan(saved.get("file").getAsString());
         assertEquals(55, plan.getAsJsonArray("pads").size());
         assertEquals(saved.getAsJsonObject("art").get("id").getAsString(),

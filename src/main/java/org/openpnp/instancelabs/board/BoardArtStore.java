@@ -68,6 +68,8 @@ public final class BoardArtStore {
         public String origin;
         /** attach: the board file the drawing was attached to. */
         public String board;
+        /** BR-88: what the upload gives no paste; null for drawings saved before it. */
+        public BoardArt.Skipped skipped;
     }
 
     private static final class Fallback {
@@ -228,6 +230,7 @@ public final class BoardArtStore {
             i.atMs = a.imported.atMs;
             i.how = a.imported.how;
             i.board = a.imported.board;
+            i.skipped = a.imported.skipped;
         }
         if (a.source != null) {
             i.sourceName = a.source.name;

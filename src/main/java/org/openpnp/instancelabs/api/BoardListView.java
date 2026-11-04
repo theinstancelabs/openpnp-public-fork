@@ -52,6 +52,7 @@ final class BoardListView {
         entry.put("origin", imp == null ? null : imp.origin);
         entry.put("art", art == null ? null : Views.map("id", art.id, "kind", art.kind, "note", art.note));
         entry.put("imported", imp == null ? null : Views.map("slug", imp.slug, "name", imp.name, "atMs", imp.atMs,
-                "sourceName", imp.sourceName, "kicadVersion", imp.kicadVersion, "how", imp.how, "board", imp.board));
+                "sourceName", imp.sourceName, "kicadVersion", imp.kicadVersion, "how", imp.how, "board", imp.board,
+                "skipped", imp.skipped));
     }
 }

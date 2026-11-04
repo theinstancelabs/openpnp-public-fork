@@ -90,17 +90,52 @@ public final class BoardArt {
         public List<IdState> packages = new ArrayList<>();
         public List<IdState> parts = new ArrayList<>();
         public List<ImportWarning> warnings = new ArrayList<>();
+        /** BR-88: what gets no paste, as the upload's preview listed it; null in drawings saved before it. */
+        public Skipped skipped;
 
-        /** The counts and warnings of a proposal; the caller sets the rest (ids come from the id allocator). */
+        /** The counts, warnings and skipped parts of a proposal; the caller sets the rest (ids come from the id allocator). */
         public static Import from(ImportProposal p, List<ImportWarning> artWarnings) {
             Import i = new Import();
             i.counts = p.counts;
+            i.skipped = Skipped.of(p);
             i.warnings.addAll(p.warnings);
             if (artWarnings != null) {
                 i.warnings.addAll(artWarnings);
                 ImportWarning.sort(i.warnings);
             }
             return i;
+        }
+    }
+
+    /** The parts an upload gives no paste: the preview's {@code skipped} (POST /api/boards/import), kept with the import. */
+    public static final class Skipped {
+        public List<String> bottom = new ArrayList<>();
+        public List<ArtOnly> artOnly = new ArrayList<>();
+        public List<String> dnp = new ArrayList<>();
+        public List<String> pasteOnly = new ArrayList<>();
+
+        public static Skipped of(ImportProposal p) {
+            Skipped s = new Skipped();
+            s.bottom.addAll(p.skipped.get(ImportProposal.SKIP_BOTTOM));
+            for (ImportProposal.FootprintP f : p.footprints) {
+                if (ImportProposal.FootprintP.ART.equals(f.kind)) {
+                    s.artOnly.add(new ArtOnly(f.ref, f.why));
+                }
+            }
+            s.dnp.addAll(p.skipped.get(ImportProposal.SKIP_DNP));
+            s.pasteOnly.addAll(p.skipped.get(ImportProposal.SKIP_PASTE_ONLY));
+            return s;
+        }
+    }
+
+    /** A footprint drawn but never pasted, and why ("through-hole", "board only", …). */
+    public static final class ArtOnly {
+        public String ref;
+        public String why;
+
+        public ArtOnly(String ref, String why) {
+            this.ref = ref;
+            this.why = why;
         }
     }
 
