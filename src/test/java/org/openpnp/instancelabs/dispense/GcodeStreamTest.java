@@ -517,7 +517,8 @@ public class GcodeStreamTest {
     /**
      * BR-82, the plastic 25G recipe: after every dot's lift the profile's pause at the lift height (pressure on: the
      * paste thread breaks there), then the X/Y travel. Board, purge row, prime and test dots, calibration blocks alike;
-     * with the watchdog armed it goes out in pieces of the ping interval, like the dwell. 0: no pause, as before.
+     * in settle pieces of at most 250 ms. The dot ends on its lift and the pause follows its end marker, so a STOP
+     * during the pause leaves the laid dot counted. 0: no pause, as before.
      */
     @Test
     public void liftPauseAfterEveryLiftBeforeTravel() throws Exception {
@@ -525,24 +526,33 @@ public class GcodeStreamTest {
         c.profile.liftPauseMs = 500;
         GcodeProgram p = board(c, mapper(), toyPlan(c), false, false, 0L);
         assertEquals(Collections.emptyList(), GcodeStreamValidator.validate(p, c, "B"));
+        List<GcodeProgram.Line> lines = new ArrayList<>();
         List<String> t = new ArrayList<>();
         for (GcodeProgram.Line l : p.lines) {
             if (!l.isComment()) {
+                lines.add(l);
                 t.add(l.text);
             }
         }
         assertEquals(11, pausedLifts(t, 2), "8 purge dots and 3 board dots, the pause in two 250 ms pieces");
-        for (List<GcodeProgram.Line> d : dotLines(p)) {
-            List<String> x = texts(d);
-            assertEquals(java.util.Arrays.asList("G4 P250", "G4 P250"), x.subList(x.size() - 2, x.size()),
-                    "the pause ends the dot: " + x);
-            assertTrue(x.get(x.size() - 3).matches("G1 Z-?\\d+\\.\\d{4} F3000"), "after the lift: " + x);
+        int ends = 0;
+        for (int i = 0; i < lines.size(); i++) {
+            if (lines.get(i).has(GcodeProgram.Marker.DOT_END)) {
+                ends++;
+                assertTrue(t.get(i).matches("G1 Z-?\\d+\\.\\d{4} F3000"), "the dot ends on its lift: " + t.get(i));
+                assertEquals(java.util.Arrays.asList("G4 P250", "G4 P250"), t.subList(i + 1, i + 3),
+                        "the pause follows the dot's end marker");
+                assertEquals(GcodeProgram.Marker.NONE, lines.get(i + 1).marker);
+            }
         }
-        // 0: one G4 per dot, its dwell
+        assertEquals(11, ends);
+        // in every dot one G4, its dwell, with the pause and without
         DispenseConfig none = toyConfig();
-        for (List<GcodeProgram.Line> d : dotLines(board(none, mapper(), toyPlan(none), false, false, 0L))) {
-            assertEquals(Collections.singletonList("G4 P250"), texts(d).stream().filter(x -> x.startsWith("G4"))
-                    .collect(java.util.stream.Collectors.toList()), texts(d).toString());
+        for (GcodeProgram q : java.util.Arrays.asList(p, board(none, mapper(), toyPlan(none), false, false, 0L))) {
+            for (List<GcodeProgram.Line> d : dotLines(q)) {
+                assertEquals(Collections.singletonList("G4 P250"), texts(d).stream().filter(x -> x.startsWith("G4"))
+                        .collect(java.util.stream.Collectors.toList()), texts(d).toString());
+            }
         }
         // the prime and a test dot; calibration blocks (17 purge-row dots, 9 work dots)
         List<GcodeStreamBuilder.DotSpec> specs = Collections.singletonList(new GcodeStreamBuilder.DotSpec(62, 30,

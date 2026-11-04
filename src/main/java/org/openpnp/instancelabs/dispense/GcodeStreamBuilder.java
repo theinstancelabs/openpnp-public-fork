@@ -591,7 +591,7 @@ public class GcodeStreamBuilder {
     /**
      * One dot turning the screw by {@code netSteps}: forward net + suck-back under the screw
      * acceleration, dwell, back by the suck-back, XY/Z acceleration again (M204 S caps B as well),
-     * lift, the profile's pause after the lift (if any).
+     * lift (the dot's end), then the profile's pause after the lift (if any).
      */
     public void dot(DotSpec d, long netSteps) throws Exception {
         if (!bZeroed) {
@@ -625,12 +625,12 @@ public class GcodeStreamBuilder {
         restSteps += netSteps;
         setAccel(cfg.zLiftAccelMmS2);
         moveNozzle(x, y, d.hopZ, cfg.zLiftFeedMmS, "G1");
-        // the no-pause rule's one exception (plastic 25G, BR-82): pressure on at the lift height, the thread breaks;
-        // in settle pieces, so a STOP's valve-off waits at most one
-        settle(profile.liftPauseMs);
         setAccel(cfg.travelAccelMmS2);
         markLast(GcodeProgram.Marker.DOT_END, d.index, d.label, d.rotationDeg);
         prog.dotCount += d.index >= 0 ? 1 : 0;
+        // the no-pause rule's one exception (plastic 25G, BR-82): pressure on at the lift height, the thread breaks;
+        // after the dot's end, so a STOP in it leaves the laid dot counted, and in settle pieces (its valve-off waits one)
+        settle(profile.liftPauseMs);
     }
 
     /** A dispense target moved by minus where the needle lands (landing + trim, §22.3). */
