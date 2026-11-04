@@ -156,6 +156,8 @@ public class StartAngleMeasureSimTest {
         assertEquals(0, off(peak2, 89.1), 20, a.toString());
         JsonObject applied = a.getAsJsonObject("applied");
         assertEquals("peak", applied.get("featureFrom").getAsString());
+        assertTrue(PadCalibrationSimTest.str(a, "sentence").matches("Measured \\d\\d:\\d\\d: the flow's peak at .*; the "
+                + "start angle set .*"), a.toString());
         JsonObject p = profile();
         JsonObject f2 = p.getAsJsonObject("startAngleFeature");
         assertEquals(PadCalibrationSimTest.str(a, "job"), f2.get("runId").getAsString());

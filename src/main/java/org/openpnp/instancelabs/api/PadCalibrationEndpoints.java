@@ -251,7 +251,7 @@ final class PadCalibrationEndpoints {
         }
         boolean finished = await(job);
         Map<String, Object> result = job.startAngleView();
-        result.put("sentence", job.result == null ? null : job.result.get("sentence"));
+        result.put("sentence", job.sentence());
         accepted.put("finished", finished);
         accepted.put("result", result);
         return finished ? accepted : ApiServer.Response.json(202, accepted);

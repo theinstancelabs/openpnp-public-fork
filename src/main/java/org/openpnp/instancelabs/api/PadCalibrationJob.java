@@ -19,8 +19,8 @@ import org.openpnp.instancelabs.dispense.Balance;
 import org.openpnp.instancelabs.dispense.CalibrationArea;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseDb;
-import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispensePlan;
+import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DoseBlocks;
 import org.openpnp.instancelabs.dispense.DoseBlocksRequest;
@@ -2836,6 +2836,13 @@ final class PadCalibrationJob {
         }
         catch (Exception e) {
             Logger.warn(e, "pad calibration {}: the end was not recorded", id);
+        }
+    }
+
+    /** The result's sentence once the job ended, else null (under the lock: {@link #end} sets it with the state). */
+    String sentence() {
+        synchronized (lock) {
+            return result == null ? null : (String) result.get("sentence");
         }
     }
 

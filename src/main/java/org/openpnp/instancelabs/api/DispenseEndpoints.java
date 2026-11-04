@@ -16,9 +16,9 @@ import org.openpnp.instancelabs.dispense.BoardRegistration;
 import org.openpnp.instancelabs.dispense.Calibration;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
-import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseDb;
 import org.openpnp.instancelabs.dispense.DispensePlan;
+import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DoseBlocks;
 import org.openpnp.instancelabs.dispense.DotLadder;
@@ -1336,9 +1336,9 @@ final class DispenseEndpoints {
                         + "(kept until OpenPnP restarts: measure again)" : runId + " is no finished start-angle measure "
                                 + "that found an angle"));
             }
-            measured = (double) f.measuredAtMs;
         }
-        svc.setStartAngle(a, Json.str(b, "note", null), measured == null ? null : measured.longValue(), f);
+        svc.setStartAngle(a, Json.str(b, "note", null), f != null ? f.measuredAtMs : measured == null ? null
+                : measured.longValue(), f);
         return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs(),
                 svc.getControllerResetAtMs());
     }
