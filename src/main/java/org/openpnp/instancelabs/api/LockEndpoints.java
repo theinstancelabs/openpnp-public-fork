@@ -5,6 +5,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -204,11 +206,48 @@ final class LockEndpoints {
     // Take control (the web UI)
     // ------------------------------------------------------------------------------------------
 
+    /** The take in progress: a second Take control (another window, a double click) joins it (#19 review MAJOR 3). */
+    private final Object takeLock = new Object();
+    private CompletableFuture<Object> takeRunning;
+
     Object take(ApiServer.Request r) throws Exception {
         if (!isUi(r)) {
             throw new ApiException(403, "not-ui", "Take control is the web UI's (" + MachineLock.UI_HEADER + ": ui): "
                     + "agents take the lock with POST /api/lock/acquire while nobody holds it");
         }
+        CompletableFuture<Object> mine = null, joined;
+        synchronized (takeLock) {
+            joined = takeRunning;
+            if (joined == null) {
+                mine = new CompletableFuture<>();
+                takeRunning = mine;
+            }
+        }
+        if (joined != null) {
+            try {
+                return joined.get(HOME_WAIT_MS + STOP_CONFIRM_MS + 60_000L, TimeUnit.MILLISECONDS);
+            }
+            catch (ExecutionException e) {
+                throw e.getCause() instanceof Exception ? (Exception) e.getCause() : e;
+            }
+        }
+        try {
+            Object res = doTake();
+            mine.complete(res);
+            return res;
+        }
+        catch (Exception e) {
+            mine.completeExceptionally(e);
+            throw e;
+        }
+        finally {
+            synchronized (takeLock) {
+                takeRunning = null;
+            }
+        }
+    }
+
+    private Object doTake() throws Exception {
         long at = System.currentTimeMillis();
         MachineLock.Holder old = ctx.lock.takeForUser();
         Logger.info("Take control: the user holds the machine{}", old == null ? "" : " (taken from " + old.label
@@ -216,7 +255,13 @@ final class LockEndpoints {
         if (old == null) {
             return Views.map("lock", ctx.lock.view(), "stopped", null, "atMs", at);
         }
-        Map<String, Object> stopped = endHolderWork(old, "the user took control from " + old.label);
+        Map<String, Object> stopped;
+        try {
+            stopped = endHolderWork(old, "the user took control from " + old.label);
+        }
+        finally {
+            ctx.lock.handoverDone();
+        }
         Logger.info("Take control from {}: {}", old.label, stopped);
         ctx.passthrough.log("engine", "!", "the user took control from " + old.label + ": " + stopped.get("detail"));
         Map<String, Object> body = Views.map("lock", ctx.lock.view(), "stopped", stopped, "atMs", at);
@@ -252,6 +297,23 @@ final class LockEndpoints {
             out.put("confirmed", true);
             return out;
         }
+        // what runs now (the plain phrases), then nothing new starts: a batch stops before its next line, a pad
+        // calibration queues no further step, and an engine task not yet at its G28 never sends it (homeSafely checks
+        // the abort before it); a home already running is left to finish (#19 review MINOR 5)
+        DispenseService svc = ctx.svcOrNull();
+        boolean batch = ctx.passthrough.running();
+        boolean run = svc != null && svc.isBusy();
+        boolean hold = ctx.pressure.isActive();
+        boolean padCal = ctx.padCalJobs.lockReason() != null;
+        boolean working0 = ctx.lock.busy(old) || batch || ctx.passthrough.motionPending() || run || hold || padCal
+                || m.isBusy() || homing(m);
+        if (working0) {
+            ctx.passthrough.abort(why);
+            ctx.padCalJobs.stop(why);
+            if (svc != null && !homing(m)) {
+                svc.abort(why);
+            }
+        }
         long t0 = System.currentTimeMillis();
         while (homing(m) && System.currentTimeMillis() - t0 < HOME_WAIT_MS) {
             sleep(100);
@@ -268,12 +330,9 @@ final class LockEndpoints {
             out.put("machineOff", !m.isEnabled());
             return out;
         }
-        DispenseService svc = ctx.svcOrNull();
-        boolean batch = ctx.passthrough.running();
-        boolean run = svc != null && svc.isBusy();
-        boolean hold = ctx.pressure.isActive();
-        boolean padCal = ctx.padCalJobs.lockReason() != null;
-        boolean working = ctx.lock.busy(old) || batch || ctx.passthrough.motionPending() || run || hold || padCal
+        // after the home: what still runs decides (a home that ended on its own leaves the machine homed)
+        boolean working = ctx.lock.busy(old) || ctx.passthrough.running() || ctx.passthrough.motionPending()
+                || svc != null && svc.isBusy() || ctx.pressure.isActive() || ctx.padCalJobs.lockReason() != null
                 || m.isBusy();
         if (!working) {
             if (!m.isEnabled()) {
@@ -336,6 +395,18 @@ final class LockEndpoints {
     private void tick() {
         try {
             Machine m = ctx.configuration.getMachine();
+            MachineLock.Holder cur = ctx.lock.current();
+            if (cur != null && cur.kind == MachineLock.Kind.AGENT) {
+                // the agent's work on the machine (a 202 run, a home, a hold, a batch): never a lapse in the middle
+                // of it, and it shows as busy (#19 review MAJOR 2)
+                DispenseService svc = ctx.svcOrNull();
+                boolean work = m != null && (m.isBusy() || homing(m)) || svc != null && svc.isBusy()
+                        || ctx.pressure.isActive() || ctx.padCalJobs.lockReason() != null || ctx.passthrough.running();
+                ctx.lock.markWorking(cur, work);
+                if (work) {
+                    return;
+                }
+            }
             if (m != null && homing(m)) {
                 return;
             }

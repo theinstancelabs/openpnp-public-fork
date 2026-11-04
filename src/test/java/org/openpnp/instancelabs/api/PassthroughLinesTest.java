@@ -25,6 +25,7 @@ public class PassthroughLinesTest {
         LIMITS.put('X', new double[] {0, 408});
         LIMITS.put('Y', new double[] {0, 410});
         LIMITS.put('Z', new double[] {Double.NaN, 63});
+        LIMITS.put('A', new double[] {-200, 200});
     }
 
     static PassthroughLines.Line ok(String line) {
@@ -52,7 +53,7 @@ public class PassthroughLinesTest {
                 "M150 P255 R255 U255 B255", "M150 R0 U0 B0", "M204 S2000", "M204 S20000", "M201 B10000",
                 "M906 B580", "M906 B670", "M906", "M18 B", "M17 B", "M260 A112 B1 S1", "M260 A109",
                 "M260 B48", "M260 S1", "M261 A109 B3 S1", "M485 FFFF0001", "M42 I P44 T2", "M42 P44 T0",
-                "M43 P29", "M43 I P44")) {
+                "M43 P29", "M43 I P29")) {
             ok(l);
         }
     }
@@ -102,6 +103,28 @@ public class PassthroughLinesTest {
         assertTrue(refused("M906 X800").contains("B"));
         assertTrue(refused("G4 P61000").contains("60"));
         assertTrue(refused("G4 S61").contains("60"));
+        // #19 review MINOR 4: Marlin reads G4 P with strtoul (-3e9 = a 15-day dwell that blocks a STOP's valve-off)
+        refused("G4 P-3000000000");
+        refused("G4 S-1");
+        refused("M204 S0");
+        refused("M204 S-500");
+        refused("G1 B" + new String(new char[400]).replace('\0', '1'));
+        refused("G1 B2000000");
+        refused("G1 X10 F0");
+        // A (N1's rotation) has soft limits too: enforced like X/Y/Z
+        assertTrue(refused("G1 A250").contains("A"));
+        ok("G1 A90");
+        // #19 review MINOR 9: M42 only on BR-48's switch pin
+        refused("M42 I P45 T2");
+        refused("M43 P12");
+        ok("M43 P29");
+    }
+
+    @Test
+    public void aQuickStopLeavesOpenPnpsPositionStale() {
+        // #19 review MINOR 6: an M410 can stop a move short: OpenPnP must re-read where the head is
+        assertTrue(ok("M410").frame);
+        assertFalse(ok("M410").motion);
     }
 
     @Test

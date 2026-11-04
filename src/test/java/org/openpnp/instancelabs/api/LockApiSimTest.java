@@ -330,6 +330,34 @@ public class LockApiSimTest {
         assertEquals(1, b.json.get("index").getAsInt(), "the line in flight: " + b);
     }
 
+    /** Process's client on Infra's SIM (11-03 17:10): a web STOP during a batch's last line answered 200 too. */
+    @Test
+    public void aStopDuringABatchsLastLineAnswersStoppedNotDone() throws Exception {
+        String token = acquire("one long move");
+        sim.server.delayBeforeOkMs.put("M400", 3000L);
+        sim.server.mark();
+        CompletableFuture<Res> batch = CompletableFuture.supplyAsync(() -> {
+            try {
+                return gcode(token, "G1 X70 Y220 F300", "M400");
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        long t0 = System.currentTimeMillis();
+        while (!commands(sim.server.sinceMark()).contains("M400") && System.currentTimeMillis() - t0 < 10000) {
+            Thread.sleep(10);
+        }
+        ok(post("/api/stop", null, null));
+        Res b = batch.get();
+        assertError(409, "stopped", b);
+        JsonObject last = b.json.getAsJsonArray("results").get(1).getAsJsonObject();
+        assertEquals("M400", last.get("line").getAsString());
+        assertTrue(last.get("interrupted").getAsBoolean(), b.toString());
+        assertEquals("process", holder().get("who").getAsString(), "a STOP does not take the lock");
+        awaitOff();
+    }
+
     @Test
     public void takeControlFromAnIdleAgentSwitchesTheOutputsOffAndKeepsTheMachineHomed() throws Exception {
         String token = acquire("pressure check");
@@ -414,6 +442,73 @@ public class LockApiSimTest {
         assertError(409, "lock-lost", lost);
         assertEquals("expired", lost.json.getAsJsonObject("lost").get("how").getAsString());
         assertTrue(status().getAsJsonObject("machine").get("homed").getAsBoolean());
+    }
+
+    /**
+     * #19 review MAJOR 3: while a take still waits for the agent's home and stops its work, another window's write
+     * answers 409 taking-over (nothing of the user's lands inside the agent's home or under the STOP), and a second
+     * take joins the first: one stop, the same answer.
+     */
+    @Test
+    public void duringTheHandoverAnotherWindowWaitsAndASecondTakeJoins() throws Exception {
+        String token = acquire("re-home");
+        sim.server.delayBeforeOkMs.put("G28", 3000L);
+        assertEquals(202, post("/api/machine/home", "{}", token).status);
+        long t0 = System.currentTimeMillis();
+        while (!status().getAsJsonObject("machine").get("homing").getAsBoolean()
+                && System.currentTimeMillis() - t0 < 5000) {
+            Thread.sleep(10);
+        }
+        CompletableFuture<Res> first = CompletableFuture.supplyAsync(() -> {
+            try {
+                return post("/api/lock/take", "{}", UI);
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        t0 = System.currentTimeMillis();
+        while (!lock().get("handover").getAsBoolean() && System.currentTimeMillis() - t0 < 5000) {
+            Thread.sleep(10);
+        }
+        assertTrue(lock().get("handover").getAsBoolean(), lock().toString());
+        Res other = post("/api/needle/offset", NEEDLE_OFFSET, UI);
+        assertError(409, "taking-over", other);
+        Res second = post("/api/lock/take", "{}", UI);
+        Res one = first.get();
+        JsonObject a = ok(one), b = ok(second);
+        assertEquals(a.get("atMs"), b.get("atMs"), "the second take joined the first: " + b);
+        assertEquals("Process", b.getAsJsonObject("stopped").get("label").getAsString(), b.toString());
+        assertFalse(lock().get("handover").getAsBoolean());
+        ok(post("/api/needle/offset", NEEDLE_OFFSET, UI));
+    }
+
+    /** #19 review MAJOR 2: an agent's own task (a 202 home here) keeps its lease alive: no STOP in the middle of it. */
+    @Test
+    public void theLeaseDoesNotLapseWhileTheAgentsTaskRuns() throws Exception {
+        String token = ok(post("/api/lock/acquire", "{\"who\":\"process\",\"what\":\"a home\",\"ttlS\":30}", null))
+                .get("token").getAsString();
+        sim.server.delayBeforeOkMs.put("G28", 3000L);
+        assertEquals(202, post("/api/machine/home", "{}", token).status);
+        // the lease check (every second) sees the home as the agent's work: busy, and the lease renewed
+        long t0 = System.currentTimeMillis();
+        while (!holder().get("busy").getAsBoolean() && System.currentTimeMillis() - t0 < 2500) {
+            Thread.sleep(50);
+        }
+        assertTrue(holder().get("busy").getAsBoolean(), "its home shows as work");
+        api.getContext().lockClockSkewMs.set(31_000L);
+        t0 = System.currentTimeMillis();
+        while (System.currentTimeMillis() - t0 < 1500) {
+            assertEquals("process", holder().get("who").getAsString(), "lapsed during its home");
+            Thread.sleep(100);
+        }
+        t0 = System.currentTimeMillis();
+        while (status().getAsJsonObject("machine").get("homing").getAsBoolean() && System.currentTimeMillis() - t0 < 10000) {
+            Thread.sleep(50);
+        }
+        Thread.sleep(1500);
+        assertEquals("process", holder().get("who").getAsString(), "the lease counts from the end of its work");
+        assertTrue(status().getAsJsonObject("machine").get("homed").getAsBoolean(), "never stopped");
     }
 
     @Test

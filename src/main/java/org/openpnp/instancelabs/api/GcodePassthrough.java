@@ -213,13 +213,7 @@ final class GcodePassthrough {
             if (l.empty) {
                 continue;
             }
-            String stop = stopReason(m, b);
-            if (stop != null) {
-                return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i, l.text,
-                        null, stop);
-            }
             long ls = System.currentTimeMillis();
-            log(who, ">", l.text);
             List<String> replies = new ArrayList<>();
             try {
                 try {
@@ -228,6 +222,13 @@ final class GcodePassthrough {
                 catch (Exception stale) {
                     log(who, "!", "an earlier controller error was cleared: " + stale.getMessage());
                 }
+                // checked right before the send (#19 review MINOR 5): a take or STOP meanwhile sends nothing more
+                String stop = stopReason(m, b);
+                if (stop != null) {
+                    return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i,
+                            l.text, null, stop);
+                }
+                log(who, ">", l.text);
                 d.sendCommand(l.text, timeoutMs);
                 for (GcodeDriver.Line got : d.receiveResponses(confirm, timeoutMs, r -> r)) {
                     if (!got.getLine().matches(confirm)) {
@@ -237,7 +238,7 @@ final class GcodePassthrough {
             }
             catch (Exception e) {
                 String why = String.valueOf(e.getMessage());
-                stop = stopReason(m, b);
+                String stop = stopReason(m, b);
                 log(who, "!", why);
                 if (stop != null) {
                     return interrupted(stop, results, t0, i, l, replies, ls);
@@ -254,7 +255,7 @@ final class GcodePassthrough {
             }
             // taken or stopped while this line ran: its ok may be the STOP's flush (M410), not its end (Infra's
             // lumen-sim e2e: an M400 answered as if the head had arrived)
-            stop = stopReason(m, b);
+            String stop = stopReason(m, b);
             if (stop != null) {
                 return interrupted(stop, results, t0, i, l, replies, ls);
             }
@@ -481,7 +482,10 @@ final class GcodePassthrough {
         throw ApiException.unavailable("the machine has no G-code driver");
     }
 
-    /** The soft limits of the driver's X/Y/Z axes, per letter {low, high}, NaN where none is set. */
+    /**
+     * The soft limits of the driver's axes, per letter {low, high}, NaN where none is set: X/Y/Z, and a rotation axis
+     * with an enabled limit (N1's A: #19 review MAJOR 1). The screw (B) has none.
+     */
     static Map<Character, double[]> limits(Machine m, GcodeDriver d) {
         Map<Character, double[]> out = new LinkedHashMap<>();
         for (Axis a : m.getAxes()) {
@@ -490,14 +494,16 @@ final class GcodePassthrough {
             }
             ReferenceControllerAxis ra = (ReferenceControllerAxis) a;
             String letter = ra.getLetter();
-            if (letter == null || letter.length() != 1 || !(ra.getType() == Axis.Type.X || ra.getType() == Axis.Type.Y
-                    || ra.getType() == Axis.Type.Z)) {
+            boolean linear = ra.getType() == Axis.Type.X || ra.getType() == Axis.Type.Y || ra.getType() == Axis.Type.Z;
+            boolean limited = ra.isSoftLimitLowEnabled() || ra.isSoftLimitHighEnabled();
+            if (letter == null || letter.length() != 1 || !linear && !(ra.getType() == Axis.Type.Rotation && limited)) {
                 continue;
             }
-            double lo = ra.isSoftLimitLowEnabled() ? ra.getSoftLimitLow().convertToUnits(LengthUnit.Millimeters)
-                    .getValue() : Double.NaN;
-            double hi = ra.isSoftLimitHighEnabled() ? ra.getSoftLimitHigh().convertToUnits(LengthUnit.Millimeters)
-                    .getValue() : Double.NaN;
+            // a rotation's limits are degrees: its Length value as is
+            double lo = !ra.isSoftLimitLowEnabled() ? Double.NaN : linear ? ra.getSoftLimitLow().convertToUnits(
+                    LengthUnit.Millimeters).getValue() : ra.getSoftLimitLow().getValue();
+            double hi = !ra.isSoftLimitHighEnabled() ? Double.NaN : linear ? ra.getSoftLimitHigh().convertToUnits(
+                    LengthUnit.Millimeters).getValue() : ra.getSoftLimitHigh().getValue();
             char c = Character.toUpperCase(letter.charAt(0));
             double[] prev = out.get(c);
             // two axes on one letter (never on this machine): the narrower band

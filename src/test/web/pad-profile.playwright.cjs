@@ -192,7 +192,7 @@ async function weighCoupon(page, place) {
 
 (async () => {
   const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const context = await browser.newContext({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
   const jsErrors = [];
   page.on('pageerror', (e) => jsErrors.push(String(e)));

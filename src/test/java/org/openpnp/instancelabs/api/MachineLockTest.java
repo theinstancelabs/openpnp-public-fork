@@ -133,7 +133,8 @@ public class MachineLockTest {
         assertEquals("lock-lost", refused(() -> lock.keepalive(token, null)).code);
         assertEquals("lock-lost", refused(() -> lock.release(token, false)).code);
         assertEquals("locked", refused(() -> lock.acquire("process", null, "again", null, null)).code);
-        // the user's own writes pass; a second take is a no-op
+        // once the take's stop has ended (LockEndpoints), the user's own writes pass; a second take is a no-op
+        lock.handoverDone();
         lock.end(lock.admit(true, null, "Start"));
         assertNull(lock.takeForUser());
         // Give back: nobody, and takenFrom is cleared when the lock changes hands
@@ -141,6 +142,42 @@ public class MachineLockTest {
         assertNull(holder());
         assertNull(lock.view().get("takenFrom"));
         // the old token stays lost (not "no-lock") after the lock changed hands again
+        assertEquals("lock-lost", refused(() -> lock.admit(false, token, "gcode")).code);
+    }
+
+    /**
+     * #19 review MAJOR 3: while a take still stops the agent's work (a home to finish, the STOP to confirm), nobody's
+     * guarded write passes, not even another window's, and a second take joins the first (LockEndpoints).
+     */
+    @Test
+    public void duringTheHandoverNothingPasses() throws Exception {
+        acquire("process", "dots");
+        MachineLock.Holder old = lock.takeForUser();
+        assertNotNull(old);
+        assertEquals(true, lock.view().get("handover"));
+        ApiException e = refused(() -> lock.admit(true, null, "Home"));
+        assertEquals(409, e.status);
+        assertEquals("taking-over", e.code);
+        assertTrue(e.getMessage().contains("Process"), e.getMessage());
+        assertEquals("taking-over", refused(() -> lock.admit(false, null, "home")).code);
+        assertEquals("locked", refused(() -> lock.acquire("infra", null, "deploy", null, null)).code);
+        assertEquals("taking-over", refused(() -> lock.release(null, true)).code);
+        lock.handoverDone();
+        assertEquals(false, lock.view().get("handover"));
+        lock.end(lock.admit(true, null, "Home"));
+    }
+
+    /** #19 review MAJOR 2: the agent's work on the machine (a 202 run, a home) keeps its lease alive. */
+    @Test
+    public void workOnTheMachineRenewsTheLease() throws Exception {
+        String token = (String) lock.acquire("process", null, "a run", null, 30).get("token");
+        MachineLock.Holder h = lock.current();
+        now.addAndGet(29_000L);
+        lock.touch(h);
+        now.addAndGet(29_000L);
+        assertNull(lock.expireDue(), "renewed by the work");
+        now.addAndGet(2_000L);
+        assertNotNull(lock.expireDue());
         assertEquals("lock-lost", refused(() -> lock.admit(false, token, "gcode")).code);
     }
 

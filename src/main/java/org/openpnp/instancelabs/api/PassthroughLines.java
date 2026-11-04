@@ -24,6 +24,11 @@ final class PassthroughLines {
     /** The pump's and the valve's M106 index (VAC2: M106 P2 / P3, ControllerCommands). */
     private static final Set<Integer> FULL_ON_ONLY = new HashSet<>(Arrays.asList(2, 3));
     static final double MAX_DWELL_S = 60;
+    /** Any number on a line: no Infinity, no 400-digit screw turn (#19 review MINOR 4). */
+    static final double MAX_MAGNITUDE = 1_000_000;
+    /** BR-48's bed switch: M42 names its pin P44, M43 the same pin P29 (Process checked 11-02 on the machine). */
+    static final double SWITCH_PIN_M42 = 44;
+    static final double SWITCH_PIN_M43 = 29;
     static final double MAX_SCREW_MA = 670;
     private static final Pattern WORD = Pattern.compile("([A-Z])\\s*([-+]?(?:\\d+\\.?\\d*|\\.\\d+))?\\s*");
 
@@ -103,7 +108,11 @@ final class PassthroughLines {
                 return no(s, letter + " twice");
             }
             String num = m.group(2);
-            p.put(letter, num == null ? null : Double.valueOf(num));
+            Double v = num == null ? null : Double.valueOf(num);
+            if (v != null && (v.isInfinite() || v.isNaN() || Math.abs(v) > MAX_MAGNITUDE)) {
+                return no(s, letter + " " + num + " is out of range (at most " + (long) MAX_MAGNITUDE + " here)");
+            }
+            p.put(letter, v);
             at = m.end();
         }
         String text = word + render(p);
@@ -112,7 +121,10 @@ final class PassthroughLines {
             return no(text, why);
         }
         boolean motion = "G0".equals(word) || "G1".equals(word);
-        return new Line(text, null, false, motion, "M400".equals(word), motion || "G92".equals(word));
+        // M410 flushes queued moves (none pending after it) and may stop one short: OpenPnP re-reads the position
+        boolean quickStop = "M410".equals(word);
+        return new Line(text, null, false, motion, "M400".equals(word) || quickStop,
+                motion || "G92".equals(word) || quickStop);
     }
 
     private static String render(Map<Character, Double> p) {
@@ -144,6 +156,9 @@ final class PassthroughLines {
                     return bad;
                 }
                 double sec = p.containsKey('S') ? p.get('S') : p.containsKey('P') ? p.get('P') / 1000.0 : 0;
+                if (sec < 0) {
+                    return "G4 takes no negative time (the firmware would read it as days)";
+                }
                 return sec > MAX_DWELL_S ? "G4 at most " + (int) MAX_DWELL_S + " s per line" : null;
             }
             case "G90":
@@ -190,8 +205,18 @@ final class PassthroughLines {
             }
             case "M150":
                 return only(word, p, "RUBWPIKS", true);
-            case "M204":
-                return only(word, p, "SPTR", true);
+            case "M204": {
+                String bad = only(word, p, "SPTR", true);
+                if (bad != null) {
+                    return bad;
+                }
+                for (Double v : p.values()) {
+                    if (v <= 0) {
+                        return "M204 accelerations are positive";
+                    }
+                }
+                return null;
+            }
             case "M201":
                 return p.size() == 1 && p.containsKey('B') && p.get('B') != null && p.get('B') > 0 ? null
                         : "M201 on B only (M201 B10000): X, Y and Z accelerations are OpenPnP's";
@@ -219,12 +244,15 @@ final class PassthroughLines {
                     return bad;
                 }
                 Double t = p.get('T');
-                return p.get('P') == null || t == null || !(t == 0 || t == 2 || t == 3)
-                        ? "M42 only sets an input mode here (M42 I P44 T2): T0, T2 or T3 with a pin" : null;
+                if (p.get('P') == null || p.get('P') != SWITCH_PIN_M42) {
+                    return "M42 only on BR-48's switch pin here (M42 I P44 T2)";
+                }
+                return t == null || !(t == 0 || t == 2 || t == 3)
+                        ? "M42 only sets an input mode here (M42 I P44 T2): T0, T2 or T3" : null;
             }
             case "M43":
-                if (only(word, p, "IP", false) != null || p.get('P') == null) {
-                    return "M43 only reads one pin here (M43 P29)";
+                if (only(word, p, "IP", false) != null || p.get('P') == null || p.get('P') != SWITCH_PIN_M43) {
+                    return "M43 only reads BR-48's switch pin here (M43 P29)";
                 }
                 return null;
             default:
@@ -258,12 +286,12 @@ final class PassthroughLines {
         if (bad != null) {
             return bad;
         }
-        for (char axis : new char[] {'X', 'Y', 'Z'}) {
+        for (char axis : new char[] {'X', 'Y', 'Z', 'A', 'B'}) {
             Double v = p.get(axis);
             if (v == null) {
                 continue;
             }
-            if (!homed) {
+            if (!homed && "XYZ".indexOf(axis) >= 0) {
                 return "X, Y and Z move only once homed: home with POST /api/machine/home and your token";
             }
             double[] lim = limits.get(axis);

@@ -54,6 +54,8 @@ final class MachineLock {
         int inFlight;
         /** Set when the lock is taken from it or lapses: its running batch sends nothing more. */
         volatile boolean revoked;
+        /** Its work on the machine runs (a 202 task, a home, a hold), seen by the lease check (LockEndpoints). */
+        boolean working;
 
         Holder(Kind kind, String who, String label, String what, String thread, String token, long now, long ttlMs) {
             this.kind = kind;
@@ -97,6 +99,8 @@ final class MachineLock {
     private final SecureRandom random = new SecureRandom();
     private Holder holder;
     private Map<String, Object> takenFrom;
+    /** A take-over is still stopping the agent's work: nobody's guarded write passes until it ends. */
+    private boolean handover;
     private final Map<String, Lost> lost = new LinkedHashMap<String, Lost>() {
         private static final long serialVersionUID = 1L;
 
@@ -115,12 +119,13 @@ final class MachineLock {
         Map<String, Object> v = new LinkedHashMap<>();
         v.put("holder", holder == null ? null : holderView(holder));
         v.put("takenFrom", takenFrom == null ? null : new LinkedHashMap<>(takenFrom));
+        v.put("handover", handover);
         return v;
     }
 
     private static Map<String, Object> holderView(Holder h) {
         return Views.map("kind", h.kind == Kind.USER ? "user" : "agent", "who", h.who, "label", h.label, "what", h.what,
-                "thread", h.thread, "sinceMs", h.sinceMs, "lastActiveMs", h.lastActiveMs, "busy", h.inFlight > 0,
+                "thread", h.thread, "sinceMs", h.sinceMs, "lastActiveMs", h.lastActiveMs, "busy", h.inFlight > 0 || h.working,
                 "expiresAtMs", h.kind == Kind.USER ? null : h.lastActiveMs + h.ttlMs);
     }
 
@@ -199,6 +204,9 @@ final class MachineLock {
         if (holder == null) {
             throw new ApiException(409, "no-lock", "nobody holds the machine");
         }
+        if (handover) {
+            throw takingOver();
+        }
         if (!ui || holder.kind != Kind.USER) {
             throw locked(ui);
         }
@@ -230,7 +238,19 @@ final class MachineLock {
         }
         holder = user(now);
         takenFrom = Views.map("label", old.label, "who", old.who, "what", old.what, "atMs", now, "by", "user");
+        handover = !lapsing;
         return lapsing ? null : old;
+    }
+
+    /** The take-over's stop has ended (confirmed or not): the user's controls work from now on. */
+    synchronized void handoverDone() {
+        handover = false;
+    }
+
+    private ApiException takingOver() {
+        String from = takenFrom == null ? "the agent" : String.valueOf(takenFrom.get("label"));
+        return new ApiException(409, "taking-over", "Take control is still stopping " + from + "'s work: a moment, "
+                + "then try again").with("lock", view());
     }
 
     private Holder user(long now) {
@@ -253,6 +273,9 @@ final class MachineLock {
                 throw notHolder(token, ui);
             }
             h = holder;
+        }
+        else if (handover) {
+            throw takingOver();
         }
         else if (holder == null) {
             if (!ui) {
@@ -316,6 +339,19 @@ final class MachineLock {
         return h.inFlight > 0;
     }
 
+    /** The holder's work on the machine runs: its lease counts from when that ends (#19 review MAJOR 2). */
+    synchronized void touch(Holder h) {
+        h.lastActiveMs = clock.getAsLong();
+    }
+
+    /** Whether the holder's work on the machine runs now (shown as busy; renews the lease while true). */
+    synchronized void markWorking(Holder h, boolean working) {
+        h.working = working;
+        if (working) {
+            h.lastActiveMs = clock.getAsLong();
+        }
+    }
+
     /** The lock-lost answer for a holder whose lock ended (its batch saw it revoked). */
     synchronized ApiException lostError(Holder h) {
         return notHolder(h.token, false);
@@ -374,6 +410,7 @@ final class MachineLock {
     private void setHolder(Holder h) {
         holder = h;
         takenFrom = null;
+        handover = false;
     }
 
     private static String checkWhat(String what, boolean required) throws ApiException {

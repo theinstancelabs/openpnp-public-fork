@@ -162,7 +162,7 @@ async function runFirstDots(page, n) {
     args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
   });
   // a context of its own: a second tab of this browser (shared localStorage) is opened in it below
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
   const jsErrors = [];
   page.on('pageerror', (e) => jsErrors.push(String(e)));
@@ -206,7 +206,7 @@ async function runFirstDots(page, n) {
     // ---- STOP keys, the offline state and STOP NOT CONFIRMED (§5, §15, §18) ------------------------
     // a second page whose /api/stop is answered by a stub (nothing reaches OpenPnP; its recovery is this tab's only)
     {
-      const aux = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+      const aux = await browser.newPage({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 900 } });
       aux.on('pageerror', (e) => jsErrors.push('aux: ' + e));
       aux.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
       let stops = 0;
@@ -1309,7 +1309,7 @@ async function runFirstDots(page, n) {
         await page.waitForFunction(() => !IL.S.planPending && IL.S.plan && IL.S.plan.pasted, null, { timeout: 15000 }).catch(() => {});
         await page.waitForTimeout(1000);
         const mine = await page.evaluate(() => ({ done: IL.run.doneSet.size, board: IL.S.plan.pasted.board, plan: IL.S.plan.planId }));
-        const fresh = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+        const fresh = await browser.newContext({ extraHTTPHeaders: { 'X-IL-Client': 'ui' }, viewport: { width: 1440, height: 900 } });
         const tab = await fresh.newPage();
         tab.on('console', (m) => { if (m.type() === 'error') jsErrors.push('new tab: ' + m.text()); });
         await tab.goto(BASE + '#run/checks');
