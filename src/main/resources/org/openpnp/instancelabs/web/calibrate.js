@@ -434,7 +434,7 @@
             pcr.field('shots-place', 'Cup place', null, placeSel('shots-place')),
             pcr.field('shots-rot', 'Turn per shot', '°', pcr.numInput('shots-rot', '360', '1', { min: '1', max: '3600' })),
             pcr.field('shots-count', 'Shots', '1 to 200', pcr.numInput('shots-count', '30', '1', { min: '1', max: '200' }))),
-          el('div', { id: 'shots-noplace', class: 'reason reason--need', hidden: true }, el('span', {}, 'No places yet: add the cup in ', el('button', { type: 'button', class: 'link', text: 'Setup › Places', onclick: () => IL.go('#setup/places') }), '.')),
+          el('div', { id: 'shots-noplace', class: 'reason reason--need', hidden: true }, el('span', {}, 'No cup place yet: add the cup in ', el('button', { type: 'button', class: 'link', text: 'Setup › Places', onclick: () => IL.go('#setup/places') }), '.')),
           el('div', { id: 'shots-pre' }), liveEl('shots-live'),
           el('div', { class: 'btn-row' }, run), reasonEl('shots-reason')),
         el('div', { class: 'cal-form', 'data-enter-submits': 'btn-ss-save' },
@@ -804,7 +804,8 @@
   }
   function renderShots(s) {
     const d = s.dispense || {}, prof = d.profile || {};
-    const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find((nm) => /cup|scale/i.test(nm)));
+    // only where paste may go with nothing under it (the engine refuses the others: "takes no paste"), a cup first
+    const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace), (nm) => IL.isSinkPlace(nm, d));
     IL.show($('shots-noplace'), !names.length);
     const place = $('shots-place').value;
     const p = shotsPlan();

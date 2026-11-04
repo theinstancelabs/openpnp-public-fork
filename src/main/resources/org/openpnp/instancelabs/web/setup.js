@@ -1650,9 +1650,13 @@
     return c.root;
   }
   function usedFor(name, d) {
-    if (name === (d.wasteLocationName || 'waste')) return 'prime, test dot';
+    if (name === (d.wasteLocationName || 'waste')) return 'prime, test dot, pressure on';
     if (name === (d.blankLocationName || 'blank')) return 'touch-off, dot ladder';
-    return 'scale shots, calibrations';
+    // #12's paste zones: the other sinks and the coupons take paste; every other place none
+    if (IL.isCupPlace(name)) return 'scale shots';
+    if (IL.isSinkPlace(name, d)) return 'drool while pressure is on';
+    if ((((S.config || {}).padCalibration || {}).couponPlaces || ['coupon1', 'coupon2']).includes(name)) return 'pad calibration coupon';
+    return 'moves and Z only: no paste';
   }
   function placeRow(name) {
     const r = { name };

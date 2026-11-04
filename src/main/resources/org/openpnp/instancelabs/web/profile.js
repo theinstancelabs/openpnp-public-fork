@@ -54,9 +54,9 @@
     const d = (status && status.dispense) || {};
     return Object.keys(d.locations || {}).filter((n) => n !== 'waste-test-dot').sort();
   };
-  /** Fills a place <select>, keeps the chosen value; preferred when nothing is chosen yet. */
-  pcr.fillPlaces = function (sel, status, preferred) {
-    const names = pcr.places(status);
+  /** Fills a place <select>, keeps the chosen value; preferred when nothing is chosen yet; only(name): the places offered. */
+  pcr.fillPlaces = function (sel, status, preferred, only) {
+    const names = pcr.places(status).filter(only || Boolean);
     const key = names.join('|');
     if (sel.dataset.key !== key) {
       const keep = sel.value;
