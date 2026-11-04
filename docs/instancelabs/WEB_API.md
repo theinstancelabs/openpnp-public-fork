@@ -541,6 +541,25 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before the next
   guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
 
+### 3.8 Jog, move-to and the cameras (BR-49, BR-53)
+
+The user's Machine › Control (P0 after BR-72; `ControlEndpoints`; shape in `docs/backend-requests.md` "BR-49 + BR-53
+API"). Both motion routes are guarded writes (§3.7) and run one at a time as OpenPnP machine tasks, checked again on
+its thread; STOP ends them at once (a move that saw a STOP answers 409 "the move was stopped", even when its last ok
+came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the other.**
+- `POST /api/jog {tool: camera|n1|needle, dx?, dy?, dz?}` (mm; one press X/Y ≤ 10 or Z ≤ 2, never both) and
+  `POST /api/move-to {tool, place? | x?, y?}` (at safe Z; ends at the tool's safe Z, so both nozzles end at travel
+  height) → `{tool, from: {x, y, z}, to: {x, y, z}, positions}`.
+- Refused (409, the reason in words): not started, unhomed (nothing moves), switching off, busy (OpenPnP, a task, a
+  G-code batch, a pressure hold, a pad calibration), another move still running; X/Y while either nozzle is below
+  its safe zone; the camera's `dz`; a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
+  always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current frame (anchored and
+  touched off since the needle change, and no failed Z check of this home), not below the surface under it + its
+  offset nor its I4 floor, without one not below its safe zone; OpenPnP's soft limits. 404 for an unknown place.
+- `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
+  `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
+  ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.
+
 ## 4. Pressure hold (Dispense tab)
 
 The engine pressurises inside each run. The hold is the manual "pressure on" for reading the regulator gauge:

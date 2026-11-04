@@ -164,6 +164,12 @@ public final class SimScene {
         /** The physical screw angle at count 0 (steps); null = drawn per connection from the seed. */
         public Integer offsetSteps;
         /**
+         * BR-74: the seed of the dose and thread noise on every connection (null: seed + the connection's number, as
+         * before), so a scene's paste is the same however often the controller reconnected (a test alone in a fresh
+         * session draws what it draws after the suite's reconnects).
+         */
+        public Long noiseSeed;
+        /**
          * Per tip setup key (tip setups design §22.8, {@code "byTip"}): the paste and landing of that tip on the
          * head; a tip without an entry uses the fields above.
          */
@@ -197,6 +203,7 @@ public final class SimScene {
             p.n2OffsetMm = n2OffsetMm == null ? null : n2OffsetMm.clone();
             p.reportCount = reportCount;
             p.offsetSteps = offsetSteps;
+            p.noiseSeed = noiseSeed;
             p.byTip = new LinkedHashMap<>(byTip);
             return p;
         }
@@ -567,6 +574,8 @@ public final class SimScene {
             p.n2OffsetMm = n2;
         }
         p.reportCount = o.has("reportCount") ? o.get("reportCount").getAsBoolean() : p.reportCount;
+        p.noiseSeed = o.has("noiseSeed") && !o.get("noiseSeed").isJsonNull() ? Long.valueOf(o.get("noiseSeed").getAsLong())
+                : null;
         p.offsetSteps = o.has("offsetSteps") && !o.get("offsetSteps").isJsonNull()
                 ? Integer.valueOf(Math.floorMod(o.get("offsetSteps").getAsInt(), SimPaste.STEPS_PER_REV)) : null;
         JsonObject byTip = obj(o, "byTip");
