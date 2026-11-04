@@ -353,7 +353,7 @@ class Simulator:
             "counts": named(fw.position),
             "stepper_counts": named(st.realtime_counts(t)),
             "physical": st.realtime_physical(t),
-            "head": self._head(t),
+            "head": self.head(t),
             "switches": {a: v for a, v in zip("XYZ", self.machine.switches)},
             "z_drop": self.machine.z_drop,
             "surface_z": self.machine.surface_z,
@@ -387,7 +387,7 @@ class Simulator:
             "sim_errors": list(self.sim_errors),
         }
 
-    def _head(self, t):
+    def head(self, t):
         """X/Y/Z: where the head is (physical, the machine's true frame), where the controller believes it is now
         (logical: its step counts in G92 coordinates; M114 prints the planned end), and physical - logical, the
         error the controller does not know about. Rounded to 1 nm."""
