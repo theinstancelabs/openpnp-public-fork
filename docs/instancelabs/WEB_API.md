@@ -266,10 +266,10 @@ sourceName, kicadVersion, how, board, skipped, pasteDnp}` (BR-88: `skipped` = th
 place, as its preview listed them: `{bottom` (the other side, not read), `artOnly: [{ref, why}]` (drawn only), `dnp`
 (do-not-place: pasted only when `pasteDnp`), `pasteOnly` (pasted, nothing placed)`}`; `pasteDnp` = the upload's choice;
 both null for drawings saved before them). `imported` is the board's own upload (BR-88): the newest save of this board
-file (`<slug>/<slug>.board.xml`) or attach to it, while the board has that upload's geometry; any other file (a byte
-copy, e.g. uinav's) gets the upload of its drawing. The drawing (`art`, `origin`) is found by geometry: boards saved
-from one file share the newest upload's. A board without KiCad art gets a drawing made from the board file
-(`imported: null`).
+file (`<slug>/<slug>.board.xml`) or attach to it, while the board has that upload's geometry (an upload a replace
+moved to `history/` no longer counts); any other file (a byte copy, e.g. uinav's) gets the upload of its drawing. The
+drawing (`art`, `origin`) is found by geometry: boards saved from one file share the newest upload's. A board without
+KiCad art gets a drawing made from the board file (`imported: null`).
 
 **The plan view** adds `board` `{name, file, widthMm, heightMm, side, toMachine (the board → machine affine, 6
 numbers), transformStatus, fiducials: [{id, partId, bx, by, x, y}], art: {id, kind, note} | null}` (the drawing is

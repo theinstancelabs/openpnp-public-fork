@@ -58,6 +58,13 @@ public class BoardArtStoreTest {
      * drawing, a replace: that drawing moves to history/.
      */
     static Saved save(BoardArtStore store, String fixture, String slug, File attachedTo, long atMs) throws Exception {
+        Saved s = write(store, fixture, slug, attachedTo, atMs);
+        store.invalidate();
+        return s;
+    }
+
+    /** The files and the index entry of {@link #save}, without the store's invalidate that ends a save. */
+    static Saved write(BoardArtStore store, String fixture, String slug, File attachedTo, long atMs) throws Exception {
         ArtFixtures.Drawn d = ArtFixtures.draw(fixture);
         BoardArt art = d.art();
         art.source.name = fixture.replace(".gz", "");
@@ -86,7 +93,6 @@ public class BoardArtStoreTest {
         File boardFile = attachedTo == null ? new File(dir, slug + ".board.xml") : attachedTo;
         store.index().put(art.imported.boardDigest, new BoardArtIndex.Entry(id, slug, art.imported.how,
                 boardFile.getAbsolutePath(), atMs), arts);
-        store.invalidate();
         return new Saved(d, id, boardFile);
     }
 
@@ -213,6 +219,20 @@ public class BoardArtStoreTest {
         BoardArtStore.Imported i = store.imported(f.board());
         assertEquals(AT + 2, i.atMs);
         assertEquals(g.boardFile.getCanonicalPath(), i.board);
+    }
+
+    /**
+     * BR-88: once a save is announced (status.boardImport.savedAtMs) the board list gives its upload, also before the
+     * save's finally invalidates the store: a page that polls the status and reads the list at once sees the replace.
+     */
+    @Test
+    public void aSaveIsListedOnceItIsAnnounced() throws Exception {
+        BoardArtStore store = freshStore();
+        Saved ftp = save(store, ArtFixtures.FTP, "ftp", null, AT + 1);
+        assertEquals(AT + 1, store.imported(ftp.board()).atMs);
+        write(store, ArtFixtures.FTP, "ftp", null, AT + 2); // a replace's index change, inside the save
+        store.saved(AT + 2);
+        assertEquals(AT + 2, store.imported(ftp.board()).atMs);
     }
 
     /** BR-88: an import's board file linked by hand to a file elsewhere still lists its own upload. */

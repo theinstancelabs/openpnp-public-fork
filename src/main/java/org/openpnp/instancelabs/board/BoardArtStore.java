@@ -108,7 +108,7 @@ public final class BoardArtStore {
      * this run; never stale (an id is a content address), so a new index parses only the new drawings.
      */
     private final Map<String, BoardArt> records = new HashMap<>();
-    /** BR-88: board file (canonical) + '|' + geometry digest → its own upload; null until read after an invalidate. */
+    /** BR-88: board file (canonical) + '|' + geometry digest → its own upload; null: built at the next read. */
     private Map<String, BoardArt> uploads;
     /** BR-88: the atMs of the last save, replace or attach of this run that succeeded; null before one. */
     private volatile Long savedAtMs;
@@ -230,8 +230,12 @@ public final class BoardArtStore {
         uploads = null;
     }
 
-    /** BR-88: a save, replace or attach succeeded (its atMs): GET /api/status gives it as boardImport.savedAtMs. */
-    public void saved(long atMs) {
+    /**
+     * BR-88: a save, replace or attach succeeded (its atMs): GET /api/status gives it as boardImport.savedAtMs. The own
+     * uploads are found again first (the index changed inside the save), so a list read once the time shows has it.
+     */
+    public synchronized void saved(long atMs) {
+        uploads = null;
         savedAtMs = atMs;
     }
 
@@ -330,7 +334,7 @@ public final class BoardArtStore {
      * BR-88: the newest current drawing (not one a replace moved to history/) saved for this board file at its present
      * geometry: an import's, whose board file is {@code <slug>/<slug>.board.xml} next to its {@code <slug>.art.json},
      * or an attach's, which names the board file. Its source and import blocks only; null when there is none. The
-     * current drawings are sorted by board file once per index ({@link #invalidate}), not per board.
+     * current drawings are sorted by board file once per index ({@link #invalidate}, {@link #saved}), not per board.
      */
     private BoardArt ownUpload(Board b) {
         if (uploads == null) {
@@ -346,6 +350,7 @@ public final class BoardArtStore {
                 }
                 File saved = r.imported.board != null ? new File(r.imported.board)
                         : new File(new File(index.root(), slug), slug + ".board.xml");
+                // resolved now: a link made by hand later matches after the next save, attach or restart
                 uploads.merge(BoardArtIndex.canonical(saved) + '|' + r.imported.boardDigest, r,
                         (x, y) -> y.imported.atMs > x.imported.atMs ? y : x);
             }
