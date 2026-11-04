@@ -5089,7 +5089,7 @@ public final class DispenseService {
     private void doseBlocks(DoseBlocksRequest req, DoseBlocksResult res, Task t) throws Exception {
         RunResult r = t.r;
         hook("dose-blocks");
-        DispenseConfig c = cfg;
+        DispenseConfig c = stepConfig(cfg, req);
         if (stopEpoch.get() != req.stopEpoch) {
             throw refused(STOPPED_SINCE_QUEUED);
         }
@@ -5380,6 +5380,19 @@ public final class DispenseService {
                 c.bAxisName);
         return GcodeStreamBuilder.forBlocks(c, mapper, specs, purgeSpecs(c, need), c.padCalibration.flushDots,
                 bZeroed.get(), false, 0L, null, tipXy(c));
+    }
+
+    /**
+     * The configuration a dose-blocks step runs on, its builder and its stream validator alike: the live one, or BR-77 a
+     * copy with the request's start angle (never saved).
+     */
+    static DispenseConfig stepConfig(DispenseConfig live, DoseBlocksRequest req) {
+        if (req.startAngleDeg == null) {
+            return live;
+        }
+        DispenseConfig c = live.copy();
+        c.profile.startAngleDeg = req.startAngleDeg;
+        return c;
     }
 
     /** The Interlocks of a block program: I4 by the scope, I9 for its purge spots, I11 for a partial turn, I6-feed. */

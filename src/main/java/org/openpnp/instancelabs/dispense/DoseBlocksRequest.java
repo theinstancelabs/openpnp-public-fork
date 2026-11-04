@@ -44,6 +44,11 @@ public final class DoseBlocksRequest {
      * be bare as a whole); null = the tiles around the dots.
      */
     public List<double[]> lookXy;
+    /**
+     * BR-77: the start angle this step's blocks start at (deg, count angle), in place of the profile's; null = the
+     * profile's. The stored angle does not change.
+     */
+    public Double startAngleDeg;
 
     /** Dots of one dose, laid together. */
     public static final class Block {
