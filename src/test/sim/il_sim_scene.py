@@ -37,7 +37,8 @@ CLI:
   il_sim_scene.py amend --config DIR [PADCAL]      the session's scene file, changed in place (it reloads on its stamp)
   il_sim_scene.py selftest [--board FILE] [--config DIR]
   PADCAL: [--paste] [--coupons] [--balance display|connected] [--bench-blank] [--variant NAME]
-          [--paste-by-tip KEY:mRevMg=M,c=C,e=E,landing=DX:DY,<paste key>=V]... [--physical-tip KEY|mounted]
+          [--paste-by-tip KEY:[preset=NAME,]mRevMg=M,c=C,e=E,landing=DX:DY,<paste key>=V]...
+          [--physical-tip KEY|mounted]
 
 Tip setups (PROFILE_CALIBRATION_DESIGN.md §22.8): --paste-by-tip gives one tip setup its own paste (mass per
 revolution, footprint law, where it lands off the commanded spot; fields left out are the paste's), --physical-tip
@@ -383,6 +384,8 @@ def variant(sc, name, config_dir=None):
 
 
 PASTE_BY_TIP_FIELDS = ("mRevMg", "c", "e", "landing")
+# INF-06: per-tip pastes from Process's measured reference (preset=NAME), checked by SimPasteReferenceTest
+PASTE_TIPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paste-tips.json")
 # INF-06: any other key of the paste block, laid over it for that tip (SimScene.apply); SimScene checks the values
 PASTE_BY_TIP_FLAGS = ("newPhaseOnMotorOff", "wholeTurnsOnly")
 PASTE_BY_TIP_INTS = ("emptyDotsAfterPowerCycle", "offsetSteps")
@@ -393,12 +396,26 @@ PASTE_BY_TIP_NUMBERS = ("ripple", "ripplePeakDeg", "cv", "transferRatio", "oozeF
 
 def parse_paste_by_tip(text):
     """'KEY:mRevMg=1.6,c=0.6,e=0.77,landing=2.4:-0.4' -> (KEY, the byTip entry of the scene's paste, §22.8); any other
-    key of the paste block too ('primeTurns=230,wholeTurnsOnly=true', INF-06)."""
+    key of the paste block too ('primeTurns=230,wholeTurnsOnly=true', INF-06), and preset=NAME (paste-tips.json) with
+    the other keys laid over it."""
     key, sep, rest = text.partition(":")
     if not key or not sep or not rest:
         raise ValueError("--paste-by-tip %r: expected KEY:mRevMg=..,c=..,e=..,landing=DX:DY" % text)
+    items = rest.split(",")
+    named = [i.partition("=")[2].strip() for i in items if i.partition("=")[0].strip() == "preset"]
     entry = {}
-    for item in rest.split(","):
+    if len(named) > 1:
+        raise ValueError("--paste-by-tip %r: one preset at most" % text)
+    if named:
+        with open(PASTE_TIPS) as f:
+            tips = json.load(f)["presets"]
+        if named[0] not in tips:
+            raise ValueError("--paste-by-tip %r: no preset %r in %s (%s)" % (text, named[0], PASTE_TIPS,
+                                                                            ", ".join(sorted(tips))))
+        entry = json.loads(json.dumps(tips[named[0]]))  # a copy: the keys below go over it
+    for item in items:
+        if item.partition("=")[0].strip() == "preset":
+            continue
         name, eq, value = item.partition("=")
         name, value = name.strip(), value.strip()
         if eq and name in PASTE_BY_TIP_FLAGS:
@@ -595,13 +612,16 @@ def cmd_selftest(a):
     check("paste-by-tip: §22.8's example", k == "25g-straight"
           and e == {"mRevMg": 1.6, "footprint": {"c": 0.6}, "landingBiasMm": [2.4, -0.4]})
     check("paste-by-tip: e alone", parse_paste_by_tip("x:e=0.8")[1] == {"footprint": {"e": 0.8}})
+    k22, e22 = parse_paste_by_tip("22g:preset=22g-bent,cv=0.2")
+    check("paste-by-tip: a preset of paste-tips.json, a key over it (INF-06)", k22 == "22g"
+          and e22["primeTurns"] == 75 and e22["footprint"] == {"c": 0.74, "e": 0.77} and e22["cv"] == 0.2)
     check("paste-by-tip: any key of the paste block (INF-06)", parse_paste_by_tip(
         "k:primeTurns=230,wholeTurnsOnly=true,newPhaseOnMotorOff=false,maxGapMm=0.35,emptyDotsAfterPowerCycle=12")[1]
         == {"primeTurns": 230.0, "wholeTurnsOnly": True, "newPhaseOnMotorOff": False, "maxGapMm": 0.35,
             "emptyDotsAfterPowerCycle": 12})
     for bad in ("25g-straight", "25g-straight:", "k:mRevMg=0", "k:c=-1", "k:landing=2.4", "k:speed=3", "k:mRevMg",
                 "k:wholeTurnsOnly=yes", "k:emptyDotsAfterPowerCycle=1.5", "k:cv=x", "k:cv=nan", "k:maxGapMm=inf",
-                "k:mRevMg=inf", "k:c=1e400", "k:landing=nan:0", "k:landing=0:inf"):
+                "k:mRevMg=inf", "k:c=1e400", "k:landing=nan:0", "k:landing=0:inf", "k:preset=27g-steel"):
         try:
             parse_paste_by_tip(bad)
             check("paste-by-tip refuses %r" % bad, False)
