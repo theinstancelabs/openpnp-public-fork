@@ -1884,7 +1884,7 @@
     const surf = Object.values(d.surfaces || {}).map((x) => x.name + ':' + x.setAtMs + ':' + x.boundToBoard).join(',');
     return [m.enabled, m.homed, p.controllerConnectedAtMs, p.fingerprint, p.startAngleSetAtMs, surf, pr.usedSpots, pr.resetAtMs,
       pr.defined, n.setAtMs, n.changedAtMs, n.anchor && n.anchor.setAtMs, d.cleanPadCheck && d.cleanPadCheck.enabled,
-      d.minPadTypeStatus, s.run && s.run.running, (s.padLedgers || []).map((x) => x.board + ':' + x.clean + ':' + x.wipedAtMs).join(',')].join('|');
+      d.minPadTypeStatus, s.run && s.run.running, s.run && s.run.running ? '' : (s.padLedgers || []).map((x) => x.board + ':' + x.clean + ':' + x.wipedAtMs).join(',')].join('|');
   }
   let lastFreshKey = null;
 
@@ -2201,14 +2201,15 @@
     if (!s || off) { setCell(lc, 'off', off ? 'Unknown' : '…', off ? cap(since) : null); return; }
     if (!h) { setCell(lc, 'off', 'Nobody', 'Nobody has the machine. Its controls are yours: your first move makes it yours until you give it back. An agent may take it while nobody has it.'); return; }
     if (lk.mine) { setCell(lc, 'ok', 'You', 'You have the machine' + (t ? ' since ' + t : '') + '. Agents cannot use it until you give it back (click here).'); return; }
-    const name = IL.holderName(h), working = h.busy === true || IL.holderWorking(h);
+    const name = IL.holderName(h), waits = (s.padLedgers || []).some((x) => x.waiting), working = !waits && (h.busy === true || IL.holderWorking(h));
     const last = isNum(h.lastActiveMs) ? 'its last command ' + IL.fmtAgo(h.lastActiveMs - S.skewMs) : 'no command yet';
-    setCell(lc, working ? 'live' : 'info', [name + (working ? ' · working' : ' · idle'), h.what ? ' · ' + h.what : '', 2],
+    setCell(lc, working ? 'live' : 'info', [name + (working ? ' · working' : waits ? ' · waiting' : ' · idle'), h.what ? ' · ' + h.what : '', 2],
       name + ' (an agent) has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '. '
-      + (working ? 'Working' : 'Idle') + ': ' + last + '. Take control stops its work and makes the machine yours.');
+      + (working ? 'Working' : waits ? 'Waiting for clean pads' : 'Idle') + ': ' + last + '. Take control stops its work and makes the machine yours.');
     IL.msg('held', { kind: working ? 'live' : 'info', alert: false,
       text: name + ' has the machine' + (t ? ' since ' + t : '') + (h.what ? ': ' + h.what : '') + '.',
-      sub: (working ? 'It is working now.' : 'It is idle (no command for a while).') + ' This page shows everything but cannot move the machine until you take control.',
+      sub: waits ? 'It waits for clean pads: Board wiped (below) works without taking control. Anything else needs Take control.'
+        : (working ? 'It is working now.' : 'It is idle (no command for a while).') + ' This page shows everything but cannot move the machine until you take control.',
       actions: [IL.fixButton({ fix: 'take-control', label: 'Take control', primary: true }, { cls: 'btn--sm' })] });
   }
   function renderStrip() {
@@ -3015,7 +3016,7 @@
     gate: (s) => {
       const waits = ((s && s.padLedgers) || []).some((x) => x.waiting);
       const lk = IL.lockOf(s);
-      if (lk.agent && !waits) return IL.holderName(lk.holder) + ' is working: Take control to wipe now (stops its work)';
+      if (lk.agent && !waits && S.online !== false) return IL.holderName(lk.holder) + ' is working: Take control to wipe now (stops its work)';
       return IL.lockReason(s, { connected: true, homed: true, held: !waits });
     },
     run: (btn, board) => IL.api('POST', '/api/boards/' + encodeURIComponent(board) + '/wiped', {}),

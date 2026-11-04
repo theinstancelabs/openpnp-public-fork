@@ -287,7 +287,7 @@
     return card('cal-testboard', 'Test board', 'clean pads: wipe the board before a run needs them, never during one',
       [pick, el('p', { class: 'pca-line', id: 'tb-sum' }), el('div', { class: 'notebox', id: 'tb-need', hidden: true }),
         el('div', { class: 'cal-live', id: 'tb-check', hidden: true, role: 'status' }), el('div', { class: 'pv-host', id: 'tb-map', hidden: true }),
-        el('p', { class: 'field__h', id: 'tb-key', hidden: true, text: 'Filled: used since the wipe. Outlined: clean. Dashed: not counted.' }),
+        el('p', { class: 'field__h', id: 'tb-key', hidden: true, text: 'Red: used since the wipe. Dashed: not counted. The rest are clean.' }),
         el('p', { class: 'field__h', id: 'tb-fixed', hidden: true }), reasonEl('tb-err')],
       el('div', { class: 'btn-row' }, wiped, el('span', { class: 'field__h', text: 'Wipe the pads by hand first. The camera then checks every pad; nothing touches the board.' })));
   }

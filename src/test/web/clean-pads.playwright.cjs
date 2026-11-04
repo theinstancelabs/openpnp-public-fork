@@ -44,6 +44,8 @@ async function press2(page, sel) {
 const BOARD = 'ftp';
 const SETS = ['R', 'D'];
 const HOUR = 3600 * 1000;
+/** `h` hours ago, but never before today's midnight: the card adds the date to an older time (a run at 00:30). */
+const ago = (h) => { const m = new Date(); m.setHours(0, 0, 0, 0); return Math.max(Date.now() - h * HOUR, m.getTime()); };
 function makePads() {
   const pads = [];
   SETS.forEach((set, si) => {
@@ -56,11 +58,11 @@ function makePads() {
   });
   return pads;
 }
-const L = { pads: makePads(), wipedAtMs: Date.now() - 2 * HOUR, check: null, need: null, waiting: null, wipes: [] };
+const L = { pads: makePads(), wipedAtMs: ago(2), check: null, need: null, waiting: null, wipes: [] };
 function mark(ids, o) { for (const p of L.pads) if (ids.includes(p.id)) Object.assign(p, o); }
 const ids = (set, from, to) => { const out = []; for (let n = from; n <= to; n++) out.push(set + n + '.1', set + n + '.2'); return out; };
 // before: R1-R3 and D1-D5 pasted by Process's runs since the wipe, R5.1 carries old solder (survives a wipe)
-mark(ids('R', 1, 3).concat(ids('D', 1, 5)), { state: 'used', atMs: Date.now() - HOUR, by: 'Process', kind: 'dot' });
+mark(ids('R', 1, 3).concat(ids('D', 1, 5)), { state: 'used', atMs: ago(1), by: 'Process', kind: 'dot' });
 mark(['R5.1'], { state: 'fixed', note: 'old solder (survives a wipe)' });
 function summary() {
   const sets = SETS.map((set) => {
@@ -85,7 +87,8 @@ async function stubRoutes(context) {
     if (url.pathname === '/api/status' && method === 'GET') {
       const resp = await route.fetch();
       const body = await resp.json();
-      if (ST.mode === 'empty') body.padLedgers = [];
+      if (ST.mode === 'none') delete body.padLedgers;
+      else if (ST.mode === 'empty') body.padLedgers = [];
       else if (ST.mode === 'two') body.padLedgers = [summary(), tileSummary()];
       if (ST.lock) body.lock = { holder: ST.lock, takenFrom: null };
       return route.fulfill({ response: resp, json: body });
@@ -161,7 +164,7 @@ const card = (page) => page.evaluate(() => {
     await page.waitForFunction(() => window.IL && IL.S && IL.S.status && document.getElementById('cal-testboard'), null, { timeout: 30000 });
 
     // ---- (0) an OpenPnP before BR-76, then one without a ledger yet ------------------------------------------------------
-    await sleep(800);
+    await page.waitForFunction(() => document.getElementById('cal-testboard').hidden, null, { timeout: 8000 }).catch(() => null);
     const c0 = await card(page);
     check('(0) before BR-76 (no padLedgers in the status) the Test board card is hidden', !c0.shown, c0);
     ST.mode = 'empty';
@@ -273,7 +276,7 @@ const card = (page) => page.evaluate(() => {
     const c4e = await card(page);
     check('(4) the tile: "6 of 6 pads clean", no sets, no wipe time, 6 pads drawn', c4e.sum === '6 of 6 pads clean' && c4e.pads === 6, c4e);
     await press2(page, '#btn-tb-wiped');
-    await sleep(800);
+    for (let i = 0; i < 50 && T.wipes < 1; i++) await sleep(100);
     check('(4) Board wiped on the tile goes to the tile, not to the first board', T.wipes === 1 && L.wipes.length === 1, { tile: T.wipes, ftp: L.wipes.length });
     await page.selectOption('#tb-board', 'ftp');
 
@@ -292,6 +295,13 @@ const card = (page) => page.evaluate(() => {
       !!band && band.text.startsWith('Process’s pad calibration waits for clean pads: 10 clean, it needs 24.') && /Wipe the board \(Opulo test board\), then press Board wiped\./.test(band.text)
       && band.fix.includes('board-wiped'), band);
     check('(5) Board wiped can be pressed under the waiting agent\'s lock (no Take control, no STOP)', !!band && band.wipeEnabled, band);
+    const held = await page.evaluate(() => {
+      const b = document.querySelector('#msg-area [data-msg="held"] small');
+      const v = document.querySelector('#cell-lock .cell__v');
+      return { sub: b ? b.textContent : null, cell: v ? v.textContent.replace(/\s+/g, ' ').trim() : null };
+    });
+    check('(5) the agent\'s band and the strip say it waits, and that Board wiped needs no Take control',
+      /^It waits for clean pads: Board wiped \(below\) works without taking control\./.test(held.sub || '') && /^Process · waiting/.test(held.cell || ''), held);
     await shot(page, 'clean-pads-band.png', false);
     L.waiting = null;
     const gone = await page.waitForFunction(() => !document.querySelector('#msg-area [data-msg="pads-wait"]'), null, { timeout: 8000 }).then(() => true, () => false);
