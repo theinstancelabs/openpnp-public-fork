@@ -65,7 +65,17 @@
     const mt = mounted();
     const dose = { v: mt ? IL.tips.dotsWords(mt) : String(tip.dots || '—'), how: mt && mt.dots && mt.dots.source === 'bench' ? 'the bench tests' : 'dots on the test blank, weighed on coupons', until: 'the paste barrel changes' };
     const pads = { v: mt ? IL.tips.typesWords(mt) : '—', how: 'the pad calibration, per pad size', until: 'the dose changes' };
-    return [['lands', 'Where it lands', lands], ['height', 'Height', height], ['pressure', 'Pressure', pressure], ['dose', 'Dose', dose], ['padsizes', 'Pad sizes', pads]];
+    const rows = [['lands', 'Where it lands', lands], ['height', 'Height', height], ['pressure', 'Pressure', pressure], ['dose', 'Dose', dose]];
+    // the paste per pad Calibrate aims for (BR-85): the tip's own, else the one its pads' family shares; Process sets it
+    const da = tip.doseAnchor;
+    if (da) {
+      const of = [da.padType, isNum(da.areaMm2) ? IL.fmt(da.areaMm2, 2) + ' mm²' : null].filter(Boolean);
+      rows.push(['anchor', 'Paste per pad (target)', { v: String(Number(Number(da.massPerPadMg).toFixed(3))) + ' mg per pad' + (of.length ? ' (' + of.join(', ') + ')' : ''),
+        how: da.fromFamily ? (da.source || 'the shared anchor') + ': this tip has no number of its own yet' : (da.source || 'set') + (isNum(da.setAtMs) ? ', ' + t(da.setAtMs) : ''),
+        until: 'this tip is weighed again' }]);
+    }
+    rows.push(['padsizes', 'Pad sizes', pads]);
+    return rows;
   }
 
   // ================================================================================== parts
