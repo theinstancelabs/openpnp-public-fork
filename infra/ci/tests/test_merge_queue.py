@@ -66,9 +66,25 @@ class MergeQueue(unittest.TestCase):
 
     def test_the_queued_job_may_read_the_queue_runs_and_is_bounded(self):
         block = ci_wiring.jobs(self.ci)["queued"]
-        self.assertEqual(ci_wiring.job_map(block, "permissions"), {"contents": "read", "actions": "read  # the commit's "
-                         "merge_group runs and their artifacts"})
+        perms = {k: v.split("#")[0].strip() for k, v in ci_wiring.job_map(block, "permissions").items()}
+        self.assertEqual(perms, {"contents": "read", "actions": "read"})
         self.assertRegex(block, r"\n    timeout-minutes: [1-5]\n")
+        # a stalled API call must answer [] (every test job runs), not time the job out (every test job skipped)
+        step = ci_wiring.step_run(next(s for s in ci_wiring.job_steps(block) if "run:" in s))
+        calls = re.findall(r"(\S+\s+\S+\s+)?\bgh (api|run download)\b", step)
+        self.assertEqual(len(calls), 2, step)
+        for prefix, _ in calls:
+            self.assertRegex(prefix, r"^timeout \d+\s+$")
+
+    def test_the_gate_is_bounded_and_push_runs_build_like_the_queue(self):
+        js = ci_wiring.jobs(self.ci)
+        self.assertRegex(js["gate"], r"\n    timeout-minutes: \d+")  # a hung step would hold the queue's check
+        for name in ("build", "maven"):  # no cache on a push or in the queue: the shipped jar resolves as the tested
+            m = re.search(r"cache: \$\{\{ (.*?) \}\}", js[name])
+            ctx = lambda e: {"github.event_name": e}
+            self.assertEqual(ci_wiring.interpolate("${{ %s }}" % m.group(1), ctx("pull_request")), "maven", name)
+            for event in ("push", "merge_group", "workflow_dispatch"):
+                self.assertEqual(ci_wiring.interpolate("${{ %s }}" % m.group(1), ctx(event)), "", (name, event))
 
     def test_the_build_and_the_queued_job_always_run(self):
         js = ci_wiring.jobs(self.ci)
