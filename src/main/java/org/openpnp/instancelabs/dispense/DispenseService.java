@@ -157,16 +157,37 @@ public final class DispenseService {
     /** BR-02: the driver whose received lines this engine watches (the host watchdog's trip), or null. */
     private volatile GcodeDriver watchedDriver;
     private final java.util.function.Consumer<String> tripWatcher = this::watchForWatchdogTrip;
+    /**
+     * BR-02: writes the journal for the reader thread (a trip heard there): no "ok" behind it, a STOP's included, waits
+     * for an insert.
+     */
+    private final java.util.concurrent.ExecutorService journalWriter = java.util.concurrent.Executors
+            .newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "dispense-journal");
+                t.setDaemon(true);
+                return t;
+            });
+    /**
+     * BR-02: the passthrough's targets per axis letter since the last other motion (OpenPnP's, the engine's, a
+     * connect): a G0/G1 to where an axis already is queues no move. Machine thread.
+     */
+    private final Map<Character, Double> passthroughAt = new java.util.concurrent.ConcurrentHashMap<>();
     /** BR-02: the engine's own moves (the controller's idle clock) and its stop sequence's M18 B. */
     private final DispenseExecutor.ScrewWatch screwWatch = new DispenseExecutor.ScrewWatch() {
         @Override
         public void moved(boolean screw) {
+            passthroughAt.clear(); // the axes are no longer where the passthrough left them
             if (screw) {
                 controllerReset.screwMoved();
             }
             else {
                 controllerReset.axisMoved();
             }
+        }
+
+        @Override
+        public void watchdogArmed() {
+            controllerReset.watchdogArmed();
         }
 
         @Override
@@ -374,6 +395,7 @@ public final class DispenseService {
                 @Override
                 public void machineEnabled(Machine m) {
                     bZeroed.set(false);
+                    passthroughAt.clear(); // BR-02: OpenPnP read where the axes are
                     readPositionAtConnect(m);
                 }
 
@@ -424,6 +446,13 @@ public final class DispenseService {
         GcodeDriver watched = watchedDriver;
         if (watched != null && watched.getReceivedLineWatcher() == tripWatcher) {
             watched.setReceivedLineWatcher(null);
+        }
+        journalWriter.shutdown(); // a trip handed on goes on record before the database closes
+        try {
+            journalWriter.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
         Machine machine = configuration.getMachine();
         if (machine != null && machineListener != null) {
@@ -537,7 +566,7 @@ public final class DispenseService {
     private void journalReset(ControllerReset.Event e) {
         try {
             String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
-                    e.code) ? "INFO" : "WARN";
+                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code) ? "INFO" : "WARN";
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
         catch (SQLException ex) {
@@ -569,7 +598,8 @@ public final class DispenseService {
             }
             for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
                     ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH, ControllerReset.EVENT_MOTOR_OFF,
-                    ControllerReset.EVENT_SCREW_MOTION)) {
+                    ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_WATCHDOG_TRIP,
+                    ControllerReset.EVENT_WATCHDOG_ARMED)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }
@@ -630,8 +660,7 @@ public final class DispenseService {
             return;
         }
         GcodeDriver d = (GcodeDriver) b.getDriver();
-        long sent = d.getDisableCommandsSent();
-        if (disablesSeen.getAndSet(sent) == sent) {
+        if (!advanced(disablesSeen, d.getDisableCommandsSent())) {
             return;
         }
         String line = screwOffLine(d.getCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND), b.getLetter());
@@ -649,11 +678,19 @@ public final class DispenseService {
         if (d == null) {
             return;
         }
-        long sent = d.getMotionCommandsSent();
-        if (motionsSeen.getAndSet(sent) != sent) {
+        if (advanced(motionsSeen, d.getMotionCommandsSent())) {
+            passthroughAt.clear(); // the axes are no longer where the passthrough left them
             controllerReset.axisMoved();
             controllerReset.journalScrewMotion();
         }
+    }
+
+    /**
+     * Whether a driver's count moved on past the one seen (and notes it): a count read late by one of two handlers at
+     * once never takes the seen one back (a second record of it later).
+     */
+    static boolean advanced(AtomicLong seen, long count) {
+        return seen.getAndAccumulate(count, Math::max) < count;
     }
 
     /**
@@ -662,14 +699,20 @@ public final class DispenseService {
      */
     private void watchForWatchdogTrip(String line) {
         if (ControllerCommands.isHostWatchdogTrip(line)) {
-            controllerReset.screwMotorOff("the controller's host watchdog tripped: " + line.trim());
+            String cause = "the controller's host watchdog tripped: " + line.trim();
+            try {
+                journalWriter.execute(() -> controllerReset.watchdogTripped(cause, false)); // never this thread's insert
+            }
+            catch (java.util.concurrent.RejectedExecutionException e) {
+                Logger.warn("dispense: {} after the engine stopped: not on record", cause);
+            }
         }
     }
 
     /**
      * BR-02, at a connect, where M115 names the host watchdog: its M990 report keeps a trip until the next arm, also
-     * one while OpenPnP was gone (no one heard its error). Recorded at every connect it reports one: the same trip
-     * again until an engine run or the pressure hold arms it, never one missed. Without the capability, nothing.
+     * one while OpenPnP was gone (no one heard its error). Recorded once per arm (an engine run or the pressure hold
+     * arms it; a reset ends it). Without the capability, nothing.
      */
     private void readWatchdogTripAtConnect(GcodeChannel ch, List<String> m115) {
         boolean capable = false;
@@ -682,8 +725,9 @@ public final class DispenseService {
         try {
             List<String> report = ch.sendAndCollect(ControllerCommands.KEEPALIVE_PING, cfg.commandTimeoutMs);
             if (ControllerCommands.reportsWatchdogTrip(report)) {
-                controllerReset.screwMotorOff("the controller's host watchdog tripped while no one listened: its "
-                        + "M990 reports it at the connect");
+                // once per arm: it reports the trip until the host arms it again (never, without the keepalive)
+                controllerReset.watchdogTripped("the controller's host watchdog tripped while no one listened: its "
+                        + "M990 reports it at the connect", true);
             }
         }
         catch (Exception e) {
@@ -697,20 +741,65 @@ public final class DispenseService {
      * names the screw or no axis switches its motor off. Call it once the line was sent.
      */
     public void noteControllerLine(String line) {
-        ReferenceControllerAxis b = screwAxis(configuration.getMachine());
+        Machine m = configuration.getMachine();
+        ReferenceControllerAxis b = screwAxis(m);
         String letter = b == null ? null : b.getLetter(); // unknown: only an M18 of every motor counts
         if (ControllerCommands.switchesScrewOff(line, letter)) {
             controllerReset.screwMotorOff("a G-code line: " + ControllerCommands.normalize(line));
         }
-        else if (ControllerCommands.isMove(line)) {
-            if (ControllerCommands.turnsScrew(line, letter)) {
-                controllerReset.screwMoved();
-            }
-            else {
-                controllerReset.axisMoved();
-            }
-            controllerReset.journalScrewMotion();
+        else if (ControllerCommands.armsWatchdog(line)) {
+            controllerReset.watchdogArmed();
         }
+        else if ("G92".equals(ControllerCommands.word(ControllerCommands.normalize(line)))) {
+            passthroughAt.putAll(ControllerCommands.axisWords(line)); // the axes are there now, without a move
+        }
+        else if (ControllerCommands.isMove(line)) {
+            boolean screw = false;
+            boolean moved = "G28".equals(ControllerCommands.word(ControllerCommands.normalize(line)));
+            for (Map.Entry<Character, Double> w : ControllerCommands.axisWords(line).entrySet()) {
+                char axis = w.getKey();
+                boolean isScrew = letter != null && Character.toUpperCase(letter.charAt(0)) == axis;
+                Double at = passthroughAt.containsKey(axis) ? passthroughAt.get(axis) : openPnpAt(m, axis);
+                double step = isScrew ? 0.5 / cfg.bStepsPerDeg : 1e-4; // a change less than a step queues nothing
+                // where the axis was unknown (no such axis): not counted, a line that queued nothing would date late
+                if (at != null && Math.abs(w.getValue() - at) >= step) {
+                    moved = true;
+                    screw = screw || isScrew;
+                }
+                passthroughAt.put(axis, w.getValue());
+            }
+            if (moved) {
+                if (screw) {
+                    controllerReset.screwMoved();
+                }
+                else {
+                    controllerReset.axisMoved();
+                }
+                controllerReset.journalScrewMotion();
+            }
+        }
+    }
+
+    /**
+     * Where OpenPnP has an axis of the screw's driver (driver coordinate, mm or degrees), by its letter; null when no such
+     * axis. OpenPnP's own moves and the resyncs after the engine's streams and the passthrough's batches keep it.
+     */
+    private Double openPnpAt(Machine m, char letter) {
+        GcodeDriver d = screwDriver(m);
+        if (d == null) {
+            return null;
+        }
+        for (org.openpnp.spi.Axis a : m.getAxes()) {
+            if (a instanceof ReferenceControllerAxis && ((ReferenceControllerAxis) a).getDriver() == d) {
+                ReferenceControllerAxis ra = (ReferenceControllerAxis) a;
+                String l = ra.getLetter();
+                if (l != null && !l.isEmpty() && Character.toUpperCase(l.charAt(0)) == letter) {
+                    return ra.getType() == org.openpnp.spi.Axis.Type.Rotation ? ra.getDriverCoordinate()
+                            : ra.getDriverLengthCoordinate().convertToUnits(LengthUnit.Millimeters).getValue();
+                }
+            }
+        }
+        return null;
     }
 
     /** The controller's M115 answer on the current connection. */

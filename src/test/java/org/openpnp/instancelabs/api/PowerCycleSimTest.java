@@ -532,9 +532,64 @@ public class PowerCycleSimTest {
         assertTrue(why.contains("(the controller's host watchdog tripped") && why.contains("M990"), why);
         call("POST", "/api/screw/start-angle", "{}");
         assertEquals(409, lastStatus, lastBody);
+        // the firmware reports it until the host arms the watchdog again (never, without the keepalive): once per arm
+        reconnect();
+        assertEquals(1, motorOffs().size(), "the same trip at the next connect");
+        // the pressure hold arms it: the firmware forgets that trip, so one reported after it is a new one
+        ok("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals("on", ok("POST", "/api/pressure/start", null).get("state").getAsString());
+        ok("POST", "/api/pressure/stop", null);
+        reconnect();
+        assertEquals(2, motorOffs().size(), "a trip reported after an arm is a new one");
         sim.server.watchdogReport = "echo:Host watchdog: off";
         reconnect();
-        assertEquals(1, motorOffs().size(), "no trip reported: nothing new");
+        assertEquals(2, motorOffs().size(), "no trip reported: nothing new");
+    }
+
+    /** BR-02: a trip's journal write holds up no answer of the controller (the reader thread hands it on). */
+    @Test
+    public void aWatchdogTripsJournalWriteHoldsUpNoAnswer() throws Exception {
+        synchronized (svc.getDb()) { // the journal cannot write now (a slow insert)
+            sim.server.say("Error:host watchdog");
+            Thread.sleep(200);
+            sim.machine.execute(() -> {
+                try {
+                    sim.driver.sendCommand("M400", 2000);
+                }
+                catch (Exception e) {
+                    // the trip's error, once
+                }
+                sim.driver.sendCommand("M400", 2000); // its ok is read while the journal waits
+                return null;
+            });
+        }
+        long t0 = System.currentTimeMillis();
+        while (motorOffs().isEmpty() && System.currentTimeMillis() - t0 < 5000) {
+            Thread.sleep(20);
+        }
+        assertEquals(1, motorOffs().size(), String.valueOf(svc.getDb().recentEvents(20)));
+    }
+
+    /**
+     * BR-02: Marlin restarts its idle clock only on a queued move: a G1 that changes nothing (feed only, or to where the
+     * axis is) queues none, so it is no move for the engine either, nor a turn of the screw.
+     */
+    @Test
+    public void aPassthroughLineThatMovesNothingIsNoTurn() throws Exception {
+        liveDisableCommand();
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":118}");
+        Thread.sleep(5);
+        ok("POST", "/api/stop", null);
+        ok("POST", "/api/machine/enable", null);
+        assertEquals(0, sim.server.position('B'), 1e-9, "the home's G92 B0");
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"start angle\"}").get("token")
+                .getAsString();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 F600\",\"G1 B0 F600\",\"M400\"]}");
+        call("POST", "/api/screw/start-angle", "{\"startAngleDeg\":226}");
+        assertEquals(409, lastStatus, "nothing turned: " + lastBody);
+        assertTrue(lastBody.contains("the screw has not turned since"), lastBody);
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 B30 F600\",\"G1 B30 F600\",\"M400\"]}");
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":226}");
     }
 
     /** BR-02: the controller's idle timeout is at most Marlin's 3600 s (a longer one would miss its switch-off). */

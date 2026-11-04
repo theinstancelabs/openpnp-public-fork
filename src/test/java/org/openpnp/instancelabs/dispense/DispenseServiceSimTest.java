@@ -724,6 +724,16 @@ public class DispenseServiceSimTest {
         assertEquals(8, svc.getConfig().purgeRow.usedSpots, "spots reserved before streaming stay used");
     }
 
+    /** BR-02: a count one of two handlers at once read late never takes the seen count back (a phantom later). */
+    @Test
+    public void aSeenCountNeverGoesBack() {
+        java.util.concurrent.atomic.AtomicLong seen = new java.util.concurrent.atomic.AtomicLong(1);
+        assertTrue(DispenseService.advanced(seen, 2), "the other handler's newer count");
+        assertFalse(DispenseService.advanced(seen, 1), "this one read before it: nothing new");
+        assertEquals(2, seen.get());
+        assertFalse(DispenseService.advanced(seen, 2), "the next look at the same count");
+    }
+
     /** The journal's screw motor switch-offs (BR-02). */
     List<java.util.Map<String, Object>> motorOffs() throws Exception {
         return svc.getDb().query("SELECT * FROM events WHERE code = ?", ControllerReset.EVENT_MOTOR_OFF);

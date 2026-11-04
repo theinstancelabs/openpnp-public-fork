@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -151,10 +152,44 @@ public final class ControllerCommands {
         return ("G0".equals(w) || "G1".equals(w)) && names(parameterLetters(s), letter);
     }
 
-    /** BR-02: whether a line queues a move (G0, G1, G28): Marlin restarts its idle clock on every queued move. */
+    /**
+     * BR-02: whether a line may queue a move: a G0 or G1 naming an axis, or G28 (Marlin restarts its idle clock only
+     * while moves are queued: a feed-only G1 queues none). Whether the named axis changes is the caller's to tell (a
+     * G1 to where the axis is queues none either).
+     */
     public static boolean isMove(String line) {
         String w = word(normalize(line));
-        return "G0".equals(w) || "G1".equals(w) || "G28".equals(w);
+        return "G28".equals(w) || ("G0".equals(w) || "G1".equals(w)) && !axisWords(line).isEmpty();
+    }
+
+    /** Marlin's axis letters (the screw is one of them: B on the LumenPnP). */
+    private static final String AXES = "XYZABCUVWIJKE";
+    private static final Pattern AXIS_WORD = Pattern.compile("([A-Z])\\s*(-?(?:\\d+\\.?\\d*|\\.\\d+))");
+
+    /** BR-02: the axis words of a G0, G1 or G92 line, letter to value ({X=10, B=-2.5} for "G1 X10 B-2.5 F600"). */
+    public static Map<Character, Double> axisWords(String line) {
+        Map<Character, Double> p = new java.util.LinkedHashMap<>();
+        String s = normalize(line);
+        String w = word(s);
+        if (!"G0".equals(w) && !"G1".equals(w) && !"G92".equals(w)) {
+            return p;
+        }
+        Matcher m = WORD.matcher(s);
+        if (m.find()) {
+            Matcher a = AXIS_WORD.matcher(s.substring(m.end()));
+            while (a.find()) {
+                if (AXES.indexOf(a.group(1).charAt(0)) >= 0) {
+                    p.put(a.group(1).charAt(0), Double.parseDouble(a.group(2)));
+                }
+            }
+        }
+        return p;
+    }
+
+    /** BR-02: whether a line arms the host watchdog (M990 S with a window): the firmware then forgets a trip. */
+    public static boolean armsWatchdog(String line) {
+        Matcher m = ARM.matcher(normalize(line));
+        return m.matches() && Long.parseLong(m.group(1)) > 0;
     }
 
     /** The il/safety firmware's host watchdog tripping (SERIAL_ERROR_MSG "host watchdog"); not its M990 report. */

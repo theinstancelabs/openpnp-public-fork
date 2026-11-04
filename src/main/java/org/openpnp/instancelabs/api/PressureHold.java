@@ -233,10 +233,15 @@ final class PressureHold implements DispenseListener {
             ka = c.keepaliveEnabled && hasWatchdog(ch, c);
         }
         if (ka) {
-            if (!sendWhileStarting(ch, ControllerCommands.keepaliveArm(c.keepaliveWindowMs), c)) {
+            String arm = ControllerCommands.keepaliveArm(c.keepaliveWindowMs);
+            if (!sendWhileStarting(ch, arm, c)) {
                 return false;
             }
             keepaliveArmed = true;
+            DispenseService engine = ctx.svcOrNull();
+            if (engine != null) {
+                engine.noteControllerLine(arm); // BR-02: an arm makes the firmware forget a host watchdog trip
+            }
             lastPingMs = System.currentTimeMillis();
         }
         if (!sendWhileStarting(ch, ControllerCommands.PUMP_ON, c)) {

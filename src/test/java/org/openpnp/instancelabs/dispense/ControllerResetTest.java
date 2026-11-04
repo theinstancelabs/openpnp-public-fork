@@ -556,6 +556,64 @@ public class ControllerResetTest {
         assertNull(r.whyNoAngle(null));
     }
 
+    /**
+     * The host watchdog's M990 keeps "tripped" until the host arms it again (without the keepalive nothing arms it):
+     * one trip goes on record once, at its first report; an arm, or a reset (the firmware boots without it), ends it.
+     */
+    @Test
+    public void aTripReportedAtEveryConnectIsRecordedOncePerArm() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        assertTrue(r.watchdogTripped("the host watchdog tripped", true));
+        now = 2000;
+        assertFalse(r.watchdogTripped("the host watchdog tripped", true), "the same trip at the next connect");
+        assertFalse(withIdle().watchdogTripped("the host watchdog tripped", true), "and after a restart");
+        assertEquals(Arrays.asList(ControllerReset.EVENT_MOTOR_OFF, ControllerReset.EVENT_WATCHDOG_TRIP), codes());
+        assertEquals(Long.valueOf(1000), r.countEpochMs());
+        now = 3000;
+        r.watchdogArmed(); // a run's M990 S3000: the firmware forgets its trip
+        now = 4000;
+        assertTrue(r.watchdogTripped("the host watchdog tripped", true), "reported after an arm: a new one");
+        assertTrue(r.watchdogTripped("Error:host watchdog", false), "heard as it happened: always new");
+        now = 5000;
+        r.connected(reply(BOOT), 'B', null); // a power cycle: it boots without the trip
+        now = 6000;
+        assertTrue(withIdle().watchdogTripped("the host watchdog tripped", true), "after the reset, read back");
+        assertEquals(Long.valueOf(6000), withIdle().countEpochMs());
+    }
+
+    /**
+     * A journal write runs outside the lock: a status poll writing a switch-off it found must not make the stream's next
+     * move wait for the insert.
+     */
+    @Test
+    public void aJournalWriteNeverHoldsTheStreamsNextMove() throws Exception {
+        java.util.concurrent.CountDownLatch writing = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        ControllerReset r = new ControllerReset(() -> now, false, false, null, e -> {
+            writing.countDown();
+            try {
+                release.await(10, java.util.concurrent.TimeUnit.SECONDS); // a slow insert
+            }
+            catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
+        }, () -> idleMs);
+        now = 1000;
+        r.screwMoved();
+        now = 1000 + 2 * HOUR;
+        Thread poll = new Thread(r::view); // finds the idle switch-off and writes it
+        poll.start();
+        assertTrue(writing.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        long t0 = System.nanoTime();
+        r.screwMoved();
+        r.axisMoved();
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        release.countDown();
+        poll.join(5000);
+        assertTrue(ms < 1000, "the moves waited " + ms + " ms for the journal");
+    }
+
     @Test
     public void theScrewCountEpochMovesOnlyOnAResetOrAnUnreadConnect() {
         ControllerReset r = reset(false, false);

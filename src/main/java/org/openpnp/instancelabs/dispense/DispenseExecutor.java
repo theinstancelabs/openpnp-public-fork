@@ -36,6 +36,9 @@ public class DispenseExecutor {
          */
         void moved(boolean screw);
 
+        /** The host watchdog was armed (M990 S, acknowledged): the firmware forgets a trip it kept. No I/O. */
+        void watchdogArmed();
+
         /**
          * The I1 shutdown sent a line that switches the screw's motor off (its M18), after the whole sequence;
          * {@code acknowledged} false: its send failed, yet it may have reached the controller.
@@ -70,11 +73,20 @@ public class DispenseExecutor {
         return this;
     }
 
-    /** BR-02: an acknowledged move restarts the controller's idle clock (a screw move also switches it on). */
+    /**
+     * BR-02: an acknowledged move restarts the controller's idle clock (a screw move also switches it on; the builder
+     * sends no line that moves nothing), an arm of the host watchdog ends a trip it kept.
+     */
     private void noteScrewMove(String line) {
         ScrewWatch w = screwWatch;
-        if (w != null && ControllerCommands.isMove(line)) {
+        if (w == null) {
+            return;
+        }
+        if (ControllerCommands.isMove(line)) {
             w.moved(ControllerCommands.turnsScrew(line, letterB));
+        }
+        else if (ControllerCommands.armsWatchdog(line)) {
+            w.watchdogArmed();
         }
     }
 

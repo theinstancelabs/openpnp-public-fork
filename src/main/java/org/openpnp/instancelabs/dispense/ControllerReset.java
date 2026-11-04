@@ -43,12 +43,21 @@ import java.util.regex.Pattern;
  * its phase, and I11 wants the angle measured again (no confirm). The motor goes off at a STOP whose DISABLE_COMMAND
  * sends M18 B, at the engine's own stop sequence (its M18 B), and when the controller's idle timeout passes without a
  * move (Marlin's DEFAULT_STEPPER_DEACTIVE_TIME): that one is dated at the last move the engine knows of plus the
- * timeout, found when the state is next read, and journaled once. Marlin restarts its idle clock on every queued move,
- * of any axis, and a screw move switches the motor on again: so does this clock (the engine's streams, the API's G-code
- * passthrough, OpenPnP's own moves and homes), counting from a move's acknowledgement (it runs on after it, a few
- * seconds early at most). A move it did not hear of would date the switch-off too early, and an angle measured between
- * that date and the real switch-off would look valid. The last move is journaled now and then
- * ({@link #EVENT_SCREW_MOTION}), so the idle clock outlives a restart that left the motor on.</p>
+ * timeout, found when the state is next read, and journaled once. Marlin restarts its idle clock only while a move is
+ * queued, of any axis, and a screw move switches the motor on again: so does this clock (the engine's streams, the
+ * API's G-code passthrough, OpenPnP's own moves and homes), counting from a move's acknowledgement. Counting a line
+ * that queued nothing (a feed-only G1, a G1 to where the axis is) would date the switch-off late, and the runs between
+ * the real switch-off and that date would use a lost angle: so only lines that move an axis count. A move it did not
+ * hear of dates it early: the angle is asked for sooner (and a set then needs a turn, which restarts both clocks). The
+ * last move is journaled now and then ({@link #EVENT_SCREW_MOTION}), so the idle clock outlives a restart that left
+ * the motor on.</p>
+ *
+ * <p>The il/safety firmware's host watchdog switches the screw's driver off when it trips, and its M990 report keeps
+ * the trip until the host arms it again (never, without the keepalive): a reported trip goes on record once per arm
+ * ({@link #EVENT_WATCHDOG_TRIP}, {@link #EVENT_WATCHDOG_ARMED}); a reset ends it too (the firmware boots without it).</p>
+ *
+ * <p>Journal writes happen after the lock is released, one writer at a time, in the order the changes were made: a
+ * status poll writing a switch-off never makes the stream's next move wait for the insert.</p>
  *
  * <p>After a switch-off or a reset a start angle can only be set once the screw has turned since (the dot pair that
  * measures it turns it; {@link #whyNoAngle}): the angle shown before it, one click away, would otherwise clear I11.</p>
@@ -87,6 +96,10 @@ public final class ControllerReset {
      * only brings the idle switch-off sooner.
      */
     public static final long MOTION_JOURNAL_MS = 10 * 60_000L;
+    /** The host watchdog tripped: on record until it is armed again (its M990 report keeps the trip until then). */
+    public static final String EVENT_WATCHDOG_TRIP = "HOST_WATCHDOG_TRIP";
+    /** The host watchdog was armed again after a trip on record: the firmware forgot the trip. */
+    public static final String EVENT_WATCHDOG_ARMED = "HOST_WATCHDOG_ARMED";
     private static final double TOL = 1e-3;
     private static final Pattern WORD = Pattern.compile("(?:^|\\s)([A-Z]):(-?\\d+(?:\\.\\d+)?)");
 
@@ -121,8 +134,12 @@ public final class ControllerReset {
     private Long screwTurnedAtMs;
     /** The last move put on record, or null: the next move goes on record at once. */
     private Long journaledMoveMs;
-    /** Switch-offs found between a stream's lines: journaled by the next call that may write (never a line's). */
-    private final List<Event> pending = new ArrayList<>();
+    /** A host watchdog trip on record that no arm or reset has ended since (its M990 still reports it), or null. */
+    private Long watchdogTripAtMs;
+    /** The changes made and not written yet (under this lock), in their order. */
+    private final List<Event> toWrite = new ArrayList<>();
+    /** One journal writer at a time, outside this lock (a stream's move never waits for an insert). */
+    private final Object writeLock = new Object();
 
     /** Without a journal: nothing outlives this engine (tests). */
     public ControllerReset(LongSupplier clock, boolean enabledAtStart, boolean homedAtStart) {
@@ -149,8 +166,16 @@ public final class ControllerReset {
         this.journal = journal;
         this.idleOffMs = idleOffMs;
         positionKnown = true;
+        Long tripAt = null, tripEndedAt = null;
         for (Event e : history == null ? Collections.<Event> emptyList() : history) {
+            if (EVENT_WATCHDOG_TRIP.equals(e.code)) {
+                tripAt = e.atMs;
+            }
+            else if (EVENT_WATCHDOG_ARMED.equals(e.code) || EVENT_UNREAD.equals(e.code)) {
+                tripEndedAt = later(tripEndedAt, e.atMs); // armed, or maybe a reset: the firmware forgot it
+            }
             if (EVENT_RESET.equals(e.code)) {
+                tripEndedAt = later(tripEndedAt, e.atMs); // it boots without the trip
                 detectedAtMs = e.atMs; // what it reported is not journaled: reported stays null
                 unknown(e.message, e.atMs);
                 stopIdleClock(e.atMs); // the controller boots with its motors off
@@ -178,6 +203,7 @@ public final class ControllerReset {
                 unknownWhy = null;
             }
         }
+        watchdogTripAt(tripAt, tripEndedAt);
         if (!positionKnown) {
             unknownWhy += "; no home has followed (OpenPnP restarted meanwhile)";
         }
@@ -242,7 +268,14 @@ public final class ControllerReset {
      * Right after a connect: the controller's M114 reply, or null with {@code readError} when it could not be read. A
      * reply without a position counts as unread.
      */
-    public synchronized void connected(List<String> m114, char letterB, String readError) {
+    public void connected(List<String> m114, char letterB, String readError) {
+        synchronized (this) {
+            connectedLocked(m114, letterB, readError);
+        }
+        writeOut();
+    }
+
+    private void connectedLocked(List<String> m114, char letterB, String readError) {
         long now = clock.getAsLong();
         Map<Character, Double> p = parsePosition(m114);
         detected = !p.isEmpty() && isBootPosition(p, letterB);
@@ -250,6 +283,7 @@ public final class ControllerReset {
             unknown("the controller's position could not be read at connect ("
                     + (readError != null ? readError : "no position in its M114 reply")
                     + "), so it may have been reset", now);
+            watchdogTripAtMs = null; // maybe a reset: a trip reported now is a new one
             record(EVENT_UNREAD, now, unknownWhy);
             return;
         }
@@ -269,6 +303,7 @@ public final class ControllerReset {
             unknown(String.format(Locale.ROOT, "the controller was reset (a power cycle: at connect it reported "
                     + "X 0, Y 0, Z 0 and %s), so the head may be anywhere", rot), now);
             stopIdleClock(now); // it boots with its motors off: the count's epoch covers the screw
+            watchdogTripAtMs = null; // and without a host watchdog trip
             record(EVENT_RESET, now, unknownWhy);
         }
     }
@@ -277,12 +312,58 @@ public final class ControllerReset {
      * The screw's motor was switched off now: an M18 that names it (a STOP's DISABLE_COMMAND, the engine's stop
      * sequence). Journaled; dates the screw count. {@code cause} in plain words ("a STOP: ...").
      */
-    public synchronized void screwMotorOff(String cause) {
-        long now = clock.getAsLong();
-        idleCheck(now, false); // an idle switch-off before it goes on record first
-        Event e = new Event(EVENT_MOTOR_OFF, now, offText(now, cause));
-        switchedOff(e);
-        record(e.code, e.atMs, e.message);
+    public void screwMotorOff(String cause) {
+        synchronized (this) {
+            long now = clock.getAsLong();
+            idleCheck(now); // an idle switch-off before it goes on record first
+            Event e = new Event(EVENT_MOTOR_OFF, now, offText(now, cause));
+            switchedOff(e);
+            toWrite.add(e);
+        }
+        writeOut();
+    }
+
+    /**
+     * The il/safety firmware's host watchdog tripped: it switched the screw's driver off ({@code cause} in plain words).
+     * {@code reported}: its M990 report at a connect, which keeps a trip until the host arms it again: one already on
+     * record (no arm or reset since) is that trip, not another (false; nothing recorded). Heard as it happened (its
+     * error), it is always a new one.
+     */
+    public boolean watchdogTripped(String cause, boolean reported) {
+        boolean recorded;
+        synchronized (this) {
+            recorded = !reported || watchdogTripAtMs == null;
+            if (recorded) {
+                long now = clock.getAsLong();
+                idleCheck(now);
+                Event e = new Event(EVENT_MOTOR_OFF, now, offText(now, cause));
+                switchedOff(e);
+                toWrite.add(e);
+                watchdogTripAtMs = now;
+                record(EVENT_WATCHDOG_TRIP, now, "the host watchdog tripped at " + ZCheck.clock(now) + ": its M990 "
+                        + "reports it until the host arms it again");
+            }
+        }
+        writeOut();
+        return recorded;
+    }
+
+    /**
+     * The engine armed the host watchdog (M990 S: a run, the pressure hold): the firmware forgets its trip, so one it
+     * reports later is a new one. No I/O (a stream's line): written by the next call that writes.
+     */
+    public synchronized void watchdogArmed() {
+        if (watchdogTripAtMs != null) {
+            watchdogTripAtMs = null;
+            long now = clock.getAsLong();
+            record(EVENT_WATCHDOG_ARMED, now, "the host watchdog was armed again at " + ZCheck.clock(now) + ": the "
+                    + "firmware forgot its trip");
+        }
+    }
+
+    /** A trip read back is still on record when no arm or reset (or unread connect) came after it. */
+    private void watchdogTripAt(Long tripAt, Long endedAt) {
+        watchdogTripAtMs = tripAt != null && (endedAt == null || tripAt > endedAt) ? tripAt : null;
     }
 
     /**
@@ -291,7 +372,7 @@ public final class ControllerReset {
      */
     public synchronized void screwMoved() {
         long now = clock.getAsLong();
-        idleCheck(now, true);
+        idleCheck(now);
         lastMoveMs = now;
         screwTurnedAtMs = now;
     }
@@ -302,7 +383,7 @@ public final class ControllerReset {
      */
     public synchronized void axisMoved() {
         long now = clock.getAsLong();
-        idleCheck(now, true);
+        idleCheck(now);
         if (lastMoveMs != null) {
             lastMoveMs = now;
         }
@@ -313,9 +394,17 @@ public final class ControllerReset {
      * a reset: it boots off) the screw must have turned since (a dot pair measures the angle), and evidence the
      * request dates ({@code measuredAtMs}, null = none) must be from after it.
      */
-    public synchronized String whyNoAngle(Long measuredAtMs) {
-        flush();
-        idleCheck(clock.getAsLong(), false);
+    public String whyNoAngle(Long measuredAtMs) {
+        String why;
+        synchronized (this) {
+            idleCheck(clock.getAsLong());
+            why = whyNoAngleLocked(measuredAtMs);
+        }
+        writeOut();
+        return why;
+    }
+
+    private String whyNoAngleLocked(Long measuredAtMs) {
         Long offAt = motorOff == null ? detectedAtMs : later(detectedAtMs, motorOff.atMs);
         if (offAt == null) {
             return null;
@@ -338,21 +427,27 @@ public final class ControllerReset {
      * once): an OpenPnP restart that left the motor on then keeps the controller's idle clock. Called after a stream
      * (never during one: a journal write between two lines would hold the needle at a dot).
      */
-    public synchronized void journalScrewMotion() {
-        flush();
-        Long last = lastMoveMs;
-        if (last == null || (journaledMoveMs != null && last - journaledMoveMs < MOTION_JOURNAL_MS)) {
-            return;
+    public void journalScrewMotion() {
+        synchronized (this) {
+            Long last = lastMoveMs;
+            if (last != null && (journaledMoveMs == null || last - journaledMoveMs >= MOTION_JOURNAL_MS)) {
+                journaledMoveMs = last;
+                record(EVENT_SCREW_MOTION, last, "a move at " + ZCheck.clock(last) + " with the screw's motor on"
+                        + idleNote());
+            }
         }
-        journaledMoveMs = last;
-        record(EVENT_SCREW_MOTION, last, "a move at " + ZCheck.clock(last) + " with the screw's motor on" + idleNote());
+        writeOut(); // also what a stream's moves found
     }
 
     /** The last switch-off of the screw's motor (atMs and the reason in plain words), or null: none on record. */
-    public synchronized Event lastScrewMotorOff() {
-        flush();
-        idleCheck(clock.getAsLong(), false);
-        return motorOff;
+    public Event lastScrewMotorOff() {
+        Event e;
+        synchronized (this) {
+            idleCheck(clock.getAsLong());
+            e = motorOff;
+        }
+        writeOut();
+        return e;
     }
 
     /** ": the controller switches it off after 60 min without one", or "" without a timeout. */
@@ -374,10 +469,10 @@ public final class ControllerReset {
 
     /**
      * The controller's idle timeout passed since the last move: it switched the motor off then. Journaled once (the
-     * idle clock stops with it), dated at the last move plus the timeout; {@code defer}: later, by the next call that
-     * may write (a stream's line must not wait for the journal).
+     * idle clock stops with it), dated at the last move plus the timeout, by the next call that writes (never a
+     * stream's line).
      */
-    private void idleCheck(long now, boolean defer) {
+    private void idleCheck(long now) {
         Long t = idleOffMs == null ? null : idleOffMs.getAsLong();
         if (lastMoveMs == null || t == null || t <= 0 || now - lastMoveMs < t) {
             return;
@@ -386,23 +481,28 @@ public final class ControllerReset {
         Event e = new Event(EVENT_MOTOR_OFF, at, offText(at, "the controller's idle timeout: no move for "
                 + duration(t)));
         switchedOff(e);
-        if (defer) {
-            pending.add(e);
-        }
-        else {
-            record(e.code, e.atMs, e.message);
-        }
+        toWrite.add(e);
     }
 
-    /** Journals the switch-offs found between a stream's lines, in their order. */
-    private void flush() {
-        if (pending.isEmpty()) {
-            return;
-        }
-        List<Event> l = new ArrayList<>(pending);
-        pending.clear();
-        for (Event e : l) {
-            write(e);
+    /**
+     * Writes the changes made so far, outside this lock and in their order: one writer at a time drains them all, so a
+     * later writer finds the earlier changes written.
+     */
+    private void writeOut() {
+        synchronized (writeLock) {
+            List<Event> l;
+            synchronized (this) {
+                if (toWrite.isEmpty()) {
+                    return;
+                }
+                l = new ArrayList<>(toWrite);
+                toWrite.clear();
+            }
+            if (journal != null) {
+                for (Event e : l) {
+                    journal.accept(e);
+                }
+            }
         }
     }
 
@@ -426,12 +526,15 @@ public final class ControllerReset {
     }
 
     /** A home succeeded (the engine's, the API's or OpenPnP's own): the position is known. */
-    public synchronized void homed() {
-        if (!positionKnown) {
-            record(EVENT_KNOWN, clock.getAsLong(), "homed: the position is known again");
+    public void homed() {
+        synchronized (this) {
+            if (!positionKnown) {
+                record(EVENT_KNOWN, clock.getAsLong(), "homed: the position is known again");
+            }
+            positionKnown = true;
+            unknownWhy = null;
         }
-        positionKnown = true;
-        unknownWhy = null;
+        writeOut();
     }
 
     public synchronized boolean isPositionKnown() {
@@ -465,9 +568,17 @@ public final class ControllerReset {
      * The status's view, read at once: positionKnown, positionUnknownWhy, powerCycle {detected, atMs, reported} and
      * screwMotorOff {atMs, why} (field by field, a home in between could show an unknown position without its reason).
      */
-    public synchronized Map<String, Object> view() {
-        flush();
-        idleCheck(clock.getAsLong(), false);
+    public Map<String, Object> view() {
+        Map<String, Object> v;
+        synchronized (this) {
+            idleCheck(clock.getAsLong());
+            v = viewLocked();
+        }
+        writeOut();
+        return v;
+    }
+
+    private Map<String, Object> viewLocked() {
         Map<String, Object> pc = new LinkedHashMap<>();
         pc.put("detected", detected);
         pc.put("atMs", detectedAtMs);
@@ -488,10 +599,14 @@ public final class ControllerReset {
      * connect whose position could not be read, or the screw's motor switched off (it may have turned); null if none
      * was seen.
      */
-    public synchronized Long countEpochMs() {
-        flush();
-        idleCheck(clock.getAsLong(), false);
-        return countEpochMs;
+    public Long countEpochMs() {
+        Long epoch;
+        synchronized (this) {
+            idleCheck(clock.getAsLong());
+            epoch = countEpochMs;
+        }
+        writeOut();
+        return epoch;
     }
 
     private static Long later(Long a, long b) {
@@ -505,15 +620,8 @@ public final class ControllerReset {
         countEpochMs = later(countEpochMs, atMs);
     }
 
-    /** Journals a change; the switch-offs found between a stream's lines go first (they came before it). */
+    /** A change to journal: written after the lock is released, after the changes made before it. */
     private void record(String code, long atMs, String message) {
-        flush();
-        write(new Event(code, atMs, message));
-    }
-
-    private void write(Event e) {
-        if (journal != null) {
-            journal.accept(e);
-        }
+        toWrite.add(new Event(code, atMs, message));
     }
 }

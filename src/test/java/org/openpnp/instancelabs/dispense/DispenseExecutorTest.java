@@ -346,6 +346,7 @@ public class DispenseExecutorTest {
         /** Per acknowledged move: true when it turned the screw. */
         final List<Boolean> moved = new ArrayList<>();
         final List<String> off = new ArrayList<>();
+        int armed;
         final FakeChannel ch;
 
         Watch(FakeChannel ch) {
@@ -355,6 +356,11 @@ public class DispenseExecutorTest {
         @Override
         public void moved(boolean screw) {
             moved.add(screw);
+        }
+
+        @Override
+        public void watchdogArmed() {
+            armed++;
         }
 
         @Override
@@ -382,6 +388,10 @@ public class DispenseExecutorTest {
         assertEquals(bMoves, w.moved.stream().filter(b -> b).count(), "one per G1 B line");
         assertEquals(others, w.moved.stream().filter(b -> !b).count(), "one per X/Y/Z move");
         assertEquals(new ArrayList<String>(), w.off);
+        assertEquals(0, w.armed, "no keepalive: the watchdog stays as it was");
+        Watch k = new Watch(ch);
+        new DispenseExecutor(c, ch, "B", () -> ch.now).watchScrew(k).stream(program(c, true), run(3), null);
+        assertEquals(1, k.armed, "M990 S3000: the firmware forgets a trip it kept");
     }
 
     /** BR-02: the I1 shutdown's M18 B switches the screw's motor off: heard also when its send failed. */
@@ -428,9 +438,19 @@ public class DispenseExecutorTest {
         for (String l : new String[] {"G0 X1", "G1 Z10 F600", "g1 b3", "G28", "G28 X Y"}) {
             assertTrue(ControllerCommands.isMove(l), l);
         }
-        for (String l : new String[] {"G92 X0", "G4 P100", "M400", "M18 B", "G280", ""}) {
-            assertFalse(ControllerCommands.isMove(l), l);
+        for (String l : new String[] {"G92 X0", "G4 P100", "M400", "M18 B", "G280", "", "G1 F600", "G0"}) {
+            assertFalse(ControllerCommands.isMove(l), l + ": names no axis, queues no move");
         }
+        java.util.Map<Character, Double> w = ControllerCommands.axisWords("G1 X10 B-2.5 F600 ; to the waste");
+        assertEquals(2, w.size(), w.toString());
+        assertEquals(10, w.get('X'), 1e-9);
+        assertEquals(-2.5, w.get('B'), 1e-9);
+        assertTrue(ControllerCommands.axisWords("G1 F600").isEmpty());
+        assertEquals(0, ControllerCommands.axisWords("G92 B0").get('B'), 1e-9);
+        assertTrue(ControllerCommands.armsWatchdog("M990 S3000"));
+        assertFalse(ControllerCommands.armsWatchdog("M990 S0"), "a disarm keeps the trip");
+        assertFalse(ControllerCommands.armsWatchdog("M990"), "the report");
+        assertFalse(ControllerCommands.armsWatchdog("M99 S3000"));
     }
 
     /**
