@@ -465,9 +465,27 @@ public class SimPasteTest {
         n.dot(phase[0] + s.paste.n2OffsetMm[0], phase[1] + s.paste.n2OffsetMm[1], COUPON_Z, 1324);
         assertEquals(1, p.deposits(null).size(), "the phase dot on the purge row is laid");
         assertEquals(0, p.unmodelledContacts());
+        n.dot(phase[0] + s.paste.n2OffsetMm[0], phase[1] + s.paste.n2OffsetMm[1], COUPON_Z, 800);
+        assertEquals(1, p.deposits(null).size(), "a second sub-turn contact there, the same session: not the phase dot");
+        assertEquals(1, p.unmodelledContacts());
         double[] t = a.testDot;
         n.dot(t[0] + s.paste.n2OffsetMm[0], t[1] + s.paste.n2OffsetMm[1], s.contactZ(SimScene.Region.BED, 200, 100), 400);
         assertEquals(1, p.deposits(null).size(), "a quarter-turn test dot lays nothing");
+        assertEquals(2, p.unmodelledContacts());
+    }
+
+    /** Review round 6: a purge spot that cannot be told from the I9 test dot: the measured reading wins, as at offset 0. */
+    @Test
+    public void aTestDotNextToAPurgeSpotIsStillMeasured() {
+        SimScene s = exact();
+        s.paste.wholeTurnsOnly = true;
+        SimPaste p = paste(s);
+        p.engineAims(() -> new SimPaste.EngineAims(raw(s, 202, 100), java.util.Collections.singletonList(raw(s, 202.5,
+                100))));
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.dot(202, 100, s.contactZ(SimScene.Region.BED, 202, 100), 400); // the session's first contact: the test dot
+        assertTrue(p.deposits(null).isEmpty(), "a quarter-turn test dot lays nothing");
         assertEquals(1, p.unmodelledContacts());
     }
 

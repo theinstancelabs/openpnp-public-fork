@@ -864,13 +864,14 @@ public final class SimPaste {
         if (a == null) {
             return r != SimScene.Region.BED && !(sessionDot == 0 && r == SimScene.Region.BLANK);
         }
+        if (r == SimScene.Region.BED && a.testDot != null
+                && Math.hypot(dotX - a.testDot[0], dotY - a.testDot[1]) <= a.testDotRadius) {
+            return true; // the I9 test dot, even beside a purge spot: the measured reading wins
+        }
         if (sessionDot == 0 && a.purge.stream().anyMatch(t -> Math.hypot(dotX - t[0], dotY - t[1]) <= AIM_RADIUS_MM)) {
             return false;
         }
-        if (r == SimScene.Region.BED) {
-            return a.testDot != null && Math.hypot(dotX - a.testDot[0], dotY - a.testDot[1]) <= a.testDotRadius;
-        }
-        return true;
+        return r != SimScene.Region.BED;
     }
 
     static boolean wholeTurns(long net) {
