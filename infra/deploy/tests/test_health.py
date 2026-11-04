@@ -102,6 +102,21 @@ class Health(HealthLab, unittest.TestCase):
         self.fake.enable()
         rep = self.check()
         self.assertTrue(rep["ok"], rep)
+        posts = self.posts()
+        self.assertEqual(posts[0], ("POST", "/api/stop/planned"), "BR-75: planned, as every stop of the check's own")
+        self.assertNotIn(("POST", "/api/stop"), posts)
+        self.assertEqual([r for r in self.lab.requests() if "screw" in r], [], "no M18 B")
+
+    def test_an_enabled_machine_whose_lock_is_taken_is_left_alone(self):
+        """Someone starts the machine (and so holds the lock) just before the check reads it: their session, never
+        the build's fault, no STOP."""
+        self.start(jar_fail=["lock-at-planned-stop"])
+        self.fake.enable()
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["kind"], "claim-lost", rep)
+        self.assertTrue(rep["failure"].startswith("enable: "), rep["failure"])
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
 
     def test_link_kept_open_since_an_earlier_enable(self):
         """connection-keep-alive (the lab machine.xml): a STOP leaves the link open, so the next enable logs no

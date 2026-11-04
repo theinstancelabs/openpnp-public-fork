@@ -256,8 +256,9 @@ Exit codes:
   deploy time too. `--version TAG` overrides only the bad list, never eligibility.
 - Never while someone holds the machine. Any doubt counts as held: a missing or doubled Holder line, `none`,
   `free`, `Nobody?`, bold markers, a `wants` note.
-- Never STOPs during a home: a STOP inside G28 hangs the controller until a power cycle. One rule for every
-  STOP (deploys, the exception path, the unit's ExecStop, the test service manager):
+- Never STOPs during a home: a STOP inside G28 hangs the controller until a power cycle. One rule for every real
+  STOP (failures, the exception path, the unit's ExecStop, the test service manager, a stop where no planned stop can be
+  used); a planned stop is refused by OpenPnP itself while anything works, a home included:
   - `machine.homing` true (BR-44: from the start of any home, the web's, the engine's or OpenPnP's own Home button,
     until it ends; `ReferenceMachine.isHoming`): wait, whatever else the status shows (an engine run past its home
     phase, the pressure held: OpenPnP's Home button does not check the web's pressure hold, and the valve-off lines
@@ -277,16 +278,23 @@ Exit codes:
   - OpenPnP not answering at all (connection refused): nothing to stop.
 - Never homes a controller that shows the power-cycle signature. It reports `controller was reset; a person
   must check the machine` and sets the hold.
-- **The deployer's own stops are planned (BR-75):** before the switch, the health check's last stop and its stop of a
-  machine left enabled use `POST /api/stop/planned`: OpenPnP's STOP without the screw's motor-off line (`M18 B`), so
-  the screw keeps its timing through a deploy; with the machine already off it closes a link kept open, on which
-  OpenPnP's quit would send `M18 B`. Its confirm is a STOP's (below); the unit's ExecStop then finds the machine
-  stopped and sends nothing. A refusal is never answered with a real STOP: `409 refused` (something works) is asked
-  again for `--stop-timeout`, then the deploy or rollback ends `not idle` (exit 3, nothing changed, no hold: a
-  later run deploys); `409 locked` (someone has the machine lock) ends it so at once. In the health check, after its
-  own home, a refusal fails the `stop` step as a machine problem (the lock: as someone else's session). A build
-  before BR-75 (404 `no such endpoint`) is stopped by `POST /api/stop` as before: the first deploy over one, and a
-  rollback to one. Failures and the exception path STOP for real (the rule below), as does the unit's ExecStop.
+- **The deployer's own stops are planned (BR-75):** the health check's last stop, its stop of a machine left enabled
+  and the stop before the switch use `POST /api/stop/planned`: OpenPnP's STOP without the screw's motor-off line
+  (`M18 B`), so the screw keeps its timing through a deploy; it also closes the controller link. It is confirmed as a
+  STOP (below); a 200 whose lines went unanswered (`linesFailed`: the valve or pump may be on) is a failure.
+  - Before the switch the machine is off already (the idle check), so neither stop sends a line; the planned one
+    guards the race of someone pressing Start after the idle check: `409 locked`, nothing sent, instead of a STOP on
+    their session. The unit's ExecStop then finds the machine stopped and sends nothing; SIGTERM sends nothing either.
+  - A refusal is never answered with a real STOP before the switch. `409 locked` ends the deploy or rollback at once,
+    `409 refused` (something works) is asked again every 5 s for `--stop-timeout`, then it ends: exit 3 `not idle`,
+    nothing changed, no hold, a later run deploys. A refusal while `/api/status` shows the machine already stopped is
+    nothing to stop: #41 refuses without its engine (a failed engine start) or a machine before it looks.
+  - In the health check (OpenPnP it just started, and homed) a refusal fails the step: the lock as someone else's
+    session (`claim-lost`, left alone, as before), anything else as a machine problem, which the deploy's failure path
+    handles like any other (its STOP if safe, the previous build back unchecked, the hold).
+  - No planned stop to use (a build before BR-75: 404 `no such endpoint`; the API not answering): the stop as before
+    BR-75 decides. That is the first deploy over an older build, and a rollback to one. Failures and the exception path
+    STOP for real, as does the unit's ExecStop (`stop-openpnp`).
 - Always a stop through the API before stopping the process. SIGTERM saves nothing and sends no Stop, and the
   outputs keep their state. A STOP is confirmed only when `/api/status` shows the machine disabled, the dispense
   engine idle and the pressure hold off: `MachineEndpoints.stop` disables the machine, but the engine's abort sends

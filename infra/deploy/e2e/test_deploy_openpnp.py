@@ -739,7 +739,8 @@ class DeployRealOpenPnP(unittest.TestCase):
             after = [line for i, line in lines if i > ok and (k + 1 == len(homes) or i < homes[k + 1])]
             self.assertTrue(any(after[i:i + len(PLANNED_LINES)] == PLANNED_LINES for i in range(len(after))),
                             "no planned stop %s after G28 #%d: %s" % (PLANNED_LINES, k + 1, after))
-        self.assertNotIn("M18 B", [line for _, line in lines], "a STOP switched the screw's motor off")
+        self.assertEqual([line for _, line in lines if line.split(" ")[0] in ("M18", "M84")], [],
+                         "a motor switched off (the screw's: M18 B)")
         st = self.sim.state()
         self.assertFalse(st["halted"], st.get("halt_reason"))
         self.assertEqual(st["sim_errors"], [])

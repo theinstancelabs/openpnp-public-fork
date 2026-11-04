@@ -309,15 +309,18 @@ class PlannedApi(StubApi):
     """StubApi with BR-75's POST /api/stop/planned, answering planned(n) (n: its count); only a 200 stops the machine.
     calls: every POST in order."""
 
-    def __init__(self, planned, after_stop=None):
-        super().__init__(lambda n: status(), after_stop)
+    def __init__(self, planned, after_stop=None, st=None):
+        super().__init__(st or (lambda n: status()), after_stop)
         self.planned, self.calls = planned, []
 
     def post(self, path, body=None, timeout=10):
         self.calls.append(path)
         if path != "/api/stop/planned":
             return super().post(path, body, timeout)
-        code, answer = self.planned(self.calls.count(path))
+        r = self.planned(self.calls.count(path))
+        if isinstance(r, BaseException):
+            raise r
+        code, answer = r
         if code == 200:
             super().post(path, body, timeout)
         return code, answer
@@ -394,6 +397,39 @@ class PlannedStop(unittest.TestCase):
         api = PlannedApi(lambda n: REFUSED)
         self.deployer(api).planned_stop()
         self.assertEqual(len(api.calls), 3, "at 0, 5 and 10 s of the 10 s wait")
+
+    def test_a_refusal_with_the_machine_already_stopped_is_nothing_to_stop(self):
+        """#41 refuses without its engine (a failed start) or a machine, before it looks whether the machine is off: a
+        stopped machine needs no stop, so the deploy goes on (a STOP of it sends nothing either)."""
+        off = 200, {"machine": {"busy": False, "enabled": False}, "run": None, "pressure": {"on": False, "state": "off"},
+                    "dispense": {"busy": False}}
+        api = PlannedApi(lambda n: (409, {"error": "refused", "reason": "No planned stop: the dispense engine is not "
+                                                                         "running. The real STOP is POST /api/stop"}),
+                         st=lambda n: off)
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIs(ok, True, detail)
+        self.assertTrue(detail.startswith(il_deploy.STOP_DONE), detail)
+        self.assertIn("the dispense engine is not running", detail)
+        self.assertEqual(api.calls, ["/api/stop/planned"])
+
+    def test_lines_without_an_ok_are_a_failure(self):
+        """The valve or pump off line unanswered: the outputs are not known to be off."""
+        api = PlannedApi(lambda n: (200, dict(PLANNED_OK[1], linesSent=["M410"], linesFailed=["M107 P3"])))
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIs(ok, False)
+        self.assertIn("M107 P3", detail)
+
+    def test_an_api_that_does_not_answer_is_left_to_the_old_stop(self):
+        """As before BR-75: stop_sequence decides (connection refused: nothing to stop; no real STOP sent)."""
+        down = il_deploy.ApiDown("connection refused")
+        api = PlannedApi(lambda n: down, st=lambda n: down)
+        self.assertEqual(self.deployer(api).planned_stop()[0], True)
+        self.assertEqual(api.calls, ["/api/stop/planned"])
+
+    def test_a_404_without_a_reason_is_not_an_old_build(self):
+        api = PlannedApi(lambda n: (404, {"error": "not-found", "reason": None}))
+        self.assertIs(self.deployer(api).planned_stop()[0], False)
+        self.assertEqual(api.calls, ["/api/stop/planned"])
 
     def test_a_deploy_that_gets_no_planned_stop_changes_nothing(self):
         for answer in (LOCKED, REFUSED):

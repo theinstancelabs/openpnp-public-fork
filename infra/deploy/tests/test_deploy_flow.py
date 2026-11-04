@@ -372,16 +372,19 @@ class Flow(unittest.TestCase):
         self.assertEqual(posts[:2], ["/api/stop/planned", "/api/stop"], "the old build answers 404: its STOP")
         self.assertEqual(posts[-1], "/api/stop/planned", "the new build's health check")
 
-    def assert_no_planned_stop_no_deploy(self, **machine):
+    def assert_no_planned_stop_no_deploy(self, started=False, **machine):
         """No planned stop before the switch: nothing sent, nothing changed, nothing for a person to check; a later
-        run deploys."""
+        run deploys. started: the machine was switched on after the idle check (passed here: mocked)."""
         a = self.release(4, self.lab.b)
         self.deploy()
         self.lab.machine(**machine)
         svc = self.lab.start_service()
+        if started:
+            self.assertEqual(il_deploy.Api(self.lab.port).post("/api/machine/enable", timeout=5)[0], 200)
         self.release(5, self.lab.c)
         seen = len(self.lab.requests())
-        self.assertEqual(self.lab.main("deploy", extra=["--stop-timeout", "1"]), 3, self.lab.last_out)
+        with mock.patch.object(il_deploy.Deployer, "idle_reasons", return_value=[]) if started else contextlib.nullcontext():
+            self.assertEqual(self.lab.main("deploy", extra=["--stop-timeout", "1"]), 3, self.lab.last_out)
         self.assertEqual(self.lab.link("current"), a)
         self.assert_released_by("deploy")
         self.assertFalse(self.hold())
@@ -393,7 +396,21 @@ class Flow(unittest.TestCase):
         self.assert_no_planned_stop_no_deploy(fail=["lock-at-planned-stop"])
 
     def test_a_machine_working_through_the_wait_is_left_alone(self):
-        self.assert_no_planned_stop_no_deploy(planned_refusals=1000)
+        self.assert_no_planned_stop_no_deploy(started=True, planned_refusals=1000)
+
+    def test_a_build_whose_engine_failed_is_deployed_over(self):
+        """#41 refuses the planned stop without its engine; the machine is off, so there is nothing to stop: the deploy
+        goes on (it may be the fix), and no STOP sends a line."""
+        self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.machine(fail_for={self.lab.b[:7]: ["engine"]})
+        self.lab.start_service()
+        c = self.release(5, self.lab.c)
+        seen = len(self.lab.requests())
+        self.deploy()
+        self.assertEqual(self.lab.link("current"), c)
+        self.assertEqual(self.posts_since(seen)[0], "/api/stop/planned")
+        self.assertEqual([r for r in self.lab.requests() if "screw" in r], [], "no M18 B")
 
     def test_unexpected_exception_after_claim(self):
         self.release(4, self.lab.b)

@@ -50,7 +50,7 @@ dispense.startError, and an enable on a kept-alive link that died fails on the d
 BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the lock just before the planned stop).
 BR-75's planned stop: 409 locked while someone holds the lock, 409 refused (nothing sent) while anything works or for
 the first fake-machine.json "planned_refusals" N calls; else the STOP without the screw's motor-off, the link closed
-(keep-alive or not), after which a STOP finds the machine already stopped and sends nothing until the next enable.
+(keep-alive or not). A STOP of a machine already off sends nothing (it still vents the pressure and ends a run).
 BR-44's fields otherwise, as DispenseEndpoints.status and MachineEndpoints.machineStatus: machine.homing (true while a
 home runs), server.startedAtMs, dispense.state ("running", "starting" before engine_start_s, "failed" with "engine",
 startError then the exception's text).
@@ -124,7 +124,6 @@ class FakeOpenPnP:
         self.run_active = "run" in self.fail  # the engine run: a STOP ends it (after "run_abort_s")
         self.pressure_state = "on" if "pressure" in self.fail else "off"  # PressureHold: a STOP vents it
         self.planned_refusals = int(machine.get("planned_refusals", 0))
-        self.planned_closed = False  # BR-75: a planned stop closed the link; nothing switches the screw off till Start
         log_dir = os.path.join(config_dir, "log")
         os.makedirs(log_dir, exist_ok=True)
         # OpenPnP's tinylog RollingFileWriter (StartupPolicy) starts a new OpenPnP.log at each start
@@ -304,7 +303,6 @@ class FakeOpenPnP:
                 self.connected = self.link_dead = False  # GcodeDriver.setEnabled: disconnect(), then connect()
             connect = not self.connected
             self.enabled = self.connected = True
-            self.planned_closed = False
             if connect and self.connected_at_ms is None:
                 self.connected_at_ms = int(time.time() * 1000)
             if "reset" in self.fail or self.booted:
@@ -392,12 +390,11 @@ class FakeOpenPnP:
 
     def stop(self):
         with self.lock:
-            if self.planned_closed and not self.enabled:
-                return 200, {"stopped": True, "machineEnabled": False,
-                             "actions": ["machine was already stopped", "the screw's controller link is closed"]}
-            if self.connected:
-                self.record({"screw": "M18 B"})  # the DISABLE_COMMAND's last line on the open link
-        self.journal("SCREW_MOTOR_OFF", "the screw's motor was switched off: M18 B")
+            sends = self.enabled  # MachineEndpoints.stop: OpenPnP's Stop (the DISABLE_COMMAND) on a started machine only
+            if sends and self.connected:
+                self.record({"screw": "M18 B"})  # the DISABLE_COMMAND's last line
+        if sends:
+            self.journal("SCREW_MOTOR_OFF", "the screw's motor was switched off: M18 B")
         with self.lock:
             if (self.homing or time.time() < self.g28_until or self.run_homing()
                     or (self.run_active and self.run_phase().startswith("home"))):
@@ -427,7 +424,8 @@ class FakeOpenPnP:
                 # connection-keep-alive="true" (the lab machine.xml): a disable leaves the link open
                 if not self.machine.get("keep_alive", True):
                     self.connected = False
-            return 200, {"stopped": True, "machineEnabled": self.enabled, "actions": ["OpenPnP Stop"]}
+            return 200, {"stopped": True, "machineEnabled": self.enabled,
+                         "actions": ["OpenPnP Stop"] if sends else ["machine was already stopped"]}
 
     def planned_stop(self):
         """BR-75 (MachineEndpoints.plannedStop): a guarded write; refused with nothing sent while anything works; else
@@ -437,6 +435,9 @@ class FakeOpenPnP:
                                                "what": "using the web UI"}, "takenFrom": None}
         if self.locked():
             return self.locked()
+        if "engine" in self.fail:  # #41 refuses without its engine, before it looks at the machine
+            return 409, {"error": "refused", "reason": "No planned stop: the dispense engine is not running. The real "
+                                                       "STOP is POST /api/stop"}
         with self.lock:
             works = [why for why, on in (
                 ("a home runs", self.homing or time.time() < self.g28_until or self.run_homing()),
@@ -458,7 +459,6 @@ class FakeOpenPnP:
                              "linesFailed": [], "actions": ["OpenPnP Stop"]}
             was = self.enabled
             self.enabled = self.homed = self.connected = False
-            self.planned_closed = True
             lines = ["M410", "M107 P3", "M107 P2", "M107 P1", "M107 P0"] if was else []
             return 200, {"stopped": True, "machineEnabled": False, "planned": True, "linesSent": lines,
                          "linesFailed": [], "actions": ["OpenPnP Stop; the screw's motor stays on"] if was
