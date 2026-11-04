@@ -56,8 +56,12 @@ const startState = (page) => page.evaluate(() => {
  * whether Needs you came first; null when neither page showed.
  */
 async function toStart(page) {
-  const first = await page.waitForFunction(() => (document.getElementById('btn-rs-start') && !document.getElementById('run-start').hidden ? 'start'
-    : document.getElementById('rv-need-new') ? 'needs' : null), null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
+  const read = () => (document.getElementById('btn-rs-start') && !document.getElementById('run-start').hidden ? 'start'
+    : document.getElementById('rv-need-new') ? 'needs' : null);
+  // a fresh page shows Start until its plan is restored (GET /api/plans): read the page once a plan is there
+  const first = await page.waitForFunction(() => (!(IL.S.plan || IL.S.planForgotten) ? null
+    : document.getElementById('btn-rs-start') && !document.getElementById('run-start').hidden ? 'start'
+      : document.getElementById('rv-need-new') ? 'needs' : null), null, { timeout: 15000 }).then((h) => h.jsonValue(), () => page.evaluate(read));
   if (first !== 'needs') return first ? false : null;
   await page.click('#rv-need-more > summary');
   await page.click('#rv-need-new');
@@ -81,6 +85,11 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     const sim = await page.evaluate(() => !!(IL.S.status.server && IL.S.status.server.simulated === true));
     check('the server is an OpenPnP simulator (status.server.simulated)', sim);
     if (!sim) throw new Error('not a simulator: nothing was done');
+    // loopback drivers alone could be a real controller behind a bridge: it must answer as OpenPnP's simulator
+    const confirmed = await page.waitForFunction(() => !!(IL.S.status.server && IL.S.status.server.simulatorConfirmed === true), null, { timeout: 15000 })
+      .then(() => true, () => false);
+    check('the controller answers as OpenPnP\'s simulator (status.server.simulatorConfirmed)', confirmed);
+    if (!confirmed) throw new Error('the controller is not confirmed as the simulator: nothing was done');
 
     // ---- (0) the state it needs, from what the main leg leaves: tip-flow mounts a second tip of its own (no pad types):
     // the setup with the board's pad types goes back on, its needle frame by hand as tip-flow does when the mount lost it
@@ -104,7 +113,7 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     if (nd0.xyChecked === false && nd0.landing && nd0.landing.keepable) {
       await page.evaluate((tk) => IL.api('POST', '/api/needle/landing', { keep: true, needleChangedAtMs: tk }), nd0.changedAtMs);
       st0 = await page.evaluate(() => IL.api('GET', '/api/status'));
-    } else if (nd0.xyChecked === false) {
+    } else if (use && nd0.xyChecked === false) {
       // a bent tip lands where its bend points (no keeping): the landing check on the SIM, as tip-flow's checks run it,
       // on a calibration area the earlier scripts used up: "Blank wiped" first (the SIM's blank)
       await page.evaluate(() => IL.api('POST', '/api/calibration-area/reset', {}));
@@ -122,7 +131,7 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
 
     // ---- (1) Run opens Start while nothing runs ---------------------------------------------------------------------
     const needsFirst = await toStart(page);
-    if (needsFirst) check('(1) a board part done on its seat: Run opens Needs you; "It is a new board" gives Start back', true);
+    if (needsFirst !== false) check('(1) a board part done on its seat: Run opens Needs you; "It is a new board" gives Start back', needsFirst === true, { needsFirst });
     const s1 = Object.assign(await page.evaluate(() => ({ run: IL.S.status.run && { label: IL.S.status.run.label, running: IL.S.status.run.running }, hash: location.hash })), { needsFirst });
     check('(1) Run, while nothing runs, opens Start: its own main column and panel, not today\'s board picture', await shown(page, '#run-start')
       && !(await shown(page, '#run-hero')) && await shown(page, '#btn-rs-start') && (await page.textContent('#run-start .eyebrow')).trim() === 'Make a board', s1);
@@ -155,7 +164,8 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     const p2 = made2 ? await page.waitForFunction((id) => IL.S.plan && IL.S.plan.planId === id && IL.S.plan, made2.planId, { timeout: 15000 }).then((h) => h.jsonValue(), () => null) : null;
     const nom = simBoard && simBoard.registration.nominal;
     check('(2) a click on a design plans it where it sat (its last registration): the card is pressed', !!made2 && !!p2 && !!nom && Math.abs(p2.source.x - nom.x) < 1e-6
-      && Math.abs(p2.source.y - nom.y) < 1e-6 && (await page.getAttribute('#rs-designs .design[aria-pressed="true"]', 'data-board')) === key2, { key2, nom, src: p2 && p2.source });
+      && Math.abs(p2.source.y - nom.y) < 1e-6 && (await page.getAttribute('#rs-designs .design[aria-pressed="true"]', 'data-board')) === key2,
+      { key2, nom, src: p2 && p2.source, already: planned === key2, seatless: other2 ? other2.board : 'none: the click on an already chosen board plans nothing' });
 
     // a board part done on its seat (webui-sim's runs): Needs you; a new board in the holder is one of its other choices
     const needs2 = await toStart(page);
