@@ -77,6 +77,8 @@ SHOTS_DIR="${PP_SHOTS_DIR:-$OUT_DIR/pad-profile-shots}" node "$HERE/pad-profile.
 SHOTS_DIR="${TS_SHOTS_DIR:-$OUT_DIR/tip-setups-shots}" node "$HERE/tip-setups.playwright.cjs"
 # the Tip flow of the agreed mockups (docs/ui-flows/tip-setup-flow.md): after tip-setups, on the tips it set up
 node "$HERE/tip-flow.playwright.cjs"
+# Machine › Control: jog, move to a place and the cameras (BR-49 + BR-53, stubbed until they land): nothing moves
+node "$HERE/jog.playwright.cjs"
 # who has the machine and Take control (P0, BR-72): the screens on a stubbed lock (the states a simulator cannot reach;
 # it presses STOP on the SIM), then against the engine's own lock with an agent that really holds it
 node "$HERE/lock.playwright.cjs"
