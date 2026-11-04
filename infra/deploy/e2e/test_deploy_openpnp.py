@@ -687,8 +687,8 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertTrue(stops and stops[-1]["ok"] and stops[-1]["detail"] == il_deploy.STOP_DONE, stops)
         self.assert_status_fields()  # build B runs on after its health check
 
-        # a health check by hand on that OpenPnP: its link stayed open after the STOP (connection-keep-alive), so the
-        # enable logs no connect line and the serial step finds this OpenPnP's last one
+        # a health check by hand on that OpenPnP: the deploy's planned stop closed its link (BR-75: keep-alive or not,
+        # else OpenPnP's quit would send M18 B on it), so the enable connects again and the serial step reads that line
         self.main("health")
         rep = self.last_health()
         self.assertTrue(rep["ok"], rep)
@@ -696,7 +696,7 @@ class DeployRealOpenPnP(unittest.TestCase):
                                                                         "home", "homed", "stop"])
         serial = step(rep["report"], "serial")["detail"]
         self.assertIn("Serial port: connecting to %s by " % self.sim.link, serial)
-        self.assertIn("the link is kept open", serial)
+        self.assertNotIn("the link is kept open", serial)
         self.assertTrue(self.service().is_active())
         self.assertTrue(self.holder().value.startswith("nobody (released by Infra health check at "),
                         self.holder().value)
@@ -723,7 +723,8 @@ class DeployRealOpenPnP(unittest.TestCase):
         # BR-02's hazard (INF-10): motion while the position is only believed, e.g. a Z raise before the home. After
         # each connect (CONNECT_COMMAND's G21) no G0/G1 before that connection's first G28; moves after a home are fine
         connects = [i for i, line in lines if line.split(";")[0].strip() == "G21"]
-        self.assertEqual(len(connects), 3, "three OpenPnP starts: deploy, deploy over it, rollback")
+        self.assertEqual(len(connects), 4, "deploy, deploy over it, the health check by hand (the planned stop closed "
+                                           "the link), rollback")
         for k, c in enumerate(connects):
             first = next((g for g in homes if g > c), None)
             end = connects[k + 1] if k + 1 < len(connects) else len(io_rows)
