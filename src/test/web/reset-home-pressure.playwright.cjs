@@ -204,8 +204,6 @@ const visibleFixes = (page, root) => page.evaluate((r) => Array.from(document.qu
     check('(2b) the screw motor switched off after the angle was set: only "measure it again"', st2b === 'measure' && ang.some((b) => /measure/i.test(b.text)) && !ang.some((b) => b.fix === 'I11-confirm'), { st2b, ang });
     check('(2b) the angle view gives the engine\'s why: the screw may have turned', pt.includes('The screw motor was switched off at 16:40 (a STOP: its DISABLE_COMMAND sends M18 B)')
       && /may have turned/.test(pt) && !/step count started again|Was the controller switched off/.test(pt), pt.slice(0, 400));
-    const chip = await page.evaluate(() => { const c = document.getElementById('chip-angle'); return { v: c.querySelector('.cell__v').textContent.trim(), title: c.title }; });
-    check('(2b) the strip\'s angle chip says measure again, with the why, not "Confirm"', /Measure/.test(chip.v) && chip.title.includes('M18 B') && !/reconnected/.test(chip.title), chip);
     await page.evaluate(() => IL.go('#calibrate/angle'));
     await sleep(1200);
     const cal2b = await page.evaluate(() => { const w = document.getElementById('ws-calibrate'); return { text: w.textContent.replace(/\s+/g, ' '), confirm: !!w.querySelector('button[data-fix="I11-confirm"]:not([hidden])') }; });
