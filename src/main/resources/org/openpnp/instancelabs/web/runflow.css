@@ -38,3 +38,15 @@
 #rs-then { margin-top: 8px; }
 #rs-start-why { margin-bottom: 8px; }
 .rf-steps { display: inline-block; margin-top: 10px; font-size: 13.5px; }
+
+/* Live, Needs you, Done: run.js's board picture in this frame; the flow's own tiles replace today's */
+.rf-view #plan-summary, .rf-view #run-live, .rf-view #run-decide, .rf-view #run-timeline { display: none !important; }
+.rf-slot > .hero { margin: 0; }
+.rf-tiles { grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.rf-pbody { display: flex; flex-direction: column; gap: 12px; }
+#rv-stop { width: 100%; margin-bottom: 14px; }
+.rf-note { font-size: 13.5px; line-height: 1.4; }
+.rf-more { margin-top: 8px; }
+.rf-more summary { cursor: pointer; color: var(--accent-ink); font-weight: 650; font-size: 14px; }
+.rf-more .btn-row { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.rf-done-acts { display: flex; flex-direction: column; gap: 10px; }

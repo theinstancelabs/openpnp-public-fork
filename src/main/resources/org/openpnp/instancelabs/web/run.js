@@ -333,19 +333,24 @@
     if (IL.recoveryActive()) return 'recovery';
     if (R.section && STEPS.includes(R.section)) return R.section;
     const a = autoStep(s);
-    return flowClaims(s, a) ? 'start' : a;
+    return flowView(s, a) || a;
   }
   /**
-   * Run › Start (runflow.js) is bare #run's page while nothing needs today's: no board run running, stopped or part
-   * done, no result and no registration of today's pages to show. Start's own chain keeps it until its run starts.
-   * On today's pages (R.steps: a #run/<step> was opened) bare #run stays today's: Plan and Register move on there.
+   * The Run pages of the agreed flow (runflow.js) at bare #run: Start while nothing needs today's pages (no board run
+   * running, stopped or part done, no registration of today's to show; Start's own chain keeps it until its run
+   * starts), Live while a board runs, Needs you while a board is stopped or part done, Done after a board run. On
+   * today's pages (R.steps: a #run/<step> was opened) bare #run stays today's: Plan and Register move on there.
    */
-  function flowClaims(s, a) {
-    if (!IL.runFlow || R.steps) return false;
-    if (IL.runFlow.chaining()) return a !== 'run';
-    if (a === 'probe') return !R.regResultRunId && !(regRun(s) && regRun(s).running);
-    return (a === 'board' || a === 'checks') && !stopDecision(s) && !partialDecision(s);
+  function flowView(s, a) {
+    if (!IL.runFlow || R.steps) return null;
+    if (a === 'run') return 'live';
+    if (IL.runFlow.chaining()) return 'start';
+    if (a === 'result') return 'done';
+    if (a === 'probe') return !R.regResultRunId && !(regRun(s) && regRun(s).running) ? 'start' : null;
+    if (a === 'board' || a === 'checks') return stopDecision(s) || partialDecision(s) ? 'needs' : 'start';
+    return null;
   }
+  const FLOW_VIEWS = ['start', 'live', 'needs', 'done'];
   function goStep(step) {
     R.section = step;
     IL.go({ ws: 'run', section: step }, { replace: true });
@@ -559,9 +564,10 @@
     const n = R.n;
     if (!n.hero) return;
     const step = currentStep(s);
-    const start = step === 'start';
-    for (const x of [n.head, n.headRef, n.hero]) IL.show(x, !start);
-    if (IL.runFlow) IL.runFlow.render(s, start);
+    const view = FLOW_VIEWS.includes(step) ? step : null;
+    for (const x of [n.head, n.headRef]) IL.show(x, !view);
+    IL.show(n.hero, view !== 'start');   // Live, Needs you and Done show this board picture in their own frame
+    if (IL.runFlow) IL.runFlow.render(s, view);
     let p = plan();
     let mode = mainMode(s, step);
     // another board chosen in the Board step: the main column shows it before planning (its drawing at the form's seat,
@@ -2720,19 +2726,23 @@
         el('button', { type: 'button', class: 'btn btn--lg', onclick: () => h.close('cancel') }, 'Cancel'),
         el('button', { type: 'button', class: 'btn btn--primary btn--lg', onclick: () => {
           h.close('yes');
-          IL.setNewSeat(Date.now());
-          R.seatSame = null;
-          R.resultRunId = null;
-          R.refused = null;
-          R.decidedAt = Date.now();
-          ssSet('il.run.decidedAt', R.decidedAt);
-          R.doneSet = new Set();
-          // a new board starts here (the server: every tab sees it): the board count goes up at its first dot
-          IL.api('POST', '/api/board/next', {}).then(() => IL.planRefresh({ quiet: true }))
-            .catch((e) => IL.toast('Next board not noted: ' + IL.errorText(e), 'need'));
+          nextBoard();
           goStep('board');
         } }, 'Yes: new seat')],
       initialFocus: null });
+  }
+  /** The board on the seat is done: a new seat, nothing decided or shown about the board before it. */
+  function nextBoard() {
+    IL.setNewSeat(Date.now());
+    R.seatSame = null;
+    R.resultRunId = null;
+    R.refused = null;
+    R.decidedAt = Date.now();
+    ssSet('il.run.decidedAt', R.decidedAt);
+    R.doneSet = new Set();
+    // a new board starts here (the server: every tab sees it): the board count goes up at its first dot
+    IL.api('POST', '/api/board/next', {}).then(() => IL.planRefresh({ quiet: true }))
+      .catch((e) => IL.toast('Next board not noted: ' + IL.errorText(e), 'need'));
   }
   function renderResult(s) {
     const p = plan();
@@ -3051,7 +3061,7 @@
       IL.views.recovery.render(parts, s, true);
       return;
     }
-    if (step === 'start') { IL.runFlow.panel(parts, s, true); return; }
+    if (FLOW_VIEWS.includes(step)) { IL.runFlow.panel(parts, s, true, step); return; }
     renderSteps(parts.top, s, step);
     if (step === 'board') {
       if (!R.boards && !R.boardsLoading) loadBoards();
@@ -3075,7 +3085,7 @@
   }
   function renderPanelStep(parts, s, step) {
     if (step === 'recovery') { IL.views.recovery.render(parts, s, false); return; }
-    if (step === 'start') { IL.runFlow.panel(parts, s, false); return; }
+    if (FLOW_VIEWS.includes(step)) { IL.runFlow.panel(parts, s, false, step); return; }
     renderSteps(parts.top, s, step);
     if (step === 'board') renderBoardStep(s, parts);
     else if (step === 'probe') renderProbe(s);
@@ -3145,8 +3155,11 @@
   if (tabRun) tabRun.addEventListener('click', () => { R.steps = false; if (IL.active() === 'run') IL.render(); });
   // what Start does through run.js, so both keep one board choice, one plan and one run bookkeeping
   R.flow = {
-    selectBoard, loadBoards, needCard, padsDone, remembered,
+    selectBoard, loadBoards, needCard, padsDone, padsLeft, remembered, resultRun, boardNumber, openConfirm, nextBoard,
+    stopped: (s) => stopDecision(s) || partialDecision(s),
     estimate: (s) => estimate(s),
+    /** Back to Start after Done (the result was seen). */
+    leaveResult() { R.resultRunId = null; IL.render(); },
     async plan(body) {
       const p = await postPlan(body);
       rememberSeat(body);

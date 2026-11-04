@@ -11,6 +11,11 @@
      (the user, 11-02): it plans when the plan is not the chosen board's, registers the board (finds it, its height),
      then runs the plan the registration made. The page chains them (BR-86 asks for one engine job), so it says to stay
      until the paste starts. A refusal stops the chain where it is, its words in the panel.
+   - Live (a board runs), Needs you (a board stopped or part done) and Done (after a board run): the flow's rail, "You
+     can leave now" or "Needs you", run.js's own board picture moved into this frame (its chip, recipe and dots), four
+     tiles; the panel has STOP and the steps (Live), one card with one primary action and the other choices (Needs
+     you: today's confirm for the pads left), or the record, Next board and another run (Done). The steps the machine
+     cannot do yet (check the paste, place, check the parts) say "not built yet"; the oven is by hand.
    Styles: runflow.css. */
 'use strict';
 (function () {
@@ -191,13 +196,37 @@
           el('div', { class: 'seg seg--block' }, n.one, n.tile),
           el('div', { class: 'rf-cap', id: 'rs-boards-cap', text: 'One board at a time. Boards on the tile: not built yet (BR-39).' })),
         card('rs-load-card', n.loadT, 'The side to paste first.', n.loadPic, n.loadCap, n.loadKv)));
-    root.append(n.root);
+    n.vEyebrow = el('div', { class: 'eyebrow', id: 'rv-eyebrow' });
+    n.vTitle = el('h1', { class: 'tf-h1', id: 'rv-title' });
+    n.vMeta = el('div', { class: 'meta', id: 'rv-meta' });
+    n.leave = el('div', { id: 'rv-leave' });
+    n.rail = el('div', { id: 'rv-rail' });
+    n.slot = el('div', { class: 'rf-slot', id: 'rv-slot' });
+    n.tiles = el('div', { class: 'tiles rf-tiles', id: 'rv-tiles' });
+    n.view = el('div', { class: 'tf-stack rf-view', id: 'run-view', hidden: true },
+      el('div', { class: 'page-head' }, el('div', { class: 'page-head__text' }, n.vEyebrow, n.vTitle, n.vMeta)), n.leave, n.rail, n.slot, n.tiles);
+    root.append(n.root, n.view);
   }
-  function render(s, on) {
+  /** view: run.js's step when it is one of the flow's (start, live, needs, done), else null (today's pages). */
+  function render(s, view) {
     const n = F.n;
     if (!n.root) return;
-    IL.show(n.root, !!on);
-    if (!on) return;
+    IL.show(n.root, view === 'start');
+    const v = view && view !== 'start' ? view : null;
+    IL.show(n.view, !!v);
+    placeHero(!!v);
+    if (view === 'start') renderStart(s);
+    else if (v) renderView(s, v);
+  }
+  /** run.js's board picture (#run-hero) in this frame for Live, Needs you and Done; back on today's pages otherwise. */
+  function placeHero(here) {
+    const hero = R.n.hero;
+    if (!hero || (here ? hero.parentNode === F.n.slot : hero.parentNode !== F.n.slot)) return;
+    if (here) F.n.slot.append(hero); else R.n.headRef.after(hero);
+    if (R.bv) setTimeout(() => R.bv.relayout(), 0);
+  }
+  function renderStart(s) {
+    const n = F.n;
     if (!R.boards && !R.boardsLoading) R.flow.loadBoards();
     const e = chosen(), p = planOf(e);
     IL.setText(n.title, e ? e.name : 'Choose a design');
@@ -235,8 +264,136 @@
   }
   const regSeconds = (p) => { const t = p && p.registrationTargets && p.registrationTargets.estimatedSeconds; return t && isNum(t.total) ? Number(t.total) : null; };
 
+  // ================================================================================== Live, Needs you, Done
+  const RAIL = ['Session', 'Find', 'Paste', 'Check paste', 'Place', 'Check parts', 'Oven'];
+  const NOT_YET = 'not built yet';
+  function rail(states, subs) {
+    return el('div', { class: 'card' }, el('div', { class: 'steps rail', style: '--n:' + RAIL.length },
+      RAIL.map((name, i) => {
+        const st = states[i];
+        const g = st === 'done' ? 'ok' : st === 'need' ? 'need' : st === 'live' ? 'live' : 'wait';
+        const glyph = el('span', { class: 'st st--sm st--' + g, role: 'img' });
+        if (g === 'ok' || g === 'need') IL.setGlyph(glyph, g, 'sm'); else if (g === 'live') glyph.append(el('span', { class: 'pulse', style: 'width:8px;height:8px' }));
+        else glyph.append(String(i + 1));
+        return el('div', { class: 'step' + (st === 'done' ? ' step--done' : st === 'need' ? ' step--need' : st === 'live' ? ' step--live' : ''), 'data-k': name,
+          'aria-current': st === 'need' || st === 'live' ? 'step' : null }, glyph, el('span', { class: 'step__t', text: name }), el('span', { class: 'step__s', text: subs[i] || '' }));
+      })));
+  }
+  const tile = (k, v, u, sub) => el('div', { class: 'tile', 'data-k': k }, el('div', { class: 'tile__k' }, el('span', { text: k })),
+    el('div', { class: 'tile__v' }, el('span', { class: 'n', text: v }), u ? el('span', { class: 'u', text: u }) : null), el('div', { class: 'tile__s', text: sub || '' }));
+  const time = (ms) => (ms ? IL.fmtTime(IL.toClient(ms)) : '—');
+  function viewFacts(s, v) {
+    const p = S.plan, run = s && s.run;
+    const name = (chosen() || {}).name || (p && String(p.boardName || '').replace(/\.board\.xml$/, '')) || 'Board';
+    const nb = R.flow.boardNumber();
+    const pads = p ? (p.pads || []).length : 0, done = p ? R.flow.padsDone(p).length : 0, left = p ? R.flow.padsLeft(p).length : 0;
+    const dec = v === 'needs' ? R.flow.stopped(s) : null;
+    const rr = v === 'done' ? R.flow.resultRun(s) : null;
+    return { p, run, name, nb, pads, done, left, dec, rr };
+  }
+  function renderView(s, v) {
+    const n = F.n;
+    const f = viewFacts(s, v);
+    const board = 'board ' + (f.nb || '1');
+    IL.setText(n.vEyebrow, f.name + ' · ' + board + ' · side 1 (top)');
+    let title, meta, leave = null, states, subs, tiles;
+    if (v === 'live') {
+      const r = f.run || {};
+      const leftS = IL.boardLeftS(r);
+      title = 'Pasting side 1';
+      meta = ['Started ' + time(r.startedAtMs), isNum(r.dotsPlanned) ? (r.dotsDone || 0) + ' of ' + r.dotsPlanned + ' dots' : null];
+      leave = ['ok', 'You can leave now', (isNum(leftS) ? 'About ' + minutes(leftS).replace('≈ ', '') + ' left. ' : '') + 'If something needs you sooner, it says so here.'];
+      states = ['done', 'done', 'live', 'wait', 'wait', 'wait', 'wait'];
+      subs = ['your answers', 'marks, height', (r.dotsDone || 0) + ' of ' + (r.dotsPlanned || '?'), NOT_YET, NOT_YET, NOT_YET, 'by hand'];
+      tiles = [tile('Pads', String(f.done), 'of ' + f.pads, board), tile('Parts', '—', '', NOT_YET),
+        tile('Side 1 left', isNum(leftS) ? minutes(leftS) : '—', '', 'this board'), tile('Paste on since', time(r.pressureOnAtMs), '', 'the pressure on')];
+    } else if (v === 'needs') {
+      const d = f.dec || { run: {} };
+      const part = d.cause === 'partial';
+      title = (part ? 'Part done: ' : 'Stopped: ') + board;
+      meta = [(part ? 'Ended ' : 'Stopped ') + time(d.atMs + S.skewMs), (d.run.dotsDone || 0) + ' of ' + (d.run.dotsPlanned || '?') + ' dots on the board'];
+      leave = ['need', 'Needs you', f.done ? 'Finish the ' + IL.plural(f.left, 'pad') + ' left, or wipe the board and run it all.' : 'No dot reached the board: run it again.'];
+      states = ['done', 'done', 'need', 'wait', 'wait', 'wait', 'wait'];
+      subs = ['your answers', 'marks, height', (d.run.dotsDone || 0) + ' of ' + (d.run.dotsPlanned || '?'), NOT_YET, NOT_YET, NOT_YET, 'by hand'];
+      tiles = [tile('Pads', String(f.done), 'of ' + f.pads, 'have paste'), tile('Pads left', String(f.left), '', 'to finish'),
+        tile('Parts', '—', '', NOT_YET), tile(part ? 'Ended' : 'Stopped', time(d.atMs + S.skewMs), '', '')];
+    } else {
+      const r = f.rr || {};
+      const complete = f.p && !f.left;
+      title = (complete ? 'Done: ' : 'Part done: ') + board;
+      meta = ['finished ' + time(r.endedAtMs), isNum(r.dotsDone) ? r.dotsDone + ' of ' + r.dotsPlanned + ' dots this run' : null];
+      states = ['done', 'done', complete ? 'done' : 'need', 'wait', 'wait', 'wait', 'wait'];
+      subs = ['your answers', 'marks, height', complete ? 'all ' + f.pads + ' pads' : f.done + ' of ' + f.pads + ' pads', NOT_YET, NOT_YET, NOT_YET, 'by hand'];
+      tiles = [tile('Pads', String(f.done), 'of ' + f.pads, 'have paste'), tile('Parts', '—', '', NOT_YET),
+        tile('Hand fixes', '—', '', 'not recorded yet (BR-50)'), tile('Time', IL.fmtClock(r.totalSeconds), '', 'this run')];
+    }
+    IL.setText(n.vTitle, title);
+    IL.keyed(n.vMeta, JSON.stringify(meta), () => meta.filter(Boolean).map((x) => el('span', { text: x })));
+    IL.keyed(n.leave, JSON.stringify(leave), () => (leave ? el('div', { class: 'leave' + (leave[0] === 'need' ? ' leave--need' : ''), id: 'rv-leave-box' },
+      IL.icon(leave[0] === 'need' ? 'i-hand' : 'i-walk'), el('div', {}, el('b', { text: leave[1] }), el('span', { text: leave[2] }))) : null));
+    IL.keyed(n.rail, JSON.stringify([states, subs]), () => rail(states, subs));
+    IL.keyed(n.tiles, JSON.stringify(tiles.map((x) => x.textContent)), () => tiles);
+  }
+  function panelView(parts, s, first, v) {
+    const n = F.n;
+    if (first) {
+      parts.body.append(el('div', { class: 'panel__title' }, el('h2', { text: v === 'live' ? 'Side 1 · now' : v === 'needs' ? 'Needs you' : 'Done' })));
+      n.pBody = el('div', { class: 'rf-pbody', id: 'rv-panel', 'data-refusals': '' });
+      if (v === 'live') {
+        const stop = el('button', { type: 'button', class: 'stop stop--panel', id: 'rv-stop' },
+          el('span', { class: 'stop__word', text: 'STOP' }), el('span', { class: 'stop__sub' }, el('kbd', { text: 'F9' }), ' motion · vent · screw off'));
+        stop.addEventListener('click', () => IL.stop('Run › Live'));
+        parts.body.append(stop);
+      }
+      parts.body.append(n.pBody);
+    }
+    const f = viewFacts(s, v);
+    if (v === 'live') {
+      const r = f.run || {};
+      const found = f.p && f.p.registrationRun && f.p.registrationRun.atMs;
+      const rows = [['find', 'done', 'Find the board', found ? 'found ' + time(found) : 'marks, height', ''],
+        ['paste', 'now', 'Paste', (r.dotsDone || 0) + ' of ' + (r.dotsPlanned || '?') + ' dots', IL.fmtClock(r.elapsedS)],
+        ['check', 'todo', 'Check the paste', NOT_YET + ' (BR-62): look at the pads', ''], ['place', 'todo', 'Place', NOT_YET + ' (BR-28)', ''],
+        ['parts', 'todo', 'Check the parts', NOT_YET, ''], ['oven', 'todo', 'Oven', 'by hand: you carry the board', '']];
+      IL.keyed(n.pBody, JSON.stringify(rows), () => [el('ol', { class: 'phases', id: 'rv-steps' }, rows.map(([k, st, t, d, val]) => el('li', { class: st === 'done' ? '' : st, 'data-k': k },
+        IL.glyph(st === 'done' ? 'ok' : st === 'now' ? 'live' : 'wait', 'xs'), el('div', {}, el('div', { class: 'ph__t', text: t }), el('div', { class: 'ph__d', text: d })), el('span', { class: 'ph__v', text: val })))),
+        el('div', { class: 'notebox rf-note', text: 'It does not fix things by itself yet: if pads stay empty or the board moves, press STOP and do what it asks next.' })]);
+    } else if (v === 'needs') {
+      const d = f.dec || { run: {} };
+      const none = !f.done;
+      IL.keyed(n.pBody, JSON.stringify([d.cause, d.run.dotsDone, d.run.dotsPlanned, f.left, none]), () => {
+        const go = el('button', { type: 'button', class: 'btn btn--primary btn--lg btn--block', id: 'rv-need-go' }, none ? 'Run it again' : 'Finish the ' + IL.plural(f.left, 'pad') + ' left');
+        go.addEventListener('click', () => R.flow.openConfirm(none ? 'full' : 'rest'));
+        const all = el('button', { type: 'button', class: 'btn', id: 'rv-need-all' }, 'Wipe all, run all');
+        all.addEventListener('click', () => R.flow.openConfirm('all'));
+        return el('div', { class: 'ri ri--need', 'data-key': 'stopped' }, IL.glyph('need'),
+          el('div', {}, el('div', { class: 'ri__t' }, none ? 'Run the board again' : 'Finish the pads left', el('span', { class: 'tag tag--next', text: 'Next' })),
+            el('div', { class: 'ri__d', text: none ? 'It stopped before the first dot: nothing to keep or wipe.'
+              : (d.run.dotsDone || 0) + ' of ' + (d.run.dotsPlanned || '?') + ' dots are on the board. The pads left get their paste; the dots there stay.' })),
+          el('div', { class: 'ri__act' }, go, el('details', { class: 'rf-more', id: 'rv-need-more' }, el('summary', { text: 'Other choices…' }),
+            el('div', { class: 'btn-row' }, none ? null : all, el('a', { class: 'link', href: '#run/checks', text: 'Step by step' })))),
+          el('div', { class: 'ri__note', text: 'Nothing moves until you press it. The run checks every pad first.' }));
+      });
+    } else {
+      const r = f.rr || {};
+      const complete = f.p && !f.left;
+      IL.keyed(n.pBody, JSON.stringify([r.runId, complete, f.left]), () => {
+        // a whole board: the next one (a new seat) or another run; part of it: its pads left, or the next board as it is
+        const go = el('button', { type: 'button', class: 'btn btn--primary btn--lg btn--block', id: 'rv-done-go' }, complete ? 'Next board · same design' : 'Finish the ' + IL.plural(f.left, 'pad') + ' left');
+        go.addEventListener('click', () => (complete ? (R.flow.nextBoard(), R.flow.leaveResult()) : R.flow.openConfirm('rest')));
+        const other = el('button', { type: 'button', class: 'btn btn--block', id: 'rv-done-other' }, complete ? 'Choose another run' : 'Next board: unload this one as it is');
+        other.addEventListener('click', () => { if (!complete) R.flow.nextBoard(); R.flow.leaveResult(); });
+        return [el('div', { class: 'notebox notebox--ok', id: 'rv-done-record' }, el('b', { text: complete ? 'The paste is on' : 'Part of the board has paste' }),
+          el('div', {}, 'The run is in Records with its settings and dots. ', r.runId ? el('a', { class: 'link', href: '#records/boards/' + r.runId, id: 'rv-done-open', text: 'Open the record' }) : null)),
+          el('div', { class: 'notebox', text: 'Then: carry the board to the oven (by hand: the oven step is not built yet). Checking the paste and placing are not built yet.' }),
+          el('div', { class: 'stack rf-done-acts' }, go, other)];
+      });
+    }
+  }
+
   // ================================================================================== panel
-  function panel(parts, s, first) {
+  function panel(parts, s, first, view) {
+    if (view && view !== 'start') { panelView(parts, s, first, view); return; }
     const n = F.n;
     if (first) {
       parts.body.append(el('div', { class: 'panel__title' }, el('h2', { text: 'Start' })));

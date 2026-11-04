@@ -7,8 +7,11 @@
  * can say (the tip on the dispenser, the paste within its life, the gauge), each kept 8 hours as today; (6) a need of
  * the readiness checks shows as a Needs-you card with its fix and keeps Start locked; (7) a refusal on the way stops
  * the chain where it is, its words in the panel, nothing after it sent; (8) one Start: plan when needed, register,
- * then the run of the registered plan, in that order (the test cuts the run to its first pads), and the run's pages
- * take over while it pastes; (9) Step by step opens today's Checks; no JavaScript errors, no native dialogs.
+ * then the run of the registered plan, in that order (the test cuts the run to its first pads); (10) Live while it
+ * pastes: the rail, "You can leave now", the board picture in its frame, four tiles, STOP and the steps (the ones the
+ * machine cannot do yet say so); (11) Done after it, part of the board: the pads left first, the record one click away;
+ * (12) back to Run later, the board still part done: Needs you, one card, one primary action; (9) Step by step opens
+ * today's Checks; no JavaScript errors, no native dialogs.
  * States the SIM does not hold on demand (a need, a refusal) come from Playwright routes. Runs after tip-flow in the
  * main leg (the board, the waste, the needle frame and the purge row that webui-sim set up). Nothing here runs a real
  * machine.
@@ -150,6 +153,18 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     // a board run other than the one before (webui-sim's last run is still the status's until this one starts)
     const ran = await page.waitForFunction((id0) => { const r = IL.S.status.run; return !!r && r.label === 'board' && !!r.runId && r.runId !== id0; }, runId0,
       { timeout: 300000, polling: 500 }).then(() => true, () => false);
+    // ---- (10) Live while it pastes (the cut run lasts some seconds: read at once) -------------------------------------
+    const live = await page.waitForFunction(() => { const t = document.getElementById('rv-title'); return !!t && /Pasting side 1/.test(t.textContent) && !document.getElementById('run-view').hidden; },
+      null, { timeout: 15000, polling: 200 }).then(() => page.evaluate(() => ({
+      leave: (document.getElementById('rv-leave-box') || {}).textContent || '',
+      rail: Array.from(document.querySelectorAll('#rv-rail .step')).map((x) => [x.dataset.k, x.className.replace(/^step ?/, '')]),
+      heroHere: !!document.querySelector('#rv-slot > #run-hero'), tiles: Array.from(document.querySelectorAll('#rv-tiles .tile')).map((x) => x.dataset.k),
+      parts: ((document.querySelector('#rv-tiles .tile[data-k="Parts"] .tile__s') || {}).textContent || ''),
+      stop: !!document.getElementById('rv-stop'), check: ((document.querySelector('#rv-steps li[data-k="check"]') || {}).textContent || '') })), () => null);
+    check('(10) Live: "You can leave now", the rail with Paste live, the board picture in its frame, four tiles, STOP in the panel', !!live && /You can leave now/.test(live.leave)
+      && live.rail.some(([k, c]) => k === 'Paste' && /live/.test(c)) && live.heroHere && ['Pads', 'Parts', 'Side 1 left', 'Paste on since'].every((k) => live.tiles.includes(k)) && live.stop, live);
+    check('(10) Live: what the machine cannot do yet says so (parts, check the paste)', !!live && /not built yet/.test(live.parts) && /not built yet/.test(live.check), live);
+    await page.screenshot({ path: path.join(OUT, 'run-live.png') });
     const reg = order.find((x) => x.k === 'register'), run = order.find((x) => x.k === 'run');
     const regRun = await page.evaluate(() => { const r = IL.S.status.lastRun; return r; });
     check('(8) one Start: register, then the run, in that order (a plan first only when needed)', ran && !!reg && !!run && order.indexOf(reg) < order.indexOf(run)
@@ -159,10 +174,34 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     await page.waitForFunction((id0) => { const r = IL.S.status.run; return !!r && r.label === 'board' && r.runId !== id0 && !r.running && !!r.finishedAtMs; }, runId0,
       { timeout: 300000, polling: 1000 }).catch(() => null);
     await page.unroute('**/api/run');
-    const end8 = await page.evaluate(() => ({ run: IL.S.status.run && { status: IL.S.status.run.status, dotsDone: IL.S.status.run.dotsDone }, start: !!document.getElementById('run-start') && !document.getElementById('run-start').hidden,
-      hero: !!document.getElementById('run-hero') && !document.getElementById('run-hero').hidden }));
-    check('(8) the paste ran to its end on the SIM, and the run\'s own pages took over from Start', !!end8.run && end8.run.status === 'OK' && end8.run.dotsDone > 0 && !end8.start && end8.hero, end8);
-    await page.screenshot({ path: path.join(OUT, 'run-flow-after.png') });
+    const end8 = await page.evaluate(() => ({ run: IL.S.status.run && { status: IL.S.status.run.status, dotsDone: IL.S.status.run.dotsDone, runId: IL.S.status.run.runId } }));
+    check('(8) the paste ran to its end on the SIM', !!end8.run && end8.run.status === 'OK' && end8.run.dotsDone > 0, end8);
+
+    // ---- (11) Done: part of the board (the test's cut run) --------------------------------------------------------------
+    await page.waitForFunction(() => /^Part done: board/.test((document.getElementById('rv-title') || {}).textContent || ''), null, { timeout: 15000 }).catch(() => null);
+    const done = await page.evaluate(() => ({ title: document.getElementById('rv-title').textContent, go: (document.getElementById('rv-done-go') || {}).textContent || '',
+      other: (document.getElementById('rv-done-other') || {}).textContent || '', open: (document.getElementById('rv-done-open') || { getAttribute: () => null }).getAttribute('href'),
+      heroHere: !!document.querySelector('#rv-slot > #run-hero'), tiles: Array.from(document.querySelectorAll('#rv-tiles .tile')).map((x) => x.dataset.k) }));
+    check('(11) Done, part of the board: the pads left first, the next board as it is, the record one click away', /^Part done: board/.test(done.title)
+      && /^Finish the \d+ pads? left$/.test(done.go) && /Next board/.test(done.other) && done.open === '#records/boards/' + (end8.run && end8.run.runId) && done.heroHere
+      && ['Pads', 'Parts', 'Hand fixes', 'Time'].every((k) => done.tiles.includes(k)), done);
+    await page.click('#rv-done-go');
+    const dlg11 = await page.waitForSelector('#dlg-run', { state: 'visible', timeout: 8000 }).then(() => true, () => false);
+    check('(11) Finish the pads left opens the run confirm for the pads left (today\'s)', dlg11 && /left/i.test(await page.textContent('#dlg-run')));
+    if (dlg11) await page.click('#btn-run-cancel');
+    await page.screenshot({ path: path.join(OUT, 'run-done.png') });
+
+    // ---- (12) back to Run later, the board still part done: Needs you ---------------------------------------------------
+    await page.evaluate(() => IL.go('#tip'));
+    await sleep(500);
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !!document.getElementById('rv-need-go'), null, { timeout: 10000 }).catch(() => null);
+    const need = await page.evaluate(() => ({ title: (document.getElementById('rv-title') || {}).textContent || '', leave: (document.getElementById('rv-leave-box') || {}).textContent || '',
+      go: (document.getElementById('rv-need-go') || {}).textContent || '', more: (document.getElementById('rv-need-more') || {}).textContent || '',
+      cards: document.querySelectorAll('#rv-panel .ri').length, heroHere: !!document.querySelector('#rv-slot > #run-hero') }));
+    check('(12) Needs you: one card with one primary action (the pads left), the other choices behind it, the board in its frame', /Part done|Stopped/.test(need.title)
+      && /Needs you/.test(need.leave) && /^Finish the \d+ pads? left$/.test(need.go) && /Wipe all, run all/.test(need.more) && /Step by step/.test(need.more) && need.cards === 1 && need.heroHere, need);
+    await page.screenshot({ path: path.join(OUT, 'run-need.png') });
 
     // ---- (9) Step by step ----------------------------------------------------------------------------------------------
     await page.evaluate(() => IL.go('#run/checks'));
