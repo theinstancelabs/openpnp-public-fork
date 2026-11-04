@@ -1,0 +1,169 @@
+package org.openpnp.instancelabs.api;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongSupplier;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.DispenseProfile;
+import org.openpnp.instancelabs.dispense.DoseBlocksRequest;
+import org.openpnp.instancelabs.dispense.DoseBlocksResult;
+import org.openpnp.instancelabs.dispense.DotImager;
+import org.openpnp.instancelabs.dispense.RunResult;
+import org.openpnp.instancelabs.dispense.SurfaceProbeRequest;
+import org.openpnp.instancelabs.dispense.SurfaceProbeResult;
+import org.openpnp.instancelabs.vision.Dot;
+
+import com.google.gson.JsonObject;
+
+/**
+ * BR-77: the start-angle measure job with fake engine steps (PadCalibrationJobTest's machine and API): a STOP the job did
+ * not see itself (OpenPnP's own Stop moves the engine's stop epoch) after its last step sets nothing.
+ */
+public class StartAngleJobTest {
+    final PadCalibrationJobTest t = new PadCalibrationJobTest();
+    final Steps steps = new Steps();
+
+    /** Dose-blocks steps that find every dot at its own count, with the areas of a flow peaking at 179.1 (a 0.47). */
+    static final class Steps implements PadCalibrationJobs.Engine {
+        final AtomicInteger calls = new AtomicInteger();
+        /** The step (1 = first) that waits until {@link #release}, or 0. */
+        volatile int holdAt;
+        final CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1);
+        volatile long epoch;
+        volatile LongSupplier base = () -> 0L;
+
+        @Override
+        public Future<SurfaceProbeResult> probeSurface(SurfaceProbeRequest r) {
+            throw new UnsupportedOperationException("a measure probes nothing");
+        }
+
+        @Override
+        public Future<DoseBlocksResult> runDoseBlocks(DoseBlocksRequest req) {
+            int n = calls.incrementAndGet();
+            return CompletableFuture.supplyAsync(() -> {
+                if (n == holdAt) {
+                    held.countDown();
+                    try {
+                        release.await(60, TimeUnit.SECONDS);
+                    }
+                    catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                RunResult r = new RunResult();
+                r.runId = UUID.randomUUID().toString();
+                r.status = RunResult.Status.OK;
+                r.startedAtMs = System.currentTimeMillis();
+                DoseBlocksResult res = new DoseBlocksResult();
+                res.run = r;
+                res.ok = true;
+                DoseBlocksRequest.Block b = req.blocks.get(0);
+                DoseBlocksResult.BlockOut o = new DoseBlocksResult.BlockOut();
+                o.netSteps = b.netSteps;
+                long c0 = Math.round(req.startAngleDeg / 360 * 1600);
+                for (int i = 0; i < b.xy.size(); i++) {
+                    DoseBlocksResult.DotOut d = new DoseBlocksResult.DotOut();
+                    d.x = b.xy.get(i)[0];
+                    d.y = b.xy.get(i)[1];
+                    d.startCount = c0 + (long) i * b.netSteps;
+                    double s = DispenseProfile.angleOfCount(d.startCount, 1600);
+                    double area = 1 - 2 * 0.47 / Math.PI * Math.sin(Math.toRadians(s - 179.1));
+                    d.found = new Dot(0, 0, 2 * Math.sqrt(area / Math.PI), area, 0.9);
+                    o.dots.add(d);
+                }
+                res.blocks.add(o);
+                return res;
+            });
+        }
+
+        @Override
+        public long stopEpoch() {
+            return epoch + base.getAsLong();
+        }
+
+        @Override
+        public void abort(String reason) {
+            epoch++;
+            release.countDown();
+        }
+    }
+
+    @BeforeEach
+    public void before() throws Exception {
+        t.before();
+        steps.base = t.svc::stopEpoch;
+        t.ctx.padCalJobs.engine = steps;
+        t.svc.setDotImager(new DotImager() {
+            @Override
+            public boolean isAvailable() {
+                return true;
+            }
+
+            @Override
+            public Frame capture(double xMm, double yMm) {
+                return new Frame(new BufferedImage(64, 48, BufferedImage.TYPE_INT_RGB), 0.02, 0.02, xMm, yMm);
+            }
+
+            @Override
+            public List<Dot> inspect(Frame before, Frame after) {
+                return new ArrayList<>();
+            }
+        });
+    }
+
+    @AfterEach
+    public void after() throws Exception {
+        steps.release.countDown();
+        t.after();
+    }
+
+    /** n spots in lines of 8, 2.5 mm apart, from (x0, y0) on the blank, as JSON pairs. */
+    static String spots(double x0, double y0, int n) {
+        List<String> l = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            l.add(String.format(Locale.ROOT, "[%.1f,%.1f]", x0 + 2.5 * (i % 8), y0 + 2.5 * (i / 8)));
+        }
+        return String.join(",", l);
+    }
+
+    @Test
+    public void openPnpsOwnStopAfterTheLastStepSetsNothing() throws Exception {
+        long t0 = System.currentTimeMillis();
+        t.svc.setStartAngle(359.1, "seeded", t0, new DispenseProfile.StartAngleFeature("halves", 179.1, t0, "pc-0"));
+        steps.holdAt = 2;
+        PadCalibrationJobTest.Res r = t.call("POST", "/api/screw/start-angle/measure", "{\"mode\":\"halves\","
+                + "\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16) + "],\"throwaways\":[[285,262],"
+                + "[287.5,262]],\"apply\":true}");
+        assertEquals(202, r.status, r.toString());
+        String job = r.json().get("job").getAsString();
+        assertTrue(steps.held.await(30, TimeUnit.SECONDS), "row 2 queued");
+        steps.epoch++; // OpenPnP's own Stop: the engine's epoch moves, the step it ran still ends OK
+        steps.release.countDown();
+        JsonObject j = null;
+        for (long until = System.currentTimeMillis() + 30_000; System.currentTimeMillis() < until; Thread.sleep(20)) {
+            j = PadCalibrationJobTest.ok(t.get("/api/pad-calibrations/" + job));
+            if (!"running".equals(j.get("state").getAsString())) {
+                break;
+            }
+        }
+        assertEquals("stopped", j.get("state").getAsString(), j.toString());
+        DispenseProfile p = t.svc.getConfig().profile;
+        assertEquals(359.1, p.startAngleDeg, 0, "nothing set");
+        assertEquals("pc-0", p.startAngleFeature.runId);
+        assertTrue(j.getAsJsonObject("result").getAsJsonObject("startAngle").get("applied").isJsonNull(), j.toString());
+    }
+}

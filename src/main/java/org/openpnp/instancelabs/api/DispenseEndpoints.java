@@ -1332,9 +1332,9 @@ final class DispenseEndpoints {
             PadCalibrationJob j = ctx.padCalJobs.get(runId);
             f = j == null ? null : j.measuredFeature();
             if (f == null) {
-                throw ApiException.refused("measure first: " + (j == null ? "no measure " + runId + " in this session "
-                        + "(kept until OpenPnP restarts: measure again)" : runId + " is no finished start-angle measure "
-                                + "that found an angle"));
+                throw ApiException.refused("measure first: " + (j == null ? "no measure " + runId + " among the last "
+                        + PadCalibrationJobs.KEEP + " pad calibrations of this session (newer ones and a restart drop it: "
+                        + "measure again)" : runId + " is no finished start-angle measure that found an angle"));
             }
         }
         svc.setStartAngle(a, Json.str(b, "note", null), f != null ? f.measuredAtMs : measured == null ? null

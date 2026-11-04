@@ -111,6 +111,8 @@ final class PadCalibrationJob {
     static final String MEASURE_START_ANGLE = "start-angle", HALVES = "halves", QUARTERS = "quarters";
     /** BR-77 (Process 11-04): a throwaway on wet paste is laid this much higher per layer (mm), as the bench start-ups. */
     static final double THROWAWAY_LAYER_MM = 0.15;
+    /** BR-77: the most throwaways a measure step lays (the landing check purges 8). */
+    static final int MAX_THROWAWAYS = 8;
     /** The landing check's steps: the locator dot, then the purge and the row. */
     static final String LOCATOR = "locator", ROW = "row";
     /** The halt of a job whose engine saw a STOP it did not (§7.8). */
@@ -635,13 +637,18 @@ final class PadCalibrationJob {
                     + "of %d pairs), not %d", n, 4 * n, n, q.targets.size()) : String.format(Locale.ROOT, "quarters of "
                             + "%d turns take %d targets (4 per turn), not %d", n, 4 * n, q.targets.size()));
         }
-        if (q.throwaways.size() < 2) {
-            throw ApiException.badRequest("at least 2 throwaways: the first sets the screw's phase, the others flush it");
+        if (q.throwaways.size() < 2 || q.throwaways.size() > MAX_THROWAWAYS) {
+            throw ApiException.badRequest("at least 2 throwaways, at most " + MAX_THROWAWAYS + ": the first sets the "
+                    + "screw's phase, the others flush it");
         }
         for (double[] t : q.throwaways) {
             if (!(t[2] == 0 || t[2] == 1 || t[2] == 2)) {
                 throw ApiException.badRequest("a throwaway's layers must be 0 (a clean flat spot), 1 or 2 (wet paste, laid "
                         + Texts.num(THROWAWAY_LAYER_MM, 2) + " mm higher per layer; never on a reflowed joint)");
+            }
+            if (halves && t[2] > 1) {
+                throw ApiException.badRequest("halves lay each throwaway once per row: layers at most 1 (row 2 lays them "
+                        + "one wet layer higher)");
             }
         }
         if (q.startDeg != null && !(q.startDeg >= 0 && q.startDeg < 360)) {
@@ -1272,6 +1279,9 @@ final class PadCalibrationJob {
         if (saProblem != null) {
             return saProblem;
         }
+        if (!svc.hasTopCamera()) {
+            return "the measure needs the top camera: it looks at every spot before dispensing and measures every dot";
+        }
         SurfacePlane plane = svc.surfacePlane(saSurface);
         if (plane == null) {
             return "I4: no '" + saSurface + "' surface: probe it first";
@@ -1834,7 +1844,8 @@ final class PadCalibrationJob {
             r.measuresStartAngle = true;
             r.purgeXy = new ArrayList<>();
             for (double[] t : q.throwaways) {
-                r.purgeXy.add(new double[] {t[0], t[1], t[2] * THROWAWAY_LAYER_MM});
+                // every earlier row left one wet layer on each throwaway (Process's Q3: never at the targets' Z)
+                r.purgeXy.add(new double[] {t[0], t[1], (t[2] + k) * THROWAWAY_LAYER_MM});
             }
             r.blocks.add(b);
             stamp(r);
@@ -1875,16 +1886,21 @@ final class PadCalibrationJob {
         if (!q.apply || feature == null) {
             return;
         }
-        if (saSuggested == null) {
-            throw new IllegalStateException("the start angle's measured " + saMode + " feature changed during the measure: "
-                    + "nothing was set");
+        // a STOP, a cancel or OpenPnP's own Stop since the last step sets nothing; one now waits for the set
+        synchronized (lock) {
+            if (!stopRequested && engine.stopEpoch() != startEpoch) {
+                stopRequested = true;
+                stopReason = STOPPED_SINCE_START;
+            }
+            if (stopRequested) {
+                throw new Halt(stopReason);
+            }
+            double[] ft = svc.applyStartAngle(new DispenseProfile.StartAngleFeature(saMode, feature, saMeasuredAtMs,
+                    id));
+            saSuggested = ft[1];
+            saApplied = Views.map("fromDeg", round(ft[0], 2), "toDeg", round(ft[1], 2), "featureFrom",
+                    HALVES.equals(saMode) ? "peak" : "interpolated");
         }
-        double to = saSuggested;
-        svc.setStartAngle(to, String.format(Locale.ROOT, "measure %s: %s %s→%s", id, saMode, Texts.num(
-                now.startAngleDeg, 1), Texts.num(to, 1)), saMeasuredAtMs, new DispenseProfile.StartAngleFeature(saMode,
-                        feature, saMeasuredAtMs, id));
-        saApplied = Views.map("fromDeg", round(now.startAngleDeg, 2), "toDeg", round(to, 2), "featureFrom",
-                HALVES.equals(saMode) ? "peak" : "interpolated");
     }
 
     /**
@@ -3092,13 +3108,13 @@ final class PadCalibrationJob {
         }
         if (MEASURE_START_ANGLE.equals(measure)) {
             boolean halves = HALVES.equals(saMode);
-            s.add(String.format(Locale.ROOT, "Lays %d %s dots on the '%s' surface (%s), each row after its %d throwaways, "
-                    + "looks at them with the top camera and fits %s (≈ %s).", req.startAngle.targets.size(), halves
-                            ? "half-turn" : "quarter-turn", saSurface, halves ? "2 rows from " + Texts.num(saStartDeg, 1)
-                                    + "° and " + Texts.num(ScrewPhaseFit.norm(saStartDeg + 90), 1) + "°" : "4 per turn from "
-                                            + Texts.num(saStartDeg, 1) + "°", req.startAngle.throwaways.size(), halves
-                                                    ? "the flow's peak" : "the dead quarter's start",
-                    minSec(estimatedSeconds)));
+            String from = halves ? "2 rows from " + Texts.num(saStartDeg, 1) + "° and " + Texts.num(ScrewPhaseFit.norm(
+                    saStartDeg + 90), 1) + "°" : "4 per turn from " + Texts.num(saStartDeg, 1) + "°";
+            String on = saSurface == null ? "" : " on the '" + saSurface + "' surface";
+            s.add(String.format(Locale.ROOT, "Lays %d %s dots%s (%s), each row after its %d throwaways, looks at them "
+                    + "with the top camera and fits %s (≈ %s).", req.startAngle.targets.size(), halves ? "half-turn"
+                            : "quarter-turn", on, from, req.startAngle.throwaways.size(), halves ? "the flow's peak"
+                                    : "the dead quarter's start", minSec(estimatedSeconds)));
             return String.join(" ", s);
         }
         if (MEASURE_LANDING.equals(measure)) {
@@ -3487,8 +3503,8 @@ final class PadCalibrationJob {
         else if (f instanceof ScrewPhaseFit.Quarters) {
             ScrewPhaseFit.Quarters q = (ScrewPhaseFit.Quarters) f;
             fit = Views.map("deadQuarterStartDeg", round(q.deadQuarterStartDeg, 2), "gridDeadStartDeg", round(
-                    q.gridDeadStartDeg, 2), "liveQuarterAreas", byAngle(q.liveQuarterAreas), "cvPerAngle", byAngle(
-                            q.cvPerAngle));
+                    q.gridDeadStartDeg, 2), "regridStartDeg", round(q.regridStartDeg, 2), "liveQuarterAreas", byAngle(
+                            q.liveQuarterAreas), "cvPerAngle", byAngle(q.cvPerAngle));
         }
         return Views.map("job", id, "state", state, "mode", saMode, "startDeg", saStartDeg, "featureDeg", f == null
                 ? null : round(f.featureDeg(), 2), "confidence", f == null ? null : f.confidence, "why", f == null
