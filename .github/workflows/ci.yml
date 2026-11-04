@@ -4,12 +4,15 @@ name: CI
 # "gate": in the merge queue (merge_group) and on pushes, green only if every job below passed; on a PR without the
 # label full-ci, the UI end-to-end and SIM acceptance jobs are skipped (the fast gate) and run in the queue. A green
 # push to il/integration also publishes a versioned build as a GitHub prerelease, which the lab computer's deployer
-# installs when the machine is idle (INF-02, infra/deploy/).
+# installs when the machine is idle (INF-02, infra/deploy/). The queue fast-forwards il/integration to the very commit
+# its merge_group run gated, so that push skips each test job the queue run passed (job queued) and builds, gates and
+# releases in minutes.
 # What runs where: infra/README.md.
 
 on:
   # A PR runs the fast gate (the UI end-to-end and SIM acceptance jobs only with the label full-ci); the merge queue
-  # (merge_group) and the push to il/integration run the full gate. Releases come from the push run only.
+  # (merge_group) runs the full gate, and the push to il/integration every test job its queue run did not pass.
+  # Releases come from the push run only.
   pull_request:
     types: [opened, synchronize, reopened, labeled]  # labeled: adding full-ci runs the slow jobs
   merge_group:
@@ -56,8 +59,47 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  queued:
+    # Which test jobs this commit's merge_group run passed, by job id (its gate's gate-needs artifact): a push skips
+    # those. Only a push to il/integration asks; anything unexpected (an API error, no such run, no artifact) answers
+    # [] and every test job runs here. Every test job needs it, so if this job itself fails (a lost runner), they are
+    # skipped and the gate is red, as for a failed build.
+    name: Passed in the merge queue
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read  # the commit's merge_group runs and their artifacts
+    outputs:
+      passed: ${{ steps.find.outputs.passed }}
+    steps:
+      - name: The test jobs this commit's queue run passed
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          passed='[]'
+          if [ "$EVENT" = push ] && [ "$GITHUB_REF" = refs/heads/il/integration ] &&
+              timeout 60 gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=merge_group&head_sha=$GITHUB_SHA" \
+                > runs.json; then
+            run=$(jq -r --arg sha "$GITHUB_SHA" '[.workflow_runs[] | select(.event == "merge_group"
+                and (.path | split("@")[0]) == ".github/workflows/ci.yml" and .head_sha == $sha
+                and (.head_branch | startswith("gh-readonly-queue/il/integration/"))
+                and .status == "completed" and .conclusion == "success") | .id] | max // empty' runs.json) || run=
+            if [ -n "$run" ] && timeout 120 gh run download "$run" -R "$GITHUB_REPOSITORY" -n gate-needs -D gate-needs
+            then
+              # a job counts only if it passed there: one skipped there (a partial run) runs here
+              passed=$(jq -c 'if type == "object" then [to_entries[] | select(.value.result == "success") | .key]
+                  | sort else [] end' gate-needs/needs.json) || passed='[]'
+            fi
+          fi
+          echo "passed=$passed" | tee -a "$GITHUB_OUTPUT"
+
   infra:
     name: Infra self-tests (CI helpers, deploy, lumen-sim)
+    needs: queued
+    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'infra') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -74,6 +116,8 @@ jobs:
 
   maven:
     name: Unit + simulated-machine integration (mvn test)
+    needs: queued
+    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'maven') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -102,7 +146,8 @@ jobs:
 
   deploy-e2e:
     name: Deploy dry run (real OpenPnP + lumen-sim, deploy and rollback)
-    needs: build
+    needs: [build, queued]
+    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'deploy-e2e') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -137,7 +182,8 @@ jobs:
 
   controller-e2e:
     name: Simulated controller behind OpenPnP (home, STOP in G28, long prime)
-    needs: build
+    needs: [build, queued]
+    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'controller-e2e') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -169,8 +215,10 @@ jobs:
     # One fresh SIM session per leg (WEBUI_SCRIPTS): infra/ci/webui_shards.py names each leg's scripts; "rest" runs
     # every other script in run-webui-sim-test.sh's ALL_SCRIPTS, so a new UI script needs no change here.
     name: UI end-to-end (${{ matrix.title }})
-    needs: build
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    needs: [build, queued]
+    if: >-
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-e2e') && (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     strategy:
@@ -210,7 +258,8 @@ jobs:
 
   ui-boardview:
     name: UI end-to-end (boardview)
-    needs: build
+    needs: [build, queued]
+    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-boardview') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -237,8 +286,10 @@ jobs:
 
   acceptance:
     name: SIM acceptance (${{ matrix.shard }}${{ matrix.controller == 'pty' && ', on lumen-sim' || '' }})
-    needs: build
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-ci')
+    needs: [build, queued]
+    if: >-
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'acceptance') && (github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -287,7 +338,8 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [build, infra, maven, deploy-e2e, controller-e2e, ui-e2e, ui-boardview, acceptance]
+    timeout-minutes: 10  # a hung step must not hold the queue's required check for hours
+    needs: [queued, build, infra, maven, deploy-e2e, controller-e2e, ui-e2e, ui-boardview, acceptance]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -304,6 +356,11 @@ jobs:
             # the fast gate: the slow jobs run in the merge queue (label a PR full-ci to run them here too)
             echo "$NEEDS" | jq -e 'length > 0 and all(to_entries[]; .value.result == "success" or
               ((.key == "ui-e2e" or .key == "acceptance") and .value.result == "skipped"))' >/dev/null
+          elif [ "$EVENT" = push ]; then
+            # a test job this commit's queue run passed is skipped here (job queued); every other job must pass
+            echo "$NEEDS" | jq -e '(.queued.outputs.passed // "[]" | fromjson) as $passed | length > 0
+              and .queued.result == "success" and .build.result == "success" and all(to_entries[];
+              .value.result == "success" or (.value.result == "skipped" and (.key | IN($passed[]))))' >/dev/null
           else
             echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null
           fi
@@ -318,11 +375,32 @@ jobs:
             | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")
             | "\(.conclusion)\t\(.name)"' jobs.json > bad.txt
           if [ -s bad.txt ]; then echo "jobs of this run that did not pass:"; cat bad.txt; exit 1; fi
+      - name: What this queue run passed, by job (the push of this commit skips those)
+        # after both verdicts, so it exists only for a green queue run; a failed write or upload never fails the
+        # gate (it would eject the PR): the push then runs every test job
+        if: github.event_name == 'merge_group'
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS" > needs.json
+      - uses: actions/upload-artifact@v7  # fetched at the job's set-up as for build, which the gate needs anyway
+        if: github.event_name == 'merge_group'
+        continue-on-error: true
+        timeout-minutes: 2  # a hang would hold the required check until the queue ejects the PR
+        with:
+          name: gate-needs
+          path: needs.json
+          retention-days: 7
+          overwrite: true  # a re-run's gate replaces it
+          if-no-files-found: error
 
   release:
     name: Release (versioned build for the deployer)
     needs: [gate]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/il/integration' && needs.gate.result == 'success'
+    # !cancelled(): without a status function GitHub adds success() over every job before the gate, so a push whose
+    # test jobs were skipped (job queued) would never release
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/il/integration' && needs.gate.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
