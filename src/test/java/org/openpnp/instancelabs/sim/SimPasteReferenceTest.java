@@ -19,7 +19,7 @@ import com.google.gson.JsonParser;
 /**
  * INF-06's acceptance: the SIM's per-tip pastes ({@code src/test/sim/paste-tips.json}) lay dots that match Process's
  * measured reference ({@code docs/research/paste-model-reference-per-tip.md}, 11-04) within its CI tolerance: mass per
- * whole turn ±10 %, mean area ±15 % (phase-averaged: a board's 298°/118° pairs average the phase, Process 05:0x), CV up
+ * whole turn ±10 %, mean area ±15 % (the SIM's mean phase-averaged, as a board's 298°/118° pairs, Process 05:0x), CV up
  * to 1.5× the measured one (at the balanced phase, where both halves of a turn are equal), landing SD ±0.02 mm per
  * axis. Mass, mean area, swing and gap are checked on the law itself (cv 0); CV and landing scatter with the noise,
  * as their means over 16 noise seeds.
@@ -209,7 +209,7 @@ public class SimPasteReferenceTest {
         // the SIM blank has no pad: §2's flat blank, not the masked 0603 rows (board 3's 0.788 is pad-capped, Process)
         within(mean(areas), 0.94, 0.15, "22G half-turn mean area on a flat blank, no pad (§2, 10-31)");
         assertTrue(a >= 0.56 && a <= 0.60, "22G area swing A of tools/lumen.py's f(phi) (§3: 0.56-0.60): " + a);
-        // the flat blank's row has no CV: board 3's, of pad-capped dots, is the only one
+        // the flat blank's row has no CV: board 3's (pad-capped dots, at §1's ~19 psi) stands in
         assertTrue(c >= 0.5 * 0.075 && c <= 1.5 * 0.075, "22G CV at the balanced phase: " + c + " (§2: 7.5 %)");
         within(noisy[1], 0.035, 0.02 / 0.035, "22G landing SD (§7: 0.03-0.04)");
     }
@@ -249,7 +249,7 @@ public class SimPasteReferenceTest {
         within(byGap.get(0), 1.50, 0.15, "25G whole-turn mean area on flat FR4, no pad (§2, the 20 weighed dots)");
         assertTrue(Collections.max(byGap) / Collections.min(byGap) < 1.10,
                 "25G areas alike over gaps 0.10-0.30 (§6): " + byGap);
-        assertTrue(c >= 0.5 * 0.057 && c <= 1.5 * 0.057, "25G CV on flat FR4: " + c + " (§2: 5.7 %, 20 dots)");
+        assertTrue(c >= 0.5 * 0.057 && c <= 1.5 * 0.057, "25G CV on flat FR4: " + c + " (§2: ~6 %, 5.7 % by Process)");
         within(noisy[1], 0.045, 0.02 / 0.045, "25G landing SD (§7: 0.02-0.06)");
     }
 
