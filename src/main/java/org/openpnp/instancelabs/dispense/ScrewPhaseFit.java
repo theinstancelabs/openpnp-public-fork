@@ -12,8 +12,9 @@ import java.util.TreeMap;
  *
  * <ul>
  * <li><b>Halves</b> (the 22G, roles/process.md "Screw timing"): two rows of half-turn pairs, the second 90° after the
- * first. Per row x = (A − B)/(A + B) of the found dots at its start and half a turn on (a half turn always lays paste);
- * x = −(2a/π)·sin(start − peak) gives the flow's peak and its amplitude a.</li>
+ * first. Per row x = (A − B)/(A + B) of the medians of the found dots at its start and half a turn on (a half turn always
+ * lays paste; a carried or start blob at 2-3× moves a mean, not a median); x = −(2a/π)·sin(start − peak) gives the
+ * flow's peak and its amplitude a.</li>
  * <li><b>Quarters</b> (the 25G at a threshold): 4 quarter dots per turn, a dot not found laid nothing; the dead quarter's
  * start by the first harmonic of the 4 means (the 90° grid alone misses ±22.5°), the grid's own minimum kept beside
  * it.</li>
@@ -25,6 +26,8 @@ public final class ScrewPhaseFit {
     public static final String HIGH = "high", LOW = "low", NONE = "none";
     /** Halves: the peak's standard error (deg) for high, for low; a ripple below 3 standard errors of x is none. */
     static final double HIGH_SE_DEG = 10, LOW_SE_DEG = 20, RIPPLE_SE = 3;
+    /** A normal SD per median absolute deviation. */
+    static final double MAD_SD = 1.4826;
     static final int MIN_FOUND_PER_HALF = 3;
     /** Quarters (Process 11-04): dead at or below 0.2 of the largest mean, a dip at or below 0.5; a live cv above 0.15. */
     static final double DEAD_SHARE = 0.2, DIP_SHARE = 0.5, LIVE_CV_MAX = 0.15;
@@ -109,17 +112,17 @@ public final class ScrewPhaseFit {
             }
             for (int j = 0; j < 2 && h.why.isEmpty(); j++) {
                 if (half.get(j).size() < MIN_FOUND_PER_HALF) {
-                    int n = half.get(j).size();
-                    h.why.add("only " + n + (n == 1 ? " dot" : " dots") + " found at " + deg(r.startDeg + 180 * j)
+                    h.why.add("only " + dots(half.get(j).size()) + " to use at " + deg(r.startDeg + 180 * j)
                             + ": at least " + MIN_FOUND_PER_HALF + " per half");
                 }
             }
             if (!h.why.isEmpty()) {
+                h.why.addAll(notes);
                 return h;
             }
-            double a = mean(half.get(0)), b = mean(half.get(1));
+            double a = median(half.get(0)), b = median(half.get(1));
             r.x = (a - b) / (a + b);
-            r.xSe = Math.sqrt(var(half.get(0)) / half.get(0).size() + var(half.get(1)) / half.get(1).size()) / (a + b);
+            r.xSe = Math.hypot(medianSe(half.get(0)), medianSe(half.get(1))) / (a + b);
             maxSe = Math.max(maxSe, r.xSe);
             h.rows.add(r);
         }
@@ -292,6 +295,27 @@ public final class ScrewPhaseFit {
 
     private static String dots(int n) {
         return n + (n == 1 ? " dot" : " dots");
+    }
+
+    private static double median(List<Double> l) {
+        List<Double> s = new ArrayList<>(l);
+        java.util.Collections.sort(s);
+        int n = s.size();
+        return n % 2 == 1 ? s.get(n / 2) : (s.get(n / 2 - 1) + s.get(n / 2)) / 2;
+    }
+
+    /**
+     * A median's standard error, √(π/2)·σ/√n, with σ from the median absolute deviation (a blob does not widen it), or
+     * the sample SD when more than half the values are equal (a MAD of 0 is no error of 0).
+     */
+    private static double medianSe(List<Double> l) {
+        double m = median(l);
+        List<Double> dev = new ArrayList<>();
+        for (double v : l) {
+            dev.add(Math.abs(v - m));
+        }
+        double mad = median(dev), sd = mad > 0 ? MAD_SD * mad : Math.sqrt(var(l));
+        return Math.sqrt(Math.PI / 2) * sd / Math.sqrt(l.size());
     }
 
     private static double mean(List<Double> l) {

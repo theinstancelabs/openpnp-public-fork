@@ -40,6 +40,7 @@ public class StartAngleJobTest {
     /** Dose-blocks steps that find every dot at its own count, with the areas of a flow peaking at 179.1 (a 0.47). */
     static final class Steps implements PadCalibrationJobs.Engine {
         final AtomicInteger calls = new AtomicInteger();
+        final List<DoseBlocksRequest> reqs = new java.util.concurrent.CopyOnWriteArrayList<>();
         /** The step (1 = first) that waits until {@link #release}, or 0. */
         volatile int holdAt;
         final CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1);
@@ -54,6 +55,7 @@ public class StartAngleJobTest {
         @Override
         public Future<DoseBlocksResult> runDoseBlocks(DoseBlocksRequest req) {
             int n = calls.incrementAndGet();
+            reqs.add(req);
             return CompletableFuture.supplyAsync(() -> {
                 if (n == holdAt) {
                     held.countDown();
@@ -147,7 +149,7 @@ public class StartAngleJobTest {
         steps.holdAt = 2;
         PadCalibrationJobTest.Res r = t.call("POST", "/api/screw/start-angle/measure", "{\"mode\":\"halves\","
                 + "\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16) + "],\"throwaways\":[[285,262],"
-                + "[287.5,262]],\"apply\":true}");
+                + "[287.5,262],[290,262],[292.5,262]],\"apply\":true}");
         assertEquals(202, r.status, r.toString());
         String job = r.json().get("job").getAsString();
         assertTrue(steps.held.await(30, TimeUnit.SECONDS), "row 2 queued");
@@ -165,5 +167,50 @@ public class StartAngleJobTest {
         assertEquals(359.1, p.startAngleDeg, 0, "nothing set");
         assertEquals("pc-0", p.startAngleFeature.runId);
         assertTrue(j.getAsJsonObject("result").getAsJsonObject("startAngle").get("applied").isJsonNull(), j.toString());
+    }
+
+    /**
+     * Halves lay one throwaway set per row (Process 11-04 13:0x): the first half of the throwaways before row 1, the
+     * second before row 2, each spot at its own layers, nothing raised; two throwaways on one spot are refused.
+     */
+    @Test
+    public void halvesLayEachRowsOwnThrowawaysAtTheirOwnLayers() throws Exception {
+        String halves = "{\"mode\":\"halves\",\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16) + "],";
+        PadCalibrationJobTest.Res r = t.call("POST", "/api/screw/start-angle/measure", halves + "\"throwaways\":[[285,262],"
+                + "[287.5,262,1],[290,262,0],[292.5,262,2]],\"wait\":true}");
+        assertEquals(200, r.status, r.toString());
+        assertEquals(2, steps.reqs.size(), "one engine step per row");
+        assertEquals("[[285.0, 262.0, 0.0], [287.5, 262.0, 0.15]]", purge(steps.reqs.get(0)), "row 1's set");
+        assertEquals("[[290.0, 262.0, 0.0], [292.5, 262.0, 0.3]]", purge(steps.reqs.get(1)), "row 2's set, not raised");
+        PadCalibrationJobTest.Res pv = t.call("POST", "/api/screw/start-angle/measure", halves + "\"throwaways\":[[285,"
+                + "262],[287.5,262],[290,262],[292.5,262]],\"apply\":true}");
+        assertEquals(409, pv.status, "no stored halves feature: " + pv);
+        assertTrue(pv.json().getAsJsonObject("preview").get("sentence").getAsString().contains(", each row after its 2 "
+                + "throwaways,"), pv.toString());
+        assertBad(halves + "\"throwaways\":[[285,262],[287.5,262],[290,262]]}", "halves take one set of throwaways per "
+                + "row: an even count, 2 to 8 per row (the first half before row 1, the second before row 2), not 3");
+        assertBad(halves + "\"throwaways\":[[285,262],[287.5,262]]}", "2 to 8 per row");
+        assertBad(halves + "\"throwaways\":[" + spots(280, 262, 8) + "," + spots(280, 266, 9) + ",[300,270]]}",
+                "2 to 8 per row");
+        assertBad(halves + "\"throwaways\":[[285,262],[287.5,262],[285,262],[290,262]]}", "throwaways 1 and 3 lie 0.00 "
+                + "mm apart: at least the targets' pitch, 2.50 mm, or one lands on the other's wet dot");
+        assertBad("{\"mode\":\"quarters\",\"targets\":[" + spots(285, 245, 16) + "],\"throwaways\":[[285,262],"
+                + "[286,262]]}", "throwaways 1 and 2 lie 1.00 mm apart");
+        assertEquals(2, steps.reqs.size(), "nothing ran");
+    }
+
+    /** The purge spots of a step as {x, y, raise}. */
+    static String purge(DoseBlocksRequest r) {
+        List<String> l = new ArrayList<>();
+        for (double[] p : r.purgeXy) {
+            l.add(java.util.Arrays.toString(new double[] {p[0], p[1], Math.round(p[2] * 1e6) / 1e6}));
+        }
+        return l.toString();
+    }
+
+    void assertBad(String body, String why) throws Exception {
+        PadCalibrationJobTest.Res r = t.call("POST", "/api/screw/start-angle/measure", body);
+        assertEquals(400, r.status, r.toString());
+        assertTrue(r.json().get("reason").getAsString().contains(why), r.toString());
     }
 }

@@ -168,7 +168,10 @@ final class PadCalibrationJob {
         String mode;
         /** N2 machine X/Y in dispense order: halves row 1 then row 2 (2·pairs each), quarters 4 per turn. */
         List<double[]> targets = new ArrayList<>();
-        /** {x, y, layers}: the purge spots of every step; layers 0 (a clean flat spot), 1 or 2 (wet paste). */
+        /**
+         * {x, y, layers}: the purge spots, layers 0 (a clean flat spot), 1 or 2 (wet paste); halves one set per row (the
+         * first half before row 1, the second before row 2), quarters one set.
+         */
         List<double[]> throwaways = new ArrayList<>();
         String surface;
         Double startDeg;
@@ -637,7 +640,14 @@ final class PadCalibrationJob {
                     + "of %d pairs), not %d", n, 4 * n, n, q.targets.size()) : String.format(Locale.ROOT, "quarters of "
                             + "%d turns take %d targets (4 per turn), not %d", n, 4 * n, q.targets.size()));
         }
-        if (q.throwaways.size() < 2 || q.throwaways.size() > MAX_THROWAWAYS) {
+        // halves: one set per row (Process 11-04 13:0x): a spot raised over row 1's wet dot may not reach it bare
+        int perRow = halves ? q.throwaways.size() / 2 : q.throwaways.size();
+        if (halves && (q.throwaways.size() % 2 != 0 || perRow < 2 || perRow > MAX_THROWAWAYS)) {
+            throw ApiException.badRequest("halves take one set of throwaways per row: an even count, 2 to "
+                    + MAX_THROWAWAYS + " per row (the first half before row 1, the second before row 2), not "
+                    + q.throwaways.size());
+        }
+        if (perRow < 2 || perRow > MAX_THROWAWAYS) {
             throw ApiException.badRequest("at least 2 throwaways, at most " + MAX_THROWAWAYS + ": the first sets the "
                     + "screw's phase, the others flush it");
         }
@@ -645,10 +655,6 @@ final class PadCalibrationJob {
             if (!(t[2] == 0 || t[2] == 1 || t[2] == 2)) {
                 throw ApiException.badRequest("a throwaway's layers must be 0 (a clean flat spot), 1 or 2 (wet paste, laid "
                         + Texts.num(THROWAWAY_LAYER_MM, 2) + " mm higher per layer; never on a reflowed joint)");
-            }
-            if (halves && t[2] > 1) {
-                throw ApiException.badRequest("halves lay each throwaway once per row: layers at most 1 (row 2 lays them "
-                        + "one wet layer higher)");
             }
         }
         if (q.startDeg != null && !(q.startDeg >= 0 && q.startDeg < 360)) {
@@ -671,6 +677,13 @@ final class PadCalibrationJob {
                     throw ApiException.badRequest(String.format(Locale.ROOT, "throwaway %d lies %.2f mm from target %d: "
                             + "at least the targets' pitch, %.2f mm, or its paste is taken for that dot", i + 1, dist(
                                     q.throwaways.get(i), q.targets.get(j)), j + 1, pitch));
+                }
+            }
+            for (int j = i + 1; j < q.throwaways.size(); j++) {
+                if (dist(q.throwaways.get(i), q.throwaways.get(j)) < pitch) {
+                    throw ApiException.badRequest(String.format(Locale.ROOT, "throwaways %d and %d lie %.2f mm apart: at "
+                            + "least the targets' pitch, %.2f mm, or one lands on the other's wet dot", i + 1, j + 1, dist(
+                                    q.throwaways.get(i), q.throwaways.get(j)), pitch));
                 }
             }
         }
@@ -1058,7 +1071,8 @@ final class PadCalibrationJob {
         if (MEASURE_START_ANGLE.equals(measure)) {
             for (DoseBlocksRequest.Block x : saBlocks) {
                 find(x.label).estimateS = blockSeconds(c, java.util.Collections.singletonList(x));
-                pasteMg += (x.xy.size() + req.startAngle.throwaways.size()) * countMgPerDot(x.netSteps);
+                pasteMg += (x.xy.size() + req.startAngle.throwaways.size() / saBlocks.size()) * countMgPerDot(
+                        x.netSteps);
             }
         }
         if (l != null && layout != null) {
@@ -1843,9 +1857,10 @@ final class PadCalibrationJob {
             r.startAngleDeg = ScrewPhaseFit.norm(saStartDeg + 90 * k);
             r.measuresStartAngle = true;
             r.purgeXy = new ArrayList<>();
-            for (double[] t : q.throwaways) {
-                // every earlier row left one wet layer on each throwaway (Process's Q3: never at the targets' Z)
-                r.purgeXy.add(new double[] {t[0], t[1], (t[2] + k) * THROWAWAY_LAYER_MM});
+            int per = q.throwaways.size() / saBlocks.size();
+            for (double[] t : q.throwaways.subList(k * per, (k + 1) * per)) {
+                // this row's own spots, each at its own layers (Process's Q3: never on wet paste at the targets' Z)
+                r.purgeXy.add(new double[] {t[0], t[1], t[2] * THROWAWAY_LAYER_MM});
             }
             r.blocks.add(b);
             stamp(r);
@@ -3113,7 +3128,8 @@ final class PadCalibrationJob {
             String on = saSurface == null ? "" : " on the '" + saSurface + "' surface";
             s.add(String.format(Locale.ROOT, "Lays %d %s dots%s (%s), each row after its %d throwaways, looks at them "
                     + "with the top camera and fits %s (≈ %s).", req.startAngle.targets.size(), halves ? "half-turn"
-                            : "quarter-turn", on, from, req.startAngle.throwaways.size(), halves ? "the flow's peak"
+                            : "quarter-turn", on, from, req.startAngle.throwaways.size() / saBlocks.size(), halves
+                                    ? "the flow's peak"
                                     : "the dead quarter's start", minSec(estimatedSeconds)));
             return String.join(" ", s);
         }

@@ -40,7 +40,7 @@ public class StartAngleMeasureSimTest {
 
     /**
      * SimPaste with this ripple and physical offset, no threads (a thread would join two blobs), a fixed noise; and a
-     * throwaway raised over a wet layer still touches (SimPaste has no paste height: up to 0.35 mm).
+     * throwaway raised over wet layers still touches (SimPaste has no paste height: up to the API's 0.10 + 2 × 0.15).
      */
     static Consumer<JsonObject> paste(double ripple, int offsetSteps) {
         return sc -> {
@@ -49,7 +49,7 @@ public class StartAngleMeasureSimTest {
             p.addProperty("offsetSteps", offsetSteps);
             p.addProperty("threadShare", 0);
             p.addProperty("noiseSeed", 77);
-            p.addProperty("maxGapMm", 0.35);
+            p.addProperty("maxGapMm", 0.40);
         };
     }
 
@@ -82,10 +82,14 @@ public class StartAngleMeasureSimTest {
         return String.join(",", l);
     }
 
-    /** Halves of 8 pairs: row 1 from (x0, 245), row 2 from (x0, 253). */
+    /**
+     * Halves of 8 pairs: row 1 from (x0, 245) after its throwaways at (x0, 262) and (x0 + 2.5, 262), both clean; row 2
+     * from (x0, 253) after its own at (x0 + 5, 262), clean, and (x0 + 7.5, 262) on two wet layers.
+     */
     static String halves(double x0, String more) {
         return "{\"mode\":\"halves\",\"targets\":[" + spots(x0, 245, 16) + "," + spots(x0, 253, 16) + "],"
-                + "\"throwaways\":[[" + x0 + ",262],[" + (x0 + 2.5) + ",262]]" + more + "}";
+                + "\"throwaways\":[[" + x0 + ",262],[" + (x0 + 2.5) + ",262],[" + (x0 + 5) + ",262,0],[" + (x0 + 7.5)
+                + ",262,2]]" + more + "}";
     }
 
     static String quarters(String more) {
@@ -129,11 +133,11 @@ public class StartAngleMeasureSimTest {
         pc.sim.server.mark();
         JsonObject r = measure(halves(285, ""));
         assertEquals("done", PadCalibrationSimTest.str(r, "state"), r.toString());
-        // row 2's throwaways lie on row 1's, one wet layer: laid 0.15 mm higher (Process's Q3), never at the targets' Z
+        // each row after its own 2 throwaways (Process 11-04 13:0x), each at its own layers, nothing raised by the row
         List<Double> z = dotZ(sent());
         assertEquals(36, z.size(), z.toString());
-        assertEquals(up(0.15), z.get(18) - z.get(0), 0.002, z.toString());
-        assertEquals(up(0.15), z.get(19) - z.get(1), 0.002, z.toString());
+        assertEquals(z.get(0), z.get(18), 0.002, "row 2's clean throwaway at the targets' Z: " + z);
+        assertEquals(up(0.30), z.get(19) - z.get(0), 0.002, "two wet layers: 0.30 mm higher: " + z);
         assertEquals(z.get(0), z.get(2), 0.002, "row 1's clean throwaways at the targets' Z");
         assertEquals("halves", PadCalibrationSimTest.str(r, "mode"));
         JsonObject fit = r.getAsJsonObject("fit");
@@ -276,7 +280,8 @@ public class StartAngleMeasureSimTest {
         assertBad("{\"mode\":\"quarters\"," + t + "\"throwaways\":" + THROWAWAYS + ",\"startDeg\":360}", "startDeg");
         assertBad("{\"mode\":\"quarters\"," + t + "\"throwaways\":" + THROWAWAYS + ",\"turns\":9}", "turns");
         assertBad("{\"mode\":\"halves\",\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16) + "],"
-                + "\"throwaways\":[[285,262,2],[287.5,262]]}", "halves lay each throwaway once per row: layers at most 1");
+                + "\"throwaways\":" + THROWAWAYS + "}", "halves take one set of throwaways per row: an even count, 2 to "
+                + "8 per row");
         assertBad("{\"mode\":\"quarters\"," + t + "\"throwaways\":[" + spots(280, 266, 9) + "]}", "at most 8");
         assertBad("{\"mode\":\"quarters\",\"targets\":[[285,245],[286,245]," + spots(285, 250, 14) + "],\"throwaways\":"
                 + THROWAWAYS + "}", "two targets lie 1.00 mm apart: at least 1.6 mm");

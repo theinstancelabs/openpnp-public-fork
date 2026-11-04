@@ -143,7 +143,8 @@ public class StartAngleBlocksTest {
             DispenseProfile.StartAngleFeature quarters = new DispenseProfile.StartAngleFeature("quarters", 300, t0,
                     "pc-2");
             EngineRefusal other = assertThrows(EngineRefusal.class, () -> svc.applyStartAngle(quarters));
-            assertTrue(other.getMessage().contains("no measured quarters feature"), other.getMessage());
+            assertTrue(other.getMessage().contains("no measured quarters feature (it was set from a halves measure "
+                    + "since)"), other.getMessage());
             long t1 = System.currentTimeMillis();
             double[] ft = svc.applyStartAngle(new DispenseProfile.StartAngleFeature("halves", 88.7, t1, "pc-3"));
             assertEquals(0.4, ft[0], 0);
@@ -152,8 +153,11 @@ public class StartAngleBlocksTest {
             assertEquals(268.69, p.startAngleDeg, 1e-9);
             assertEquals("pc-3", p.startAngleFeature.runId);
             svc.setStartAngle(10.0, "typed");
-            assertThrows(EngineRefusal.class, () -> svc.applyStartAngle(new DispenseProfile.StartAngleFeature("halves",
-                    90, System.currentTimeMillis(), "pc-4")), "a set without a measure dropped the feature");
+            EngineRefusal none = assertThrows(EngineRefusal.class, () -> svc.applyStartAngle(new DispenseProfile
+                    .StartAngleFeature("halves", 90, System.currentTimeMillis(), "pc-4")), "a set without a measure "
+                            + "dropped the feature");
+            assertTrue(none.getMessage().contains("no measured halves feature (it was set without a measure since)"),
+                    none.getMessage());
             assertEquals(10, svc.getConfig().profile.startAngleDeg, 0);
         }
     }

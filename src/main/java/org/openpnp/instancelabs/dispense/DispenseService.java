@@ -1327,7 +1327,8 @@ public final class DispenseService {
         DispenseProfile.StartAngleFeature old = p.startAngleFeature;
         if (old == null || !old.mode.equals(measured.mode)) {
             throw new EngineRefusal(409, "refused", "the start angle has no measured " + measured.mode + " feature (it "
-                    + "was set without a measure since): nothing was set");
+                    + "was set " + (old == null ? "without a measure" : "from a " + old.mode + " measure") + " since): "
+                    + "nothing was set");
         }
         double from = p.startAngleDeg, to = ScrewPhaseFit.norm(from + measured.deg - old.deg);
         setStartAngle(to, String.format(java.util.Locale.ROOT, "measure %s: %s %.1f→%.1f", measured.runId,

@@ -94,16 +94,28 @@ public class ScrewPhaseFitTest {
         }
         ScrewPhaseFit.Halves few = ScrewPhaseFit.halves(r1, 298, modelRow(28, 179.1, 0.47), 28);
         assertEquals(ScrewPhaseFit.NONE, few.confidence);
-        assertEquals("only 2 dots found at 118°: at least 3 per half", few.why.get(0));
-        // a noisy measure (± 0.25 on areas of 1): the peak's standard error, √(x₂²se₁² + x₁²se₂²)/k², decides
-        ScrewPhaseFit.Halves low = noisy(0.336);
-        assertEquals(17.90, low.peakSeDeg, 0.01);
+        assertEquals("only 2 dots to use at 118°: at least 3 per half", few.why.get(0));
+        assertEquals("6 dots not found at 118° (a half turn always lays paste): left out", few.why.get(1));
+        // found but joined (dots 5-16): the same count, and the notes say why
+        List<ScrewPhaseFit.Dot> j = modelRow(298, 179.1, 0.47);
+        for (int i = 4; i < j.size(); i++) {
+            j.set(i, new ScrewPhaseFit.Dot(j.get(i).startDeg, j.get(i).areaMm2, true, true));
+        }
+        ScrewPhaseFit.Halves joined = ScrewPhaseFit.halves(j, 298, modelRow(28, 179.1, 0.47), 28);
+        assertEquals("[only 2 dots to use at 298°: at least 3 per half, 6 dots joined to a neighbour (a thread or one "
+                + "blob) at 298°: left out, 6 dots joined to a neighbour (a thread or one blob) at 118°: left out]",
+                joined.why.toString());
+        // a noisy measure (± 0.25 on areas of 1): the peak's standard error, √(x₂²se₁² + x₁²se₂²)/k², decides; each
+        // half's error is its median's, √(π/2)·1.4826·MAD/√n (MAD 0.25 here: xSe 0.1161)
+        ScrewPhaseFit.Halves low = noisy(0.7);
+        assertEquals(14.93, low.peakSeDeg, 0.01);
+        assertEquals(0.1161, low.rows.get(0).xSe, 1e-4);
         assertEquals(ScrewPhaseFit.LOW, low.confidence);
-        assertEquals("the peak's standard error is 17.9° (high at most 10°)", low.why.get(0));
+        assertEquals("the peak's standard error is 14.9° (high at most 10°)", low.why.get(0));
         assertEquals(179.1, low.featureDeg(), 1e-9);
-        assertEquals(11.35, noisy(0.53).peakSeDeg, 0.01);
-        assertEquals(ScrewPhaseFit.HIGH, noisy(0.8).confidence, "SE 7.5°");
-        assertEquals(60.13, noisy(0.1).peakSeDeg, 0.01);
+        assertEquals(17.42, noisy(0.6).peakSeDeg, 0.01);
+        assertEquals(ScrewPhaseFit.HIGH, noisy(1.1).confidence, "SE 9.5°");
+        assertEquals(104.52, noisy(0.1).peakSeDeg, 0.01);
         assertEquals("no ripple: a whole-turn recipe needs no start angle", noisy(0.1).why.get(0));
     }
 
@@ -134,6 +146,33 @@ public class ScrewPhaseFitTest {
         assertEquals(ScrewPhaseFit.LOW, j.confidence);
         assertEquals("1 dot joined to a neighbour (a thread or one blob) at 298°: left out", j.why.get(0));
         assertEquals("1 dot joined to a neighbour (a thread or one blob) at 118°: left out", j.why.get(1));
+    }
+
+    /**
+     * Each half's area is its median and its error the median absolute deviation's (Process 11-04 13:0x): a start blob
+     * at 3× in a group of 8 raises a mean by a quarter and moves the peak ~14°; the median does not move.
+     */
+    @Test
+    public void halvesTakeMediansSoOneBlobBarelyMovesThePeak() {
+        List<ScrewPhaseFit.Dot> r1 = modelRow(298, 179.1, 0.47), r2 = modelRow(28, 179.1, 0.47);
+        ScrewPhaseFit.Halves clean = ScrewPhaseFit.halves(r1, 298, r2, 28);
+        List<ScrewPhaseFit.Dot> blob = new ArrayList<>(r1);
+        blob.set(0, new ScrewPhaseFit.Dot(298, 3 * r1.get(0).areaMm2));
+        ScrewPhaseFit.Halves h = ScrewPhaseFit.halves(blob, 298, r2, 28);
+        assertEquals(clean.peakDeg, h.peakDeg, 0.5);
+        assertEquals(clean.a, h.a, 0.01);
+        assertEquals(clean.peakSeDeg, h.peakSeDeg, 0.5, "the blob does not widen the error either");
+        assertEquals(ScrewPhaseFit.HIGH, h.confidence, h.why.toString());
+        // more than half the areas equal: the deviations' median is 0, the sample SD stands in (never an error of 0)
+        List<ScrewPhaseFit.Dot> tied = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            double e = i < 5 ? 0 : i % 2 == 0 ? 0.3 : -0.3;
+            tied.add(new ScrewPhaseFit.Dot(298, 0.74 + e));
+            tied.add(new ScrewPhaseFit.Dot(118, 1.26 - e));
+        }
+        ScrewPhaseFit.Halves t = ScrewPhaseFit.halves(tied, 298, r2, 28);
+        assertEquals(-0.26, t.rows.get(0).x, 1e-9, "the medians 0.74 and 1.26");
+        assertTrue(t.peakSeDeg > 3, "the SD's error, not 0: " + t.peakSeDeg);
     }
 
     /** No angle from a dot the camera could not measure, or from a dot that did not start where the plan put it. */
