@@ -38,7 +38,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WHAT = 'Feed step 20 -> 21.5 psi, drool check';
 const ACTIONS = ['quick stop (M410)', 'valve off', 'pump off', 'N1 valve off', 'N1 pump off', 'screw off (M18 B)'];
 const ACTIONS_IDLE = ['valve off', 'pump off', 'N1 valve off', 'N1 pump off'];
-const stub = { holder: null, takenFrom: null, refuseWrites: false, takingOver: false, takeFails: false, takes: 0, releases: 0, stops: 0, writes: [], noClient: [] };
+const stub = { holder: null, takenFrom: null, refuseWrites: false, takingOver: false, noLock: false, takeFails: false, takes: 0, releases: 0, stops: 0, writes: [], noClient: [] };
 // BR-72: never guarded (STOP, Pressure off, a pad calibration's cancel, the lock), and data-only writes (photos, board
 // import, plan, pad types and their rules, package mappings, coupon readings, tip-setup definitions but not a mount)
 const FREE = /^\/api\/(stop|pressure\/stop|lock\/.*|pad-calibrations\/[^/]+\/cancel)$/;
@@ -61,7 +61,7 @@ async function stubRoutes(context) {
     if (url.pathname === '/api/status' && method === 'GET') {
       const resp = await route.fetch();
       const body = await resp.json();
-      body.lock = lockView();
+      if (stub.noLock) delete body.lock; else body.lock = lockView();   // noLock: an OpenPnP before BR-72
       return route.fulfill({ response: resp, json: body });
     }
     if (url.pathname === '/api/lock/take' && method === 'POST') {
@@ -285,8 +285,9 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     check('(8) the strip reads You', /^You/.test((await cellText(page)).v), await cellText(page));
     await page.screenshot({ path: path.join(OUT, 'lock-unconfirmed.png') });
 
-    // ---- (8b) the strip after that STOP, its widest state: the verdict never cut, its time kept at 1440 px (In control
-    // gives its room first while it reads You or Nobody); an agent's cell never leaves the strip ---------------------------
+    // ---- (8b) the strip after that STOP, its widest state: In control costs the verdict nothing (while it reads You or
+    // Nobody it shrinks first): the verdict reads as on the same page without the lock, at 1440, 1280 and 1024 px,
+    // whatever the other cells read in this session; an agent's cell never leaves the strip --------------------------------
     await page.evaluate(() => IL.msg('lock', null));
     await page.waitForFunction(() => /^Stopped \d\d:\d\d/.test(document.querySelector('#pill-engine .cell__v').textContent), null, { timeout: 10000 }).catch(() => null);
     const fit = async (w, h) => {
@@ -298,10 +299,26 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
         return { w: ww, shown: v.innerText, cut: v.scrollWidth > v.clientWidth + 0.5 || r.right > lim + 0.5, tier: cells.className, lock: lc.offsetParent !== null };
       }, w);
     };
-    const cuts = [];
-    for (const [w, h] of [[1440, 900], [1280, 800], [1024, 768]]) cuts.push(await fit(w, h));
-    check('(8b) after a STOP, with You in control: the verdict reads "Stopped…" in full at 1440, 1280 and 1024 px', cuts.every((c) => !c.cut && /^Stopped/.test(c.shown)), cuts);
-    check('(8b) and keeps the time of the stop at 1440 px', /^Stopped \d\d:\d\d/.test(cuts[0].shown), cuts[0]);
+    // the STOP's after-effects settle first (as webui-sim's own check waits for Not connected); then each width is
+    // measured with In control and right after without it (the status without `lock`), so the rest of the strip is the same
+    await page.waitForFunction(() => document.getElementById('pill-conn').textContent.trim() === 'Not connected', null, { timeout: 15000 }).catch(() => null);
+    await sleep(1500);
+    const WIDTHS = [[1440, 900], [1280, 800], [1024, 768]];
+    const cuts = [], bare = [];
+    for (const [w, h] of WIDTHS) {
+      cuts.push(await fit(w, h));
+      stub.noLock = true;
+      await page.waitForFunction(() => document.getElementById('cell-lock').hidden, null, { timeout: 5000 }).catch(() => null);
+      await sleep(600);
+      bare.push(await fit(w, h));
+      stub.noLock = false;
+      await waitCell(page, /^You/);
+      await page.waitForFunction(() => !document.getElementById('cell-lock').hidden, null, { timeout: 5000 }).catch(() => null);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    check('(8b) after a STOP, with You in control: the verdict reads as without In control at 1440, 1280 and 1024 px',
+      cuts.every((c, i) => c.shown === bare[i].shown && c.cut === bare[i].cut && /^Stopped/.test(c.shown)), { cuts, bare });
+    check('(8b) and keeps the time of the stop at 1440 px', /^Stopped \d\d:\d\d/.test(cuts[0].shown) || !/^Stopped \d\d:\d\d/.test(bare[0].shown), { cuts: cuts[0], bare: bare[0] });
     stub.holder = agent(3, 1);
     await waitCell(page, /^Process/);
     const a1024 = await fit(1024, 768);

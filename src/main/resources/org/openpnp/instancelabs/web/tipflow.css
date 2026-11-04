@@ -1,0 +1,74 @@
+/* tipflow.css: the components the agreed mockups add (docs/ui-flows/mockups/mock.css, the user's OK of 11-02): the
+   flow's steps across the main column, "You can leave now", tip kinds with pictures, the big hand-step list, the
+   evidence table, and the Designs and Machine places (places.js). Same tokens as app.css; nothing here restyles an
+   existing component. */
+.tf-h1 { font: 700 25px/1.2 var(--font-ui); margin: 4px 0 6px; letter-spacing: -.01em; }
+.tf-stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.tf-row { display: flex; gap: 14px; min-width: 0; align-items: flex-start; }
+.tf-row > * { flex: 1; min-width: 0; }
+
+/* the flow's steps across the main column: today's .steps, any count */
+.rail { display: grid; grid-template-columns: repeat(var(--n, 7), 1fr); padding: 12px 8px 0; border-bottom: 0; }
+.rail .step { cursor: default; }
+.rail .step .st { position: relative; z-index: 1; }
+.rail .step--now { border-bottom-color: var(--accent); }
+.rail .step--now .step__s { color: var(--accent-ink); font-weight: 650; }
+
+/* "You can leave now" */
+.leave { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 12px; background: var(--ok-bg); border: 1px solid var(--ok-line); }
+.leave .ic { width: 30px; height: 30px; color: var(--ok); stroke-width: 1.8; flex: none; }
+.leave b { display: block; font: 700 17px/1.25 var(--font-ui); color: var(--ok); }
+.leave span { font-size: 14px; color: var(--ink-2); }
+.leave--need { background: var(--need-bg); border-color: var(--need-line); }
+.leave--need .ic, .leave--need b { color: var(--need); }
+
+/* tip kinds (Tip › Which tip) */
+.kinds { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; }
+.kind { position: relative; display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 14px; border: 1px solid var(--line-2); background: var(--surface); text-align: left; min-width: 0; color: var(--ink); font: inherit; cursor: pointer; }
+.kind:hover { border-color: var(--accent); }
+.kind[aria-pressed="true"] { border: 2px solid var(--accent); padding: 11px; box-shadow: 0 0 0 4px var(--accent-tint); }
+.kind__img { height: 132px; border-radius: 10px; background: var(--sunken); display: grid; place-items: center; overflow: hidden; }
+.kind__img img { width: 100%; height: 100%; object-fit: cover; }
+.kind__img .ic { width: 40px; height: 40px; color: var(--ink-3); }
+.kind__t { font: 700 16px/1.25 var(--font-ui); }
+.kind__s { font-size: 13px; color: var(--ink-2); line-height: 1.35; }
+.kind__path { margin-top: auto; padding-top: 8px; border-top: 1px solid var(--line); font-size: 13.5px; line-height: 1.4; }
+.kind--new { border-style: dashed; background: var(--tile); }
+.kind .tag { position: absolute; top: 18px; left: 18px; }
+
+/* hand steps (big, numbered) */
+.howto { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; counter-reset: h; }
+.howto li { display: grid; grid-template-columns: 40px 1fr; gap: 12px; align-items: start; font: 600 18px/1.35 var(--font-ui); }
+.howto li::before { counter-increment: h; content: counter(h); width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--need-bg); color: var(--need); box-shadow: inset 0 0 0 2px var(--need-dot); font: 700 16px/1 var(--font-ui); }
+.howto li small { display: block; font: 500 14px/1.4 var(--font-ui); color: var(--ink-2); margin-top: 2px; }
+
+/* the gauge box */
+.gauge { display: grid; grid-template-columns: 1fr 120px; gap: 10px; align-items: center; }
+.gauge__t { font: 700 17px/1.25 var(--font-ui); }
+.gauge__t small { display: block; font: 500 13px/1.35 var(--font-ui); color: var(--ink-2); margin-top: 2px; }
+.gauge .input { text-align: right; font-size: 20px; }
+.later { opacity: .62; }
+
+/* the evidence table */
+.evi td { vertical-align: top; font-size: 13.5px; line-height: 1.35; }
+.evi td:first-child { font-weight: 650; white-space: nowrap; }
+.evi .v { font-weight: 700; }
+.evi .how, .evi .until { color: var(--ink-2); }
+.tf-pic { border-radius: 12px; overflow: hidden; background: var(--sunken); display: grid; place-items: center; min-height: 120px; }
+.tf-pic img { width: 100%; height: auto; display: block; }
+
+/* checks: a by-hand or not-built step keeps its words in the list */
+.phases li.hand .ph__t, .phases li.notyet .ph__t { color: var(--ink-2); }
+.phases li .ph__d a { color: var(--accent-ink); }
+
+/* Designs and Machine (places.js) */
+.designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.design { display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--surface); }
+.design__t { font: 700 15px/1.25 var(--font-ui); }
+.design__s { font-size: 13px; color: var(--ink-2); }
+.place-more { margin-top: 12px; }
+.place-links { display: flex; flex-direction: column; gap: 8px; }
+.place-link { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-decoration: none; }
+.place-link:hover { border-color: var(--accent); }
+.place-link b { font: 650 15px/1.25 var(--font-ui); color: var(--accent-ink); }
+.place-link span { font-size: 13px; color: var(--ink-2); }

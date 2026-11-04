@@ -335,10 +335,10 @@ async function weighCoupon(page, place) {
       rows: Array.from(document.querySelectorAll('#pt-needs-table tbody tr[data-group]')).map((tr) => [tr.dataset.reason, tr.querySelector('.pt-needs__n').textContent]),
       tip: Array.from(document.querySelectorAll('#pt-needs-tip tr[data-reason]')).map((tr) => tr.dataset.reason),
       tipOpen: document.getElementById('pt-needs-tip').open, tipText: document.getElementById('pt-needs-tip-s').textContent,
-      nav: document.querySelector('#tab-btn-profile .nav__s').textContent, src: document.getElementById('pt-needs-src').textContent }));
+      nav: document.querySelector('#tab-btn-designs .nav__s').textContent, src: document.getElementById('pt-needs-src').textContent }));
     check('(3) three fixable rows with data-reason (J, T, Q)', list.rows.length === 3 && list.rows.every((r) => r[0] === 'no-type'), list.rows);
     check('(3) the tip details (collapsed) hold the 2 WSON groups', list.tip.length === 2 && !list.tipOpen && /22G bent taper/.test(list.tipText), list);
-    check('(3) nav sub "Needs 3 profiles"', list.nav === 'Needs 3 profiles', list.nav);
+    check('(3) nav sub "Needs 3 profiles" (under Designs: pad types serve the designs, the agreed menu of 11-02)', list.nav === 'Needs 3 profiles', list.nav);
     // the profile panel's pad-type gate counts in words: "1 of 12 pad types is allowed", "2 of 13 … are allowed"
     await page.waitForFunction(() => / pad types (is|are) allowed/.test((document.querySelector('#pt-ov-gate .pt-gate__s') || {}).textContent || ''), null, { timeout: 15000 }).catch(() => null);
     const gate3 = await page.evaluate(() => (document.querySelector('#pt-ov-gate .pt-gate__s') || {}).textContent || '');
