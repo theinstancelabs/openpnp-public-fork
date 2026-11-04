@@ -30,7 +30,7 @@
    */
   async function get(id) {
     if (!id || !/^[0-9a-f]{16}$/.test(String(id))) return null;
-    const r = await fetch('/api/board-art/' + id, { cache: 'default', headers: { Accept: 'application/json' } });
+    const r = await fetch('/api/board-art/' + id, { cache: 'default', headers: Object.assign({ Accept: 'application/json' }, IL.CLIENT_HEADER) });
     if (r.status === 404) return null;
     if (!r.ok) throw new Error('board drawing ' + id + ': HTTP ' + r.status);
     const art = await r.json();

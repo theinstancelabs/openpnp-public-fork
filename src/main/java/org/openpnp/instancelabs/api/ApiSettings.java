@@ -6,7 +6,6 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -59,11 +58,18 @@ public class ApiSettings {
             File f = fileFor(configDir);
             if (f.isFile()) {
                 try {
-                    ApiSettings fromFile = Json.GSON.fromJson(
-                            new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8), ApiSettings.class);
+                    com.google.gson.JsonElement root = new com.google.gson.JsonParser().parse(
+                            new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8));
+                    // trustedOrigins on its own: a mistyped list must not drop lanAccess, enabled or the port
+                    List<String> origins = null;
+                    if (root != null && root.isJsonObject() && root.getAsJsonObject().has("trustedOrigins")) {
+                        origins = originList(root.getAsJsonObject().remove("trustedOrigins"));
+                    }
+                    ApiSettings fromFile = Json.GSON.fromJson(root, ApiSettings.class);
                     if (fromFile != null) {
                         s = fromFile;
                     }
+                    s.trustedOrigins = origins == null ? new ArrayList<>() : origins;
                 }
                 catch (IOException | RuntimeException e) {
                     org.pmw.tinylog.Logger.warn(e, "Instance Labs API: ignoring unreadable {}", f);
@@ -73,9 +79,13 @@ public class ApiSettings {
         s.port = intOverride("instancelabs.api.port", "OPENPNP_IL_API_PORT", s.port);
         s.lanAccess = boolOverride("instancelabs.api.lan", "OPENPNP_IL_API_LAN", s.lanAccess);
         s.enabled = boolOverride("instancelabs.api.enabled", "OPENPNP_IL_API_ENABLED", s.enabled);
-        String origins = override("instancelabs.api.trustedOrigins", "OPENPNP_IL_API_TRUSTED_ORIGINS");
+        // set, even empty, replaces the file's list (an empty one clears it)
+        String origins = System.getProperty("instancelabs.api.trustedOrigins");
+        if (origins == null) {
+            origins = System.getenv("OPENPNP_IL_API_TRUSTED_ORIGINS");
+        }
         if (origins != null) {
-            s.trustedOrigins = new ArrayList<>(Arrays.asList(origins.split("\\s*,\\s*")));
+            s.trustedOrigins = split(origins);
         }
         if (s.trustedOrigins == null) {
             s.trustedOrigins = new ArrayList<>();
@@ -84,6 +94,40 @@ public class ApiSettings {
             s.threads = 2;
         }
         return s;
+    }
+
+    private static List<String> split(String list) {
+        List<String> out = new ArrayList<>();
+        for (String o : list.split(",")) {
+            if (!o.trim().isEmpty()) {
+                out.add(o.trim());
+            }
+        }
+        return out;
+    }
+
+    /** The file's trustedOrigins: a list, or one comma-separated string; null entries and other types dropped. */
+    private static List<String> originList(com.google.gson.JsonElement e) {
+        List<String> out = new ArrayList<>();
+        if (e == null || e.isJsonNull()) {
+            return out;
+        }
+        if (e.isJsonPrimitive() && e.getAsJsonPrimitive().isString()) {
+            return split(e.getAsString());
+        }
+        if (e.isJsonArray()) {
+            for (com.google.gson.JsonElement x : e.getAsJsonArray()) {
+                if (x != null && x.isJsonPrimitive() && x.getAsJsonPrimitive().isString()) {
+                    out.add(x.getAsString());
+                }
+                else if (x != null && !x.isJsonNull()) {
+                    org.pmw.tinylog.Logger.warn("Instance Labs API: ignoring trusted origin {} (not a string)", x);
+                }
+            }
+            return out;
+        }
+        org.pmw.tinylog.Logger.warn("Instance Labs API: ignoring trustedOrigins {} (a list of origins expected)", e);
+        return out;
     }
 
     /** {@link #trustedOrigins} normalised ({@link #normalizeOrigin}), in order; bad entries dropped with a warning. */
