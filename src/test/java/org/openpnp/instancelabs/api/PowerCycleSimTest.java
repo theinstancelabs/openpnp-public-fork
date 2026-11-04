@@ -541,6 +541,7 @@ public class PowerCycleSimTest {
         assertEquals(1, motorOffs().size(), "the same trip at the next connect");
         // the pressure hold arms it: the firmware forgets that trip, so one reported after it is a new one
         ok("POST", "/api/machine/home", "{\"wait\":true}");
+        sim.towelUnderNeedle(svc); // BR-03: the hold opens the valve only over a sink
         assertEquals("on", ok("POST", "/api/pressure/start", null).get("state").getAsString());
         ok("POST", "/api/pressure/stop", null);
         reconnect();
