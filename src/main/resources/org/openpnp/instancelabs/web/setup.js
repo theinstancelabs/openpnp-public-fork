@@ -100,11 +100,12 @@
     f.el.classList.toggle('input--dirty', dirty(f));
     if (f.kind === 'num') f.el.classList.toggle('input--invalid', val(f) !== '' && !Number.isFinite(toNum(val(f))));
   }
-  /** Sets a value the way the operator would (capture buttons). */
+  /** Sets a value the way the operator would (capture buttons). The value is the status's (a live position), so it
+   *  carries the status's token, never a refusal's the status does not show yet (review of #14). */
   function setVal(f, v) {
     if (f.kind === 'check') f.el.checked = !!v; else f.el.value = v;
     f.edited = true;
-    f.tok = curToken();
+    f.tok = statusToken();
     paint(f);
     IL.render();
   }
@@ -581,8 +582,8 @@
       const manual = dirty(F.off);
       const off = manual ? need(F.off, 'the needle offset in mm') : nd.anchorOffsetMm;
       if (!isNum(off)) throw bad('Record the needle Z frame first.');
-      const r = await IL.api('POST', '/api/needle/offset', { offsetMm: Number(Number(off).toFixed(4)), note: manual ? 'entered in the web UI' : 'confirmed frame offset (web UI)',
-        needleChangedAtMs: tokenOf([F.off]) });
+      const r = await postNeedle('/api/needle/offset', { offsetMm: Number(Number(off).toFixed(4)), note: manual ? 'entered in the web UI' : 'confirmed frame offset (web UI)' },
+        [F.off]);
       clean(F.off);
       frameAnswer(r);
       IL.planRefreshSoon();
@@ -794,7 +795,7 @@
         T.save.addEventListener('click', () => IL.act(T.save, async () => {
           const dx = need(F.dx, 'dx in mm (0 for none)'), dy = need(F.dy, 'dy in mm (0 for none)');
           if (Math.abs(dx) > 1 || Math.abs(dy) > 1) throw bad('The trim is at most ±1 mm on each axis: a needle that lands farther off needs its landing checked (Setup › Dispenser & tip › Check where it lands).');
-          const r = await IL.api('POST', '/api/needle/xy-trim', { dxMm: dx, dyMm: dy, note: IL.str(F.note.el) || null, needleChangedAtMs: tokenOf([F.dx, F.dy, F.note]) });
+          const r = await postNeedle('/api/needle/xy-trim', { dxMm: dx, dyMm: dy, note: IL.str(F.note.el) || null }, [F.dx, F.dy, F.note]);
           clean(F.dx, F.dy, F.note);
           IL.loadConfig();
           IL.planRefreshSoon();
