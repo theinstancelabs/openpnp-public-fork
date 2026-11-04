@@ -105,15 +105,18 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     // the SIM scene's board: the one with a stored registration (the runner's board, registered by webui-sim)
     const simBoard = (boards.files || []).find((b) => b.file && b.registration && b.registration.nominal);
     const key2 = simBoard ? 'file:' + simBoard.file : null;
-    // already the chosen one (a second run in one session): another card first, so this click chooses it again
-    const other2 = cards.find((c) => c.board !== key2);
+    // already the chosen one (a second run in one session): first a board with no seat known (it plans nothing), so this
+    // click chooses it again
+    const seatless = (boards.files || []).filter((b) => b.file && !b.registration).map((b) => 'file:' + b.file);
+    const other2 = cards.find((c) => c.board !== key2 && seatless.includes(c.board));
     if (key2 && planned === key2 && other2) await page.click('#rs-designs .design[data-board="' + other2.board.replace(/"/g, '\\"') + '"]');
-    const planPost = page.waitForRequest((q) => q.method() === 'POST' && /\/api\/plan$/.test(q.url()), { timeout: 15000 }).then(() => true, () => false);
+    const planRes = page.waitForResponse((r) => r.request().method() === 'POST' && /\/api\/plan$/.test(r.url())
+      && (r.request().postDataJSON() || {}).file === (simBoard && simBoard.file), { timeout: 30000 }).then((r) => r.json(), () => null);
     if (key2) await page.click('#rs-designs .design[data-board="' + key2.replace(/"/g, '\\"') + '"]');
-    const p2 = await page.waitForFunction((f) => IL.S.plan && IL.S.plan.source && IL.S.plan.source.file === f && IL.S.plan, simBoard && simBoard.file, { timeout: 30000 })
-      .then((h) => h.jsonValue(), () => null);
+    const made2 = await planRes;
+    const p2 = made2 ? await page.waitForFunction((id) => IL.S.plan && IL.S.plan.planId === id && IL.S.plan, made2.planId, { timeout: 15000 }).then((h) => h.jsonValue(), () => null) : null;
     const nom = simBoard && simBoard.registration.nominal;
-    check('(2) a click on a design plans it where it sat (its last registration): the card is pressed', await planPost && !!p2 && !!nom && Math.abs(p2.source.x - nom.x) < 1e-6
+    check('(2) a click on a design plans it where it sat (its last registration): the card is pressed', !!made2 && !!p2 && !!nom && Math.abs(p2.source.x - nom.x) < 1e-6
       && Math.abs(p2.source.y - nom.y) < 1e-6 && (await page.getAttribute('#rs-designs .design[aria-pressed="true"]', 'data-board')) === key2, { key2, nom, src: p2 && p2.source });
 
     // ---- (3) Boards this run -----------------------------------------------------------------------------------------
@@ -202,7 +205,8 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
           stop: (() => { const x = document.getElementById('panel-stop'); return !!x && !x.hidden; })(),
           check: (document.querySelector('#rv-steps li[data-k="check"]') || {}).textContent || '' };
       };
-      new MutationObserver(read).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+      const obs = new MutationObserver(() => { read(); if (window.__live) obs.disconnect(); });
+      obs.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
     });
     const runId0 = await page.evaluate(() => (IL.S.status.run && IL.S.status.run.runId) || null);
     await page.click('#btn-rs-start');

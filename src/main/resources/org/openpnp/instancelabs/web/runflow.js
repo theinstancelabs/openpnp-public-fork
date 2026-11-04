@@ -141,7 +141,7 @@
     // the answers and the checks again before each step: an 8 h answer can lapse, another tab can untick it, a new plan
     // can block pads; the run is posted only for the plan this registration made
     const gate = () => { const why = startReason(S.status); if (why) throw new Error(why); };
-    await IL.act(btn, async () => {
+    const posted = await IL.act(btn, async () => {
       if (!planCurrent(planOf(e))) {
         const seat = seatOf(e);
         if (!seat) throw new Error('Where does this board sit? Plan it once in Step by step › Board.');
@@ -169,7 +169,8 @@
       if (F.wiped) body.wiped = true;   // ticked "I wiped it": the server forgets this seat's paste first
       return R.flow.run(body, 'full');
     }, { refusalIn: F.n.refusals, what: 'Start', ok: (r) => (r ? 'Pasting started: ' + IL.plural(r.dots, 'dot') + '. You can leave now.' : null) });
-    if (F.chain && F.chain.step === 'paste') await until((st) => st && st.run && st.run.label === 'board' && st.run.running, 10000, 'The run').catch(() => null);
+    // locked until the status shows the run it posted (running or already ended), never after a refusal
+    if (posted && posted.planId) await until((st) => st && st.run && st.run.label === 'board' && st.run.planId === posted.planId, 10000, 'The run').catch(() => null);
     F.chain = null;
     F.wiped = false;
     IL.render();
