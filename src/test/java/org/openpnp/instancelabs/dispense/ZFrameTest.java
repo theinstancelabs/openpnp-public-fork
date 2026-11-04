@@ -314,7 +314,7 @@ public class ZFrameTest {
         DispenseConfig g = cfg();
         g.profile.gapMm = 2;
         assertFalse(g.validate().isEmpty());
-        g.profile.gapMm = 0.20; // the bench: >= 0.20 misses dots
+        g.profile.gapMm = 0.31; // above Process's gap ladder (0.30)
         assertFalse(g.validate().isEmpty());
     }
 
