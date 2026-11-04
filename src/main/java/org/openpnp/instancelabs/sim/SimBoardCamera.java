@@ -110,14 +110,15 @@ public class SimBoardCamera extends ImageCamera {
         }
         Location loc = SimulationModeMachine.getSimulatedPhysicalLocation(this, getLooking(), false)
                 .convertToUnits(LengthUnit.Millimeters);
+        double[] off = SimPose.offsetMm(this); // where lumen-sim's head physically is (INF-05)
+        double x = loc.getX() + off[0], y = loc.getY() + off[1];
         Location upp = getUnitsPerPixel().convertToUnits(LengthUnit.Millimeters);
         Board board = sc.findBoard(c);
-        List<Object> key = Arrays.asList(sc, board, loc.getX(), loc.getY(), w, h, upp.getX(), upp.getY(), isFlipX(),
-                isFlipY(), SimPaste.version());
+        List<Object> key = Arrays.asList(sc, board, x, y, w, h, upp.getX(), upp.getY(), isFlipX(), isFlipY(),
+                SimPaste.version());
         long now = System.currentTimeMillis();
         if (cachedFrame == null || !key.equals(cachedKey) || now - cachedAtMs > CACHE_MS) {
-            cachedFrame = preFlip(SimBoardRenderer.render(sc, board, loc.getX(), loc.getY(), w, h, upp.getX(),
-                    upp.getY()));
+            cachedFrame = preFlip(SimBoardRenderer.render(sc, board, x, y, w, h, upp.getX(), upp.getY()));
             cachedKey = key;
             cachedAtMs = now;
         }
