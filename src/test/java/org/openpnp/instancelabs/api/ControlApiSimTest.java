@@ -297,6 +297,26 @@ public class ControlApiSimTest {
         batch.get();
     }
 
+    /**
+     * #21 review MAJOR 1: a move that times out while it runs must not answer "it will not run" (cancel(false) is true
+     * for a running task too): it says the move did not end, and to look and press STOP.
+     */
+    @Test
+    public void aMoveThatTimesOutWhileItRunsSaysSo() throws Exception {
+        long before = ControlEndpoints.moveTimeoutMs;
+        ControlEndpoints.moveTimeoutMs = 1000;
+        try {
+            sim.server.delayBeforeOkMs.put("M400", 3000L);
+            Res r = call("POST", "/api/move-to", "{\"tool\":\"n1\",\"x\":120,\"y\":90}", UI);
+            refused(409, "did not end", r);
+            assertTrue(r.body.contains("STOP") && !r.body.contains("will not run"), r.toString());
+        }
+        finally {
+            ControlEndpoints.moveTimeoutMs = before;
+            sim.server.delayBeforeOkMs.clear();
+        }
+    }
+
     @Test
     public void stopEndsAMoveTo() throws Exception {
         sim.server.delayBeforeOkMs.put("M400", 3000L);
