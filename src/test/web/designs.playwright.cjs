@@ -49,7 +49,7 @@ async function checkOf(page, file) {
     try {
       const c = await IL.api('GET', '/api/pad-profile/check?boardFile=' + encodeURIComponent(f));
       const groups = c.groups || [];
-      const tip = groups.filter((g) => ['tip', 'part'].includes(g.reason));
+      const tip = groups.filter((g) => ['tip', 'part'].includes(g.reason) && g.blocking);
       const fix = groups.filter((g) => ['no-pad-size', 'no-type', 'below-gate', 'bridge'].includes(g.reason));
       return { c, state: c.ok ? 'ready' : tip.length ? 'tip' : 'wait', tip, fix,
         use: fix.filter((g) => g.suggestion && g.suggestion.kind === 'use'),
@@ -102,7 +102,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
   });
   // states the SIM does not hold on demand: a check whose groups wait for the tip's dots or a by-hand dose (one board
   // file), an apply refused once
-  const ST = { checkFile: null, refuseApply: false, attachOffer: null, attachDnp: true, attachUrl: null, importHeld: null, holdPreview: null, holdAttach: null };
+  const ST = { checkFile: null, refuseApply: false, attachOffer: null, attachDnp: true, attachUrl: null, importHeld: null, holdPreview: null, holdAttach: null, okTipFile: null };
   // the status's boardImport held ((2), (5d): "an upload is being read" off and savedAtMs as before the save, so only the
   // save's own 'boards' event may make Designs read its list; (2c): only `reading` off, savedAtMs passes)
   await page.route((u) => u.pathname === '/api/status', async (route) => {
@@ -142,6 +142,12 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
         const fix = (body.groups || []).filter((g) => ['no-pad-size', 'no-type', 'below-gate', 'bridge'].includes(g.reason));
         if (fix[0]) fix[0].suggestion = { kind: 'measure-tip', id: 'stub-measure', group: fix[0].group };
         if (fix[1]) fix[1].suggestion = null;
+      }
+      // (6b): every pad has a dose, and one tip group the engine does not block on (ok stays true: ProfileCheck's unflagged
+      // tip group of kind pitch)
+      if (ST.okTipFile && String(new URL(route.request().url()).searchParams.get('boardFile')).includes(ST.okTipFile)) {
+        Object.assign(body, { ok: true, groups: [{ group: 'stub-tip', reason: 'tip', tipKind: 'pitch', blocking: false, fixable: false, refs: ['U1'],
+          packageIds: ['QFN-stub'], pads: 4, minPitchMm: 0.4, short: 'not with this tip', reasonText: 'Stub: the dots would come within 0.20 mm.' }] });
       }
       await route.fulfill({ response: res, json: body });
     } catch (e) { /* unrouted while it was being answered */ }
@@ -496,6 +502,28 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       check('(6) Make a board: Run › Start opens with this design chosen', run, await page.evaluate(() => ({ hash: location.hash,
         chosen: ((document.querySelector('#rs-designs .design[aria-pressed="true"]') || {}).dataset || {}).board || null })));
     }
+
+    // ---- (6b) a design saved after Run read its list, ready with a tip group the engine does not block on: Set up shows
+    // no "Change the tip" row and no tip box, and Make a board opens Start with it chosen (Start once said "Choose a design")
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !!IL.run.boards && !IL.run.boardsLoading, null, { timeout: 15000 }).catch(() => null);
+    const lateName = 'designs-late-' + TS;
+    ST.okTipFile = lateName;
+    const up6 = await uploadDesign(page, 'padcal.kicad_pcb', PADCAL, lateName);
+    const late = up6.saved && (await boardsOf(page)).find((f) => f.file === up6.saved.file);
+    await page.waitForFunction((h) => location.hash === h && !document.getElementById('design-setup').hidden && document.querySelectorAll('#design-steps > li').length >= 7,
+      late ? routeOf(late) : '#none', { timeout: 15000 }).catch(() => null);
+    const s6 = await stepsOf(page);
+    const p6 = await page.evaluate(() => ({ title: (document.querySelector('#panel .panel__title h2') || {}).textContent || null,
+      box: !(document.getElementById('design-rest-block') || {}).hidden }));
+    check('(6b) a tip group the engine does not block on (ok): Ready, no "Change the tip" row, no tip box, Make a board', !!late && !s6.some((x) => /^tip:/.test(x.k || ''))
+      && p6.title === 'Ready' && !p6.box && await shown(page, '#btn-design-make'), { late: late && late.file, steps: s6.map((x) => x.k + '=' + x.state), p6 });
+    if (late && await shown(page, '#btn-design-make')) await page.click('#btn-design-make');
+    const run6 = late ? await page.waitForFunction((f) => { const b = document.querySelector('#rs-designs .design[aria-pressed="true"]');
+      return location.hash === '#run' && !!b && b.dataset.board === 'file:' + f && !b.closest('[hidden]'); }, late.file, { timeout: 15000 }).then(() => true, () => false) : false;
+    check('(6b) Make a board on a design saved after Run read its list: Start opens with it chosen', run6, await page.evaluate(() => ({ hash: location.hash,
+      chosen: ((document.querySelector('#rs-designs .design[aria-pressed="true"]') || {}).dataset || {}).board || null, start: (document.getElementById('rs-start-why') || {}).textContent || null })));
+    ST.okTipFile = null;
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------
     const allowed = ['POST /api/boards/import', 'POST /api/boards/import/save', 'POST /api/boards/import/attach', 'POST /api/pad-profile/apply', 'POST /api/package-mappings',
