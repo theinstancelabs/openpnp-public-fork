@@ -246,13 +246,13 @@ class GateBehaviour(unittest.TestCase):
         self.assertRegex(step, r"\n\s+shell: bash(\s+#[^\n]*)?\n")  # GitHub runs bash as -eo pipefail
 
 
-# A stand-in gh: `api …/runs/N/jobs…` answers $FAKE/jobs.json, any other `api` $FAKE/runs.json (none there: the
+# A stand-in gh: `api …/runs/N/jobs…` answers $FAKE/jobs-N.json, any other `api` $FAKE/runs.json (none there: the
 # call fails); `run download … -D dir` puts $FAKE/needs.json into dir (none there: no artifact). Every call is logged
 # to $FAKE/gh.log.
 FAKE_GH = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE/gh.log"
 case "$1" in
-  api) case "$2" in */jobs*) exec cat "$FAKE/jobs.json" ;; *) exec cat "$FAKE/runs.json" ;; esac ;;
+  api) case "$2" in */jobs*) id=${2#*/runs/}; exec cat "$FAKE/jobs-${id%%/*}.json" ;; *) exec cat "$FAKE/runs.json" ;; esac ;;
   run) { [ "$2" = download ] && [ -f "$FAKE/needs.json" ]; } || { echo "no valid artifacts found" >&2; exit 1; }
        dir=.; while [ $# -gt 0 ]; do [ "$1" = -D ] && dir=$2; shift; done
        mkdir -p "$dir" && exec cp "$FAKE/needs.json" "$dir/needs.json" ;;
@@ -287,16 +287,18 @@ class QueueVerdict(unittest.TestCase):
 
     def passed(self, runs, needs, event="push", ref="refs/heads/il/integration", jobs=GATE_OK):
         """(the step's passed list, the gh calls) for these merge_group runs (None: the API call fails), this
-        gate-needs artifact (None: none; a str: its raw text) and the run's jobs (None: the API call fails)."""
+        gate-needs artifact (None: none; a str: its raw text) and run 41's jobs (None: the API call fails; a dict:
+        the jobs by run id)."""
         fake = os.path.join(self.tmp, "fake")
         shutil.rmtree(fake, True)
         os.makedirs(fake)
         if runs is not None:
             with open(os.path.join(fake, "runs.json"), "w") as f:
                 json.dump({"total_count": len(runs), "workflow_runs": runs}, f)
-        if jobs is not None:
-            with open(os.path.join(fake, "jobs.json"), "w") as f:
-                json.dump({"total_count": len(jobs), "jobs": jobs}, f)
+        for run_id, run_jobs in (jobs if isinstance(jobs, dict) else {41: jobs}).items():
+            if run_jobs is not None:
+                with open(os.path.join(fake, "jobs-%d.json" % run_id), "w") as f:
+                    json.dump({"total_count": len(run_jobs), "jobs": run_jobs}, f)
         if needs is not None:
             with open(os.path.join(fake, "needs.json"), "w") as f:
                 f.write(needs if isinstance(needs, str) else json.dumps(needs))
@@ -320,7 +322,7 @@ class QueueVerdict(unittest.TestCase):
         self.assertEqual(passed, sorted(("queued", "build") + TESTS))
         self.assertEqual(len(calls), 3, calls)
         self.assertIn("api repos/o/r/actions/runs?event=merge_group&head_sha=" + SHA, calls[0])
-        self.assertIn("api repos/o/r/actions/runs/41/jobs", calls[1])
+        self.assertIn("api repos/o/r/actions/runs/41/jobs?filter=latest", calls[1])
         self.assertRegex(calls[2], r"^run download 41 ")
         self.assertIn("-R o/r", calls[2])
         self.assertIn("-n gate-needs", calls[2])
@@ -343,6 +345,7 @@ class QueueVerdict(unittest.TestCase):
             "the API call fails": (None, self.NEEDS),
             "no artifact (an older workflow, or its upload failed)": ([self.queue_run()], None),
             "the artifact is not JSON": ([self.queue_run()], "{oops"),
+            "the artifact is empty": ([self.queue_run()], " \n"),
             "the artifact is not the gate's needs": ([self.queue_run()], '["infra"]'),
             "a need that is not an object": ([self.queue_run()], '{"infra": "success"}'),
             "no queue run of this commit": ([], self.NEEDS),
@@ -359,6 +362,7 @@ class QueueVerdict(unittest.TestCase):
             "its gate job failed": [dict(self.GATE_OK[1], conclusion="failure")],
             "its gate job was cancelled": [dict(self.GATE_OK[1], conclusion="cancelled")],
             "no gate job in its jobs": self.GATE_OK[:1],
+            "two gate jobs (filter=all lists every attempt's)": self.GATE_OK + running,
             "the jobs call fails": None,
         }
         for why, jobs in jobs_cases.items():
@@ -369,6 +373,14 @@ class QueueVerdict(unittest.TestCase):
             with self.subTest(why):
                 self.assertEqual(self.passed(runs, needs, jobs=running if "still going" in why else self.GATE_OK)[0],
                                  [])
+
+    def test_the_newest_queue_run_of_the_commit_counts(self):
+        """Two queue runs of one commit (an incident's retry): the newer one decides; still running, it answers []."""
+        runs = [self.queue_run(), self.queue_run(id=42, status="in_progress", conclusion=None)]
+        running = [dict(self.GATE_OK[1], status="in_progress", conclusion=None)]
+        self.assertEqual(self.passed(runs, self.NEEDS, jobs={41: self.GATE_OK, 42: running})[0], [])
+        self.assertEqual(self.passed(runs, self.NEEDS, jobs={41: running, 42: self.GATE_OK})[0],
+                         sorted(("queued", "build") + TESTS))
 
     def test_only_a_push_to_il_integration_asks(self):
         queue_ref = "refs/heads/gh-readonly-queue/il/integration/pr-7-" + "a" * 40
