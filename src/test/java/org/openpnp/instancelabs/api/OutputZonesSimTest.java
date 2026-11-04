@@ -377,6 +377,26 @@ public class OutputZonesSimTest {
         assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
     }
 
+    /**
+     * (b), the process engineer 11-04: a stored place no run puts paste on (the park, a feeder pick, the oven) is no
+     * allowed zone. Shots there pass I4 and are refused by I12 before a line is sent, naming the place.
+     */
+    @Test
+    public void shotsAtAPlaceNoRunUsesAreRefusedBeforeALine() throws Exception {
+        ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        ok("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}");
+        landing(0, 0); // where it lands is checked: I4 lets shots away from the waste go on
+        ok("PUT", "/api/locations/park", "{\"x\":120,\"y\":60,\"z\":5.5}");
+        sim.server.mark();
+        JsonObject run = ok("POST", "/api/calibrations/shots-run", "{\"locationName\":\"park\",\"rotationDeg\":180,"
+                + "\"count\":1,\"wait\":true}").getAsJsonObject("result");
+        assertFalse("OK".equals(run.get("status").getAsString()), run.toString());
+        String why = run.get("message").getAsString();
+        assertTrue(why.contains("valve or screw lines put paste where it may not go; the first: the valve ON at line ")
+                && why.contains("puts paste at (120.0, 60.0), over the place 'park', which takes no paste"), why);
+        assertFalse(sim.server.sinceMark().stream().anyMatch(s -> s.startsWith("M106")), "nothing switched on");
+    }
+
     /** The bottom camera as the tip picture sees it: OpenPnP's up-looking camera's X/Y, a plain frame. */
     static final class TipCam implements TipCamera {
         @Override
