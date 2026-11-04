@@ -2193,6 +2193,7 @@ class Deployer:
         step("status", f"version {version}, simulated {sim}, dispense engine available")
 
         if cfg.trusted_origins:
+            rep["trusted_origins"] = server.get("trustedOrigins")  # what the API listed (None: a build before BR-73)
             ok, detail = self._origins_check(server)
             if not ok:
                 return fail("origins", detail, stop=False)

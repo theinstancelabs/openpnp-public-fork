@@ -533,6 +533,7 @@ class TrustedOrigins(HealthLab, unittest.TestCase):
         self.assertTrue(rep["ok"], rep)
         self.assertEqual([s["step"] for s in rep["steps"]][:3], ["status", "origins", "enable"])
         self.assertEqual(self.probes(), [ORIGIN, il_deploy.FOREIGN_ORIGIN])
+        self.assertEqual(rep["trusted_origins"], [ORIGIN])
 
     def test_without_the_flag_there_is_no_origins_step(self):
         self.start(trusted=[ORIGIN])
@@ -549,6 +550,7 @@ class TrustedOrigins(HealthLab, unittest.TestCase):
         step = next(s for s in rep["steps"] if s["step"] == "origins")
         self.assertIn("before BR-73", step["detail"])
         self.assertEqual(self.probes(), [])
+        self.assertIsNone(rep["trusted_origins"])
 
     def test_a_build_that_refuses_its_origin_fails_before_the_enable(self):
         self.start(jar_fail=["origins-refused"], trusted=[ORIGIN])

@@ -245,6 +245,14 @@ def jar_build_sha7(jar):
 # ------------------------------------------------------------------------------------------------
 # Processes and ports
 # ------------------------------------------------------------------------------------------------
+
+ORIGIN = "https://deploy-e2e.example.ts.net:8877"  # the real machine's tailnet origin's stand-in (BR-73)
+
+
+def step(report, name):
+    return next(x for x in report["steps"] if x["step"] == name)
+
+
 class ScopedProcs(il_deploy.Procs):
     """The host's /proc, but only OpenPnPs whose config is under this test's directory count: another role's
     OpenPnP on the lab computer must not make this test 'not idle' (it is only read, never touched)."""
@@ -451,7 +459,7 @@ class DeployRealOpenPnP(unittest.TestCase):
             "--serial-match", "connecting to " + re.escape(cls.sim.link) + " by ",
             "--service-manager", "subprocess", "--java", JAVA, "--display", cls.display,
             "--status-timeout", "180", "--home-timeout", "150", "--home-busy-wait", "90", "--stop-timeout", "20",
-            "--poll-interval", "0.25"]
+            "--poll-interval", "0.25", "--trusted-origin", ORIGIN]
 
     @classmethod
     def service(cls):
@@ -619,9 +627,10 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertTrue(rep["ok"], rep)
         version = rep["report"]["version"]
         self.assertTrue(version.startswith(tag + "_") and version.endswith("." + self.sha7), version)
-        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "enable", "serial", "axes", "home",
-                                                                        "homed", "stop"])
-        self.assertIn("Serial port: connecting to %s by " % self.sim.link, rep["report"]["steps"][2]["detail"])
+        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "origins", "enable", "serial", "axes",
+                                                                        "home", "homed", "stop"])
+        self.assertIn("Serial port: connecting to %s by " % self.sim.link, step(rep["report"], "serial")["detail"])
+        self.assert_origins(rep["report"])
         text = self.state_text()
         self.assertIn("- **Deployed on the machine:** %s (%s, %s, CI https://github.com/%s/actions/runs/%d)"
                       % (tag, self.sha7, BRANCH, GH_REPO, 9000 + int(tag.split("-")[2])), text)
@@ -630,6 +639,16 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertTrue(h.value.startswith("nobody (released by Infra %s at " % action), h.value)
         self.assertFalse(os.path.exists(os.path.join(self.root, "hold.json")))
         self.assertEqual(self.service().is_active(), running)
+
+    def assert_origins(self, report):
+        """BR-73 on the real jar: its own origin passes the API's Host and Origin guards, a foreign Origin is refused.
+        A jar from before BR-73 reports no trusted origins and passes with a note (a rollback to it stays possible)."""
+        detail = step(report, "origins")["detail"]
+        if report["trusted_origins"] is not None:
+            self.assertEqual(report["trusted_origins"], [ORIGIN])
+            self.assertEqual(detail, ORIGIN + ": accepted with its Host and Origin; a foreign Origin refused")
+        else:
+            self.assertIn("before BR-73", detail)
 
     # --- the steps ------------------------------------------------------------------------------
     def test_1_poll_deploy_redeploy_rollback(self):
@@ -672,9 +691,9 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.main("health")
         rep = self.last_health()
         self.assertTrue(rep["ok"], rep)
-        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "enable", "serial", "axes", "home",
-                                                                        "homed", "stop"])
-        serial = rep["report"]["steps"][2]["detail"]
+        self.assertEqual([s["step"] for s in rep["report"]["steps"]], ["status", "origins", "enable", "serial", "axes",
+                                                                        "home", "homed", "stop"])
+        serial = step(rep["report"], "serial")["detail"]
         self.assertIn("Serial port: connecting to %s by " % self.sim.link, serial)
         self.assertIn("the link is kept open", serial)
         self.assertTrue(self.service().is_active())
@@ -741,7 +760,7 @@ class DeployRealOpenPnP(unittest.TestCase):
         rep = self.last_health()["report"]
         self.assertEqual((rep["ok"], rep["kind"]), (False, "machine"), rep)
         self.assertTrue(rep["version"].startswith(tag_c + "_"), rep["version"])
-        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"])
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "origins", "enable", "serial", "axes"])
         self.assertEqual(rep["steps"][-1]["detail"][:24], "controller was reset; a ")
 
         self.assertEqual(self.link("current"), self.tag_a)
@@ -780,8 +799,8 @@ class DeployRealOpenPnP(unittest.TestCase):
         # them from the step counts), so no home; the STOP leaves the link open.
         self.main("health", "--no-claim", expect=1)
         rep = json.loads(self.last_stdout)
-        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"], rep)
-        self.assertNotIn("kept open", rep["steps"][2]["detail"])
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "origins", "enable", "serial", "axes"], rep)
+        self.assertNotIn("kept open", step(rep, "serial")["detail"])
         self.assertIn("controller was reset", rep["failure"])
         self.assertTrue(rep["stopped"]["ok"], rep)
         log = os.path.join(self.root, "state", "config", "log", "OpenPnP.log")
@@ -791,9 +810,9 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertTrue(self.sim.ctl({"cmd": "power_cycle"})["ok"])  # the link OpenPnP keeps open dies
         self.main("health", "--no-claim", expect=1)
         rep = json.loads(self.last_stdout)
-        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "enable", "serial", "axes"], rep)
-        self.assertNotIn("kept open", rep["steps"][2]["detail"], "Start connected again")
-        self.assertIn("Serial port: connecting to %s by " % self.sim.link, rep["steps"][2]["detail"])
+        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "origins", "enable", "serial", "axes"], rep)
+        self.assertNotIn("kept open", step(rep, "serial")["detail"], "Start connected again")
+        self.assertIn("Serial port: connecting to %s by " % self.sim.link, step(rep, "serial")["detail"])
         self.assertIn("controller was reset", rep["failure"])
         self.assertTrue(rep["stopped"]["ok"], rep)
         with open(log, errors="replace") as f:
