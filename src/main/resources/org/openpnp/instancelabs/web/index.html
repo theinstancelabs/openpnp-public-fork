@@ -86,6 +86,8 @@
       <span class="brand__short" id="heartbeat-short"><span class="live-dot"></span><b class="hb__age">…</b></span>
     </button>
     <div class="cells" id="cells" aria-live="polite">
+      <button type="button" class="cell cell--off" id="cell-lock" data-open-view="lock" hidden><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">In control</span><span class="cell__v">…</span></span></button>
+      <button type="button" class="cell-act cell-act--take" id="btn-take" hidden title="Stops the agent's work (a working agent the way STOP does, an idle one's outputs only) and makes the machine yours until you give it back">Take control</button>
       <button type="button" class="cell cell--off" id="cell-machine" data-open-view="machine"><span class="st st--sm st--off" role="img" aria-label="Off or not fitted"><svg viewBox="0 0 24 24"><use href="#g-dash"/></svg></span><span class="cell__txt"><span class="cell__k">Machine</span><span class="cell__v"><span id="pill-conn" data-l="1">Connecting…</span><span class="cell__sep" hidden> · </span><span id="pill-homed" class="sr">…</span></span></span></button>
       <button type="button" class="cell-act" id="btn-start" hidden title="Connect to the controller (OpenPnP's Start button). Nothing moves.">Connect</button>
       <button type="button" class="cell-act" id="btn-home" hidden title="Move every axis to its home switch so positions are known (press twice)">Home</button>

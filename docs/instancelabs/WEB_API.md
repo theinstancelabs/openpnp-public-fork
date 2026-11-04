@@ -20,8 +20,9 @@ localhost), §4.4–4.5 (Stop, on/off order), §5.5 (interlocks), §5.7 (Profile
   `DispenseService.install`. Both start on OpenPnP's `configurationComplete`.
 - URL: **http://127.0.0.1:8765/** (UI) and `/api/...` (JSON). JDK `com.sun.net.httpserver`, Gson, no new dependency.
 - Settings: `<configDir>/instancelabs/web-api.json` (never written by the API):
-  `{"port": 8765, "lanAccess": false, "enabled": true, "threads": 8}`.
-  Overrides: system properties `instancelabs.api.port|lan|enabled`, then env `OPENPNP_IL_API_PORT|LAN|ENABLED`.
+  `{"port": 8765, "lanAccess": false, "enabled": true, "threads": 8, "trustedOrigins": []}`.
+  Overrides: system properties `instancelabs.api.port|lan|enabled|trustedOrigins`, then env
+  `OPENPNP_IL_API_PORT|LAN|ENABLED|TRUSTED_ORIGINS` (trusted origins: a comma-separated list that replaces the file's).
 - `lanAccess: true` binds all interfaces (e.g. a tablet next to the machine). There is **no authentication**: turn it
   on only on a trusted network. Off by default.
 - If the port is taken, the API logs an error and OpenPnP continues without it.
@@ -30,6 +31,16 @@ localhost), §4.4–4.5 (Stop, on/off order), §5.5 (interlocks), §5.7 (Profile
 LAN access is on (DNS-rebinding guard). Requests other than GET/HEAD with a foreign `Origin`, or
 `Sec-Fetch-Site` other than `same-origin`/`none`, get 403 (CSRF guard), so a web page elsewhere cannot press buttons.
 `curl -X POST http://127.0.0.1:8765/api/stop` works. The UI is served with a strict CSP (`script-src 'self'`).
+
+**Trusted origins (BR-73).** The real machine's UI from the user's devices: `tailscale serve --https=8877` proxies
+`https://<name>.ts.net:8877` to the API on 127.0.0.1 and keeps the browser's `Host` and `Origin` (measured 11-03). With
+`trustedOrigins: ["https://<name>.ts.net:8877"]` (exact origins: scheme, host, port; a path or another scheme is dropped
+with a warning) that Host passes the DNS-rebinding guard, and a write passes the CSRF guard only with exactly that
+Origin (or none, as curl). `"http://" + Host` stays the rule for loopback Hosts (and LAN Hosts with `lanAccess`); a
+loopback Host keeps it even if an entry names loopback. The bind stays 127.0.0.1 (the proxy connects over loopback);
+never strip Origin in a proxy instead. `GET /api/status` lists them in `server.trustedOrigins`. **There is no login: the
+tailnet's access rules are the only access control** (any device they let in can drive the machine, with curl too).
+Never serve it on a port Funnel can publish (443, 8443, 10000).
 
 ## 2. Errors and refusals
 
@@ -44,6 +55,9 @@ Every error is JSON: `{"error": "<slug>", "reason": "<plain language>", ...detai
 | 404 | `art-gone` | `GET /api/board-art/{id}` of an unknown drawing |
 | 405 | `method-not-allowed` | |
 | 409 | `refused` | machine state or an interlock refuses; `interlocks: {ok, violations:[{code,message}], notes}` included when the engine's interlocks refused |
+| 409 | `locked`, `lock-lost`, `no-lock`, `stop-not-confirmed`, `stopped` | the machine lock (§3.7): someone else holds it; your lock was taken, released or ran out (`lost: {how, by, atMs, what}`); no lock (or an unknown token); Take control's STOP not confirmed (the lock is the user's anyway); a STOP ended your G-code batch. Each carries `lock` |
+| 400 / 403 | `refused-line`, `not-ui` | a G-code line the passthrough does not send (`index`, `line`, `why`; nothing sent); Take control without `X-IL-Client: ui` |
+| 502 / 504 | `controller-error`, `controller-timeout` | a passthrough line answered with a controller error, or no `ok` in `timeoutMs`; `index`, `line`, `replies`, `results` so far; the rest not sent |
 | 409 | `busy`, `exists`, `preview-stale`, `ids-exhausted` | board upload (§3.3) |
 | 409 | `suggestion-stale`, `status-evidence` | profile check, pad calibrations and pad types (§3.4, §3.5) |
 | 409 | `implausible`, `late`, `wrong-step` | a pad calibration's readings: far from the expected mass, typed long after the dots (both saved with `confirm: true`), or an answer to a step the job does not ask (§3.5) |
@@ -494,6 +508,40 @@ that is missing is 410 `file-missing`; a restore of a gone file is 410 `gone`; r
 on every pad-type write and `forTip` with a profile patch (400 without), while a pad edit without `padVersion` uses the
 version read now; a group of the job view keeps its own `label` and carries the record's as `calibrationLabel`;
 `otherTips` counts the typed pads only (a pad without a pad type is no tip's).
+
+### 3.7 The machine lock, Take control and the G-code passthrough (BR-72)
+
+P0 (user, 11-03): the user controls the real machine from the UI at any time; agents drive it through the engine.
+`MachineLock`, `LockEndpoints`, `GcodePassthrough`, `PassthroughLines`; full shape in `docs/backend-requests.md` "BR-72 API".
+
+- **Who:** the web UI sends `X-IL-Client: ui` (every window is the user); an agent sends its token as `X-IL-Lock`;
+  neither = anonymous (CI, the deployer, curl).
+- `GET /api/lock` = `status.lock` = `{holder: null | {kind: agent|user, who, label, what, thread, sinceMs, lastActiveMs,
+  busy, expiresAtMs}, takenFrom: null | {label, who, what, atMs, by}}`.
+- **Guarded writes:** every POST/PUT/DELETE except the stops (`/api/stop`, `/api/pressure/stop`, a pad calibration's
+  cancel), `/api/lock/*` and the data writes (photos, board import, `POST /api/plan`, pad types and their rules,
+  package mappings, a calibration's label or wrong-tip, coupon readings, tip-setup add/edit/retire/unretire; see
+  `LockEndpoints.DATA`). Nobody holds the lock: anyone (the UI's first one makes the user the holder); else the holder
+  only: the user's requests or the agent's token. Else 409 `locked`.
+- `POST /api/lock/acquire {who, label?, what, thread?, ttlS? 30..1800 = 300}` → `{token, lock}` (agents; 409 `locked`
+  while anyone holds it; with its own token: a renewal). The lease ends `ttlS` after the holder's last call ended,
+  never during one; `POST /api/lock/keepalive {what?}` renews it. `POST /api/lock/release {}` (the token, or the UI
+  while the user holds it: Give back).
+- `POST /api/lock/take {}` (the UI only): the agent's token answers `lock-lost` at once; a home in progress is left to
+  finish (≤ 120 s; a STOP inside a home hangs this controller); a working holder (a call or batch running, a move
+  queued since its last M400, an engine task, a pressure hold, a pad calibration, OpenPnP busy) gets the web STOP
+  (the machine ends off and unhomed: Start, then Home), an idle one valve, pump, N1 valve and pump off (`M107 P3/P2/
+  P1/P0`; still started and homed). `{lock, stopped: null | {label, who, what, mode: stop|outputs-off, actions (plain
+  phrases for the user), detail (the lines sent), machineOff, confirmed}, atMs}`. A lapsed lease ends the same way. The user's hold never lapses.
+- `POST /api/gcode {lines[] ≤ 1000, timeoutMs? per line 1000..300000 = 60000, what?}` (the holder): on OpenPnP's
+  machine thread through its driver, one `ok` per line; `{results: [{line, replies[], ms}], ms, lock}`. Taken or
+  stopped while a line ran (its last line included): 409 `lock-lost` / `stopped` with that line in `results` marked
+  `interrupted: true` (its `ok` may be the STOP's flush, not the move's end: never take it as done). Every line
+  is checked first (`PassthroughLines`): the bench tools' commands; X/Y/Z inside the soft limits and only once
+  homed; pump P2 / valve P3 only full on; `M906 B` ≤ 670; `G4` ≤ 60 s; refused with the route to use: `G28`
+  (`POST /api/machine/home`), `G92` on X/Y/Z, bare `M18`/`M84`, `G91`, `M92`, EEPROM, `M112`/`M999`/`M997`, `M990`,
+  anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before the next
+  guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
 
 ## 4. Pressure hold (Dispense tab)
 
