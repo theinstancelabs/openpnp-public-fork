@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,8 +38,6 @@ public final class BoardArtStore {
     public static final String NOTE_CHANGED = "The board file changed since the KiCad drawing was saved.";
     static final int FALLBACK_CACHE = 64;
     static final int PARSED_CACHE = 16;
-    /** BR-88: every board-list read looks at every current drawing's record. */
-    static final int RECORD_CACHE = 256;
 
     private static BoardArtStore current;
 
@@ -105,17 +104,12 @@ public final class BoardArtStore {
         }
     };
     /**
-     * BR-88: art id → its source and import blocks (a BoardArt without the drawing). shortcut: past 256 current
-     * drawings each board-list read parses them again; index the records by board file if a machine keeps that many.
+     * BR-88: art id → its source and import blocks (a BoardArt without the drawing, a few KB), one per drawing read in
+     * this run; never stale (an id is a content address), so a new index parses only the new drawings.
      */
-    private final LinkedHashMap<String, BoardArt> records = new LinkedHashMap<String, BoardArt>(16, 0.75f, true) {
-        private static final long serialVersionUID = 1L;
-
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<String, BoardArt> e) {
-            return size() > RECORD_CACHE;
-        }
-    };
+    private final Map<String, BoardArt> records = new HashMap<>();
+    /** BR-88: board file (canonical) + '|' + geometry digest → its own upload; null until read after an invalidate. */
+    private Map<String, BoardArt> uploads;
     /** BR-88: the atMs of the last save, replace or attach of this run that succeeded; null before one. */
     private volatile Long savedAtMs;
 
@@ -226,10 +220,14 @@ public final class BoardArtStore {
         return null;
     }
 
-    /** Index.json again (after a save or an attach). The caches stay: art ids are content addresses. */
+    /**
+     * Index.json again (after a save or an attach). The caches by art id stay: art ids are content addresses. BR-88:
+     * each board file's own upload is found again.
+     */
     public synchronized void invalidate() {
         index.reload();
         verified.clear();
+        uploads = null;
     }
 
     /** BR-88: a save, replace or attach succeeded (its atMs): GET /api/status gives it as boardImport.savedAtMs. */
@@ -237,7 +235,7 @@ public final class BoardArtStore {
         savedAtMs = atMs;
     }
 
-    /** BR-88: the atMs of the last save, replace or attach of this run that succeeded, else null. */
+    /** BR-88: the record time (atMs, taken as it started) of the last save, replace or attach that succeeded; or null. */
     public Long savedAtMs() {
         return savedAtMs;
     }
@@ -331,32 +329,29 @@ public final class BoardArtStore {
     /**
      * BR-88: the newest current drawing (not one a replace moved to history/) saved for this board file at its present
      * geometry: an import's, whose board file is {@code <slug>/<slug>.board.xml} next to its {@code <slug>.art.json},
-     * or an attach's, which names the board file. Its source and import blocks only; null when there is none.
+     * or an attach's, which names the board file. Its source and import blocks only; null when there is none. The
+     * current drawings are sorted by board file once per index ({@link #invalidate}), not per board.
      */
     private BoardArt ownUpload(Board b) {
-        if (b.getFile() == null) {
-            return null;
-        }
-        String file = BoardArtIndex.canonical(b.getFile());
-        File root = new File(BoardArtIndex.canonical(index.root()));
-        String digest = BoardArtIndex.digest(b);
-        BoardArt own = null;
-        for (Map.Entry<String, String> e : index.arts().entrySet()) {
-            String slug = e.getValue() == null ? "" : e.getValue().split("/", 2)[0]; // null: an index edited by hand
-            if (!BoardStore.artPath(slug).equals(e.getValue())) {
-                continue; // history/: a replace displaced it
-            }
-            BoardArt r = record(e.getKey());
-            BoardArt.Import i = r == null ? null : r.imported;
-            if (i == null || !digest.equals(i.boardDigest)) {
-                continue;
-            }
-            String saved = i.board != null ? i.board : new File(new File(root, slug), slug + ".board.xml").getPath();
-            if (file.equals(saved) && (own == null || i.atMs > own.imported.atMs)) {
-                own = r;
+        if (uploads == null) {
+            uploads = new HashMap<>();
+            for (Map.Entry<String, String> e : index.arts().entrySet()) {
+                String slug = e.getValue() == null ? "" : e.getValue().split("/", 2)[0]; // null: a hand-edited index
+                if (!BoardStore.artPath(slug).equals(e.getValue())) {
+                    continue; // history/: a replace displaced it
+                }
+                BoardArt r = record(e.getKey());
+                if (r == null || r.imported == null) {
+                    continue;
+                }
+                File saved = r.imported.board != null ? new File(r.imported.board)
+                        : new File(new File(index.root(), slug), slug + ".board.xml");
+                uploads.merge(BoardArtIndex.canonical(saved) + '|' + r.imported.boardDigest, r,
+                        (x, y) -> y.imported.atMs > x.imported.atMs ? y : x);
             }
         }
-        return own;
+        return b.getFile() == null ? null
+                : uploads.get(BoardArtIndex.canonical(b.getFile()) + '|' + BoardArtIndex.digest(b));
     }
 
     /** BR-88: the source and import blocks of an art id (read once: the id is a content address), or null. */

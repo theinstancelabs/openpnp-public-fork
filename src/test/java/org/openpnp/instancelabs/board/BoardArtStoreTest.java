@@ -15,7 +15,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.kicad.KGeom;
@@ -45,26 +47,45 @@ public class BoardArtStoreTest {
         }
     }
 
+    static final long AT = 1793000000000L;
+
     static Saved save(BoardArtStore store, String fixture, String slug) throws Exception {
+        return save(store, fixture, slug, null, AT);
+    }
+
+    /**
+     * An import (attachedTo null) or an attach to that board file, saved as BoardImporter saves it; when the slug has a
+     * drawing, a replace: that drawing moves to history/.
+     */
+    static Saved save(BoardArtStore store, String fixture, String slug, File attachedTo, long atMs) throws Exception {
         ArtFixtures.Drawn d = ArtFixtures.draw(fixture);
         BoardArt art = d.art();
         art.source.name = fixture.replace(".gz", "");
         art.imported = BoardArt.Import.from(d.proposal, d.result.warnings);
-        art.imported.how = "import";
+        art.imported.how = attachedTo == null ? "import" : "attach";
         art.imported.name = slug;
         art.imported.slug = slug;
-        art.imported.atMs = 1793000000000L;
+        art.imported.atMs = atMs;
         art.imported.boardDigest = BoardArtIndex.digest(d.proposal);
+        art.imported.board = attachedTo == null ? null : attachedTo.getCanonicalPath();
         art.measure();
         byte[] bytes = art.toBytes();
         String id = BoardArt.idOf(bytes);
         File dir = new File(store.index().root(), slug);
+        File current = new File(dir, slug + ".art.json");
+        Map<String, String> arts = new LinkedHashMap<>();
+        arts.put(id, BoardStore.artPath(slug));
+        if (current.isFile()) {
+            String old = BoardArt.idOf(Files.readAllBytes(current.toPath()));
+            Files.createDirectories(new File(dir, BoardStore.HISTORY).toPath());
+            Files.move(current.toPath(), new File(store.index().root(), BoardStore.historyArtPath(slug, old)).toPath());
+            arts.put(old, BoardStore.historyArtPath(slug, old));
+        }
         Files.createDirectories(dir.toPath());
-        Files.write(new File(dir, slug + ".art.json").toPath(), bytes);
-        File boardFile = new File(dir, slug + ".board.xml");
-        store.index().put(art.imported.boardDigest, new BoardArtIndex.Entry(id, slug, "import",
-                boardFile.getAbsolutePath(), 1793000000000L), Collections.singletonMap(id, slug + "/" + slug
-                        + ".art.json"));
+        Files.write(current.toPath(), bytes);
+        File boardFile = attachedTo == null ? new File(dir, slug + ".board.xml") : attachedTo;
+        store.index().put(art.imported.boardDigest, new BoardArtIndex.Entry(id, slug, art.imported.how,
+                boardFile.getAbsolutePath(), atMs), arts);
         store.invalidate();
         return new Saved(d, id, boardFile);
     }
@@ -155,6 +176,55 @@ public class BoardArtStoreTest {
         Board b = ArtFixtures.boardOf(nano.drawn.proposal, ftp.boardFile); // ftp's file, the nano's placements
         assertEquals(nano.id, store.refFor(b, null).id);
         assertEquals("nano", store.imported(b).slug);
+    }
+
+    /**
+     * BR-88: two current attaches name one board file: the newer one is its upload (saved first here, so the drawing's
+     * upload is the older one). The index lists drawings by id, random here (the temp path is in them): it runs until
+     * the newer one has come both first and last.
+     */
+    @Test
+    public void theNewerOfTwoAttachesCounts() throws Exception {
+        boolean first = false;
+        boolean last = false;
+        for (int run = 0; run < 30 && !(first && last); run++) {
+            BoardArtStore store = freshStore();
+            File bench = new File(store.index().root().getParentFile(), "ftp.board.xml");
+            Saved newer = save(store, ArtFixtures.FTP, "a", bench, AT + 2);
+            Saved older = save(store, ArtFixtures.FTP, "b", bench, AT + 1);
+            assertEquals("a", store.imported(newer.board()).slug);
+            first |= newer.id.compareTo(older.id) < 0;
+            last |= newer.id.compareTo(older.id) > 0;
+        }
+        assertTrue(first && last, "the newer drawing came both first and last by id");
+    }
+
+    /**
+     * BR-88: attach "s" to F, then replace "s" by attaching it to G, F's byte copy: F's own drawing went to history/,
+     * so F lists its drawing's upload (s at t2), not s at t1.
+     */
+    @Test
+    public void anAttachDisplacedToHistoryNoLongerCounts() throws Exception {
+        BoardArtStore store = freshStore();
+        File dir = store.index().root().getParentFile();
+        Saved f = save(store, ArtFixtures.FTP, "s", new File(dir, "f.board.xml"), AT + 1);
+        assertEquals(AT + 1, store.imported(f.board()).atMs);
+        Saved g = save(store, ArtFixtures.FTP, "s", new File(dir, "g.board.xml"), AT + 2);
+        BoardArtStore.Imported i = store.imported(f.board());
+        assertEquals(AT + 2, i.atMs);
+        assertEquals(g.boardFile.getCanonicalPath(), i.board);
+    }
+
+    /** BR-88: an import's board file linked by hand to a file elsewhere still lists its own upload. */
+    @Test
+    public void aLinkedBoardFileKeepsItsOwnUpload() throws Exception {
+        BoardArtStore store = freshStore();
+        Saved ftp = save(store, ArtFixtures.FTP, "ftp");
+        save(store, ArtFixtures.FTP, "ftp2"); // saved later: the drawing of this geometry is its upload
+        File target = new File(store.index().root().getParentFile(), "ftp.board.xml");
+        Files.createFile(target.toPath());
+        Files.createSymbolicLink(ftp.boardFile.toPath(), target.toPath());
+        assertEquals("ftp", store.imported(ftp.board()).slug);
     }
 
     @Test

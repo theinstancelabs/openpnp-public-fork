@@ -1251,7 +1251,8 @@ public final class BoardImporter {
                 BoardStore.deleteTree(staging);
                 BoardArtStore.forDir(configuration.getConfigurationDirectory()).invalidate();
             }
-            BoardArtStore.forDir(configuration.getConfigurationDirectory()).saved(atMs); // BR-88: the files are in place
+            // BR-88: status.boardImport.savedAtMs, once the files are in place
+            BoardArtStore.forDir(configuration.getConfigurationDirectory()).saved(atMs);
             Logger.info("Instance Labs: drawing {} from {} attached to {}", artId, parsed.fileName, board.file);
             return map("slug", slug, "name", name, "board", board.file, "art", map("id", artId, "kind",
                     BoardArt.KIND_KICAD), "maxOffsetMm", m.maxOffsetMm, "offsets", m.offsets, "replaced",
