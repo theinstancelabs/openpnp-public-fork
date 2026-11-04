@@ -146,7 +146,11 @@ public final class SimScene {
         public double threadShare = 0.5, threadFullMg = 0.35, threadZeroMg = 0.45;
         /** A deposit below this does not stick (it stays on the tip). */
         public double missBelowMg = 0.12;
-        /** Needle-to-surface gap above which nothing reaches the surface (D/DispenseProfile.java:53-54). */
+        /**
+         * Needle-to-surface gap above which nothing reaches the surface (a dot commanded at it lands). shortcut: one
+         * reach for every tip; add maxGapMm to byTip when a SIM scene runs the 25G above 0.20 (Process: it lands
+         * over 0.10-0.30, runs/p35).
+         */
         public double maxGapMm = 0.20;
         /**
          * The true needle Z offset (N2 Z touching a surface of N1 contact Z s = s + this), as

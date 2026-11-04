@@ -72,6 +72,8 @@ public final class SimPaste {
     static final double THREAD_MAX_LIFT_MM = 2.0;
     /** A needle below the surface smears its dot to this axis ratio (counted as a string). */
     static final double SMEAR_RATIO = 2;
+    /** A dot commanded at exactly the reach lands, however the doubles round (5.62 + 0.20 - 5.62 = 0.2000...02). */
+    static final double GAP_TOLERANCE_MM = 1e-6;
     /** A round dot's axis ratio is 1 + |N(0, 0.05)|. */
     static final double ROUNDNESS_SD = 0.05;
     static final String COUNT_PREFIX = "Count X:0 Y:0 Z:0 B:";
@@ -645,7 +647,7 @@ public final class SimPaste {
                 + (p.needleZOffsetMm != null ? p.needleZOffsetMm : configNeedleZOffsetMm.getAsDouble());
         double gap = dotZ - touchZ;
         double total = bead + m;
-        if (gap > p.maxGapMm) {
+        if (gap > p.maxGapMm + GAP_TOLERANCE_MM) {
             bead = total; // in the air: everything stays on the tip
             return;
         }
