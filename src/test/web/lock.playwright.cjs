@@ -2,6 +2,7 @@
  * Who has the machine, and Take control (P0, the user 11-03 15:42: "i should be able to control the real machine at
  * any time using the UI (even if the agent is using the firmware) … there should be an indicator on the UI if an agent
  * currently holds a mutex for it / is working. i should be able to click that button and take it for myself").
+ * Wherever the strip shows In control, it says who in words: "Nobody" and "You" stay in its compact form (PM 11-03).
  * The API is Backend's BR-72 (docs/backend-requests.md, "BR-72 API: the machine lock, Take control and the G-code
  * passthrough"). Until it lands, this test stubs it with route intercepts on the simulator: `lock` added to every
  * GET /api/status, POST /api/lock/take and /api/lock/release answered here, 409 `locked` for a write, and the UI's
@@ -10,7 +11,8 @@
  * no Take control; (2) an agent has it: the strip names it, what it does and since when, working or idle, offers Take
  * control, and the machine's controls are locked with that reason; (3) one click on Take control from a working agent:
  * one POST, a confirmation that the machine is the user's and what was stopped (the way STOP does: Connect, then
- * Home), the strip reads You; from an idle agent: its outputs off, the machine still homed; (4) a second window is the
+ * Home), the strip reads You; from an idle agent: its outputs off, the machine still homed; with the machine off: only
+ * that (Connect, then Home), never "still connected"; connected, not homed: Home first; (4) a second window is the
  * user too; (5) Give back (two presses) frees it; (6) a write refused with 409 locked (an agent took it between two
  * polls) offers Take control; (7) while nobody has it, the first move makes it the user's; (8) a take whose stop is not
  * confirmed (409 stop-not-confirmed): the machine is the user's, the page says so and presses STOP itself; no
@@ -38,7 +40,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WHAT = 'Feed step 20 -> 21.5 psi, drool check';
 const ACTIONS = ['quick stop (M410)', 'valve off', 'pump off', 'N1 valve off', 'N1 pump off', 'screw off (M18 B)'];
 const ACTIONS_IDLE = ['valve off', 'pump off', 'N1 valve off', 'N1 pump off'];
-const stub = { holder: null, takenFrom: null, refuseWrites: false, takingOver: false, takeFails: false, takes: 0, releases: 0, stops: 0, writes: [], noClient: [] };
+const stub = { holder: null, takenFrom: null, machine: null, lastMachine: null, refuseWrites: false, takingOver: false, takeFails: false, takes: 0, releases: 0, stops: 0, writes: [], noClient: [] };
 // BR-72: never guarded (STOP, Pressure off, a pad calibration's cancel, the lock), and data-only writes (photos, board
 // import, plan, pad types and their rules, package mappings, coupon readings, tip-setup definitions but not a mount)
 const FREE = /^\/api\/(stop|pressure\/stop|lock\/.*|pad-calibrations\/[^/]+\/cancel)$/;
@@ -62,6 +64,8 @@ async function stubRoutes(context) {
       const resp = await route.fetch();
       const body = await resp.json();
       body.lock = lockView();
+      if (stub.machine) Object.assign(body.machine, stub.machine);   // a machine state the simulator is not in
+      stub.lastMachine = body.machine;
       return route.fulfill({ response: resp, json: body });
     }
     if (url.pathname === '/api/lock/take' && method === 'POST') {
@@ -72,9 +76,12 @@ async function stubRoutes(context) {
       stub.takenFrom = was && was.kind === 'agent' ? { label: was.label, who: was.who, what: was.what, atMs: now, by: 'user' } : null;
       stub.refuseWrites = false;
       const working = was && was.kind === 'agent' && (was.busy || now - was.lastActiveMs < 10000);
+      // as the engine: an idle agent's outputs are switched off, unless the machine is off ("the machine was off")
+      const off = !(stub.lastMachine && stub.lastMachine.enabled);
       const stopped = !was || was.kind !== 'agent' ? null : working
         ? { label: was.label, what: was.what, mode: 'stop', actions: ACTIONS, machineOff: true }
-        : { label: was.label, what: was.what, mode: 'outputs-off', actions: ACTIONS_IDLE, machineOff: false };
+        : off ? { label: was.label, what: was.what, mode: 'outputs-off', actions: ['the machine was off'], machineOff: true }
+          : { label: was.label, what: was.what, mode: 'outputs-off', actions: ACTIONS_IDLE, machineOff: false };
       const body = { lock: lockView(), stopped, atMs: now };
       if (stub.takeFails) { stub.takeFails = false; return route.fulfill({ status: 409, json: Object.assign({ error: 'stop-not-confirmed', reason: 'The STOP was not confirmed: the machine still reads started after 20 s.' }, body) }); }
       return route.fulfill({ json: body });
@@ -110,6 +117,25 @@ const takeBtn = (page) => page.evaluate(() => { const b = document.getElementByI
 /** The first machine control in the Machine panel that can be pressed now (not Take control), waiting up to 20 s. */
 const waitFix = (page) => page.waitForFunction(() => { const b = Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).find((x) => !x.hidden && !x.disabled && x.dataset.fix !== 'take-control'); return b ? b.dataset.fix : null; },
   null, { timeout: 20000 }).then((h) => h.jsonValue(), () => null);
+/**
+ * The strip at widths from 1500 down to 1040 px: wherever In control is shown, its word (re) is shown too, also in its
+ * compact form (cells--t2l); returns each width's state, and whether the compact form was met.
+ */
+async function sweepWord(page, re) {
+  const rows = [];
+  for (let w = 1500; w >= 1040; w -= 40) {
+    await page.setViewportSize({ width: w, height: 900 });
+    await sleep(350);
+    rows.push(await page.evaluate(([ww, src]) => {
+      const c = document.getElementById('cell-lock'), v = c.querySelector('.cell__v'), cells = document.getElementById('cells');
+      const shown = !c.hidden && c.offsetParent !== null;
+      return { w: ww, compact: cells.classList.contains('cells--t2l'), shown, ok: !shown || (v.getClientRects().length > 0 && new RegExp(src).test(v.textContent.trim())) };
+    }, [w, re.source]));
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await sleep(350);
+  return { rows, compactMet: rows.some((r) => r.compact && r.shown), ok: rows.every((r) => r.ok) };
+}
 const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = document.getElementById('cell-lock'); return c && new RegExp(src).test(c.querySelector('.cell__v').textContent); }, re.source, { timeout: ms || 8000 }).catch(() => null);
 
 (async () => {
@@ -131,6 +157,8 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     check('(1) the strip has an In control cell', c && c.shown && /in control/i.test(c.k), c);
     check('(1) nobody has the machine: the strip says so', c && /^Nobody/.test(c.v), c);
     check('(1) no Take control while nobody has it', !(await takeBtn(page)).shown, await takeBtn(page));
+    const sw1 = await sweepWord(page, /^Nobody$/);
+    check('(1) "Nobody" in words wherever the strip shows In control, its compact form too (not a bare mark)', sw1.ok && sw1.compactMet, sw1.rows);
 
     // ---- (2) an agent has it ------------------------------------------------------------------------------------------
     stub.holder = agent(12, 2);
@@ -181,6 +209,8 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     await waitCell(page, /^You/);
     c = await cellText(page);
     check('(3) the strip reads You', c && /^You/.test(c.v) && /cell--ok/.test(c.cls), c);
+    const sw3 = await sweepWord(page, /^You$/);
+    check('(3) "You" in words wherever the strip shows In control, its compact form too', sw3.ok && sw3.compactMet, sw3.rows);
     check('(3) Take control is gone, and the band with it', !(await takeBtn(page)).shown && !(await page.$('#msg-area [data-msg="held"]')), await takeBtn(page));
     await sleep(900);
     const ungated = await page.evaluate(() => Array.from(document.querySelectorAll('#pv-machine-act button[data-fix]')).map((b) => b.title));
@@ -190,6 +220,7 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     check('(3) the confirmation closes with its button', !(await page.$('#msg-area [data-msg="lock"]')), null);
 
     // ---- (3b) Take control from an idle agent: its outputs off, the machine stays started and homed -------------------------
+    stub.machine = { enabled: true, homed: true, positionKnown: true, busy: false };
     stub.holder = agent(40, 600);
     stub.takenFrom = null;
     await waitCell(page, /^Process/);
@@ -200,8 +231,28 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     await page.waitForSelector('#msg-area [data-msg="lock"]', { timeout: 8000 }).catch(() => null);
     const band3b = await page.evaluate(() => { const b = document.querySelector('#msg-area [data-msg="lock"]'); return b ? b.textContent.replace(/\s+/g, ' ').trim() : null; });
     check('(3b) from an idle agent: its outputs off, the machine still connected and homed', /was idle/.test(band3b || '') && ACTIONS_IDLE.every((a) => band3b.includes(a))
-      && /still connected and homed/.test(band3b) && !/Connect, then Home/.test(band3b), band3b);
+      && /still connected and homed/.test(band3b) && !/Connect, then Home|was off|not homed/.test(band3b), band3b);
     await page.click('#msg-area [data-msg="lock"] .msg__act button');
+    // the same with the machine off (after a deploy, Infra 11-03 22:51: the band said "the machine was off" and "still
+    // connected and homed"), then connected but not homed: one true sentence each
+    const takeIdle = async (machine) => {
+      stub.machine = machine;
+      stub.holder = agent(40, 600);
+      await waitCell(page, /^Process/);
+      await sleep(800);   // a status with this machine state reaches the stub's take
+      await page.click('#btn-take');
+      await page.waitForSelector('#msg-area [data-msg="lock"]', { timeout: 8000 }).catch(() => null);
+      const t = await page.evaluate(() => { const b = document.querySelector('#msg-area [data-msg="lock"]'); return b ? b.textContent.replace(/\s+/g, ' ').trim() : ''; });
+      await page.click('#msg-area [data-msg="lock"] .msg__act button').catch(() => null);
+      return t;
+    };
+    const band3c = await takeIdle({ enabled: false, homed: false, busy: false });
+    check('(3c) from an idle agent with the machine off: that, then Connect and Home; never "still connected" or "outputs are off"', /The machine is yours/.test(band3c)
+      && /was idle and the machine was already off/.test(band3c) && /Connect, then Home/.test(band3c) && !/still connected|outputs are off/.test(band3c), band3c);
+    const band3d = await takeIdle({ enabled: true, homed: false, positionKnown: true, busy: false });
+    check('(3d) from an idle agent, connected but not homed: its outputs off, Home first', /Its outputs are off/.test(band3d)
+      && /still connected but not homed: Home before moving it/.test(band3d) && !/connected and homed|was off|Connect, then Home/.test(band3d), band3d);
+    stub.machine = null;
 
     // ---- (4) a second window is the user too ----------------------------------------------------------------------------
     const page2 = await context.newPage();
