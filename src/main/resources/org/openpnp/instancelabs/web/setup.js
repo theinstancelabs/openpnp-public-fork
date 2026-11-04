@@ -1142,13 +1142,14 @@
     register: ['Register the board', 'it finds the board and takes its height'],
   };
   IL.view('heights', {
-    title: 'Heights moved after the home',
+    title: (s) => { const zm = IL.zMoved(s); return !zm ? 'Heights after the home' : zm.step === 'done' ? 'Heights measured again' : 'Heights moved after the home'; },
     render(p, s, first) {
       if (first) {
         HV.lead = el('p', { class: 'panel__lead', id: 'hv-lead' });
         HV.steps = el('ol', { class: 'phases', id: 'hv-steps' });
         HV.acts = el('div', { class: 'btn-row', id: 'hv-actions', 'data-refusals': '' });
-        p.body.append(HV.lead, HV.steps, HV.acts, el('p', { class: 'muted', text: 'Nothing moves until you press a step\u2019s button.' }));
+        HV.note = el('p', { class: 'muted', id: 'hv-note', text: 'Nothing moves until you press a step\u2019s button.' });
+        p.body.append(HV.lead, HV.steps, HV.acts, HV.note);
       }
       const zm = IL.zMoved(s);
       const zc = (s && s.machine && s.machine.zCheck) || {};
@@ -1161,8 +1162,9 @@
             + (zc.homeAtMs ? ' (the home of ' + IL.fmtTime(zc.homeAtMs - S.skewMs) + ')' : '') + '. Measure them again, in this order:');
       const rows = order.map((k, i) => [k, i < now ? 'done' : i === now ? 'now' : 'todo'].concat(HV_TEXT[k] || [k, '']));
       IL.show(HV.steps, !!zm);
+      IL.show(HV.note, !!zm && zm.step !== 'done');
       IL.keyed(HV.steps, JSON.stringify(rows), () => rows.map(([k, st, t, d], i) => el('li', { class: st === 'done' ? '' : st, 'data-k': k, 'data-state': st },
-        st === 'todo' ? IL.setGlyph(el('span'), 'num', 'xs', 'To do', String(i + 1)) : IL.glyph(st === 'done' ? 'ok' : 'need', 'xs'),
+        st === 'todo' ? IL.glyph('num', 'xs', 'Step ' + (i + 1) + ': to do', i + 1) : IL.glyph(st === 'done' ? 'ok' : 'need', 'xs'),
         el('div', {}, el('div', { class: 'ph__t', text: t }), el('div', { class: 'ph__d', text: d })))));
       const fixes = zm && zm.step !== 'done' ? zm.fixes : [];
       IL.keyed(HV.acts, JSON.stringify(fixes), () => fixes.map((f, i) => IL.fixButton(Object.assign({}, f, { primary: i === 0 }))));
