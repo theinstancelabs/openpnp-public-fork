@@ -38,8 +38,24 @@ class Units(unittest.TestCase):
 
     def test_files(self):
         self.assertEqual(sorted(os.listdir(self.out)),
-                         ["il-deploy.service", "il-deploy.timer", "il-openpnp-xvfb.service", "il-openpnp.service",
-                          "system"])
+                         ["il-deploy.service", "il-deploy.timer", "il-keepup.service", "il-keepup.timer",
+                          "il-openpnp-xvfb.service", "il-openpnp.service", "system"])
+
+    def test_without_a_trusted_origin_openpnp_gets_none(self):
+        self.assertNotIn("OPENPNP_IL_API_TRUSTED_ORIGINS", self.read("il-openpnp.service"))
+
+    def test_keep_up_runs_every_minute_with_the_deployers_flags(self):
+        timer = self.read("il-keepup.timer")
+        for line in ("OnUnitInactiveSec=1min", "Unit=il-keepup.service", "WantedBy=timers.target"):
+            self.assertIn(line, timer.splitlines())
+        svc = self.read("il-keepup.service")
+        start = [l for l in svc.splitlines() if l.startswith("ExecStart=")][0]
+        deploy = [l for l in self.read("il-deploy.service").splitlines() if l.startswith("ExecStart=")][0]
+        argv, dargv = shlex.split(start[len("ExecStart="):]), shlex.split(deploy[len("ExecStart="):])
+        self.assertEqual(argv[2], "keep-up")
+        self.assertEqual(argv[3:], dargv[3:])  # the same root, STATE.md, lock, device and port as the deployer
+        self.assertIn("SuccessExitStatus=3", svc.splitlines())  # 'not free' is not a failure
+
 
     def test_the_timers_run_verifies_attestations_with_gh_and_nothing_turns_that_off(self):
         """The tests' fake gh goes in through main(argv, deps) only: no flag and no environment variable changes the
@@ -174,6 +190,33 @@ class Units(unittest.TestCase):
                            cwd=self.out, timeout=60)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertNotIn(self.out, p.stderr, p.stderr)
+
+
+class UnitsWithATrustedOrigin(unittest.TestCase):
+    """BR-73: the tailnet origin reaches OpenPnP (its environment) and the deployer's checks (their flags)."""
+
+    def test_rendered(self):
+        lab = Lab()
+        self.addCleanup(lab.cleanup)
+        out = os.path.join(lab.dir, "units")
+        argv = lab.argv("units", "--out", out, extra=["--trusted-origin", "https://Lumen.example.ts.net:8877/"])
+        i = argv.index("--service-manager")
+        del argv[i:i + 2]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(il_deploy.main(argv, deps=lab.deps()), 0)
+
+        def read(name):
+            with open(os.path.join(out, name)) as f:
+                return f.read()
+
+        self.assertIn('Environment="OPENPNP_IL_API_TRUSTED_ORIGINS=https://lumen.example.ts.net:8877"',
+                      read("il-openpnp.service").splitlines())
+        for name in ("il-deploy.service", "il-keepup.service"):
+            start = [l for l in read(name).splitlines() if l.startswith("ExecStart=")][0]
+            argv = shlex.split(start[len("ExecStart="):])
+            i = argv.index("--trusted-origin")
+            self.assertEqual(argv[i + 1], "https://lumen.example.ts.net:8877", name)
+
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ Usage (common flags go after the subcommand):
                                             one step back to previous, with its pre-deploy config
                                             snapshot; refused if the config changed since the deploy
   il_deploy.py run                          poll, then deploy if newer (what the timer calls)
+  il_deploy.py keep-up                      start OpenPnP (never enabled or homed) if it is down and the machine is
+                                            free: the real machine's web UI is up whenever nobody holds the machine
   il_deploy.py health [--sha7 X] [--no-claim]  the health check alone; JSON report
   il_deploy.py status                       versions, last deploy, idle verdict (JSON)
   il_deploy.py init --seed-from DIR         create state/config once from an existing config
@@ -40,6 +42,7 @@ Usage (common flags go after the subcommand):
   il_deploy.py check-device                 exit 1 if a process has the serial device open
   il_deploy.py wait-display                 wait until Xvfb listens on --display (the Xvfb unit's ExecStartPost)
 Common flags: --root --state-md --lock --device --activity FILE (repeatable) --quiet-min --api-port
+  --trusted-origin URL (repeatable: OpenPnP's OPENPNP_IL_API_TRUSTED_ORIGINS, checked by the health check)
   --usb-sn --serial-match --expect-simulated --repo --branch --service --service-manager systemd|subprocess
   --openpnp-cmd CMD ({python} {root} {config} {port} {lock} {prefs} placeholders; subprocess only)
 Exit codes: 0 done or nothing to do; 1 error; 2 refused; 3 not idle; 4 deploy failed and rolled back;
@@ -567,9 +570,9 @@ class Api:
         self.base = f"http://{host}:{port}"
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def call(self, method, path, body=None, timeout=10):
+    def call(self, method, path, body=None, timeout=10, headers=None):
         data = None if body is None else json.dumps(body).encode()
-        headers = {"Content-Type": "application/json"} if data is not None else {}
+        headers = dict({"Content-Type": "application/json"} if data is not None else {}, **(headers or {}))
         req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
         try:
             with self.opener.open(req, timeout=timeout) as r:
@@ -1161,7 +1164,28 @@ def openpnp_command(cfg, use_override=True):
 
 
 def openpnp_env(cfg):
-    return {"OPENPNP_IL_API_PORT": str(cfg.api_port), "JAVA_TOOL_OPTIONS": "-Xmx1536m", "DISPLAY": cfg.display}
+    env = {"OPENPNP_IL_API_PORT": str(cfg.api_port), "JAVA_TOOL_OPTIONS": "-Xmx1536m", "DISPLAY": cfg.display}
+    if cfg.trusted_origins:
+        # BR-73: the API also answers these origins' Host and Origin (the tailnet's HTTPS name via `tailscale serve`)
+        env["OPENPNP_IL_API_TRUSTED_ORIGINS"] = ",".join(cfg.trusted_origins)
+    return env
+
+
+ORIGIN_PROBE = "/api/il-deploy/origin-probe"  # no such route: 404 once the Host and Origin checks pass, else 403
+FOREIGN_ORIGIN = "https://il-deploy-probe.invalid"
+
+
+def normalise_origin(text):
+    """(origin, authority) as OpenPnP's ApiSettings normalises a trusted origin (BR-73): lowercase, no trailing slash,
+    the scheme's default port dropped. ValueError for anything but http(s)://host[:port]."""
+    m = re.fullmatch(r"(https?)://([a-z0-9.-]+)(?::(\d{1,5}))?/?", text.strip().lower())
+    if not m:
+        raise ValueError(f"not an origin (http(s)://host[:port]): {text!r}")
+    scheme, host, port = m.groups()
+    if port and int(port) == (443 if scheme == "https" else 80):
+        port = None
+    authority = f"{host}:{port}" if port else host
+    return f"{scheme}://{authority}", authority
 
 
 def make_service(cfg):
@@ -2084,6 +2108,36 @@ class Deployer:
         finally:
             self._note_own(since)
 
+    def _origins_check(self, server):
+        """(ok, detail): OpenPnP answers each --trusted-origin as the user's browser reaches it through `tailscale serve`
+        (its Host and Origin, a POST), and still refuses a foreign Origin. A build from before BR-73 lists none: passed
+        with a note (a rollback to it stays possible; the tailnet URL is refused there)."""
+        listed = server.get("trustedOrigins")
+        if listed is None:
+            return True, ("this build has no trusted origins (before BR-73): the tailnet URL is refused "
+                          f"({', '.join(self.cfg.trusted_origins)})")
+        if not isinstance(listed, list):
+            return False, f"server.trustedOrigins is not a list: {listed!r}"
+        checked = []
+        for text in self.cfg.trusted_origins:
+            origin, host = normalise_origin(text)
+            if origin not in listed:
+                return False, (f"server.trustedOrigins {listed} lacks {origin}: OPENPNP_IL_API_TRUSTED_ORIGINS did not "
+                               "reach OpenPnP, or it dropped the entry")
+            for probe, want in ((origin, 404), (FOREIGN_ORIGIN, 403)):
+                try:
+                    code, body = self.api.call("POST", ORIGIN_PROBE, {}, timeout=10,
+                                               headers={"Host": host, "Origin": probe})
+                except ApiDown as e:
+                    return False, f"the origin probe got no answer ({e})"
+                if code != want:
+                    what = ("its own origin is refused" if want == 404 else
+                            "a foreign Origin is accepted (the CSRF guard is off)")
+                    return False, (f"a POST with Host {host} and Origin {probe} answered HTTP {code}, expected {want}: "
+                                   f"{what} ({body.get('reason', body)})")
+            checked.append(origin)
+        return True, f"{', '.join(checked)}: accepted with its Host and Origin; a foreign Origin refused"
+
     def _health_check(self, expect_sha7, watch_service):
         cfg, steps = self.cfg, []
         rep = {"ok": False, "kind": None, "failure": None, "expected_sha7": expect_sha7,
@@ -2137,6 +2191,12 @@ class Deployer:
             return fail("status", f"the dispense engine is not usable (dispense.running {d.get('running')}, "
                                   f"available {d.get('available')}: {d.get('unavailableReason')})", stop=False)
         step("status", f"version {version}, simulated {sim}, dispense engine available")
+
+        if cfg.trusted_origins:
+            ok, detail = self._origins_check(server)
+            if not ok:
+                return fail("origins", detail, stop=False)
+            step("origins", detail)
 
         try:
             code, m = self.api.get("/api/machine", timeout=10)
@@ -2583,21 +2643,26 @@ class Deployer:
     def _start_unchecked(self):
         """Start OpenPnP again, not enabled, and say whether it runs: its API answers (flock exits 75 a moment after a
         successful start when the serial lock is taken)."""
+        ok, why = self._start_not_enabled()
+        return "; OpenPnP runs again, machine not enabled" if ok else f"; OpenPnP ran before but did not start again ({why})"
+
+    def _start_not_enabled(self):
+        """Start OpenPnP and wait until its API answers; nothing is enabled or homed. (ok, detail)."""
         since = self.clock.now()
         try:
             self.svc.start()
         except (ServiceError, OSError, subprocess.SubprocessError) as e:
             self.record("start", ok=False, error=str(e))
-            return f"; OpenPnP ran before but did not start again ({e})"
+            return False, f"it did not start: {e}"
         try:
             st, why, _ = self._wait_status(True)
         finally:
             self._note_own(since)
         if st is None:
             self.record("start", ok=False, checked=False, error=why)
-            return f"; OpenPnP ran before but did not start again ({why})"
+            return False, f"it did not start: {why}"
         self.record("start", ok=True, checked=False)
-        return "; OpenPnP runs again, machine not enabled"
+        return True, "OpenPnP runs, machine not enabled"
 
     def _recover(self, tag, rep, before, snap, was_running):
         """The new build failed its health check. A machine problem puts the previous build back with its config
@@ -2840,6 +2905,48 @@ class Deployer:
                 shutil.rmtree(os.path.join(self.releases, t), ignore_errors=True)
 
     # --- the other commands ----------------------------------------------------------------------
+    def keep_up(self):
+        """The real machine's web UI is up whenever nobody holds the machine (the user's P0, 11-03): start OpenPnP, never
+        enabled or homed, when it is down and the machine is free. A bench session (a Holder) keeps it stopped; a hold
+        (a person must check) too: an exit il_deploy did not cause sets it before this runs (main), so a crash is not
+        restarted over a machine whose valve and pump may still be on. 0 started or running, 3 not free, 1 failed."""
+        if self.svc.is_active():
+            return 0
+        reasons = self.keep_up_reasons()
+        if reasons:
+            self.say("OpenPnP is down; not starting it: " + "; ".join(reasons))
+            return 3
+        ok, detail = self._start_not_enabled()
+        self.record("keep-up", ok=ok, detail=detail)
+        self.say(f"OpenPnP was down with the machine free: {detail}")
+        return 0 if ok else 1
+
+    def keep_up_reasons(self):
+        """Why OpenPnP must stay down ([] = start it): a hold, a Holder, the serial lock or device taken, another
+        OpenPnP or something else on the API port. No quiet period: a start moves nothing."""
+        reasons = []
+        hold = self.read_hold()
+        if hold:
+            since, why = self.hold_reasons(hold if isinstance(hold, dict) else {})
+            reasons.append(f"on hold since {since}: {why} (after a person has checked the machine: il_deploy.py resume)")
+        try:
+            with open(self.cfg.state_md, encoding="utf-8") as f:
+                h = parse_holder(f.read())
+            if not h.idle:
+                reasons.append(h.reason)
+        except OSError as e:
+            reasons.append(f"STATE.md unreadable ({self.cfg.state_md}): {e.strerror}")
+        reasons += self._lock_reasons(set()) + self._device_reasons(set())
+        for pid, d, real in self.procs.openpnp_processes():
+            if real:
+                reasons.append(f"another OpenPnP with a real-machine config runs (pid {pid}, config {d})")
+        try:
+            self.api.get("/api/status", timeout=3)
+            reasons.append(f"something answers on 127.0.0.1:{self.cfg.api_port} but {self.cfg.service} is not running")
+        except ApiDown:
+            pass
+        return reasons
+
     def run(self):
         try:
             self.poll()
@@ -3071,6 +3178,8 @@ def render_units(cfg, script, python):
         flags += ["--serial-match", cfg.serial_match]
     if cfg.expect_simulated:
         flags.append("--expect-simulated")
+    for o in cfg.trusted_origins:
+        flags += ["--trusted-origin", o]
     env = openpnp_env(cfg)
     openpnp = "\n".join([
         "[Unit]",
@@ -3140,6 +3249,30 @@ def render_units(cfg, script, python):
         "[Install]",
         "WantedBy=timers.target",
         ""])
+    keepup = "\n".join([
+        "[Unit]",
+        "Description=Instance Labs: start OpenPnP (never enabled or homed) when it is down and nobody holds the machine",
+        "After=il-openpnp.service",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        "ExecStart=" + sd_join(me + ["keep-up"] + flags),
+        "SuccessExitStatus=3",
+        "Nice=5",
+        ""])
+    keepup_timer = "\n".join([
+        "[Unit]",
+        "Description=Keep the real machine's web UI up: check every minute that OpenPnP runs when the machine is free",
+        "",
+        "[Timer]",
+        "OnBootSec=1min",
+        "OnUnitInactiveSec=1min",
+        "AccuracySec=10s",
+        "Unit=il-keepup.service",
+        "",
+        "[Install]",
+        "WantedBy=timers.target",
+        ""])
     budget = "\n".join([
         "# System drop-in for the user manager that runs il_deploy's units (install as root: README.md). Ubuntu's",
         "# /usr/lib/systemd/system/user@.service.d/timeout.conf gives it 5 s at shutdown, then SIGKILL. At a reboot",
@@ -3150,7 +3283,7 @@ def render_units(cfg, script, python):
         f"TimeoutStopSec={USER_MANAGER_STOP_S}",
         ""])
     return {"il-openpnp.service": openpnp, "il-openpnp-xvfb.service": xvfb, "il-deploy.service": deploy,
-            "il-deploy.timer": timer,
+            "il-deploy.timer": timer, "il-keepup.service": keepup, "il-keepup.timer": keepup_timer,
             os.path.join("system", f"user@{os.getuid()}.service.d", USER_MANAGER_DROP_IN): budget}
 
 
@@ -3172,6 +3305,9 @@ def build_parser():
     g.add_argument("--serial-match", help="regular expression the controller's 'Serial port: connecting to ...' log line "
                                           "must match (default: ' S/N <--usb-sn>'), for a link without a USB identity")
     g.add_argument("--expect-simulated", action="store_true", help="health: server.simulated must be true")
+    g.add_argument("--trusted-origin", dest="trusted_origins", action="append", default=[], type=_origin_arg,
+                   help="an origin the API must also answer, e.g. https://lumen-thinkpad.tail3e978a.ts.net:8877 "
+                        "(repeatable; OpenPnP gets them as OPENPNP_IL_API_TRUSTED_ORIGINS; the health check probes them)")
     g.add_argument("--repo", default=REPO)
     g.add_argument("--branch", default=BRANCH)
     g.add_argument("--service", default=UNIT)
@@ -3194,7 +3330,7 @@ def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], epilog=__doc__.split("\n\n", 1)[1],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("poll", "run", "status", "resume", "stop-openpnp", "check-device"):
+    for name in ("poll", "run", "keep-up", "status", "resume", "stop-openpnp", "check-device"):
         sub.add_parser(name, parents=[common])
     sub.add_parser("rollback", parents=[common]).add_argument(
         "--discard-config-changes", action="store_true",
@@ -3213,6 +3349,13 @@ def build_parser():
                                     "copy outside any git worktree)")
     p.add_argument("--python", default="/usr/bin/python3")
     return ap
+
+
+def _origin_arg(text):
+    try:
+        return normalise_origin(text)[0]
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
 
 
 def config_from_args(argv=None):
@@ -3273,7 +3416,7 @@ def main(argv=None, deps=None):
             return 3
         # no il_deploy works on this root now: a claim file left is a killed one's
         found = (d.read_hold() or {}).get("reason") if d.recover_stale_claim() else None
-        if cmd in ("deploy", "rollback", "run", "health", "resume"):
+        if cmd in ("deploy", "rollback", "run", "keep-up", "health", "resume"):
             exited = d.check_openpnp_exit()
             if exited:
                 print(exited, file=sys.stderr if cmd == "health" else sys.stdout, flush=True)
@@ -3293,6 +3436,8 @@ def main(argv=None, deps=None):
             return d.rollback(cfg.discard_config_changes)
         if cmd == "run":
             return d.run()
+        if cmd == "keep-up":
+            return d.keep_up()
         if cmd == "health":
             return d.health(cfg.sha7, cfg.no_claim)
         if cmd == "init":

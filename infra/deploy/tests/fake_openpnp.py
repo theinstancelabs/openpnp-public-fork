@@ -64,6 +64,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -79,9 +80,15 @@ BOOT_AXES = {"X": 0.0, "Y": 0.0, "Z": 0.0, "B": 720.0}  # Marlin after a power c
 BOOT_AXES_AFTER_QUICK_STOP = {"X": 0.0, "Y": 0.0, "Z": 0.0, "B": 720.05}
 
 
+LOOPBACK = re.compile(r"^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\])(:\d+)?$")
+
+
 class FakeOpenPnP:
-    def __init__(self, port, cwd, config_dir, machine=None, requests=None):
+    def __init__(self, port, cwd, config_dir, machine=None, requests=None, trusted_origins=None):
         self.port = port
+        if trusted_origins is None:  # as OpenPnP: OPENPNP_IL_API_TRUSTED_ORIGINS, comma-separated (BR-73)
+            trusted_origins = [o for o in os.environ.get("OPENPNP_IL_API_TRUSTED_ORIGINS", "").split(",") if o.strip()]
+        self.trusted = [o.strip().lower().rstrip("/") for o in trusted_origins]
         self.requests = requests or os.path.join(config_dir, "fake-requests.jsonl")
         self.cwd = cwd
         self.config = config_dir
@@ -206,6 +213,7 @@ class FakeOpenPnP:
         out = {
             "server": dict({"version": self.version(), "timeMs": int(time.time() * 1000)},
                            **({"startedAtMs": self.jvm_started_ms} if self.br44 else {}),
+                           **({} if "old-origins" in self.fail else {"trustedOrigins": list(self.trusted)}),
                            port=self.port, lanAccess=False, simulated=sim, simulatorConfirmed=sim),
             "machine": self.machine_status(),
             # DispenseEndpoints.status: config times (persisted) of the needle, tip, seat, places and surfaces
@@ -364,8 +372,29 @@ class FakeOpenPnP:
             self.link_dead = self.connected
             self.booted, self.quick_stopped = True, False
 
-    def handle(self, method, path, body):
-        self.record({"method": method, "path": path})
+    def browser_safety(self, method, host, origin):
+        """ApiServer.checkBrowserSafety with BR-73's trusted origins: (403, body) or None. Fail flags: 'old-origins' (a
+        build from before BR-73: loopback only), 'origins-refused' (it lists them but refuses them), 'origins-open' (any
+        Origin passes: the CSRF guard broken)."""
+        def refuse(why):
+            return 403, {"error": "forbidden", "reason": why}
+        host = (host or "").lower()
+        trusted = {} if ("old-origins" in self.fail or "origins-refused" in self.fail) else {
+            o.split("://", 1)[1]: o for o in self.trusted}
+        loopback = bool(LOOPBACK.match(host))
+        if not loopback and host not in trusted:
+            return refuse(f"Host '{host}' is not allowed")
+        if method in ("GET", "HEAD") or origin is None or "origins-open" in self.fail:
+            return None
+        if origin.lower() == (f"http://{host}" if loopback else trusted.get(host)):
+            return None
+        return refuse(f"cross-site request refused (Origin {origin} is not this server)")
+
+    def handle(self, method, path, body, host=None, origin=None):
+        self.record({"method": method, "path": path, **({"origin": origin} if origin else {})})
+        refused = self.browser_safety(method, host or f"127.0.0.1:{self.port}", origin)
+        if refused:
+            return refused
         if method == "GET" and path in ("/api/status", "/api/machine") and "machine-500" in self.fail:
             return 500, {"error": "internal", "reason": "NullPointerException in machineStatus"}
         if method == "GET" and path == "/api/status":
@@ -392,7 +421,8 @@ class FakeOpenPnP:
                     body = json.loads(raw) if raw else {}
                 except ValueError:
                     body = {}
-                code, out = fake.handle(method, self.path.split("?")[0], body)
+                code, out = fake.handle(method, self.path.split("?")[0], body, self.headers.get("Host"),
+                                        self.headers.get("Origin"))
                 data = json.dumps(out).encode()
                 try:
                     self.send_response(code)
