@@ -1254,6 +1254,22 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         return disableCommandsSent.get();
     }
 
+    /**
+     * Instance Labs (BR-75): a planned stop's lines (the DISABLE_COMMAND without the line that switches the screw's
+     * motor off) go out as a Stop sends its own ({@link #sendEveryLine}), then the link closes: the disable after it
+     * sends no DISABLE_COMMAND. Not counted in {@link #getDisableCommandsSent}: no M18 B went out.
+     */
+    public void sendStopLinesThenDisconnect(String lines) {
+        sendEveryLine(lines);
+        try {
+            drainCommandQueue(getTimeoutAtMachineSpeed());
+        }
+        catch (Exception e) {
+            Logger.warn(e);
+        }
+        disconnect();
+    }
+
     /** Instance Labs (BR-02): how many moves and homes this driver sent for OpenPnP (not raw lines). */
     public long getMotionCommandsSent() {
         return motionCommandsSent.get();

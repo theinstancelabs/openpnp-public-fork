@@ -242,11 +242,13 @@ public class DispenseProfileTest {
         // confirming the start angle, the name and notes do not make a plan stale
         DispenseProfile p = new DispenseProfile();
         p.startAngleSetAtMs = 123L;
+        p.startAngleChangedAtMs = 120L;
         p.name = "renamed";
         p.notes = "x";
         assertEquals(base, p.fingerprint());
         assertEquals(base, p.copy().fingerprint());
         assertEquals(123L, (long) p.copy().startAngleSetAtMs);
+        assertEquals(120L, (long) p.copy().startAngleChangedAtMs);
         assertEquals("renamed", p.copy().name);
     }
 

@@ -805,6 +805,44 @@ public final class DispenseService {
     }
 
     /**
+     * BR-75: the lines of a DISABLE_COMMAND a planned stop sends: every command but the ones that switch the screw's
+     * motor off (an M18/M84 naming {@code letter} or no axis), trimmed; blank and comment-only lines dropped.
+     */
+    public static List<String> plannedStopLines(String disableCommand, String letter) {
+        List<String> l = new ArrayList<>();
+        for (String line : disableCommand == null ? new String[0] : disableCommand.split("\n")) {
+            if (!ControllerCommands.normalize(line).isEmpty() && !ControllerCommands.switchesScrewOff(line, letter)) {
+                l.add(line.trim());
+            }
+        }
+        return l;
+    }
+
+    /**
+     * BR-75: a planned stop's part on the screw's controller, on the machine thread before OpenPnP's Stop. With the
+     * machine started and the link open, {@link #plannedStopLines} of the driver's DISABLE_COMMAND go out as OpenPnP's
+     * Stop sends its own, then the link closes, so the Stop after it sends no DISABLE_COMMAND: the screw's motor stays
+     * powered, and no switch-off goes on record. With the machine off, a link kept open (connection-keep-alive) closes
+     * without a line: OpenPnP's next disable (its quit) would send the DISABLE_COMMAND on it. Returns the lines sent;
+     * throws, sending nothing, when the screw's axis is not a controller axis of a G-code driver.
+     */
+    public List<String> plannedStop(Machine m) {
+        ReferenceControllerAxis b = screwAxis(m);
+        if (b == null) {
+            throw new IllegalStateException("the screw's axis '" + cfg.bAxisName + "' is not a controller axis of a "
+                    + "G-code driver: which line switches its motor off is not known");
+        }
+        GcodeDriver d = (GcodeDriver) b.getDriver();
+        if (!d.isConnected()) {
+            return Collections.emptyList();
+        }
+        List<String> lines = m.isEnabled() ? plannedStopLines(d.getCommand(null,
+                GcodeDriver.CommandType.DISABLE_COMMAND), b.getLetter()) : Collections.emptyList();
+        d.sendStopLinesThenDisconnect(String.join("\n", lines));
+        return lines;
+    }
+
+    /**
      * BR-02: the screw's driver sent its DISABLE_COMMAND on an open link since the last look (a disable after a
      * disconnect sends none): when it has the screw's M18, on record. Counted at the driver, so a second disable at the
      * same time is no other one.
@@ -1200,6 +1238,7 @@ public final class DispenseService {
         long now = System.currentTimeMillis();
         if (cfg != null && c.profile.startAngleDeg != cfg.profile.startAngleDeg) {
             c.profile.startAngleSetAtMs = now;
+            c.profile.startAngleChangedAtMs = now;
         }
         if (cfg != null && (c.needleXyTrim.dxMm != cfg.needleXyTrim.dxMm || c.needleXyTrim.dyMm != cfg.needleXyTrim.dyMm)) {
             c.needleXyTrim.setAtMs = now;
@@ -1297,10 +1336,15 @@ public final class DispenseService {
             throw new EngineRefusal(409, "refused", noSet);
         }
         DispenseConfig c = cfg.copy();
+        long now = System.currentTimeMillis();
         if (angleDeg != null) {
             c.profile.startAngleDeg = angleDeg;
+            c.profile.startAngleChangedAtMs = now; // BR-75: a measure; a confirm keeps the records made at the angle
         }
-        c.profile.startAngleSetAtMs = System.currentTimeMillis();
+        else if (c.profile.startAngleChangedAtMs == null) {
+            c.profile.startAngleChangedAtMs = c.profile.startAngleSetAtMs; // settings from before BR-75: its last set
+        }
+        c.profile.startAngleSetAtMs = now;
         updateConfig(c);
         db.event(null, "INFO", "I11", String.format(java.util.Locale.ROOT, "screw start angle %s %.1f deg%s",
                 angleDeg == null ? "confirmed" : "set to", c.profile.startAngleDeg, note == null ? "" : ": " + note));
@@ -1631,12 +1675,14 @@ public final class DispenseService {
             // the start angle belongs to the controller's power-up and the screw, not to the needle (§22.3)
             prof.startAngleDeg = c.profile.startAngleDeg;
             prof.startAngleSetAtMs = c.profile.startAngleSetAtMs;
+            prof.startAngleChangedAtMs = c.profile.startAngleChangedAtMs;
             List<String> problems = prof.validate(c);
             if (!problems.isEmpty()) {
                 DispenseProfile reset = new DispenseProfile();
                 reset.name = in.name + " (reset: " + problems.get(0) + ")";
                 reset.startAngleDeg = c.profile.startAngleDeg;
                 reset.startAngleSetAtMs = c.profile.startAngleSetAtMs;
+                reset.startAngleChangedAtMs = c.profile.startAngleChangedAtMs;
                 r.warnings.add("The " + in.name + "'s dispense profile no longer validates (" + problems.get(0)
                         + "): it was reset to the default recipe.");
                 prof = reset;
@@ -1735,6 +1781,7 @@ public final class DispenseService {
             c.profile = b.profile.copy();
             c.profile.startAngleDeg = cfg.profile.startAngleDeg;
             c.profile.startAngleSetAtMs = cfg.profile.startAngleSetAtMs;
+            c.profile.startAngleChangedAtMs = cfg.profile.startAngleChangedAtMs;
             c.needleAnchor = b.needleAnchor;
             c.needleZOffsetMm = b.needleZOffsetMm;
             c.needleZOffsetSetAtMs = b.needleZOffsetSetAtMs;

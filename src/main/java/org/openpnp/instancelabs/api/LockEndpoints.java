@@ -36,6 +36,8 @@ final class LockEndpoints {
     static final long HOME_WAIT_MS = 120_000;
     static final long STOP_CONFIRM_MS = 20_000;
     static final String GCODE = "/api/gcode";
+    /** BR-75: the deployer's planned stop, a guarded write the web UI may never send. */
+    static final String PLANNED_STOP = "/api/stop/planned";
 
     /** Writes everyone may always send ("METHOD path"): the stops and the lock's own routes. */
     private static final List<Pattern> OPEN = patterns("POST /api/stop", "POST /api/pressure/stop",
@@ -153,6 +155,10 @@ final class LockEndpoints {
     MachineLock.Activity admit(ApiServer.Request r) throws ApiException {
         if ("GET".equals(r.method) || "HEAD".equals(r.method) || !"guarded".equals(kindOf(r.method, r.path))) {
             return null;
+        }
+        // BR-75 (the PM): never the web UI's, and refused before its request could make the user the holder
+        if (PLANNED_STOP.equals(r.path) && isUi(r)) {
+            throw ApiException.refused("the planned stop is for deploys; the UI's STOP is POST /api/stop");
         }
         watch();
         MachineLock.Activity a = ctx.lock.admit(isUi(r), token(r), "using the web UI");

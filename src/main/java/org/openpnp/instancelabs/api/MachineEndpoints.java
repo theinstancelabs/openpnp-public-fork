@@ -68,6 +68,7 @@ final class MachineEndpoints {
 
     void register(ApiServer s) {
         s.route("POST", "/api/stop", r -> stop());
+        s.route("POST", LockEndpoints.PLANNED_STOP, r -> plannedStop());
         s.route("POST", "/api/machine/enable", r -> enable());
         s.route("POST", "/api/machine/home", this::home);
         s.route("GET", "/api/machine", r -> machineStatus());
@@ -164,6 +165,103 @@ final class MachineEndpoints {
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The planned stop (BR-75): the deployer's, never the STOP button's
+    // ------------------------------------------------------------------------------------------
+
+    /**
+     * BR-75: as STOP the outputs go off and the machine is disabled, but without the screw's M18 B, so its motor stays
+     * powered and after the next Start its start angle needs a confirm, not a measure. Refused unless nothing works.
+     * One OpenPnP machine task: the DISABLE_COMMAND's other lines, the link closed, then OpenPnP's Stop on the closed
+     * link (it sends no DISABLE_COMMAND).
+     */
+    Object plannedStop() throws Exception {
+        Machine m = ctx.configuration.getMachine();
+        DispenseService svc = ctx.svcOrNull();
+        if (m == null || svc == null) {
+            throw ApiException.refused("No planned stop: " + (m == null ? "OpenPnP has no machine configured"
+                    : "the dispense engine is not running") + ". The real STOP is POST /api/stop");
+        }
+        String working = working(svc, m);
+        if (working != null) {
+            throw refusedWhile(working);
+        }
+        List<String> actions = new ArrayList<>();
+        List<String> sent = new ArrayList<>();
+        Future<Object> f = m.submit(() -> {
+            // again on the machine thread; returned, not thrown: OpenPnP drops every task queued behind one that throws
+            String now = working(svc, m);
+            if (now != null) {
+                return now;
+            }
+            try {
+                if (!m.isEnabled()) {
+                    svc.plannedStop(m);
+                    actions.add("machine was already stopped");
+                    return null;
+                }
+                sent.addAll(svc.plannedStop(m));
+                actions.add("planned stop: " + (sent.isEmpty() ? "no line sent" : String.join(", ", sent)) + " (the "
+                        + "DISABLE_COMMAND without its screw-off line: the screw's motor stays powered); the link closed");
+                ctx.switchOff.stop(m);
+                actions.add("OpenPnP Stop on the closed link: no DISABLE_COMMAND");
+                return null;
+            }
+            catch (Exception e) {
+                Logger.warn(e, "web planned stop failed");
+                return e;
+            }
+        }, null, true);
+        Object out;
+        try {
+            out = f.get(START_WAITS_FOR_SWITCH_OFF_MS, TimeUnit.MILLISECONDS); // as long as a switch-off may take
+        }
+        catch (TimeoutException e) {
+            throw ApiException.refused("the planned stop has not ended after " + START_WAITS_FOR_SWITCH_OFF_MS / 1000
+                    + " s: the machine may still be switching off. The real STOP is POST /api/stop");
+        }
+        if (out instanceof String) {
+            throw refusedWhile((String) out);
+        }
+        if (out instanceof Exception) {
+            throw ApiException.refused("No planned stop: " + rootMessage((Exception) out) + ". The real STOP is "
+                    + "POST /api/stop");
+        }
+        return Views.map("stopped", true, "machineEnabled", m.isEnabled(), "actions", actions, "planned", true,
+                "linesSent", sent);
+    }
+
+    /** BR-75: what works now, in words, or null. On the machine thread OpenPnP reads busy for the planned stop itself. */
+    private String working(DispenseService svc, Machine m) {
+        if (ctx.switchOff.inProgress()) {
+            return "OpenPnP is switching the machine off (a STOP)";
+        }
+        // a task OpenPnP dropped (one of its own ahead of it failed) never ends by itself: it ends here (rc1 review)
+        if (svc.isBusy() && !svc.releaseDroppedTask()) {
+            return "a dispense task runs";
+        }
+        if (ctx.padCalJobs.lockReason() != null) {
+            return "a pad calibration runs";
+        }
+        if (ctx.pressure.isActive()) {
+            return "the pressure hold is on";
+        }
+        if (ctx.passthrough.running() || ctx.passthrough.motionPending()) {
+            return "a G-code batch runs, or its moves have not ended";
+        }
+        if (!m.isTask(Thread.currentThread())
+                && (m.isBusy() || m instanceof ReferenceMachine && ((ReferenceMachine) m).isHoming())) {
+            return "OpenPnP is busy (a home, a jog or a move)";
+        }
+        return null;
+    }
+
+    private static ApiException refusedWhile(String working) {
+        return ApiException.refused("No planned stop: " + working + ". It runs only while nothing works: wait for "
+                + "it to end, or stop it now with the real STOP (POST /api/stop), which also switches the screw's "
+                + "motor off");
     }
 
     // ------------------------------------------------------------------------------------------
