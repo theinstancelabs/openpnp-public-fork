@@ -48,6 +48,13 @@ public final class NeedleTouchOff {
     /** {@link Analysis#referenceFrom} when the steady dot is the dose model's (the bench 22G's, §1.4). */
     public static final String MODEL_REFERENCE = "the 22G model";
     /**
+     * BR-89 (Process 11-04 12:5x): every ladder ends with this many check dots at the reference gap; the 2nd one's
+     * landing against the reference pair's shows a tip that moved at the floor (the 1st may carry paste from there).
+     */
+    public static final int CHECK_DOTS = 2;
+    /** BR-89: a 2nd check dot this far (mm) from the reference pair's landing refuses the apply (~2-3x the 25G's scatter). */
+    public static final double LANDING_SHIFT_MAX_MM = 0.1;
+    /**
      * The default start gap (mm): with no dot skipped the reference pair sits here and one step lower. BR-85: with
      * skipped dots the start gap must be that many steps higher, so the reference still sits here or higher; a ladder
      * that starts lower is refused ({@link #startGapProblem}), not moved up (the API's default start is that minimum).
@@ -94,6 +101,18 @@ public final class NeedleTouchOff {
         /** BR-85: the dots after the prime left out before the reference pair (the recipe's touchOffSkipDots). */
         public int skippedDots;
         public String reason;
+        /** BR-89: the check dots' gap (the first counted dot's), laid after the ladder; null before the check. */
+        public Double checkGapMm;
+        /**
+         * BR-89: how far (mm) the 2nd check dot landed from the reference pair's mean landing (null: either was not
+         * measured), and the deepest counted dot's (information only: a squashed dot's centroid moves as paste spreads).
+         */
+        public Double landingShiftMm, squashedShiftMm;
+        /** BR-89: why the new offset may not be applied (the tip may have moved, or the check could not be made). */
+        public String landingProblem;
+        /** The dots laid: the ladder's and the check dots. */
+        public int dotsLaid;
+        public final List<CheckDot> checkDots = new ArrayList<>();
 
         Analysis(double[] g, Double[] d, String[] notes) {
             gapsMm = g;
@@ -108,6 +127,74 @@ public final class NeedleTouchOff {
         public boolean found() {
             return contactGapMm != null;
         }
+    }
+
+    /** BR-89: what the camera saw at a check dot's spot: its state as {@link Analysis#dotStates}, size and landing. */
+    public static class CheckDot {
+        public String state;
+        /** Its diameter and centroid offset from its planned spot (mm), for a measured dot; else null. */
+        public Double diameterMm, dxMm, dyMm;
+    }
+
+    /** BR-89: the check dots' gap: the reference gap, the first counted dot's (after {@code skip}). */
+    public static double checkGapMm(Request req, int skip) {
+        return req.startGapMm - skip * req.stepMm;
+    }
+
+    /**
+     * BR-89: the landing check of a ladder's analysis from what the camera saw at every spot ({@code seen}: the
+     * ladder's, then the {@link #CHECK_DOTS}): the 2nd check dot against the reference pair's mean landing (free dots
+     * with free dots), the deepest counted dot's shift as information. An unmeasured 2nd check dot, or one more than
+     * {@link #LANDING_SHIFT_MAX_MM} off, sets {@link Analysis#landingProblem}.
+     */
+    public static void checkLanding(Analysis a, List<SpotDot> seen, int skip) {
+        int n = a.gapsMm.length;
+        a.dotsLaid = seen.size();
+        a.checkGapMm = n > skip ? a.gapsMm[skip] : null;
+        for (int i = n; i < seen.size(); i++) {
+            SpotDot s = seen.get(i);
+            CheckDot d = new CheckDot();
+            d.state = s.state == SpotDot.State.DOT ? "dot" : s.state == SpotDot.State.UNMEASURED ? "unmeasured" : "none";
+            if (s.dot != null) {
+                d.diameterMm = s.dot.diameterMm;
+                d.dxMm = s.dot.xMm;
+                d.dyMm = s.dot.yMm;
+            }
+            a.checkDots.add(d);
+        }
+        double[] ref = n > skip + 1 ? landing(seen.get(skip), seen.get(skip + 1)) : null;
+        for (int i = n - 1; ref != null && i >= skip + 2; i--) {
+            if (seen.get(i).state == SpotDot.State.DOT) {
+                a.squashedShiftMm = shift(seen.get(i), ref);
+                break;
+            }
+        }
+        SpotDot second = seen.size() > n + 1 ? seen.get(n + 1) : null;
+        String again = ": the landing cannot be checked; look at the tip from below and run the touch-off again";
+        if (second == null || second.state != SpotDot.State.DOT) {
+            a.landingProblem = String.format(Locale.ROOT, "the 2nd check dot at gap %.3f mm %s%s", a.checkGapMm,
+                    second == null || second.state == SpotDot.State.NONE ? "left no dot" : "is " + second.note, again);
+            return;
+        }
+        if (ref == null) {
+            return; // no reference pair to compare with: the analysis found no contact either
+        }
+        a.landingShiftMm = shift(second, ref);
+        if (a.landingShiftMm > LANDING_SHIFT_MAX_MM + 1e-9) {
+            a.landingProblem = String.format(Locale.ROOT, "the 2nd check dot landed %.3f mm from where the first two "
+                    + "counted dots landed (at most %s mm): the tip may have moved; look at it from below and run the "
+                    + "touch-off again", a.landingShiftMm, DispenseProfile.plain(LANDING_SHIFT_MAX_MM));
+        }
+    }
+
+    /** The mean landing (centroid offsets, mm) of two measured dots, or null. */
+    private static double[] landing(SpotDot p, SpotDot q) {
+        return p.state != SpotDot.State.DOT || q.state != SpotDot.State.DOT ? null
+                : new double[] {(p.dot.xMm + q.dot.xMm) / 2, (p.dot.yMm + q.dot.yMm) / 2};
+    }
+
+    private static double shift(SpotDot s, double[] ref) {
+        return Math.hypot(s.dot.xMm - ref[0], s.dot.yMm - ref[1]);
     }
 
     public static double[] gaps(Request req) {
@@ -206,19 +293,22 @@ public final class NeedleTouchOff {
      * Dot i at blank.x + i * pitch. Its Z is the probed blank plane at that dot plus the offset and
      * gap i (review finding: with one flat Z, a slope of the blank along the ladder was mixed into
      * the gap steps and biased the offset). Without a plane (null) the blank place's single Z is
-     * used; runs refuse that (I4: no blank surface).
+     * used; runs refuse that (I4: no blank surface). BR-89: then the {@link #CHECK_DOTS} on along the row at
+     * {@link #checkGapMm}.
      */
     public static List<GcodeStreamBuilder.DotSpec> layout(Request req, DispenseConfig.NamedLocation blank,
             DispenseConfig cfg, SurfacePlane plane) {
         List<GcodeStreamBuilder.DotSpec> l = new ArrayList<>();
         double[] g = gaps(req);
-        for (int i = 0; i < g.length; i++) {
+        double check = checkGapMm(req, cfg.profile.touchOffSkipDots);
+        for (int i = 0; i < g.length + CHECK_DOTS; i++) {
+            boolean ladder = i < g.length;
             double x = blank.x + i * req.pitchMm, y = blank.y;
             double surface = plane == null ? blank.z : plane.z(x, y);
-            double z = surface + cfg.needleZOffsetMm + g[i];
+            double z = surface + cfg.needleZOffsetMm + (ladder ? g[i] : check);
             double hop = surface + cfg.needleZOffsetMm + Math.max(g[0], cfg.gapMm()) + cfg.liftMm();
-            l.add(new GcodeStreamBuilder.DotSpec(x, y, z, hop, req.rotationDeg, i,
-                    String.format(java.util.Locale.ROOT, "touch-off gap %.3f", g[i])));
+            l.add(new GcodeStreamBuilder.DotSpec(x, y, z, hop, req.rotationDeg, i, String.format(java.util.Locale.ROOT,
+                    ladder ? "touch-off gap %.3f" : "touch-off check gap %.3f", ladder ? g[i] : check)));
         }
         return l;
     }
@@ -311,7 +401,7 @@ public final class NeedleTouchOff {
             return a;
         }
         // the texts' "first" dots are the first after the skipped ones
-        String after = skip == 0 ? "" : " after the " + skip + " skipped";
+        String after = skip == 0 ? "" : " after the " + skip + " not counted";
         int r0 = idx[skip];
         if (strung(a, gapsMm, unmeasured, r0)) {
             return a;

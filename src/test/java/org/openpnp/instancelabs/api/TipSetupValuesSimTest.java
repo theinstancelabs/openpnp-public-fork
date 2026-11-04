@@ -231,6 +231,114 @@ public class TipSetupValuesSimTest {
         assertEquals(0.25, res.get("startGapMm").getAsDouble(), 1e-12);
     }
 
+    /**
+     * The camera of a touch-off on the 25G (skip 3, 13 dots from 0.20 mm): 3 droplets, the reference pair and 4 steady
+     * dots at 1.2 mm landing where the pair did, then squashed dots at 1.8 mm (contact between 0.000 and -0.025 mm);
+     * the 2nd check dot at {@code check2} from the pair's landing, the deepest dot at {@code floor}. Spots by the order
+     * the before tour first visits them.
+     */
+    static final class LandingCamera extends ApiServerSimTest.FakeImager {
+        final java.util.List<String> spots = new java.util.concurrent.CopyOnWriteArrayList<>();
+        volatile double[] check2 = {0, 0}, floor = {0, 0};
+
+        @Override
+        public Frame capture(double xMm, double yMm) {
+            String k = key(xMm, yMm);
+            if (!spots.contains(k)) {
+                spots.add(k);
+            }
+            return super.capture(xMm, yMm);
+        }
+
+        @Override
+        public java.util.List<org.openpnp.instancelabs.vision.Dot> inspect(Frame before, Frame after) {
+            int i = spots.indexOf(key(after.xMm, after.yMm));
+            double[] at = i == 12 ? floor : i == 14 ? check2 : new double[] {0, 0};
+            double d = i < 3 ? 0.5 : i < 9 || i > 12 ? 1.2 : 1.8;
+            return java.util.Collections.singletonList(new org.openpnp.instancelabs.vision.Dot(at[0], at[1], d,
+                    Math.PI * d * d / 4, 0.9));
+        }
+    }
+
+    /**
+     * BR-89: every ladder ends with 2 check dots at the reference gap. The 2nd landing 0.15 mm from where the reference
+     * pair landed (a tip pushed sideways or slipping in its Luer at the floor) is not applied, the frame unchanged, the
+     * analysis kept; 0.05 mm is applied; a squashed dot's shift alone is information. 15 dots laid, the last two at the
+     * first counted dot's Z.
+     */
+    @Test
+    public void aTipThatMovedBeforeItsCheckDotsIsNotApplied() throws Exception {
+        layingWith(3);
+        LandingCamera cam = new LandingCamera();
+        t.svc.setDotImager(cam);
+        double before = t.svc.getConfig().needleZOffsetMm;
+        String body = "{\"startGapMm\":0.2,\"stepMm\":0.025,\"steps\":13,\"apply\":true,\"wait\":true}";
+        cam.check2 = new double[] {0.15, 0};
+        t.sim.server.mark();
+        JsonObject moved = laid(body).getAsJsonObject("result");
+        JsonObject a = moved.getAsJsonObject("analysis");
+        assertFalse(moved.get("applied").getAsBoolean(), moved.toString());
+        assertEquals(before, t.svc.getConfig().needleZOffsetMm, 0, "the frame unchanged");
+        assertEquals(0.15, a.get("landingShiftMm").getAsDouble(), 1e-6);
+        assertEquals("the 2nd check dot landed 0.150 mm from where the first two counted dots landed (at most 0.1 mm): "
+                + "the tip may have moved; look at it from below and run the touch-off again", TipSim.str(a,
+                        "landingProblem"));
+        assertEquals(-0.0125, a.get("contactGapMm").getAsDouble(), 1e-9, "the contact is still reported");
+        assertEquals(15, a.get("dotsLaid").getAsInt());
+        assertEquals(15, cam.spots.size(), "15 spots photographed");
+        java.util.List<Double> z = dotZ(sent());
+        assertEquals(1 + 15, z.size(), "the prime at the waste, then 15 dots: " + z);
+        assertEquals(z.get(1 + 3), z.get(1 + 13), 0.002, "the 1st check dot at the first counted dot's Z: " + z);
+        assertEquals(z.get(1 + 3), z.get(1 + 14), 0.002, "and the 2nd");
+        assertEquals(z.get(1 + 2) + 0.025, z.get(1 + 3), 0.002, "a step deeper than the last dot not counted");
+        cam.check2 = new double[] {0.05, 0};
+        cam.floor = new double[] {0.2, 0};
+        JsonObject held = laid(body).getAsJsonObject("result");
+        JsonObject h = held.getAsJsonObject("analysis");
+        assertTrue(held.get("applied").getAsBoolean(), held.toString());
+        assertEquals(0.05, h.get("landingShiftMm").getAsDouble(), 1e-6);
+        assertEquals(0.2, h.get("squashedShiftMm").getAsDouble(), 1e-6, "information only");
+        assertTrue(h.get("landingProblem").isJsonNull(), h.toString());
+        assertEquals(before - 0.0125, t.svc.getConfig().needleZOffsetMm, 1e-9, "applied: the contact gap");
+    }
+
+    private static final java.util.regex.Pattern Z = java.util.regex.Pattern.compile("\\bZ(-?\\d+(?:\\.\\d+)?)");
+    private static final java.util.regex.Pattern B = java.util.regex.Pattern.compile("\\bB(-?\\d+(?:\\.\\d+)?)");
+
+    /** The raw Z each dot of the stream was laid at: the Z in force at its first B move. */
+    static java.util.List<Double> dotZ(java.util.List<String> sent) {
+        java.util.List<Double> l = new java.util.ArrayList<>();
+        Double z = null;
+        boolean inDot = false;
+        for (String s : sent) {
+            if (!s.startsWith("G0 ") && !s.startsWith("G1 ")) {
+                continue;
+            }
+            java.util.regex.Matcher mz = Z.matcher(s), mb = B.matcher(s);
+            if (mz.find()) {
+                z = Double.parseDouble(mz.group(1));
+                inDot = false;
+            }
+            if (mb.find() && !inDot && z != null) {
+                l.add(z);
+                inDot = true;
+            }
+        }
+        return l;
+    }
+
+    /** The lines the SIM controller got since the mark, without comments. */
+    java.util.List<String> sent() {
+        java.util.List<String> l = new java.util.ArrayList<>();
+        for (String s : t.sim.server.sinceMark()) {
+            String c = s.contains(";") ? s.substring(0, s.indexOf(';')).trim() : s.trim();
+            if (!c.isEmpty()) {
+                l.add(c);
+            }
+        }
+        return l;
+    }
+
     @Test
     public void aTipsDoseAnchorIsSetShownAndClearedAndStaysWithTheTip() throws Exception {
         t.add25();
