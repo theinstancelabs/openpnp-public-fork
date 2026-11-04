@@ -1,5 +1,6 @@
 package org.openpnp.instancelabs.sim;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -10,6 +11,7 @@ import java.util.List;
 import java.util.Random;
 
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 
 /**
  * The SIM needle's paste (PROFILE_CALIBRATION_DESIGN.md §11.2) on a fake clock: the mass of a turn
@@ -49,8 +51,11 @@ public class SimPasteTest {
         return s;
     }
 
+    /** A SimPaste of the scene, without an engine (another test class may leave DispenseService installed). */
     SimPaste paste(SimScene s) {
-        return new SimPaste(() -> s, SimPaste.Store.forScene(s), () -> nowNs[0], () -> 0.0);
+        SimPaste p = new SimPaste(() -> s, SimPaste.Store.forScene(s), () -> nowNs[0], () -> 0.0);
+        p.engineAims(() -> null);
+        return p;
     }
 
     static SimNeedle needle(SimPaste p, SimScene s) {
@@ -352,6 +357,79 @@ public class SimPasteTest {
         assertNotEquals(boot, other.offsetSteps(), "an M18 B: a new phase");
     }
 
+    /**
+     * Review round 4: OpenPnP's simulator makes a new GcodeServer, so a new SimScene.Source and scene object, on every
+     * connect. The power-ups count per version of the scene FILE, so each connect still draws a new phase, and the
+     * file written again starts over (a test that turns newPhaseOnMotorOff on writes its own scene, BR-74).
+     */
+    @Test
+    public void eachConnectOfOpenPnPsSimulatorDrawsANewPhase() throws Exception {
+        java.io.File f = java.io.File.createTempFile("sim-scene-", ".json");
+        f.deleteOnExit();
+        String scene = "{\"version\": 1, \"board\": {\"file\": \"t\", \"seat\": {\"x\": 0, \"y\": 0}}, "
+                + "\"paste\": {\"newPhaseOnMotorOff\": true, \"noiseSeed\": 11}}";
+        java.nio.file.Files.write(f.toPath(), scene.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        SimPaste.Store store = SimPaste.Store.forFile(f);
+        int[] phase = new int[3];
+        for (int i = 0; i < phase.length; i++) { // one Source per connect, as OpenPnP's simulator makes
+            phase[i] = new SimPaste(new SimScene.Source(f, () -> 0L, (sc) -> null), store, () -> nowNs[0], () -> 0.0)
+                    .offsetSteps();
+        }
+        assertNotEquals(phase[0], phase[1], "a second connect: a new phase");
+        assertNotEquals(phase[1], phase[2], "a third connect: a new phase");
+        java.nio.file.Files.write(f.toPath(), (scene + " ").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(phase[0], new SimPaste(new SimScene.Source(f, () -> 0L, (sc) -> null), store, () -> nowNs[0],
+                () -> 0.0).offsetSteps(), "the file written again: its first connect draws as the first did");
+    }
+
+    /** Review round 4: where the engine aims (needle XY): a place minus its landing and trim, as GcodeStreamBuilder. */
+    @Test
+    public void theEnginesAimsArePlacesMinusItsLandingAndTrim() {
+        DispenseConfig c = new DispenseConfig();
+        c.locations.put(c.wasteLocationName, new DispenseConfig.NamedLocation(200, 100, 6));
+        c.testDotOffsetXMm = 2;
+        c.testDotOffsetYMm = 0;
+        c.needleXyTrim.dxMm = 0.1;
+        c.needleXyTrim.dyMm = -0.05;
+        c.purgeRow.x0Mm = 300.0;
+        c.purgeRow.y0Mm = 240.0;
+        c.purgeRow.pitchXMm = 2.5;
+        c.purgeRow.spots = 2;
+        SimPaste.EngineAims a = SimPaste.aims(c, new double[] {2.4, -0.4});
+        assertArrayEquals(new double[] {202 - 2.5, 100 + 0.45}, a.testDot, 1e-9);
+        assertEquals(2, a.purge.size());
+        assertArrayEquals(new double[] {300 - 2.5, 240 + 0.45}, a.purge.get(0), 1e-9);
+        assertArrayEquals(new double[] {302.5 - 2.5, 240 + 0.45}, a.purge.get(1), 1e-9);
+        c.locations.clear();
+        c.purgeRow.x0Mm = null;
+        a = SimPaste.aims(c, new double[] {0, 0});
+        assertNull(a.testDot, "no waste: no test dot");
+        assertTrue(a.purge.isEmpty(), "no purge row: no phase dot spots");
+    }
+
+    /**
+     * Review round 4: with the engine, a session's first contact on the blank is spared only at a purge-row spot, where
+     * the engine lays its phase dot; any other first contact (a dot ladder without its prime at the waste) is measured.
+     */
+    @Test
+    public void wholeTurnsOnlySparesAFirstContactOnTheBlankOnlyAtAPurgeSpot() {
+        SimScene s = exact();
+        s.paste.wholeTurnsOnly = true;
+        SimPaste p = paste(s);
+        p.engineAims(() -> new SimPaste.EngineAims(null, java.util.Arrays.asList(new double[] {300, 240},
+                new double[] {302.5, 240})));
+        SimNeedle n = needle(p, s);
+        n.pressurize();
+        n.dot(310, 240, BLANK_Z, 800); // a ladder's first dot, half a turn, off the purge row
+        assertTrue(p.deposits(null).isEmpty(), "a first half turn on the blank off the purge row lays nothing");
+        assertEquals(1, p.unmodelledContacts());
+        n.vent();
+        n.pressurize();
+        n.dot(302.6, 240.1, BLANK_Z, 1324); // the next session's phase dot, on purge spot 2
+        assertEquals(1, p.deposits("blank").size(), "the phase dot on a purge spot is laid");
+        assertEquals(1, p.unmodelledContacts());
+    }
+
     /** Review round 3: a power cycle puts Marlin's idle timeout back to its default (3600 s after boot). */
     @Test
     public void aPowerCycleRestoresTheDefaultIdleTimeout() {
@@ -574,18 +652,22 @@ public class SimPasteTest {
     public void wholeTurnsOnlyRefusesASubTurnTestDotOnTheBed() {
         SimScene s = exact();
         s.paste.wholeTurnsOnly = true;
+        s.paste.landingBiasMm = new double[] {2.4, -0.4}; // the tip lands (2.4, -0.4) from where it is commanded
         SimPaste p = paste(s);
-        p.testDotSpot(() -> new double[] {202, 100}); // the engine's waste at (200, 100), its test dot 2 mm +X
+        // the engine's waste at (200, 100), its test dot 2 mm +X, its landing calibrated: it aims at (199.6, 100.4)
+        p.engineAims(() -> new SimPaste.EngineAims(new double[] {199.6, 100.4},
+                java.util.Collections.singletonList(new double[] {300, 240})));
         SimNeedle n = needle(p, s);
         n.pressurize();
-        n.dot(300, 240, BLANK_Z, 1324); // the phase dot
-        n.dot(200, 100, s.contactZ(SimScene.Region.BED, 200, 100), 400);
+        n.dot(300, 240, BLANK_Z, 1324); // the phase dot, on the purge row
+        n.dot(197.6, 100.4, s.contactZ(SimScene.Region.BED, 200, 100), 400);
         assertEquals(2, p.deposits(null).size(), "a quarter turn at the waste is laid");
-        n.dot(202.3, 100.2, s.contactZ(SimScene.Region.BED, 202.3, 100.2), 400);
+        n.dot(199.7, 100.5, s.contactZ(SimScene.Region.BED, 202, 100), 400);
         assertEquals(2, p.deposits(null).size(), "a quarter-turn test dot lays nothing");
         assertEquals(1, p.unmodelledContacts());
-        n.dot(202, 100, s.contactZ(SimScene.Region.BED, 202, 100), 1600);
+        n.dot(199.6, 100.4, s.contactZ(SimScene.Region.BED, 202, 100), 1600);
         assertEquals(3, p.deposits(null).size(), "a whole-turn test dot is laid");
+        assertEquals(202, p.deposits(null).get(2).x, 1e-9, "where TestDotCheck images it: the engine's place");
     }
 
     /** Review round 3: a refused contact also uses up one of the empty dots after a power cycle (§5: "~12 empty"). */

@@ -61,8 +61,9 @@ public final class SimPaste {
     /** Marlin's M92 B and the steps of one screw revolution (D/DispenseConfig.java:134-136). */
     public static final double STEPS_PER_DEG = 4.44;
     public static final int STEPS_PER_REV = 1600;
-    /** How near the engine's test-dot spot a bed contact is that dot (its default offset puts it 2 mm from the waste). */
-    static final double TEST_DOT_RADIUS_MM = 1.0;
+    /** How near one of the engine's aims a contact is that target (its test dot lies 2 mm from the waste, its purge
+     * spots 2.5 mm apart). */
+    static final double AIM_RADIUS_MM = 1.0;
     /** The right pump and valve: the barrel pressure (D/ControllerCommands.java:43-46). */
     static final int PUMP_OUTPUT = 2, VALVE_OUTPUT = 3;
     /** The feed demand is the paste laid in this window (s) divided by it. */
@@ -159,8 +160,9 @@ public final class SimPaste {
         private int connections;
         private final Map<String, Double> primedTurns = new HashMap<>(); // per tip fill: turns pushed into it so far
         private int unmodelled; // contacts a wholeTurnsOnly tip refused on a work surface
-        private WeakReference<SimScene> powerUpScene = new WeakReference<>(null);
-        private int powerUps; // of powerUpScene: the scene file reloaded is a new SimScene, and counts from 0
+        private WeakReference<SimScene> powerUpScene = new WeakReference<>(null); // a scene built in code
+        private List<Object> powerUpFile; // or the version of the scene file (SimScene.fileVersion)
+        private int powerUps; // of that scene version: the file written again counts from 0
         private double timeS = Double.NEGATIVE_INFINITY;
         private Double lastDotS;
         private String balancePlace;
@@ -191,10 +193,16 @@ public final class SimPaste {
             return f.getAbsoluteFile().toPath().normalize().toString();
         }
 
-        /** This power-up's number in the scene's current version (0 for its first; a scene written again starts over). */
+        /**
+         * This power-up's number in the scene's current version: 0 for its first. A scene file's version is its stamp
+         * (each OpenPnP connect reads the file into a new SimScene, the same version); a file written again, or a scene
+         * built in code anew, starts over, so the phase draws repeat from the first (BR-74).
+         */
         synchronized int powerUp(SimScene sc) {
-            if (powerUpScene.get() != sc) {
+            boolean same = sc.fileVersion != null ? sc.fileVersion.equals(powerUpFile) : powerUpScene.get() == sc;
+            if (!same) {
                 powerUpScene = new WeakReference<>(sc);
+                powerUpFile = sc.fileVersion;
                 powerUps = 0;
             }
             return powerUps++;
@@ -341,7 +349,7 @@ public final class SimPaste {
     private String fill; // the open dot's tip fill (primeTurns): its tip and its needle
     private double motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
     private Double lastMotionS;
-    private Supplier<double[]> testDotSpot = SimPaste::engineTestDotSpot;
+    private Supplier<EngineAims> engineAims = SimPaste::engineAims;
     private int powerUpIndex; // this connection's last power-up in the scene's current version (Store.powerUp)
     // The screw and the pneumatics.
     private double logicalB, machineB;
@@ -839,31 +847,25 @@ public final class SimPaste {
     }
 
     /**
-     * A contact something measures: the board, a coupon, the blank, and on the bed the engine's I9 test dot. Spared:
-     * the rest of the bed (the waste) and a pressure session's first contact on the blank, where the engine lays its
-     * phase dot (it turns the screw to its start angle on the purge row): no whole turn either. Judged where it lands.
+     * A contact something measures: the board, a coupon, the blank, and on the bed the engine's I9 test dot. Spared: the
+     * rest of the bed (the waste), and a pressure session's first contact where the engine lays its phase dot (it turns
+     * the screw to its start angle on a purge-row spot; without an engine, any first contact on the blank). Phase dots
+     * the engine lays mid-session (at a block switch) are refused: only partial-turn blocks have them, whose dots are
+     * refused too. The region is judged where the paste lands, the engine's targets where it aims (needle XY).
      * shortcut: ignores the gap, so a sub-turn contact in the air over the blank is refused and its paste lost (it
      * would hang on the tip); judge the gap too if a test ever turns in the air there.
      */
     private boolean measured(SimScene sc, SimScene.Paste p, int sessionDot) {
         double x = dotX + p.n2OffsetMm[0], y = dotY + p.n2OffsetMm[1];
         SimScene.Region r = sc.regionAt(x + p.landingBiasMm[0], y + p.landingBiasMm[1]);
+        EngineAims a = engineAims.get();
         if (r == SimScene.Region.BED) {
-            double[] t = testDotSpot.get(); // the engine's place, so the commanded spot, not where it lands
-            return t != null && Math.hypot(x - t[0], y - t[1]) <= TEST_DOT_RADIUS_MM;
+            return a != null && a.testDot != null && Math.hypot(x - a.testDot[0], y - a.testDot[1]) <= a.testDotRadius;
         }
-        return !(sessionDot == 0 && r == SimScene.Region.BLANK);
-    }
-
-    /** The engine's I9 test dot (needle XY: its waste place + testDotOffset), or null: no engine or no waste. */
-    static double[] engineTestDotSpot() {
-        DispenseService svc = DispenseService.get();
-        if (svc == null) {
-            return null;
+        if (sessionDot != 0 || r != SimScene.Region.BLANK) {
+            return true;
         }
-        DispenseConfig c = svc.getConfig();
-        DispenseConfig.NamedLocation w = c.location(c.wasteLocationName);
-        return w == null ? null : new double[] {w.x + c.testDotOffsetXMm, w.y + c.testDotOffsetYMm};
+        return a != null && a.purge.stream().noneMatch(s -> Math.hypot(x - s[0], y - s[1]) <= AIM_RADIUS_MM);
     }
 
     static boolean wholeTurns(long net) {
@@ -871,9 +873,52 @@ public final class SimPaste {
         return net >= STEPS_PER_REV - WHOLE_TURN_TOLERANCE_STEPS && rem <= 2 * WHOLE_TURN_TOLERANCE_STEPS;
     }
 
-    /** For tests: where the engine's I9 test dot goes (needle XY), instead of the engine's own config. */
-    synchronized void testDotSpot(Supplier<double[]> spot) {
-        testDotSpot = spot;
+    /**
+     * Where the engine aims the needle (machine XY, as commanded: a place minus the tip's landing and trim,
+     * GcodeStreamBuilder.trimX): its I9 test dot (imaged by TestDotCheck) and its purge-row spots (a session's phase dot).
+     */
+    static final class EngineAims {
+        final double[] testDot;
+        final List<double[]> purge;
+        /** How near the test dot's aim a contact is that dot: AIM_RADIUS_MM, less when the waste is nearer. */
+        final double testDotRadius;
+
+        EngineAims(double[] testDot, List<double[]> purge) {
+            this(testDot, purge, AIM_RADIUS_MM);
+        }
+
+        EngineAims(double[] testDot, List<double[]> purge, double testDotRadius) {
+            this.testDot = testDot;
+            this.purge = purge;
+            this.testDotRadius = testDotRadius;
+        }
+    }
+
+    /** The engine's aims for its config and its landing in effect (DispenseService.landingInEffect). */
+    static EngineAims aims(DispenseConfig c, double[] landing) {
+        double dx = landing[0] + c.needleXyTrim.dxMm, dy = landing[1] + c.needleXyTrim.dyMm;
+        DispenseConfig.NamedLocation w = c.location(c.wasteLocationName);
+        double[] t = w == null ? null : new double[] {w.x + c.testDotOffsetXMm - dx, w.y + c.testDotOffsetYMm - dy};
+        List<double[]> purge = new ArrayList<>();
+        DispenseConfig.PurgeRow r = c.purgeRow;
+        if (r != null && r.x0Mm != null && r.y0Mm != null) {
+            for (int i = 0; i < r.spots; i++) {
+                double[] at = r.spot(i);
+                purge.add(new double[] {at[0] - dx, at[1] - dy});
+            }
+        }
+        return new EngineAims(t, purge, Math.min(AIM_RADIUS_MM, Math.hypot(c.testDotOffsetXMm, c.testDotOffsetYMm) / 2));
+    }
+
+    /** The running engine's aims, or null: no engine (the unit tests). */
+    static EngineAims engineAims() {
+        DispenseService svc = DispenseService.get();
+        return svc == null ? null : aims(svc.getConfig(), svc.landingInEffect());
+    }
+
+    /** For tests: the engine's aims, instead of the running engine's. */
+    synchronized void engineAims(Supplier<EngineAims> aims) {
+        engineAims = aims;
     }
 
     /** Contacts a wholeTurnsOnly tip refused on a work surface (this scene, every connection). */

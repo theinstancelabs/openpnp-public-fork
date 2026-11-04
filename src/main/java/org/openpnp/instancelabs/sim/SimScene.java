@@ -640,6 +640,10 @@ public final class SimScene {
     /** Overlays of {@link #paste} per tip key, made once per scene ({@link #pasteFor}). */
     private final transient Map<String, Paste> overlays = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** The scene file's stamp (file key, mtime, size) this scene was read from, by {@link Source}; null when built in
+     * code. OpenPnP's simulator makes a new Source, so a new SimScene, on every connect: this tells versions apart. */
+    public transient List<Object> fileVersion;
+
     /**
      * The paste of the SIM needle with the tip {@code tipKey} on the head (§22.8): the scene's paste with that tip's
      * {@code byTip} entry laid over it, or the paste itself when the tip has none; null without a paste block.
@@ -1015,6 +1019,7 @@ public final class SimScene {
             try {
                 SimScene s = load(file);
                 scene = s.withBoardSize(boardOf.apply(s));
+                scene.fileVersion = st;
                 stamp = st;
             }
             catch (Exception e) {
