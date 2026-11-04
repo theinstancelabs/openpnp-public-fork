@@ -130,6 +130,39 @@ class Idle(unittest.TestCase):
         self.start_fake()
         self.assertEqual(self.reasons(), [])
 
+    def test_someone_holding_the_machine_lock_is_not_idle(self):
+        """BR-72: an agent role or the user holds the machine lock: they are working at it, also when it looks quiet."""
+        since = int(time.time() * 1000) - 600000
+        self.start_fake(lock={"holder": {"kind": "agent", "who": "process", "label": "Process", "what": "27G quarter map",
+                                         "sinceMs": since}, "takenFrom": None})
+        r = self.reasons()
+        hhmm = time.strftime("%H:%M", time.localtime(since / 1000))
+        self.assertEqual(r, [f"Process holds the machine lock (27G quarter map, since {hhmm})"])
+
+    def test_the_users_hold_and_a_malformed_holder_are_not_idle(self):
+        for holder, word in (({"kind": "user", "who": "user", "label": "User", "what": "using the web UI"}, "User holds"),
+                             ("someone", "someone holds")):
+            with self.subTest(holder=holder):
+                if self.fake:
+                    self.fake.shutdown()
+                self.start_fake(lock={"holder": holder, "takenFrom": None})
+                self.assertTrue(any(word in x for x in self.reasons()), self.reasons())
+
+    def test_a_lock_field_nobody_can_read_is_not_idle(self):
+        for value in ("held", [], {}, {"owner": "process"}):
+            with self.subTest(lock=value):
+                if self.fake:
+                    self.fake.shutdown()
+                self.start_fake(lock=value)
+                self.assertTrue(any("does not explain" in r for r in self.reasons()), self.reasons())
+
+    def test_nobody_holding_the_lock_and_a_build_without_one_are_idle(self):
+        self.start_fake(lock={"holder": None, "takenFrom": {"label": "Process", "by": "user"}})
+        self.assertEqual(self.reasons(), [])
+        self.fake.shutdown()
+        self.start_fake(fail=["old-lock"])
+        self.assertEqual(self.reasons(), [])
+
     def test_pressure_initial_value_is_not_activity(self):
         # PressureHold sets lastEventAtMs when OpenPnP starts ("pressure off"): not machine activity
         self.start_fake()

@@ -46,10 +46,14 @@ def read_some(fd, timeout):
 
 
 def wait_for(cond, timeout=3.0):
+    """True as soon as cond() reads true (never read again: see WaitFor), False after timeout s."""
     end = time.monotonic() + timeout
-    while not cond() and time.monotonic() < end:
+    while True:
+        if cond():
+            return True
+        if time.monotonic() >= end:
+            return False
         time.sleep(0.02)
-    return cond()
 
 
 def temp_dir(test):
@@ -877,12 +881,25 @@ class OneInstancePerPath(unittest.TestCase):
 
 
 def alive(pid):
-    """A process that exists and is not a zombie (its new parent may reap it late)."""
+    """A process that exists and is not a zombie (its new parent may reap it late) or dead (X: being reaped)."""
     try:
         with open("/proc/%d/stat" % pid) as f:
-            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+            return f.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
     except (FileNotFoundError, ProcessLookupError):
         return False
+
+
+class WaitFor(unittest.TestCase):
+    def test_a_condition_seen_true_once_is_met(self):
+        """A dead process can read alive a moment later (its PID in /proc's X state while it is reaped, or reused):
+        a second reading made wait_for say False 44 ms into PR #16's gate (run 41607411975)."""
+        readings = iter([False, True, False])
+        self.assertTrue(wait_for(lambda: next(readings), timeout=1.0))
+
+    def test_a_condition_never_true_times_out(self):
+        t0 = time.monotonic()
+        self.assertFalse(wait_for(lambda: False, timeout=0.1))
+        self.assertGreaterEqual(time.monotonic() - t0, 0.1)
 
 
 class LinkGuardian(unittest.TestCase):

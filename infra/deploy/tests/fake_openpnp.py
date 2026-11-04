@@ -64,6 +64,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -79,9 +80,15 @@ BOOT_AXES = {"X": 0.0, "Y": 0.0, "Z": 0.0, "B": 720.0}  # Marlin after a power c
 BOOT_AXES_AFTER_QUICK_STOP = {"X": 0.0, "Y": 0.0, "Z": 0.0, "B": 720.05}
 
 
+LOOPBACK = re.compile(r"^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\])(:\d+)?$")
+
+
 class FakeOpenPnP:
-    def __init__(self, port, cwd, config_dir, machine=None, requests=None):
+    def __init__(self, port, cwd, config_dir, machine=None, requests=None, trusted_origins=None):
         self.port = port
+        if trusted_origins is None:  # as OpenPnP: OPENPNP_IL_API_TRUSTED_ORIGINS, comma-separated (BR-73)
+            trusted_origins = [o for o in os.environ.get("OPENPNP_IL_API_TRUSTED_ORIGINS", "").split(",") if o.strip()]
+        self.trusted = [o.strip().lower().rstrip("/") for o in trusted_origins]
         self.requests = requests or os.path.join(config_dir, "fake-requests.jsonl")
         self.cwd = cwd
         self.config = config_dir
@@ -206,8 +213,10 @@ class FakeOpenPnP:
         out = {
             "server": dict({"version": self.version(), "timeMs": int(time.time() * 1000)},
                            **({"startedAtMs": self.jvm_started_ms} if self.br44 else {}),
+                           **({} if "old-origins" in self.fail else {"trustedOrigins": list(self.trusted)}),
                            port=self.port, lanAccess=False, simulated=sim, simulatorConfirmed=sim),
             "machine": self.machine_status(),
+            **({} if "old-lock" in self.fail else {"lock": self.lock_status()}),
             # DispenseEndpoints.status: config times (persisted) of the needle, tip, seat, places and surfaces
             "dispense": {"running": True, "available": "unavailable" not in self.fail, "busy": self.run_active,
                          "needle": {"touchedOff": True, "setAtMs": self.ago_ms("needle_set_s_ago"),
@@ -258,7 +267,24 @@ class FakeOpenPnP:
         return out
 
     # --- endpoints -----------------------------------------------------------------------------
+    def lock_status(self):
+        """BR-72's lock: fake-machine.json "lock" (default: nobody holds it); none at all for a build before BR-72."""
+        return self.machine.get("lock", {"holder": None, "takenFrom": None})
+
+    def locked(self):
+        """A guarded write from this anonymous client while someone holds the lock: BR-72's refusal, or None."""
+        holder = self.lock_status().get("holder") if "old-lock" not in self.fail else None
+        if holder:
+            return 409, {"error": "locked", "reason": f"{holder.get('label', 'Someone')} has the machine "
+                                                      f"({holder.get('what', '')}). Take control to use it.",
+                         "lock": self.lock_status()}
+        return None
+
     def enable(self):
+        if self.locked():
+            return self.locked()
+        if "taking-over-enable" in self.fail:  # the web UI's Take control is under way (BR-72)
+            return 409, {"error": "taking-over", "reason": "The user is taking control: wait for it to finish."}
         if "enable" in self.fail:
             return 409, {"error": "refused", "reason": "could not start the machine: fake port not found"}
         with self.lock:
@@ -288,6 +314,10 @@ class FakeOpenPnP:
     def home(self, body):
         """As MachineEndpoints.home: refusals before the home starts, then {"wait": true} waits up to the server's
         own limit (f.get(5, MINUTES); "home_cap_s" here) and answers 409 after it while the home runs on."""
+        if self.locked():
+            return self.locked()
+        if "lock-at-home" in self.fail:  # an agent took the lock between the enable and the home
+            return 409, {"error": "locked", "reason": "Process has the machine (a bench session). Take control to use it."}
         if "home-404" in self.fail:
             return 404, {"error": "not-found", "reason": "no such endpoint: /api/machine/home"}
         with self.lock:
@@ -349,7 +379,10 @@ class FakeOpenPnP:
                     threading.Thread(target=end_run, daemon=True).start()
             if self.enabled and ("reset" in self.fail or self.booted):
                 self.quick_stopped = True  # the DISABLE_COMMAND's M410 at the boot position
-            if "stop" not in self.fail:
+            if "lock-at-stop" in self.fail:  # the user took the lock and switched the machine on again (BR-72)
+                self.machine["lock"] = {"holder": {"kind": "user", "who": "user", "label": "User",
+                                                   "what": "using the web UI"}, "takenFrom": None}
+            elif "stop" not in self.fail:
                 self.enabled = False
                 self.homed = False
                 # connection-keep-alive="true" (the lab machine.xml): a disable leaves the link open
@@ -364,8 +397,29 @@ class FakeOpenPnP:
             self.link_dead = self.connected
             self.booted, self.quick_stopped = True, False
 
-    def handle(self, method, path, body):
-        self.record({"method": method, "path": path})
+    def browser_safety(self, method, host, origin):
+        """ApiServer.checkBrowserSafety with BR-73's trusted origins: (403, body) or None. Fail flags: 'old-origins' (a
+        build from before BR-73: loopback only), 'origins-refused' (it lists them but refuses them), 'origins-open' (any
+        Origin passes: the CSRF guard broken), 'hosts-open' (any Host passes: the DNS-rebinding guard broken)."""
+        def refuse(why):
+            return 403, {"error": "forbidden", "reason": why}
+        host = (host or "").lower()
+        trusted = {} if ("old-origins" in self.fail or "origins-refused" in self.fail) else {
+            o.split("://", 1)[1]: o for o in self.trusted}
+        loopback = bool(LOOPBACK.match(host))
+        if not loopback and host not in trusted and "hosts-open" not in self.fail:
+            return refuse(f"Host '{host}' is not allowed")
+        if method in ("GET", "HEAD") or origin is None or "origins-open" in self.fail:
+            return None
+        if origin.lower() == (f"http://{host}" if loopback or "hosts-open" in self.fail else trusted.get(host)):
+            return None
+        return refuse(f"cross-site request refused (Origin {origin} is not this server)")
+
+    def handle(self, method, path, body, host=None, origin=None):
+        self.record({"method": method, "path": path, **({"origin": origin} if origin else {})})
+        refused = self.browser_safety(method, f"127.0.0.1:{self.port}" if host is None else host, origin)
+        if refused:
+            return refused
         if method == "GET" and path in ("/api/status", "/api/machine") and "machine-500" in self.fail:
             return 500, {"error": "internal", "reason": "NullPointerException in machineStatus"}
         if method == "GET" and path == "/api/status":
@@ -392,7 +446,8 @@ class FakeOpenPnP:
                     body = json.loads(raw) if raw else {}
                 except ValueError:
                     body = {}
-                code, out = fake.handle(method, self.path.split("?")[0], body)
+                code, out = fake.handle(method, self.path.split("?")[0], body, self.headers.get("Host") or "",
+                                        self.headers.get("Origin"))  # no Host: refused, as the real API
                 data = json.dumps(out).encode()
                 try:
                     self.send_response(code)

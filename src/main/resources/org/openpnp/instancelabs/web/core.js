@@ -2120,8 +2120,8 @@
       // the other cells' long parts first: the verdict keeps its own ("Stopped 14:19", a task's progress) while it fits
       cells.classList.add('cells--t1');
       if (over()) cells.classList.replace('cells--t1', 'cells--t2');
-      // In control, while it reads You or Nobody, gives its room before the verdict's own long part (the time of a stop);
-      // an agent holding the machine never leaves the strip: the user must always see that
+      // In control, while it reads You or Nobody, shrinks to its mark before the verdict's own long part (the time of a
+      // stop) goes; an agent holding the machine keeps its words: the user must always see that
       if (over()) cells.classList.add('cells--t2l');
       if (over()) cells.classList.add('cells--t2v');
       // still too long (1024 px after a STOP, the widest state): the verdict is never cut (UI_DESIGN §4), so the
