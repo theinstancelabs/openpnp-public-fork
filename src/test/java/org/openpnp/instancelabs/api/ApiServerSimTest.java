@@ -1147,6 +1147,21 @@ public class ApiServerSimTest {
         assertFalse(c.toString().contains("Gcode"), c.toString());
     }
 
+    /** BR-82: the pause after the lift is saved with the mounted tip's recipe (0 to 5000 ms) and shown with it. */
+    @Test
+    public void liftPauseIsSavedWithTheRecipe() throws Exception {
+        Res tooLong = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftPauseMs\":5001}}");
+        assertEquals(400, tooLong.status, tooLong.toString());
+        assertTrue(tooLong.body.contains("liftPauseMs must be 0 to 5000"), tooLong.toString());
+        ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"liftPauseMs\":500}}"));
+        JsonObject c = ok(get("/api/config")).getAsJsonObject("profile");
+        assertEquals(500, c.get("liftPauseMs").getAsInt());
+        assertEquals(250, c.get("dwellMs").getAsInt(), "the other fields are kept");
+        JsonObject p = ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile");
+        assertEquals(500, p.get("liftPauseMs").getAsInt(), p.toString());
+        assertTrue(p.get("fingerprint").getAsString().endsWith(" pause=500"), p.toString());
+    }
+
     /** PUT /api/config merges the nested settings one level deep; stamped fields are the engine's. */
     @Test
     public void nestedSettingsMergeOneLevelDeep() throws Exception {

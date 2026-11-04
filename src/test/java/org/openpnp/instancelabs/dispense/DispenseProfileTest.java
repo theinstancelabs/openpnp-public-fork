@@ -207,6 +207,34 @@ public class DispenseProfileTest {
         assertEquals(2.6, old.profile.sustainedFeedMgS, 0, "older files get the default");
     }
 
+    /**
+     * BR-82: the pause at the lift height before travel (the plastic 25G recipe's 500 ms), 0 to 5000 ms. At 0 (the
+     * default, and older files) both fingerprints stay byte for byte what every dose record and plan stored.
+     */
+    @Test
+    public void liftPause() {
+        DispenseProfile p = new DispenseProfile();
+        assertEquals(0, p.liftPauseMs);
+        assertEquals("psi=18.000 suck=10.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000", p.doseFingerprint());
+        assertEquals("psi=18.000 net=800 suck=10.000 start=298.000 rpm=180.000 acc=20000.0 dwell=250 gap=0.1000 "
+                + "purge=8", p.fingerprint());
+        String dose = p.doseFingerprint();
+        String plan = p.fingerprint();
+        p.liftPauseMs = 500;
+        assertNotEquals(dose, p.doseFingerprint());
+        assertNotEquals(plan, p.fingerprint());
+        assertEquals("pause none -> 500", DispenseProfile.fingerprintDiff(dose, p.doseFingerprint()));
+        assertEquals(500, p.copy().liftPauseMs);
+        for (int ok : new int[] {0, 500, 5000}) {
+            p.liftPauseMs = ok;
+            assertTrue(p.validate(C).isEmpty(), ok + ": " + p.validate(C));
+        }
+        assertRefused(x -> x.liftPauseMs = -1, "liftPauseMs must be 0 to 5000");
+        assertRefused(x -> x.liftPauseMs = 5001, "liftPauseMs must be 0 to 5000");
+        DispenseConfig old = DispenseConfig.fromJson("{\"profile\":{\"dwellMs\":250}}");
+        assertEquals(0, old.profile.liftPauseMs, "older files: no pause");
+    }
+
     /** Screw angle = Marlin's M114 step count of B ("Count ... B:<n>"), never the B position. */
     @Test
     public void stepCountFromMarlinsM114() {

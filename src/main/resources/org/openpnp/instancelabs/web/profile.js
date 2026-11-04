@@ -199,8 +199,10 @@
     { id: 'pf-purge', key: 'purgeDots', int: true, label: 'Purge dots per board', unit: 'dots', range: '0 to 60', step: '1', min: '0', max: '60',
       check: (v) => v >= 0 && v <= 60, err: 'Must be 0 to 60 dots.', help: 'On the purge row before every board; the first one turns the screw to the start angle.' },
     { id: 'pf-notes', key: 'notes', text: true, textarea: true, label: 'Notes' },
+    { id: 'pf-liftpause', key: 'liftPauseMs', int: true, label: 'Pause after the lift', unit: 'ms', range: '0 to 5000', step: '10', min: '0', max: '5000',
+      check: (v) => v >= 0 && v <= 5000, err: 'Must be 0 to 5000 ms.', help: 'The 25G recipe waits 500 ms at the lift height before travel (it stops threads).' },
   ];
-  const FINGERPRINT_KEYS = new Set(['pressurePsi', 'netStepsPerDot', 'suckBackDeg', 'screwRpm', 'screwAccelDegS2', 'dwellMs', 'gapMm', 'purgeDots']);
+  const FINGERPRINT_KEYS = new Set(['pressurePsi', 'netStepsPerDot', 'suckBackDeg', 'screwRpm', 'screwAccelDegS2', 'dwellMs', 'gapMm', 'purgeDots', 'liftPauseMs']);
   const PF = { dirty: new Set(), expect: null, expectUntil: 0, turnKey: null, errors: {}, tipKey: null };
 
   function readVal(f) {
@@ -308,6 +310,7 @@
     d(F.screwRpm, 'speed', IL.fmtInt, ' rpm');
     d(F.screwAccelDegS2, 'acceleration', IL.fmtInt, ' °/s²');
     d(F.purgeDots, 'purge', String, ' dots');
+    d(F.liftPauseMs, 'pause after the lift', String, ' ms');
     if (!same(F.notes, b.notes, e.notes)) parts.push('notes edited');
     const stale = FIELDS.some((f) => FINGERPRINT_KEYS.has(f.key) && !same(f, b[f.key], e[f.key]));
     const psiChanged = !same(F.pressurePsi, b.pressurePsi, e.pressurePsi);
@@ -409,7 +412,7 @@
   function collectBody() {
     const v = (i) => readVal(FIELDS[i]);
     return { name: String(v(0) || '').trim(), pressurePsi: v(1), netStepsPerDot: v(2), dwellMs: v(3), suckBackDeg: v(4), gapMm: v(5),
-      screwRpm: v(6), screwAccelDegS2: v(7), purgeDots: v(8), notes: v(9) || '' };
+      screwRpm: v(6), screwAccelDegS2: v(7), purgeDots: v(8), notes: v(9) || '', liftPauseMs: v(10) };
   }
   async function doSave(body) {
     const s0 = S.status;
@@ -490,8 +493,8 @@
           el('b', { text: 'OpenPnP reports problems with the saved profile (boards are refused until they are fixed):' }),
           el('ul', { id: 'pf-problems', class: 'pf-problems' })),
         group('Recipe', null, field(F('pf-name')), field(F('pf-psi'))),
-        group('One dot', 'Each dot: lower to the gap, turn the screw forward, wait the dwell, turn back, lift.',
-          field(F('pf-turn')), field(F('pf-dwell')), field(F('pf-suck')), field(F('pf-gap')),
+        group('One dot', 'Each dot: lower to the gap, turn the screw forward, wait the dwell, turn back, lift, pause.',
+          field(F('pf-turn')), field(F('pf-dwell')), field(F('pf-suck')), field(F('pf-gap')), field(F('pf-liftpause')),
           el('div', { class: 'pf-derived span2' }, IL.icon('i-angle'), el('span', { id: 'pf-turn-info' }))),
         group('Screw motion', null, field(F('pf-rpm')), field(F('pf-accel'))),
         group('Before each board', null, field(F('pf-purge')), field(F('pf-notes')))),

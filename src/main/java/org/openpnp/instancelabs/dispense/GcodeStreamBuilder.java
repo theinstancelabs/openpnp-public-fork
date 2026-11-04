@@ -13,8 +13,8 @@ import java.util.Map;
  * work; the last purge dot leaves the screw at the profile's start angle), a cross to the work at
  * travel Z with no stop, then per dot: XY at the current (hop) height, Z down to the gap,
  * {@code M204 S<screw accel>}, B forward (net + suck-back), dwell, B back (suck-back),
- * {@code M204 S<XY/Z accel>}, Z up. Session end: M400, valve OFF, pump OFF, re-zero B (aborts:
- * the Stop sequence, see {@link #abortLines}).
+ * {@code M204 S<XY/Z accel>}, Z up, the pause after the lift (if any). Session end: M400, valve
+ * OFF, pump OFF, re-zero B (aborts: the Stop sequence, see {@link #abortLines}).
  *
  * <p>Dose blocks (profile calibration design §1.2 R2/R3, §6.2): the dots of one net turn are laid
  * together. Before every block after the first the needle goes back to the purge row: for a partial
@@ -591,7 +591,7 @@ public class GcodeStreamBuilder {
     /**
      * One dot turning the screw by {@code netSteps}: forward net + suck-back under the screw
      * acceleration, dwell, back by the suck-back, XY/Z acceleration again (M204 S caps B as well),
-     * lift.
+     * lift, the profile's pause after the lift (if any).
      */
     public void dot(DotSpec d, long netSteps) throws Exception {
         if (!bZeroed) {
@@ -625,6 +625,8 @@ public class GcodeStreamBuilder {
         restSteps += netSteps;
         setAccel(cfg.zLiftAccelMmS2);
         moveNozzle(x, y, d.hopZ, cfg.zLiftFeedMmS, "G1");
+        // the no-pause rule's one exception (plastic 25G, BR-82): pressure on at the lift height, the thread breaks
+        dwell(profile.liftPauseMs);
         setAccel(cfg.travelAccelMmS2);
         markLast(GcodeProgram.Marker.DOT_END, d.index, d.label, d.rotationDeg);
         prog.dotCount += d.index >= 0 ? 1 : 0;
@@ -667,7 +669,10 @@ public class GcodeStreamBuilder {
         add("M400", GcodeProgram.Marker.SYNC);
     }
 
-    /** The per-dot dwell (the profile's): one G4, or pieces of the watchdog's ping interval when it is armed. */
+    /**
+     * The per-dot dwell and the pause after the lift (the profile's): one G4, or pieces of the watchdog's ping interval
+     * when it is armed.
+     */
     public void dwell(int ms) {
         dwell(ms, keepalive ? Math.max(100, cfg.keepaliveIntervalMs) : ms);
     }
