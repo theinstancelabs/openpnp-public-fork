@@ -614,6 +614,8 @@
             el('div', { class: 'cal-to__big' }, isNum(a.contactGapMm) ? 'Contact at a gap of ' + IL.fmtSigned(a.contactGapMm, 3) + ' mm' : 'No contact found'),
             el('div', { text: 'offset ' + IL.fmtSigned(v.row.previous_offset_mm, 3) + ' → ' + IL.fmtSigned(v.row.z_offset_mm, 3) + ' mm' + (isNum(v.delta) ? ', Δ ' + IL.fmtSigned(v.delta, 3) : '') }),
             a.reason ? el('div', { class: 'dim', text: a.reason }) : null,
+            // what its dots were compared with (BR-85 adds where that number came from: the tip's own dots, or the 22G model)
+            isNum(a.referenceDiameterMm) ? el('div', { class: 'dim', id: 'to-ref', text: 'Normal dot ' + IL.fmt(a.referenceDiameterMm, 2) + ' mm' + (a.referenceFrom ? ', from ' + a.referenceFrom : '') + '.' }) : null,
             era ? el('div', { class: 'cal-to__old', id: 'to-era' }, IL.glyph('need', 'xs'), ' ' + eraText(era))
               : inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
                 : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
