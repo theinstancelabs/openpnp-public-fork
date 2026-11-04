@@ -623,14 +623,16 @@ public final class SimScene {
         return e.getAsBoolean();
     }
 
-    /** A JSON integer (Gson's getAsInt makes 12.7 a 12). */
+    /** A JSON integer, null keeping the default as for every number of the block (Gson's getAsInt makes 12.7 a 12
+     * and reads "12" as 12: both refused). */
     static int integer(JsonObject o, String key, int def) {
-        if (!o.has(key)) {
+        JsonElement e = o.get(key);
+        if (e == null || e.isJsonNull()) {
             return def;
         }
-        double v = o.get(key).getAsDouble();
+        double v = e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber() ? e.getAsDouble() : Double.NaN;
         if (v != Math.rint(v) || Math.abs(v) > Integer.MAX_VALUE) {
-            throw new IllegalArgumentException(key + " must be an integer, not " + o.get(key));
+            throw new IllegalArgumentException(key + " must be an integer, not " + e);
         }
         return (int) v;
     }

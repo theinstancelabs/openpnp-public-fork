@@ -84,11 +84,14 @@ public class SimTipTest {
         for (String bad : new String[] {"{\"mRevMg\": 0}}}}", "{\"footprint\": {\"c\": -1}}}}}",
             "{\"landingBiasMm\": [1]}}}}", "{\"cv\": -0.1}}}}", "{\"transferRatio\": 2}}}}",
             "{\"wholeTurnsOnly\": 1}}}}", "{\"wholeTurnsOnly\": \"yes\"}}}}",
-            "{\"emptyDotsAfterPowerCycle\": 12.7}}}}"}) {
+            "{\"emptyDotsAfterPowerCycle\": 12.7}}}}", "{\"emptyDotsAfterPowerCycle\": \"12\"}}}}"}) {
             IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
                     () -> SimScene.of(json(board + bad)), bad);
             assertTrue(e.getMessage().startsWith("paste.byTip['k']: "), e.getMessage());
         }
+        // review round 3: a JSON null keeps the default, as for every other number of the block
+        assertEquals(0, SimScene.of(json(board + "{\"emptyDotsAfterPowerCycle\": null}}}}")).pasteFor("k")
+                .emptyDotsAfterPowerCycle);
     }
 
     /** INF-06: a tip's entry may set any key of the paste block; the rest is the scene's paste, edits included. */

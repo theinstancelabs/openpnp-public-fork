@@ -423,10 +423,12 @@ def parse_paste_by_tip(text):
             if len(xy) != 2:
                 raise ValueError("--paste-by-tip %r: landing=DX:DY (mm)" % text)
             entry["landingBiasMm"] = [float(xy[0]), float(xy[1])]
+            if not all(math.isfinite(c) for c in entry["landingBiasMm"]):
+                raise ValueError("--paste-by-tip %r: landing=%r is not finite" % (text, value))
             continue
         v = float(value)
-        if not v > 0:
-            raise ValueError("--paste-by-tip %r: %s must be > 0" % (text, name))
+        if not (v > 0 and math.isfinite(v)):
+            raise ValueError("--paste-by-tip %r: %s must be a finite number > 0" % (text, name))
         if name == "mRevMg":
             entry["mRevMg"] = v
         else:
@@ -598,7 +600,8 @@ def cmd_selftest(a):
         == {"primeTurns": 230.0, "wholeTurnsOnly": True, "newPhaseOnMotorOff": False, "maxGapMm": 0.35,
             "emptyDotsAfterPowerCycle": 12})
     for bad in ("25g-straight", "25g-straight:", "k:mRevMg=0", "k:c=-1", "k:landing=2.4", "k:speed=3", "k:mRevMg",
-                "k:wholeTurnsOnly=yes", "k:emptyDotsAfterPowerCycle=1.5", "k:cv=x", "k:cv=nan", "k:maxGapMm=inf"):
+                "k:wholeTurnsOnly=yes", "k:emptyDotsAfterPowerCycle=1.5", "k:cv=x", "k:cv=nan", "k:maxGapMm=inf",
+                "k:mRevMg=inf", "k:c=1e400", "k:landing=nan:0", "k:landing=0:inf"):
         try:
             parse_paste_by_tip(bad)
             check("paste-by-tip refuses %r" % bad, False)
