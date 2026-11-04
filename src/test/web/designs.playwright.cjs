@@ -525,6 +525,19 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       chosen: ((document.querySelector('#rs-designs .design[aria-pressed="true"]') || {}).dataset || {}).board || null, start: (document.getElementById('rs-start-why') || {}).textContent || null })));
     ST.okTipFile = null;
 
+    // ---- (6c) Run reads the list again on every entry: a read that fails then keeps the cards Start has (no error box
+    // instead of them; the re-check of (6b)'s fix)
+    await page.evaluate(() => IL.go('#machine'));
+    const fail6 = (route) => (route.request().method() === 'GET' ? route.fulfill({ status: 500, json: { error: 'test', reason: 'The test failed this read.' } })
+      : route.fallback());
+    await page.route('**/api/boards', fail6);
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+    const c6 = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
+      cards: document.querySelectorAll('#rs-designs .design[data-board]').length, box: /could not be read/.test((document.getElementById('rs-designs') || {}).textContent || '') })))));
+    check('(6c) a failed read of the list on entering Run: Start keeps its design cards, no error box instead', !!c6.err && c6.cards > 0 && !c6.box, c6);
+    await page.unroute('**/api/boards', fail6);
+
     // ---- (7) ----------------------------------------------------------------------------------------------------------
     const allowed = ['POST /api/boards/import', 'POST /api/boards/import/save', 'POST /api/boards/import/attach', 'POST /api/pad-profile/apply', 'POST /api/package-mappings',
       'PUT /api/pad-types/chip-0603'];
