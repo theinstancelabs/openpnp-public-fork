@@ -849,9 +849,10 @@ public final class SimPaste {
     }
 
     /**
-     * A contact something measures: the board, a coupon, the blank, and on the bed the engine's I9 test dot. Spared: the
-     * rest of the bed (the waste), and a pressure session's first contact at a purge-row spot, where the engine lays its
-     * phase dot (it turns the screw to its start angle; without an engine: a first contact on the blank). Phase dots the
+     * A contact something measures: the board, a coupon, the blank, and the engine's I9 test dot wherever it lands (it
+     * comes first). Spared: the rest of the bed (the waste), and a pressure session's first contact at a purge-row spot,
+     * where the engine lays its phase dot (it turns the screw to its start angle; without an engine: a first contact on
+     * the blank). Phase dots the
      * engine lays mid-session (at a block switch) are refused: only partial-turn blocks have them, whose dots are
      * refused too. The region is judged where the paste lands, the engine's targets where it sends the head.
      * shortcut: ignores the gap, so a sub-turn contact in the air over the blank is refused and its paste lost (it
@@ -864,9 +865,8 @@ public final class SimPaste {
         if (a == null) {
             return r != SimScene.Region.BED && !(sessionDot == 0 && r == SimScene.Region.BLANK);
         }
-        if (r == SimScene.Region.BED && a.testDot != null
-                && Math.hypot(dotX - a.testDot[0], dotY - a.testDot[1]) <= a.testDotRadius) {
-            return true; // the I9 test dot, even beside a purge spot: the measured reading wins
+        if (a.testDot != null && Math.hypot(dotX - a.testDot[0], dotY - a.testDot[1]) <= a.testDotRadius) {
+            return true; // the I9 test dot, wherever it lands and even beside a purge spot: the measured reading wins
         }
         if (sessionDot == 0 && a.purge.stream().anyMatch(t -> Math.hypot(dotX - t[0], dotY - t[1]) <= AIM_RADIUS_MM)) {
             return false;

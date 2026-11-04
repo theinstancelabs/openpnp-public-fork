@@ -487,6 +487,14 @@ public class SimPasteTest {
         n.dot(202, 100, s.contactZ(SimScene.Region.BED, 202, 100), 400); // the session's first contact: the test dot
         assertTrue(p.deposits(null).isEmpty(), "a quarter-turn test dot lays nothing");
         assertEquals(1, p.unmodelledContacts());
+        // the waste beside the blank, so its test dot lands on the blank, next to a purge spot: still measured
+        p.engineAims(() -> new SimPaste.EngineAims(raw(s, 300, 240), java.util.Collections.singletonList(raw(s, 300.5,
+                240))));
+        n.vent();
+        n.pressurize();
+        n.dot(300, 240, BLANK_Z, 400);
+        assertTrue(p.deposits(null).isEmpty(), "a quarter-turn test dot on the blank lays nothing");
+        assertEquals(2, p.unmodelledContacts());
     }
 
     /** Review round 3: a power cycle puts Marlin's idle timeout back to its default (3600 s after boot). */
