@@ -37,7 +37,7 @@ CLI:
   il_sim_scene.py amend --config DIR [PADCAL]      the session's scene file, changed in place (it reloads on its stamp)
   il_sim_scene.py selftest [--board FILE] [--config DIR]
   PADCAL: [--paste] [--coupons] [--balance display|connected] [--bench-blank] [--variant NAME]
-          [--paste-by-tip KEY:mRevMg=M,c=C,e=E,landing=DX:DY]... [--physical-tip KEY|mounted]
+          [--paste-by-tip KEY:mRevMg=M,c=C,e=E,landing=DX:DY,<paste key>=V]... [--physical-tip KEY|mounted]
 
 Tip setups (PROFILE_CALIBRATION_DESIGN.md §22.8): --paste-by-tip gives one tip setup its own paste (mass per
 revolution, footprint law, where it lands off the commanded spot; fields left out are the paste's), --physical-tip
@@ -383,28 +383,52 @@ def variant(sc, name, config_dir=None):
 
 
 PASTE_BY_TIP_FIELDS = ("mRevMg", "c", "e", "landing")
+# INF-06: any other key of the paste block, laid over it for that tip (SimScene.apply); SimScene checks the values
+PASTE_BY_TIP_FLAGS = ("newPhaseOnMotorOff", "wholeTurnsOnly")
+PASTE_BY_TIP_INTS = ("emptyDotsAfterPowerCycle", "offsetSteps")
+PASTE_BY_TIP_NUMBERS = ("ripple", "ripplePeakDeg", "cv", "transferRatio", "oozeFirst", "refillDip", "refillTauDots",
+                        "idleFullS", "idleDeadS", "threadShare", "threadFullMg", "threadZeroMg", "missBelowMg",
+                        "maxGapMm", "needleZOffsetMm", "feedLimitMgS", "landingSdMm", "primeTurns")
 
 
 def parse_paste_by_tip(text):
-    """'KEY:mRevMg=1.6,c=0.6,e=0.77,landing=2.4:-0.4' -> (KEY, the byTip entry of the scene's paste, §22.8)."""
+    """'KEY:mRevMg=1.6,c=0.6,e=0.77,landing=2.4:-0.4' -> (KEY, the byTip entry of the scene's paste, §22.8); any other
+    key of the paste block too ('primeTurns=230,wholeTurnsOnly=true', INF-06)."""
     key, sep, rest = text.partition(":")
     if not key or not sep or not rest:
         raise ValueError("--paste-by-tip %r: expected KEY:mRevMg=..,c=..,e=..,landing=DX:DY" % text)
     entry = {}
     for item in rest.split(","):
         name, eq, value = item.partition("=")
-        name = name.strip()
+        name, value = name.strip(), value.strip()
+        if eq and name in PASTE_BY_TIP_FLAGS:
+            if value not in ("true", "false"):
+                raise ValueError("--paste-by-tip %r: %s=true|false" % (text, name))
+            entry[name] = value == "true"
+            continue
+        if eq and name in PASTE_BY_TIP_INTS + PASTE_BY_TIP_NUMBERS:
+            try:
+                entry[name] = int(value) if name in PASTE_BY_TIP_INTS else float(value)
+            except ValueError:
+                raise ValueError("--paste-by-tip %r: %s=%r is not a%s number" % (
+                    text, name, value, "n integer" if name in PASTE_BY_TIP_INTS else "")) from None
+            if not math.isfinite(entry[name]):  # SimScene refuses it, and the running SIM keeps its old scene
+                raise ValueError("--paste-by-tip %r: %s=%r is not finite" % (text, name, value))
+            continue
         if not eq or name not in PASTE_BY_TIP_FIELDS:
-            raise ValueError("--paste-by-tip %r: %r is not one of %s" % (text, item, ", ".join(PASTE_BY_TIP_FIELDS)))
+            raise ValueError("--paste-by-tip %r: %r is not one of %s" % (text, item, ", ".join(
+                PASTE_BY_TIP_FIELDS + PASTE_BY_TIP_FLAGS + PASTE_BY_TIP_INTS + PASTE_BY_TIP_NUMBERS)))
         if name == "landing":
             xy = value.split(":")
             if len(xy) != 2:
                 raise ValueError("--paste-by-tip %r: landing=DX:DY (mm)" % text)
             entry["landingBiasMm"] = [float(xy[0]), float(xy[1])]
+            if not all(math.isfinite(c) for c in entry["landingBiasMm"]):
+                raise ValueError("--paste-by-tip %r: landing=%r is not finite" % (text, value))
             continue
         v = float(value)
-        if not v > 0:
-            raise ValueError("--paste-by-tip %r: %s must be > 0" % (text, name))
+        if not (v > 0 and math.isfinite(v)):
+            raise ValueError("--paste-by-tip %r: %s must be a finite number > 0" % (text, name))
         if name == "mRevMg":
             entry["mRevMg"] = v
         else:
@@ -571,7 +595,13 @@ def cmd_selftest(a):
     check("paste-by-tip: §22.8's example", k == "25g-straight"
           and e == {"mRevMg": 1.6, "footprint": {"c": 0.6}, "landingBiasMm": [2.4, -0.4]})
     check("paste-by-tip: e alone", parse_paste_by_tip("x:e=0.8")[1] == {"footprint": {"e": 0.8}})
-    for bad in ("25g-straight", "25g-straight:", "k:mRevMg=0", "k:c=-1", "k:landing=2.4", "k:speed=3", "k:mRevMg"):
+    check("paste-by-tip: any key of the paste block (INF-06)", parse_paste_by_tip(
+        "k:primeTurns=230,wholeTurnsOnly=true,newPhaseOnMotorOff=false,maxGapMm=0.35,emptyDotsAfterPowerCycle=12")[1]
+        == {"primeTurns": 230.0, "wholeTurnsOnly": True, "newPhaseOnMotorOff": False, "maxGapMm": 0.35,
+            "emptyDotsAfterPowerCycle": 12})
+    for bad in ("25g-straight", "25g-straight:", "k:mRevMg=0", "k:c=-1", "k:landing=2.4", "k:speed=3", "k:mRevMg",
+                "k:wholeTurnsOnly=yes", "k:emptyDotsAfterPowerCycle=1.5", "k:cv=x", "k:cv=nan", "k:maxGapMm=inf",
+                "k:mRevMg=inf", "k:c=1e400", "k:landing=nan:0", "k:landing=0:inf"):
         try:
             parse_paste_by_tip(bad)
             check("paste-by-tip refuses %r" % bad, False)

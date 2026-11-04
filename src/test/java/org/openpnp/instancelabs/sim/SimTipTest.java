@@ -67,11 +67,6 @@ public class SimTipTest {
     public void theSceneGivesATipItsOwnPasteAndNamesTheTipOnTheHead() {
         SimScene s = SimScene.of(json(SCENE));
         assertEquals(K25, s.physicalTip);
-        SimScene.TipPaste t = s.paste.byTip.get(K25);
-        assertEquals(1.6, t.mRevMg, 0);
-        assertEquals(0.6, t.footprintC, 0);
-        assertNull(t.footprintE, "the paste's");
-        assertArrayEquals(new double[] {2.4, -0.4}, t.landingBiasMm, 0);
         SimScene.Paste p = s.pasteFor(K25);
         assertEquals(1.6, p.mRevMg, 0);
         assertEquals(0.6, p.footprintC, 0);
@@ -87,19 +82,45 @@ public class SimTipTest {
         assertNull(SimScene.of(json("{\"board\": {\"file\": \"t\", \"seat\": {\"x\": 0, \"y\": 0}}}")).physicalTip);
         String board = "{\"board\": {\"file\": \"t\", \"seat\": {\"x\": 0, \"y\": 0}}, \"paste\": {\"byTip\": {\"k\": ";
         for (String bad : new String[] {"{\"mRevMg\": 0}}}}", "{\"footprint\": {\"c\": -1}}}}}",
-            "{\"landingBiasMm\": [1]}}}}"}) {
-            assertThrows(IllegalArgumentException.class, () -> SimScene.of(json(board + bad)), bad);
+            "{\"landingBiasMm\": [1]}}}}", "{\"cv\": -0.1}}}}", "{\"transferRatio\": 2}}}}",
+            "{\"wholeTurnsOnly\": 1}}}}", "{\"wholeTurnsOnly\": \"yes\"}}}}",
+            "{\"emptyDotsAfterPowerCycle\": 12.7}}}}", "{\"emptyDotsAfterPowerCycle\": \"12\"}}}}"}) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> SimScene.of(json(board + bad)), bad);
+            assertTrue(e.getMessage().startsWith("paste.byTip['k']: "), e.getMessage());
         }
+        // review round 3: a JSON null keeps the default, as for every other number of the block
+        assertEquals(0, SimScene.of(json(board + "{\"emptyDotsAfterPowerCycle\": null}}}}")).pasteFor("k")
+                .emptyDotsAfterPowerCycle);
+    }
+
+    /** INF-06: a tip's entry may set any key of the paste block; the rest is the scene's paste, edits included. */
+    @Test
+    public void aTipEntryCanSetAnyPasteKey() {
+        SimScene s = SimScene.of(json("{\"board\": {\"file\": \"t\", \"seat\": {\"x\": 0, \"y\": 0}}, "
+                + "\"paste\": {\"cv\": 0.08, \"byTip\": {\"k\": {\"cv\": 0.02, \"maxGapMm\": 0.35, "
+                + "\"threadShare\": 0, \"ripple\": 0.6, \"ripplePeakDeg\": 186, \"landingSdMm\": 0.05, "
+                + "\"offsetSteps\": 100, \"needleZOffsetMm\": 0.12}}}}"));
+        s.paste.transferRatio = 0.5; // an edit of the scene's paste after loading
+        SimScene.Paste p = s.pasteFor("k");
+        assertEquals(0.02, p.cv, 0);
+        assertEquals(0.35, p.maxGapMm, 0);
+        assertEquals(0, p.threadShare, 0);
+        assertEquals(0.6, p.ripple, 0);
+        assertEquals(186, p.ripplePeakDeg, 0);
+        assertEquals(0.05, p.landingSdMm, 0);
+        assertEquals(Integer.valueOf(100), p.offsetSteps);
+        assertEquals(Double.valueOf(0.12), p.needleZOffsetMm);
+        assertEquals(0.5, p.transferRatio, 0, "the scene's paste, as edited");
+        assertEquals(0.08, s.paste.cv, 0, "the scene's paste is untouched");
+        assertNull(s.paste.offsetSteps);
     }
 
     /** The bare law of SimPasteTest with the scene's per-tip block; ripple off so a half turn lays mRev / 2. */
     static SimScene exact(String physicalTip) {
         SimScene s = SimPasteTest.exact();
         s.paste.ripple = 0;
-        SimScene.TipPaste t = new SimScene.TipPaste();
-        t.mRevMg = 1.6;
-        t.landingBiasMm = new double[] {2.4, -0.4};
-        s.paste.byTip.put(K25, t);
+        s.paste.byTip.put(K25, json("{\"mRevMg\": 1.6, \"landingBiasMm\": [2.4, -0.4]}"));
         s.physicalTip = physicalTip;
         return s;
     }
@@ -222,6 +243,28 @@ public class SimTipTest {
     void moveN2(double x, double y, double z) throws Exception {
         sim.n2.moveTo(new Location(LengthUnit.Millimeters, x, y, z, Double.NaN));
         sim.machine.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+    }
+
+    /** INF-06 §8 (review): a needle change is a fresh tip to prime, whatever was primed before it. */
+    @Test
+    public void aNeedleChangeIsAFreshTipToPrime() throws Exception {
+        sim = new SimMachine(false);
+        writeScene(null);
+        svc = DispenseService.start(Configuration.get());
+        SimScene s = SimPasteTest.exact();
+        s.paste.ripple = 0;
+        s.paste.primeTurns = 1;
+        SimPaste p = new SimPaste(() -> s, SimPaste.Store.forScene(s), () -> 0L, () -> 0.0);
+        SimNeedle n = new SimNeedle(p, s.paste.n2OffsetMm);
+        n.pressurize();
+        n.dot(300, 240, SimPasteTest.BLANK_Z, 1600);
+        n.dot(303, 240, SimPasteTest.BLANK_Z, 1600);
+        assertEquals(1, p.deposits(null).size(), "the first turn fills the mounted tip");
+        svc.recordNeedleChange("SimTipTest", "infra");
+        n.dot(306, 240, SimPasteTest.BLANK_Z, 1600);
+        assertEquals(1, p.deposits(null).size(), "a new needle: fresh");
+        n.dot(309, 240, SimPasteTest.BLANK_Z, 1600);
+        assertEquals(2, p.deposits(null).size());
     }
 
     @Test
