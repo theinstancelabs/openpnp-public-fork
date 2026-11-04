@@ -464,7 +464,7 @@ def preset_items(text, name):
             items.append("landing=%r:%r" % tuple(v))
         elif isinstance(v, bool):
             items.append("%s=%s" % (k, "true" if v else "false"))
-        elif isinstance(v, (int, float)):
+        elif isinstance(v, (int, float)) and k not in ("c", "e", "landing"):  # the CLI's short names: not JSON keys
             items.append("%s=%r" % (k, v))
         else:
             raise ValueError("--paste-by-tip %r: preset %r's %s=%r is not a key of the paste block" % (
@@ -654,26 +654,27 @@ def cmd_selftest(a):
           all(parse_paste_by_tip("k:preset=" + name)[1] for name in names))
     with tempfile.TemporaryDirectory() as d:
         bad_tips = {"typo": {"maxGapMM": 0.35}, "flag": {"wholeTurnsOnly": 1}, "nested": {"footprint": {"x": 1}},
-                    "inf": {"cv": float("inf")}, "list": [1]}
+                    "inf": {"cv": float("inf")}, "list": [1], "alias": {"c": 0.5}}
         with open(os.path.join(d, "tips.json"), "w") as f:
             json.dump({"presets": bad_tips}, f)
         with open(os.path.join(d, "bare.json"), "w") as f:
             json.dump({"typo": {}}, f)
         real = PASTE_TIPS
-        for path, presets in ((os.path.join(d, "tips.json"), sorted(bad_tips)), (os.path.join(d, "none.json"),
-                                                                                   ["typo"]),
-                              (os.path.join(d, "bare.json"), ["typo"])):
-            globals()["PASTE_TIPS"] = path
-            for name in presets:
-                try:
-                    parse_paste_by_tip("k:preset=" + name)
-                    ok = False
-                except ValueError:
-                    ok = True
-                except Exception:  # an OSError or KeyError would end the CLI with a traceback
-                    ok = False
-                check("paste-by-tip refuses preset %r of %s" % (name, os.path.basename(path)), ok)
-        globals()["PASTE_TIPS"] = real
+        try:
+            for path, presets in ((os.path.join(d, "tips.json"), sorted(bad_tips)),
+                                  (os.path.join(d, "none.json"), ["typo"]), (os.path.join(d, "bare.json"), ["typo"])):
+                globals()["PASTE_TIPS"] = path
+                for name in presets:
+                    try:
+                        parse_paste_by_tip("k:preset=" + name)
+                        ok = False
+                    except ValueError:
+                        ok = True
+                    except Exception:  # an OSError or KeyError would end the CLI with a traceback
+                        ok = False
+                    check("paste-by-tip refuses preset %r of %s" % (name, os.path.basename(path)), ok)
+        finally:
+            globals()["PASTE_TIPS"] = real
     sc = paste_by_tip(padcal({}), k, e)
     check("paste-by-tip: in paste.byTip, the paste untouched", sc["paste"]["byTip"][k] == e
           and sc["paste"]["mRevMg"] == 2.30 and "byTip" not in PASTE)

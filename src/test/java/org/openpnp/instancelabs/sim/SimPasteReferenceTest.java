@@ -21,7 +21,8 @@ import com.google.gson.JsonParser;
  * measured reference ({@code docs/research/paste-model-reference-per-tip.md}, 11-04) within its CI tolerance: mass per
  * whole turn ±10 %, mean area ±15 % (phase-averaged: a board's 298°/118° pairs average the phase, Process 05:0x), CV up
  * to 1.5× the measured one (at the balanced phase, where both halves of a turn are equal), landing SD ±0.02 mm per
- * axis. Mass, mean area, swing and gap are checked on the law itself (cv 0), CV and landing scatter with the noise.
+ * axis. Mass, mean area, swing and gap are checked on the law itself (cv 0); CV and landing scatter with the noise,
+ * as their means over 16 noise seeds.
  */
 public class SimPasteReferenceTest {
     static final long TURN = SimPaste.STEPS_PER_REV;
@@ -29,6 +30,8 @@ public class SimPasteReferenceTest {
     static final int WARM_UP_DOTS = 12;
     /** A run's first dots: the tip bead takes on the run's own rhythm (0.25^4 of the last run's is left). */
     static final int THROWAWAYS = 4;
+    /** Noise seeds the CV and landing scatter are averaged over. */
+    static final int SEEDS = 16;
     /** Spots on the bench blank (X 280-365, Y 225-250), 2.5 mm apart: 32 a row, 9 rows. */
     static final double X0 = 282.5, Y0 = 227.5, PITCH = 2.5;
     int spot;
@@ -39,7 +42,7 @@ public class SimPasteReferenceTest {
         return new double[] {X0 + PITCH * (i % 32), Y0 + PITCH * (i / 32)};
     }
 
-    /** A preset of paste-tips.json laid over the SIM's paste, as il_sim_scene.py --paste-by-tip KEY:preset=NAME does. */
+    /** A preset of paste-tips.json over the SIM's paste, as il_sim_scene.py --paste-by-tip KEY:preset=NAME lays it. */
     static SimScene.Paste preset(String name) throws Exception {
         String text = new String(Files.readAllBytes(new File("src/test/sim/paste-tips.json").toPath()),
                 StandardCharsets.UTF_8);
@@ -154,9 +157,34 @@ public class SimPasteReferenceTest {
         return Math.hypot(c, sn) / a0 * Math.PI / 2;
     }
 
+    /**
+     * The area CV and the landing SD of runs of 40 dots of {@code net} steps from the balanced phase (the peak), each
+     * the mean over SEEDS noise seeds: one seed's CV spreads about ±1 point, enough to hide a cv far outside the
+     * band or to fail a right one.
+     */
+    double[] noisy(String preset, long net) throws Exception {
+        double cv = 0;
+        double sd = 0;
+        for (long seed = 1; seed <= SEEDS; seed++) {
+            SimScene s = scene(preset, true);
+            s.paste.noiseSeed = seed;
+            spot = 0; // a new scene, a new store: its spots are bare
+            SimPaste p = paste(s);
+            SimNeedle n = ready(s, p, net);
+            List<Double> areas = new ArrayList<>();
+            List<Double> landX = new ArrayList<>();
+            for (SimPaste.Deposit d : run(s, p, n, net, s.paste.ripplePeakDeg, 40, landX)) {
+                areas.add(d.areaMm2());
+            }
+            cv += cv(areas) / SEEDS;
+            sd += sd(landX) / SEEDS;
+        }
+        return new double[] {cv, sd};
+    }
+
     @Test
     public void the22gHalfTurnDotsMatchTheReference() throws Exception {
-        // §1-3 on the law: 8 runs of consecutive half turns, their first starts 22.5° apart: 16 start angles, 2 dots each
+        // §1-3 on the law: 8 runs of consecutive half turns, first starts 22.5° apart: 16 start angles, 2 dots each
         SimScene q = scene("22g-bent", false);
         SimPaste p = paste(q);
         SimNeedle n = ready(q, p, TURN / 2);
@@ -172,23 +200,17 @@ public class SimPasteReferenceTest {
         }
         double a = halfTurnSwing(angleArea);
         // §2 and §7 with the noise: the CV at the balanced phase (a half turn from the peak: both halves equal)
-        SimScene s = scene("22g-bent", true);
-        SimPaste ps = paste(s);
-        SimNeedle ns = ready(s, ps, TURN / 2);
-        List<Double> balanced = new ArrayList<>();
-        List<Double> landX = new ArrayList<>();
-        for (SimPaste.Deposit d : run(s, ps, ns, TURN / 2, s.paste.ripplePeakDeg, 40, landX)) {
-            balanced.add(d.areaMm2());
-        }
-        System.out.printf("SIM 22G: %.3f mg/turn, mean area %.3f mm2, swing A %.3f; CV %.1f %% (balanced), "
-                + "landing SD %.3f mm%n", 2 * mean(mg), mean(areas), a, 100 * cv(balanced), sd(landX));
+        double[] noisy = noisy("22g-bent", TURN / 2);
+        double c = noisy[0];
+        System.out.printf("SIM 22G: %.3f mg/turn, mean area %.3f mm2, swing A %.3f; CV %.2f %% (balanced), "
+                + "landing SD %.4f mm (means over %d seeds)%n", 2 * mean(mg), mean(areas), a, 100 * c, noisy[1],
+                SEEDS);
         within(2 * mean(mg), 2.11, 0.10, "22G paste per whole turn, mg (§1: 169 mg / 160 half turns)");
         within(mean(areas), 0.788, 0.15, "22G half-turn mean area vs board 3 (§2)");
         within(mean(areas), 0.747, 0.15, "22G half-turn mean area vs p29 g0 (§2)");
         assertTrue(a >= 0.56 && a <= 0.60, "22G area swing A of tools/lumen.py's f(phi) (§3: 0.56-0.60): " + a);
-        double c = cv(balanced);
         assertTrue(c >= 0.5 * 0.075 && c <= 1.5 * 0.075, "22G CV at the balanced phase: " + c + " (§2: 7.5 %)");
-        within(sd(landX), 0.035, 0.02 / 0.035, "22G landing SD (§7: 0.03-0.04)");
+        within(noisy[1], 0.035, 0.02 / 0.035, "22G landing SD (§7: 0.03-0.04)");
     }
 
     @Test
@@ -210,18 +232,17 @@ public class SimPasteReferenceTest {
             }
             byGap.add(mean(g));
         }
+        // the PM's condition (§2-3): a sub-turn contact is not modelled for the 25G: nothing laid, counted
+        n.gapMm = 0.20;
+        int refused = p.unmodelledContacts();
+        assertNull(dot(q, p, n, TURN / 2, null, null), "a half turn lays nothing");
+        assertEquals(refused + 1, p.unmodelledContacts());
         // §2 and §7 with the noise
-        SimScene s = scene("25g-plastic", true);
-        SimPaste ps = paste(s);
-        SimNeedle ns = ready(s, ps, TURN);
-        List<Double> areas = new ArrayList<>();
-        List<Double> landX = new ArrayList<>();
-        for (int k = 0; k < 40; k++) {
-            areas.add(dot(s, ps, ns, TURN, null, landX).areaMm2());
-        }
-        double c = cv(areas);
-        System.out.printf("SIM 25G: %.3f mg/turn, mean area %.3f mm2 (gaps 0.20/0.10/0.30 %s); CV %.1f %%, "
-                + "landing SD %.3f mm%n", mean(mg), byGap.get(0), byGap, 100 * c, sd(landX));
+        double[] noisy = noisy("25g-plastic", TURN);
+        double c = noisy[0];
+        System.out.printf("SIM 25G: %.3f mg/turn, mean area %.3f mm2 (gaps 0.20/0.10/0.30 %s); CV %.2f %%, "
+                + "landing SD %.4f mm (means over %d seeds)%n", mean(mg), byGap.get(0), byGap, 100 * c, noisy[1],
+                SEEDS);
         within(mean(mg), 1.95, 0.10, "25G paste per whole turn, mg (§1: +39 mg / 20 whole turns)");
         // §2's two rows on bare Cu, as the 22G's two: 1.29 (S0a) and 1.58-1.71 (the ladder)
         within(byGap.get(0), 1.29, 0.15, "25G whole-turn mean area vs S0a (§2)");
@@ -229,11 +250,7 @@ public class SimPasteReferenceTest {
         assertTrue(Collections.max(byGap) / Collections.min(byGap) < 1.10,
                 "25G areas alike over gaps 0.10-0.30 (§6): " + byGap);
         assertTrue(c >= 0.5 * 0.089 && c <= 1.5 * 0.089, "25G CV: " + c + " (§2: 8.9 %)");
-        within(sd(landX), 0.045, 0.02 / 0.045, "25G landing SD (§7: 0.02-0.06)");
-        // the PM's condition (§2-3): a sub-turn contact is not modelled for the 25G: nothing laid, counted
-        int refused = ps.unmodelledContacts();
-        assertNull(dot(s, ps, ns, TURN / 2, null, null), "a half turn lays nothing");
-        assertEquals(refused + 1, ps.unmodelledContacts());
+        within(noisy[1], 0.045, 0.02 / 0.045, "25G landing SD (§7: 0.02-0.06)");
     }
 
     /** The values Process measured stand in the presets as measured (§1, §4-7, "What matters"): a mistyped key
