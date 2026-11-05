@@ -467,7 +467,12 @@ Changed routes:
   regulator and paste checks, I4 (frame and offset since the change) and a band of the calibration area 2R + 8 mm tall
   (R = 2 mm for a straight setup, or a bent one with `bendToward`, that has a landing of its own; 6 mm otherwise; 9 mm
   with `wide`; `The calibration area has 14.5 mm left; the landing check needs 20 mm: wipe the blank (Calibrate › Pad
-  calibration › Blank wiped).`); a locator dot at the band's centre, then the profile's purge dots and a row of 8 dots
+  calibration › Blank wiped).`). **BR-103:** `expectedLanding: {dxMm, dyMm, evidence}` (preview: `expectedLanding=dx,dy`
+  and `evidence=`) gives a setup with no landing of its own the place it is expected to land from N2's head offset,
+  e.g. from its end measured from below: R = 2 mm around it, the band grown by |dyMm| (nothing aims with it, so the
+  dot lands there). 400 with `wide`, outside the landing check, beyond ±9 mm or without `evidence`; 409 when the
+  setup has a landing of its own (the check already searches ±2 mm around that). The preview's `landing` adds
+  `expectedFrom` (`the request: <evidence>`, else null); a locator dot at the band's centre, then the profile's purge dots and a row of 8 dots
   at uneven gaps, fitted (`P/LandingFit`). The preview adds `landing: {searchMm, wide, expected, bandMm, band: {x0, x1,
   y0, y1}, frames, problem}` and the sentence `Lays one dot, then 8 purge dots and 8 dots in a row on the blank (X
   290.0–330.0, Y 240.0–260.0), looks at them, and saves where the needle lands. Uses 20 mm of the calibration area
