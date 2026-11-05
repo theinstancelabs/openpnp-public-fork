@@ -1842,10 +1842,10 @@ final class PadCalibrationJob {
     }
 
     /**
-     * BR-77: the measure's steps (plan §2-§5): each block an engine step of its own at its start angle after its
-     * own throwaways (I11 waived, any quarter, half or whole turn), every dot's area by the before and after frames; then the
-     * fit, and with apply the new start = old start + (new feature - old feature), set as a measure's evidence sets it
-     * (BR-02's checks). A STOP or a failed step ends the job before the fit: nothing is set.
+     * BR-77: the measure's steps (plan §2-§5): each block an engine step of its own at its start angle after its own
+     * throwaways (I11 waived, any quarter, half or whole turn), every dot's area by the before and after frames; then
+     * the fit, and with apply the new start = old start + (new feature - old feature), set as a measure's evidence sets
+     * it (BR-02's checks). A STOP or a failed step ends the job before the fit: nothing is set.
      */
     private void runStartAngle(DispenseConfig c) throws Exception {
         StartAngle q = req.startAngle;
