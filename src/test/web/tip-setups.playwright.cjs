@@ -584,14 +584,20 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
       thumbs: tr.querySelectorAll('.rec-thumbs .rec-thumb').length, tip: tr.cells[2].textContent }; });
     check('(8) the first row: the edited label, "SW…[ · v{n}]", 25G straight, ≥ 2 thumbnails', c8.label === newLabel && /SW_SPST/.test(c8.sub) && c8.tip === '25G straight' && c8.thumbs >= 2, c8);
     await shoot(page, 'records-calibrations', () => toTop(page, '#records-cals'));
+    // the rows on screen: label and tip (the list of every tip has the 22G's calibrations of pad-profile too)
+    const rows8 = () => page.evaluate(() => Array.from(document.querySelectorAll('#rec-pcals-t tbody tr')).filter((tr) => tr.querySelector('.rec-label__t'))
+      .map((tr) => ({ t: tr.querySelector('.rec-label__t').textContent, tip: tr.cells[2].textContent })));
     await page.click('#rec-pcals-tips button[data-tip="' + k25 + '"]');
     await page.waitForFunction(() => document.querySelector('#rec-pcals-t tbody tr .rec-label__t'), null, { timeout: 15000 });
-    const keep = await page.evaluate((l) => Array.from(document.querySelectorAll('#rec-pcals-t .rec-label__t')).some((x) => x.textContent === l), newLabel);
+    const r25 = await rows8();
+    const keep = r25.some((x) => x.t === newLabel) && r25.every((x) => x.tip === '25G straight');
     await page.click('#rec-pcals-tips button[data-tip="ad22tta-b"]');
     await page.waitForFunction(() => { const x = document.getElementById('rec-pcals-sum'); return !!x && !/Loading/.test(x.textContent); }, null, { timeout: 15000 });
     await sleep(800);
-    const hide = await page.evaluate((l) => !Array.from(document.querySelectorAll('#rec-pcals-t .rec-label__t')).some((x) => x.textContent === l), newLabel);
-    check('(8) the 25G straight filter keeps it, the 22G bent taper hides it', keep && hide, { keep, hide });
+    const r22 = await rows8();
+    const hide = r22.every((x) => x.t !== newLabel && x.tip === '22G bent taper');
+    check('(8) the 25G straight filter shows only the 25G\'s calibrations, the new one among them; the 22G bent taper\'s only the 22G\'s', keep && hide,
+      { keep, hide, tips25: [...new Set(r25.map((x) => x.tip))], n25: r25.length, tips22: [...new Set(r22.map((x) => x.tip))], n22: r22.length });
     await page.click('#rec-pcals-tips button[data-tip="all"]');
     await page.waitForFunction((id) => !!document.querySelector('#rec-pcals-t tr button[data-focus-key="pcal:' + id + '"]'), c7.id, { timeout: 15000 });
     await page.evaluate((id) => IL.go('#records/calibrations/p' + id), c7.id);
