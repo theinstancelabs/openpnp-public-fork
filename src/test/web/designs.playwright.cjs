@@ -565,7 +565,9 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     if (rd && late) {
       await page.evaluate((h) => IL.go(h), routeOf(rd));
       await page.waitForSelector('#btn-design-make', { state: 'visible', timeout: 15000 }).catch(() => null);
-      const make = (dis) => page.waitForFunction((d) => (document.getElementById('btn-design-make') || {}).disabled === d, dis, { timeout: 10000 })
+      // locked = disabled with the panel's reason shown; free = enabled with it gone (the state each step creates)
+      const make = (dis) => page.waitForFunction((d) => { const b = document.getElementById('btn-design-make'), w = document.getElementById('design-rest-why');
+        return !!b && b.disabled === d && (!w || w.hidden) === !d; }, dis, { timeout: 10000 })
         .catch(() => null).then(() => page.evaluate(() => {
           const b = document.getElementById('btn-design-make'), w = document.getElementById('design-rest-why');
           return { dis: b ? b.disabled : null, title: b ? b.title : null, why: w && !w.hidden ? w.textContent : null };
@@ -575,6 +577,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       // a press in the frame before the render locks it (a status that starts a task): make() refuses by itself, with a toast
       await page.evaluate(() => { const b = document.getElementById('btn-design-make'); b.disabled = false; b.click(); });
       const kept = await page.evaluate(() => ({ hash: location.hash, chosen: IL.run.form.sel, toast: (document.getElementById('toast') || {}).textContent || '' }));
+      await make(true);   // the next render locks it again
       ST.task = null;
       await page.evaluate((h) => { if (location.hash !== h) IL.go(h); }, routeOf(rd));   // a Make a board that went to Run: back
       const mFree = await make(false);
