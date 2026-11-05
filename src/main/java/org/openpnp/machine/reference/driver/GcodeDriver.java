@@ -548,8 +548,10 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     }
 
     public synchronized void connect() throws Exception {
+        // Instance Labs (BR-93): the old link's reader, closed below, reports nothing; the generation first, so it never
+        // sees the flag cleared while it still counts as the current link's
+        linkGeneration++;
         disconnectRequested = false;
-        linkGeneration++; // Instance Labs (BR-93): the old link's reader, closed below, reports nothing
         getCommunications().setDriverName(getName());
         Logger.debug("[{}] Connect", getCommunications().getConnectionName());
         getCommunications().connect();

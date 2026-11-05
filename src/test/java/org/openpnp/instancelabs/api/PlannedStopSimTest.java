@@ -247,6 +247,48 @@ public class PlannedStopSimTest {
     }
 
     /**
+     * BR-93 follow-up 1 (#53's merge-hunk review): on a lost link the planned stop is refused with the link's reason, as
+     * every route that sends a line, so the deployer waits. OpenPnP's Stop never runs, and no answer says the screw's
+     * motor stays powered (the controller may have reset).
+     */
+    @Test
+    public void aPlannedStopOnALostLinkIsRefusedWithTheLinksReason() throws Exception {
+        sim.server.dropLink(); // the controller leaves USB
+        long until = System.currentTimeMillis() + 5000;
+        while (ok("GET", "/api/machine", null).get("linkLost").isJsonNull()) {
+            assertTrue(System.currentTimeMillis() < until, "the lost link never showed");
+            Thread.sleep(20);
+        }
+        JsonObject r = call("POST", "/api/stop/planned", null);
+        assertEquals(409, lastStatus, lastBody);
+        String reason = r.get("reason").getAsString();
+        assertTrue(reason.contains("the link to the controller was lost at ") && reason.contains("restart il-openpnp"),
+                reason);
+        assertTrue(sim.machine.isEnabled(), "OpenPnP's Stop never ran");
+    }
+
+    /** BR-93 follow-up 1: a link lost after the route's checks is refused on the machine thread too. */
+    @Test
+    public void aLinkLostAfterThePlannedStopsChecksIsRefusedOnTheMachineThread() throws Exception {
+        MachineEndpoints.plannedStopHook = () -> {
+            try {
+                sim.server.dropLink();
+                long until = System.currentTimeMillis() + 5000;
+                while (sim.driver.getLinkLoss() == null && System.currentTimeMillis() < until) {
+                    Thread.sleep(20);
+                }
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
+        JsonObject r = call("POST", "/api/stop/planned", null);
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(r.get("reason").getAsString().contains("the link to the controller was lost at "), lastBody);
+        assertTrue(sim.machine.isEnabled(), "OpenPnP's Stop never ran");
+    }
+
+    /**
      * Review MAJOR: STOP's order, M18 B aside. OpenPnP's disable listeners act on the open link (the live machine.xml
      * switches VAC1 and VAC2 off at every disable: on a closed link each planned stop failed them with an IO error and
      * left OpenPnP's record of them on), then the lines without M18 B go out, then the link closes.

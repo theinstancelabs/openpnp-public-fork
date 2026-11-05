@@ -213,6 +213,7 @@ final class MachineEndpoints {
             throw ApiException.refused("No planned stop: " + (m == null ? "OpenPnP has no machine configured"
                     : "the dispense engine is not running") + ". The real STOP is POST /api/stop");
         }
+        ctx.requireLink(); // BR-93: on a lost link no answer may say the screw's motor stays powered
         String working = working(svc, m);
         if (working != null) {
             throw refusedWhile(working);
@@ -236,6 +237,7 @@ final class MachineEndpoints {
                 return now;
             }
             try {
+                ctx.requireLink(); // again on the machine thread, as working()
                 GcodeDriver.PlannedStop p = svc.plannedStop(m, () -> ctx.switchOff.stop(m));
                 if (p == null) {
                     actions.add("machine was already stopped");
