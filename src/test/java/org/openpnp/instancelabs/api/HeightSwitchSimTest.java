@@ -200,6 +200,13 @@ public class HeightSwitchSimTest {
         call("PUT", "/api/config", "{\"heightSwitch\":{\"n1\":null,\"needle\":null}}");
         assertEquals(400, lastStatus, lastBody);
         assertTrue(lastBody.contains("/api/height-switch/measure"), lastBody);
+        // review NIT: K_switch is of this home's trips only; after a new home it is null, with the reason
+        sim.machine.home();
+        JsonObject later = heightSwitchStatus();
+        assertTrue(later.get("kSwitch").isJsonNull(), later.toString());
+        assertEquals("N1 has no accepted trip on the height switch in this home", later.get("kSwitchWhy")
+                .getAsString());
+        assertTrue(hs.get("kSwitchWhy").isJsonNull(), "both of this home: no reason: " + hs);
     }
 
     /** Without zStart and zFloor the window is 1.0 above to 0.5 past the tool's accepted trip of this home. */

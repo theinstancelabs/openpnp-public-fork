@@ -67,12 +67,18 @@ final class HeightSwitchEndpoints {
     /** {@code dispense.heightSwitch} of the status, from the settings and memory only: it never sends G-code. */
     static Map<String, Object> status(DispenseService svc, DispenseConfig c) {
         DispenseConfig.HeightSwitchTrip n1 = c.heightSwitch.n1, needle = c.heightSwitch.needle;
-        // a sum of raw Z heights holds for the home both were measured under only
-        Double k = n1 != null && needle != null && n1.homeAtMs != null && n1.homeAtMs.equals(needle.homeAtMs)
-                ? Double.valueOf(n1.tripRawZ + needle.tripRawZ) : null;
+        // a sum of raw Z heights holds for the home both were measured under only, while it is this home
+        Long home = svc.getHomeTracker().getLastHomeAtMs();
+        String who = !thisHome(n1, home) ? "N1" : !thisHome(needle, home) ? "the needle" : null;
         HeightSwitch.Read last = svc.getLastHeightSwitchRead();
-        return Views.map("place", c.location(HeightSwitch.PLACE), "n1", n1, "needle", needle, "kSwitch", k,
-                "lastRead", last == null ? null : lastRead(last));
+        return Views.map("place", c.location(HeightSwitch.PLACE), "n1", n1, "needle", needle, "kSwitch",
+                who == null ? Double.valueOf(n1.tripRawZ + needle.tripRawZ) : null, "kSwitchWhy",
+                who == null ? null : who + " has no accepted trip on the height switch in this home", "lastRead",
+                last == null ? null : lastRead(last));
+    }
+
+    private static boolean thisHome(DispenseConfig.HeightSwitchTrip t, Long home) {
+        return t != null && home != null && home.equals(t.homeAtMs);
     }
 
     private static Map<String, Object> lastRead(HeightSwitch.Read r) {
