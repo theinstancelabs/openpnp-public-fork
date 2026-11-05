@@ -399,7 +399,7 @@ python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 - `tests/test_docs.py` checks the README's USB-identity instructions, including that its `sed` line works.
 - The golden tests compare reply text exactly and timing within 3 %.
 - `--sim-cap` (BR-47): with it off, M115 equals the golden byte for byte; with it on, the line comes last before the
-  `ok` on both personalities (`test_golden.py` `SimulatorCapability`, and through the pty in `test_transport.py`).
+  `ok` on stock and il-safety (`test_golden.py` `SimulatorCapability`, and through the pty in `test_transport.py`).
 - `tests/test_il_holdb.py` covers il-holdB (BR-92): its M115, and B held through the idle timeout while `M18 B`, `M84`
   and a power cycle still release it.
 
@@ -507,5 +507,5 @@ Results on 10-31 (before BR-43/47):
   - M206 offsets.
 - The il-safety firmware line keeps the stock build date; the real il build's date is unknown.
 - The il-holdB firmware line is the one Backend's linux_native build printed, with its build date and
-  `MACHINE_TYPE:SimRap 1.4`; the flashed image's line will differ in both (the stock board says
-  `MACHINE_TYPE:LumenPnP`). The engine reads only the marker.
+  `MACHINE_TYPE:SimRap 1.4`; the flashed image's differs in both (firmware/holdB/README.md: `… il-holdB (Nov  4 2026
+  22:37:24)`, and the board says `MACHINE_TYPE:LumenPnP`). The engine reads only the marker.

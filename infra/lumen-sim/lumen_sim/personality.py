@@ -4,6 +4,7 @@ il/holdB 75fb46ebc (il-holdB).
 Numbers come from the stock source wt/marlin-stock-7776c73 (Configuration.h / Configuration_adv.h) and the
 il/safety diff, as listed in RESEARCH.md section 5. il/holdB is stock with DISABLE_IDLE_J off and a version marker.
 """
+import copy
 
 FIRMWARE_LINE = ("FIRMWARE_NAME:Marlin bugfix-2.1.x (Sep 19 2024 13:39:21) "
                  "SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 "
@@ -72,11 +73,10 @@ IL_SAFETY = Personality("il-safety", steps=[320.0, 320.0, 160.0, 4.44, 4.44],
                         emergency_parser=True, host_watchdog=True, onoff_right_outputs=True,
                         homing_abort=True, outputs_off_on_kill=True)
 
-IL_HOLDB = Personality("il-holdB", steps=[320.0, 320.0, 40.0, 4.44, 4.44],
-                       max_accel=[10000, 10000, 10000, 10000, 10000], b_current=200,
-                       emergency_parser=False, host_watchdog=False, onoff_right_outputs=False,
-                       homing_abort=False, outputs_off_on_kill=False, firmware_line=HOLDB_FIRMWARE_LINE,
-                       disable_idle="XYZA")  # DISABLE_IDLE_J off: B keeps its angle through the idle timeout
+# stock plus the marker, with DISABLE_IDLE_J off (B keeps its angle through the idle timeout): copied, so a fix to
+# stock's numbers reaches it
+IL_HOLDB = copy.deepcopy(STOCK)
+IL_HOLDB.name, IL_HOLDB.firmware_line, IL_HOLDB.disable_idle = "il-holdB", HOLDB_FIRMWARE_LINE, "XYZA"
 
 PERSONALITIES = {"stock": STOCK, "il-safety": IL_SAFETY, "il-holdB": IL_HOLDB}
 

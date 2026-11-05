@@ -62,6 +62,16 @@ class IdleTimeout(unittest.TestCase):
                 b.send(how)
             self.assertFalse(enabled(b)["B"], how)
 
+    def test_m112_still_releases_b(self):
+        """kill(): every axis lets go 0.85 s after M112, B with them."""
+        b = energised()
+        t0 = b.t
+        b.write("M112\n")
+        b.run_until(t0 + 0.8)
+        self.assertTrue(enabled(b)["B"])
+        b.run_until(t0 + 0.9)
+        self.assertFalse(enabled(b)["B"])
+
 
 if __name__ == "__main__":
     unittest.main()
