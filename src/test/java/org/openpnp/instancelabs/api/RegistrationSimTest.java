@@ -465,6 +465,9 @@ public class RegistrationSimTest {
         assertEquals(res.get("registrationId").getAsString(), reg.get("id").getAsString());
         assertEquals(reg.get("id").getAsString(), p1.getAsJsonObject("source").get("registrationId").getAsString());
         assertTrue(p1.getAsJsonObject("interlocks").get("ok").getAsBoolean(), p1.toString());
+        // BR-81: the registration keeps the board's outline (its 40 x 30 mm), and the run below still pastes its board
+        assertEquals("[0.0,0.0,40.0,30.0]", ok(get("/api/config")).getAsJsonObject("boardRegistrations").entrySet()
+                .iterator().next().getValue().getAsJsonObject().get("boardRectMm").toString());
         // the run: the clean check finds copper at every dot (the dots lie on the pads), then dispenses
         sim.server.mark();
         JsonObject runRes = ok(post("/api/run", "{\"planId\":\"" + p1Id + "\",\"wait\":true}")).getAsJsonObject("result");
