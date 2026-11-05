@@ -213,6 +213,7 @@ final class MachineEndpoints {
             throw ApiException.refused("No planned stop: " + (m == null ? "OpenPnP has no machine configured"
                     : "the dispense engine is not running") + ". The real STOP is POST /api/stop");
         }
+        ctx.requireLink(); // BR-93: on a lost link no answer may say the screw's motor stays powered
         String working = working(svc, m);
         if (working != null) {
             throw refusedWhile(working);
@@ -236,6 +237,7 @@ final class MachineEndpoints {
                 return now;
             }
             try {
+                ctx.requireLink(); // again on the machine thread, as working()
                 GcodeDriver.PlannedStop p = svc.plannedStop(m, () -> ctx.switchOff.stop(m));
                 if (p == null) {
                     actions.add("machine was already stopped");
@@ -253,8 +255,13 @@ final class MachineEndpoints {
                 actions.add("planned stop: OpenPnP Stop, its DISABLE_COMMAND without the screw-off line: "
                         + (sent.isEmpty() ? "no line acknowledged" : String.join(", ", sent))
                         + (failed.isEmpty() ? "" : " (no ok for " + String.join(", ", failed) + ")")
-                        + "; the link closed, the screw's motor stays powered");
+                        + (ctx.linkLoss() != null // BR-93: lost while the lines went out, so it recorded the motor off
+                                ? "; the link was lost meanwhile: the screw's motor counts as off"
+                                : "; the link closed, the screw's motor stays powered"));
                 return null;
+            }
+            catch (ApiException e) {
+                return e; // the link's refusal, the same as before the checks
             }
             catch (Exception e) {
                 Logger.warn(e, "web planned stop failed");
@@ -279,6 +286,9 @@ final class MachineEndpoints {
         }
         if (out instanceof String) {
             throw refusedWhile((String) out);
+        }
+        if (out instanceof ApiException) {
+            throw (ApiException) out;
         }
         if (out instanceof Exception) {
             throw ApiException.refused("No planned stop: " + rootMessage((Exception) out) + ". The real STOP is "

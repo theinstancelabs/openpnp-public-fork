@@ -11,7 +11,7 @@ from collections import deque
 
 from . import personality as personalities
 from .faults import OK_FAULTS, Faults, seconds
-from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, Machine
+from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, PA5_TOOLS, Machine, Pa5Switch
 from .marlin import AXES, Firmware, f32
 
 INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": 'echo:Unknown command: "M999999"'}
@@ -19,12 +19,14 @@ INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": '
 # is refused, not ignored. Ok faults check theirs in faults.KEYS; physical faults take their axes (PHYSICAL_FAULTS).
 REQUEST_KEYS = {"state": (), "clear": (), "stop": (), "power_cycle": ("link", "down_s"),
                 "set": ("kill_messages", "sim_cap", "vacuum", "rs485", "mcp3426", "surface_z", "surfaces", "seal_drop",
-                        "homing_move_delay_s")}
+                        "homing_move_delay_s", "pa5_switch")}
 FAULT_KEYS = {"inject": ("kind", "text", "after_s"), "inject_bytes": ("hex", "text", "after_s"),
               "partial": ("text", "after_s"), "halt": ("reason",), "disconnect": ("down_s",), "frozen": ("on",)}
 # Faults of the physical machine (INF-08): fault -> the axis keys it takes (mm, signed; at least one)
 PHYSICAL_FAULTS = {"home_offset": ("x", "y"), "lost_steps": ("x", "y"), "z_shift": ("z",), "z_drop": ("z",)}
 REGION = ("x0", "y0", "x1", "y1", "z")  # a surface region of set's "surfaces" (physical mm)
+PA5_PRESS = ("tool", "x0", "y0", "x1", "y1", "trip_z")  # a press window of set's "pa5_switch" (physical mm)
+PA5_KEYS = ("presses", "overtravel_mm", "repeat_sd_mm", "pressed_level", "seed")
 
 
 def only(req, keys, what):
@@ -200,7 +202,7 @@ class Simulator:
             self._actions.append({"action": "power_cycle", "link": link, "down_s": down})
             return {"ok": True}
         if cmd == "set":
-            return self._set(req)
+            return self._set(req, t)
         if cmd == "stop":
             self._actions.append({"action": "stop"})
             return {"ok": True}
@@ -275,11 +277,12 @@ class Simulator:
             m.switches[2] += v["z"]
         else:                        # z_drop: how far the head moves each time the Z driver lets go
             m.z_drop = v["z"]
+        self.fw.pa5(t)  # the head moved under the switch (or off it), where it is now (a move may run)
         # a homing move running toward a switch now ends where that switch triggers, and the firmware's wait with it
         self.fw.stepper.recheck_endstops(t)
         self.fw.wake(t)
 
-    def _set(self, req):
+    def _set(self, req, t):
         def integer(key):
             v = req[key]
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
@@ -295,6 +298,7 @@ class Simulator:
             raise ValueError("seal_drop must be an integer >= 0 (counts), not %r" % (drop,))
         homing_delay = seconds(req["homing_move_delay_s"], "homing_move_delay_s") \
             if "homing_move_delay_s" in req else None
+        pa5 = self._pa5_switch(req["pa5_switch"]) if "pa5_switch" in req else None
         rs485 = req.get("rs485", {})
         if not isinstance(rs485, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in rs485.items()):
             raise ValueError("rs485 must map request hex to reply hex (strings), not %r" % (rs485,))
@@ -317,7 +321,41 @@ class Simulator:
             self.machine.seal_drop = drop
         if homing_delay is not None:
             self.machine.homing_move_delay_s = homing_delay
+        if "pa5_switch" in req:
+            self.machine.pa5 = pa5
+            self.fw.pa5(t)  # wired under the head: its state from where the head is
         return {"ok": True}
+
+    @staticmethod
+    def _pa5_switch(raw):
+        """set's "pa5_switch": {presses: [{tool: n1|needle, x0, y0, x1, y1, trip_z}], overtravel_mm (0.5),
+        repeat_sd_mm (0), pressed_level (1), seed (0)}; null removes it."""
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or not set(raw) <= set(PA5_KEYS) or not isinstance(raw.get("presses"), list) \
+                or not raw["presses"]:
+            raise ValueError("pa5_switch takes presses (a non-empty list) and %s, not %r" % (", ".join(PA5_KEYS[1:]),
+                                                                                          raw))
+        presses = []
+        for r in raw["presses"]:
+            if not isinstance(r, dict) or set(r) != set(PA5_PRESS) or not isinstance(r["tool"], str) \
+                    or r["tool"] not in PA5_TOOLS:
+                raise ValueError("a PA5 press takes tool (%s), x0, y0, x1, y1 and trip_z (mm), not %r"
+                                 % (" or ".join(PA5_TOOLS), r))
+            v = dict({k: mm(r[k], k) for k in PA5_PRESS[1:]}, tool=r["tool"])
+            if v["x0"] > v["x1"] or v["y0"] > v["y1"]:
+                raise ValueError("a PA5 press needs x0 <= x1 and y0 <= y1, not %r" % (r,))
+            presses.append({k: v[k] for k in PA5_PRESS})
+        spec = {k: mm(raw[k], k) for k in ("overtravel_mm", "repeat_sd_mm") if k in raw}
+        if not (0 <= spec.get("overtravel_mm", 0) <= 10 and 0 <= spec.get("repeat_sd_mm", 0) <= 1):
+            raise ValueError("overtravel_mm must be 0-10 and repeat_sd_mm 0-1 (mm), not %r" % (spec,))
+        for k, ok in (("pressed_level", (0, 1)), ("seed", None)):
+            if k in raw:
+                v = raw[k]
+                if isinstance(v, bool) or not isinstance(v, int) or (ok is not None and v not in ok):
+                    raise ValueError("%s must be %s, not %r" % (k, "0 or 1" if ok else "an integer", v))
+                spec[k] = v
+        return Pa5Switch(presses, **spec)
 
     @staticmethod
     def _regions(raw):
@@ -361,6 +399,7 @@ class Simulator:
             "seal_drop": self.machine.seal_drop,
             "homing_move_delay_s": self.machine.homing_move_delay_s,
             "n1_sealed": self.machine.n1_sealed(fw),
+            "pa5": None if self.machine.pa5 is None else self.machine.pa5.describe(),
             "stepper_timeout_s": fw.stepper_timeout_ms / 1000.0,
             "homed": {"X": fw.homed[0], "Y": fw.homed[1], "Z": fw.homed[2]},
             "homing_phase": fw.homing_phase,

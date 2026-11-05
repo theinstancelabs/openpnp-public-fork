@@ -123,9 +123,10 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
       for (let i = 0; i < 120 && job && job.id; i++) {
         await sleep(2000);
         const j = await page.evaluate((id) => IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(id)).catch(() => null), job.id);
-        if (j && /^(done|stopped|cancelled|failed)$/.test(String(j.state))) break;   // the engine's ended(): deciding and planning still run
+        if (j && /^(done|stopped|cancelled|failed)$/.test(String(j.state))) break;   // until it ended (the engine's ended())
       }
-      // and the page's own status: a click while it still shows the job is refused ("Locked while the pad calibration runs")
+      // the page's own status lags the job's end by up to a poll: a click while it still shows the job is refused ("Locked while
+      // the pad calibration runs"; the race that ejected #35 from the merge queue)
       await page.waitForFunction(() => !IL.taskRunning(IL.S.status) && !IL.padProfile.jobLock(IL.S.status), null, { timeout: 15000 }).catch(() => null);
       st0 = await page.evaluate(() => IL.api('GET', '/api/status'));
     }
@@ -140,6 +141,34 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
       && !(await shown(page, '#run-hero')) && await shown(page, '#btn-rs-start') && (await page.textContent('#run-start .eyebrow')).trim() === 'Make a board', s1);
     check('(1) today\'s pages are one link away: Step by step', await shown(page, '#rs-step-by-step')
       && (await page.getAttribute('#rs-step-by-step', 'href')) === '#run/steps');
+    // the gauge is read with the pump on and the valve closed (BR-03's pump only): since #12 Pressure on parks over the waste
+    const gaugeBtn = await page.evaluate(() => ({ pumpOnly: IL.hasPumpOnly(IL.S.status), pump: (document.getElementById('rs-pump') || {}).dataset || null,
+      pumpShown: !!document.getElementById('rs-pump') && !document.getElementById('rs-pump').hidden, onShown: !!document.getElementById('rs-pressure') && !document.getElementById('rs-pressure').hidden }));
+    check('(1) Before you start: the gauge\'s button is Pump on (valve closed, nothing moves), not Pressure on', gaugeBtn.pumpOnly && gaugeBtn.pumpShown
+      && gaugeBtn.pump && gaugeBtn.pump.fix === 'pressure-pump' && !gaugeBtn.onShown, gaugeBtn);
+    // a need card redraws when anything it shows changes: a fix-it's label too (the frame offset to confirm, read again)
+    const keys = await page.evaluate(() => { const card = (label) => [{ key: 'needle', state: 'need', title: 'T', detail: 'D', fixes: [{ fix: 'confirm-frame', label }] }];
+      return IL.run.flow.needKey ? [IL.run.flow.needKey(card('Confirm frame offset 0.512 mm')), IL.run.flow.needKey(card('Confirm frame offset 0.498 mm'))] : null; });
+    check('(1) a need card\'s key follows its fix-it\'s label (Start and Checks share it)', !!keys && keys[0] !== keys[1], keys);
+    // Start keys its own cards with that shared key (a spy sees Start's render call it)
+    const startKeyed = await page.evaluate(async () => {
+      const f = IL.run.flow, k = f.needKey;
+      let n = 0;
+      f.needKey = function () { n++; return k.apply(this, arguments); };
+      IL.render();
+      await new Promise((r) => setTimeout(r, 300));
+      f.needKey = k;
+      return n;
+    });
+    check('(1) Start keys its need cards with the shared needKey (a spy sees its render call it)', startKeyed > 0, startKeyed);
+    // a backend without the pump-only action (before #12: no I12): Pressure on as before, no Pump on
+    await fakeStatus(page, (st) => { st.interlocks = (st.interlocks || []).filter((i) => i.id !== 'I12'); });
+    const pre12 = await page.waitForFunction(() => (document.getElementById('rs-pressure') || {}).hidden === false && (document.getElementById('rs-pump') || {}).hidden !== false,
+      null, { timeout: 8000 }).then(() => true, () => false);
+    check('(1) no I12 (a backend before #12): the gauge\'s button is Pressure on, Pump on hidden', pre12,
+      await page.evaluate(() => ({ pump: !(document.getElementById('rs-pump') || {}).hidden, on: !(document.getElementById('rs-pressure') || {}).hidden })));
+    await page.unroute('**/api/status');
+    await page.waitForFunction(() => (document.getElementById('rs-pump') || {}).hidden === false, null, { timeout: 8000 }).catch(() => null);
 
     // ---- (2) Design ---------------------------------------------------------------------------------------------------
     const boards = await page.evaluate(() => IL.api('GET', '/api/boards'));
@@ -217,6 +246,21 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     check('(6) a readiness need (no purge row) is a Needs-you card with its fix, and Start stays locked', n6.start && n6.cards.some((c) => /purge/i.test(c.key + ' ' + c.t) && c.fix), n6);
     await page.unroute('**/api/status');
     await page.waitForFunction(() => !document.querySelector('#rs-needs .ri[data-key*="purge" i]'), null, { timeout: 8000 }).catch(() => null);
+
+    // ---- (6b) Start's clean-pad card keeps the check's progress line live, as Checks' does (a refused run's I10 card,
+    // the check running: both stubbed, a state the SIM does not hold on demand)
+    let tourS = 3;
+    await fakeStatus(page, (st) => { st.run = Object.assign({}, st.run, { running: true, label: 'clean-pad check', elapsedS: tourS });
+      if (st.dispense && st.dispense.cleanPadCheck) st.dispense.cleanPadCheck.enabled = true; });
+    const refused6 = await page.evaluate(() => { const was = IL.run.refused || null; IL.run.refused = { runId: 'run-flow-6b', planId: IL.S.plan && IL.S.plan.planId, message: 'I10: pads not clean' }; IL.render(); return was; });
+    const tour1 = await page.waitForFunction(() => (document.querySelector('#rs-need-cards .clean-tour') || {}).textContent || null, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+    tourS = 45;
+    const tour2 = await page.waitForFunction((a) => { const t = (document.querySelector('#rs-need-cards .clean-tour') || {}).textContent; return t && t !== a ? t : null; }, tour1,
+      { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+    check('(6b) Start: the clean-pad check\'s progress line in its card moves with the check (as in Checks)', !!tour1 && !!tour2 && tour1 !== tour2, { tour1, tour2 });
+    await page.unroute('**/api/status');
+    await page.evaluate((was) => { IL.run.refused = was; IL.render(); }, refused6);
+    await page.waitForFunction(() => !document.querySelector('#rs-need-cards .clean-tour'), null, { timeout: 8000 }).catch(() => null);
 
     // ---- (7) a refusal on the way stops the chain ---------------------------------------------------------------------
     const sent7 = [];
@@ -298,6 +342,17 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     await page.click('#rv-done-go');
     const dlg11 = await page.waitForSelector('#dlg-run', { state: 'visible', timeout: 8000 }).then(() => true, () => false);
     check('(11) Finish the pads left opens the run confirm for the pads left (today\'s)', dlg11 && /left/i.test(await page.textContent('#dlg-run')));
+    const g11 = dlg11 ? await page.evaluate(() => { const b = document.getElementById('run-confirm-pump'), on = document.getElementById('run-confirm-pressure');
+      return { pump: !!b && !b.hidden && !b.closest('[hidden]'), fix: b ? b.dataset.fix : null, on: !!on && !on.hidden }; }) : null;
+    check('(11) the run confirm reads the gauge with the pump only too (valve closed, nothing moves), not Pressure on', !!g11 && g11.pump
+      && g11.fix === 'pressure-pump' && !g11.on, g11);
+    // a backend before #12 (no I12) has no pump-only start: there "Pump on" would open the valve wherever the needle is
+    await fakeStatus(page, (st) => { st.interlocks = (st.interlocks || []).filter((i) => i.id !== 'I12'); });
+    const pre11 = dlg11 ? await page.waitForFunction(() => { const b = document.getElementById('run-confirm-pump'), on = document.getElementById('run-confirm-pressure');
+      return !!on && !on.hidden && (!b || b.hidden); }, null, { timeout: 8000 }).then(() => true, () => false) : false;
+    check('(11) no I12 (a backend before #12): the run confirm offers Pressure on, not Pump on', pre11, await page.evaluate(() => ({
+      pump: !((document.getElementById('run-confirm-pump') || {}).hidden !== false), on: (document.getElementById('run-confirm-pressure') || {}).hidden === false })));
+    await page.unroute('**/api/status');
     if (dlg11) await page.click('#btn-run-cancel');
     await page.screenshot({ path: path.join(OUT, 'run-done.png') });
 
@@ -323,6 +378,36 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     await page.evaluate(() => IL.go('#run/checks'));
     check('(9) Step by step: today\'s Checks with its board picture', await page.waitForSelector('#plan-interlocks', { state: 'visible', timeout: 10000 }).then(() => true, () => false)
       && await shown(page, '#run-hero') && !(await shown(page, '#run-start')));
+
+    // ---- (9b) the gauge's other ways in: Checks' Regulator card and Setup's regulator row read it with the pump only (I12),
+    // as Start does; a backend before #12 (no I12): the Pressure panel and Pressure on, as before
+    const psi9 = await page.evaluate(() => IL.S.status.dispense.profile.pressurePsi);
+    await page.evaluate(() => IL.attest.clear('regulator'));
+    const suFix = () => page.waitForFunction(() => { const b = document.querySelector('.band__item[data-step="regulator"] [data-fix]'); return b && !b.closest('[hidden]') ? b.dataset.fix : null; },
+      null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+    // Checks' own Regulator card on the page, not the model (the review of #59: a card that rewrites its fixes passed)
+    const reg9 = await page.waitForFunction(() => { const bs = [...document.querySelectorAll('#chk-needs .ri[data-key="regulator"] [data-fix]')];
+      return bs.length && IL.hasPumpOnly(IL.S.status) ? bs.map((b) => b.dataset.fix) : null; }, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+    const gate9 = await page.evaluate(() => IL.fixes['pressure-pump'].gate(IL.S.status) || '');
+    await page.evaluate(() => IL.go('#setup'));
+    const su9 = await suFix();
+    const suText9 = await page.evaluate(() => (document.querySelector('.band__item[data-step="regulator"]') || {}).textContent || '');
+    check('(9b) Checks\' Regulator card and Setup\'s row: Pump on to read the gauge (I12), not Pressure on', !!reg9 && reg9[0] === 'pressure-pump'
+      && !reg9.some((f) => f === 'pressure-on' || f === 'view:pressure') && su9 === 'pressure-pump', { reg9, su9 });
+    check('(9b) with I12 Setup\'s row says the pump keeps the valve closed, not "Switch the pressure on" (the review of #59)',
+      /valve stays closed/.test(suText9) && !/Switch the pressure on/.test(suText9), suText9);
+    await fakeStatus(page, (st) => { st.interlocks = (st.interlocks || []).filter((i) => i.id !== 'I12'); });
+    const reg9b = await page.waitForFunction(() => { const r = IL.ready().items.find((x) => x.key === 'regulator');
+      return r && r.state === 'need' && !IL.hasPumpOnly(IL.S.status) ? r.fixes.map((f) => f.fix || 'view:' + f.view) : null; }, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+    const su9b = await page.waitForFunction(() => { const b = document.querySelector('.band__item[data-step="regulator"] [data-fix]');
+      return b && !b.closest('[hidden]') && b.dataset.fix !== 'pressure-pump' ? b.dataset.fix : null; }, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+    check('(9b) no I12 (a backend before #12): Checks\' card opens the Pressure panel and Setup\'s row is Pressure on, no Pump on', !!reg9b && reg9b[0] === 'view:pressure'
+      && !reg9b.includes('pressure-pump') && su9b === 'pressure-on', { reg9b, su9b });
+    // the pump-only fix is locked without I12 wherever it is offered: its own gate, not only the cards' choice (the review of #59)
+    const gate9b = await page.evaluate(() => { const b = IL.fixButton({ fix: 'pressure-pump', label: 'Pump on' }); return { disabled: b.disabled, why: b.dataset.fixGate || '' }; });
+    check('(9b) the Pump on fix is locked without I12, naming it; with I12 its gate does not', gate9b.disabled && /I12/.test(gate9b.why) && !/I12/.test(gate9), { gate9, gate9b });
+    await page.unroute('**/api/status');
+    await page.evaluate((v) => IL.attest.set('regulator', v), psi9);
 
     check('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
     check('no native dialogs', dialogs.length === 0, dialogs);

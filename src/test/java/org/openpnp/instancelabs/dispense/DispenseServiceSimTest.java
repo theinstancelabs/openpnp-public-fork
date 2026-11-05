@@ -146,7 +146,9 @@ public class DispenseServiceSimTest {
 
             @Override
             public List<Dot> inspect(Frame before, Frame after) {
-                double g = gapsSeen[i++];
+                // BR-89's 2 check dots after the ladder: steady dots where the others landed
+                double g = i < gapsSeen.length ? gapsSeen[i] : gapsSeen[0];
+                i++;
                 double dia = g <= 0.05 + 1e-9 ? 1.45 : 1.05;
                 return Arrays.asList(new Dot(0, 0, dia, 0.3, 0.9));
             }
@@ -1169,7 +1171,7 @@ public class DispenseServiceSimTest {
         assertEquals(rows, svc.getDb().query("SELECT id FROM needle_touchoff").size(), "nothing recorded");
         assertEquals(0.45 * 1.16, cam.cutMm, 1e-9);
         assertEquals(0.8, cam.radiusMm, 1e-9, "half the default pitch of 1.6 mm");
-        assertEquals(6, cam.spots.size(), "one frame per dot");
+        assertEquals(6 + NeedleTouchOff.CHECK_DOTS, cam.spots.size(), "one frame per dot, BR-89's 2 check dots too");
         for (int i = 0; i < 6; i++) {
             for (int j = 0; j < 6; j++) {
                 assertEquals((j - i) * 1.6, cam.spots.get(i).get(j)[0], 1e-9, "frame " + i + ", spot " + j);
@@ -1197,7 +1199,7 @@ public class DispenseServiceSimTest {
      */
     @Test
     public void touchOffRefusesDropletsAsItsReference() throws Exception {
-        double[] sizes = {0.40, 0.42, 1.02, 1.05, 1.04, 1.06};
+        double[] sizes = {0.40, 0.42, 1.02, 1.05, 1.04, 1.06, 1.05, 1.05}; // and BR-89's 2 check dots
         svc.setDotImager(new DotImager() {
             @Override
             public boolean isAvailable() {
