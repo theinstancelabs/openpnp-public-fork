@@ -271,7 +271,8 @@
         b.addEventListener('click', () => choose(x, b));
         return b;
       });
-      return cards.concat(el('a', { class: 'design design--new', id: 'rs-new-design', href: '#designs' }, IL.icon('i-plus'), 'New design'));
+      const note = R.boardsErr ? [el('p', { class: 'reason reason--need rf-note', text: 'Could not read the list again (' + R.boardsErr + '): these are the designs from before.' })] : [];
+      return note.concat(cards, el('a', { class: 'design design--new', id: 'rs-new-design', href: '#designs' }, IL.icon('i-plus'), 'New design'));
     });
     // Load side 1
     const seat = seatOf(e);
