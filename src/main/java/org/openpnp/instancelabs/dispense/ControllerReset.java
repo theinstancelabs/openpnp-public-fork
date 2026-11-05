@@ -64,6 +64,10 @@ import java.util.regex.Pattern;
  * <p>After a switch-off or a reset a start angle can only be set once the screw has turned since (the dot pair that
  * measures it turns it; {@link #whyNoAngle}): the angle shown before it, one click away, would otherwise clear I11.</p>
  *
+ * <p>BR-93: a link to the controller lost unasked (the board left USB, a read or a write failed) may have been a reset
+ * too (a board that leaves USB has often lost power): {@link #linkLost} makes the position unknown and dates the screw
+ * count and the motor's switch-off, as an unread connect and a switch-off do, until the attested home.</p>
+ *
  * <p>Times are epoch ms from an injectable clock. Thread safe.</p>
  */
 public final class ControllerReset {
@@ -80,7 +84,7 @@ public final class ControllerReset {
     public static final double BOOT_B_DEG = 720;
     /** Journal codes (the events table's {@code code}): a connect read the boot position. */
     public static final String EVENT_RESET = "CONTROLLER_RESET";
-    /** A connect could not read the position (it may have been a reset). */
+    /** A connect could not read the position, or the link was lost (BR-93): either may have been a reset. */
     public static final String EVENT_UNREAD = "POSITION_UNREAD";
     /** A home made an unknown position known again. */
     public static final String EVENT_KNOWN = "POSITION_KNOWN";
@@ -110,6 +114,9 @@ public final class ControllerReset {
      * (I4).
      */
     public static final String EVENT_FRAME_MOVED = "Z_FRAME_MOVED";
+    /** BR-93: the way back after a lost link (the refusals while it is lost). */
+    public static final String LINK_LOST_REMEDY = "once the board is back on USB: Stop, then Start (or restart "
+            + "il-openpnp), then Home as after a reset";
     private static final double TOL = 1e-3;
     private static final Pattern WORD = Pattern.compile("(?:^|\\s)([A-Z]):(-?\\d+(?:\\.\\d+)?)");
 
@@ -153,6 +160,8 @@ public final class ControllerReset {
     private boolean resetUnhomed;
     /** When the last home after a detected reset moved the Z frame, or null. */
     private Long frameMovedAtMs;
+    /** BR-93: the last lost link put on record (the driver's time of it), or null. */
+    private Long linkLostAtMs;
     /** The changes made and not written yet (under this lock), in their order. */
     private final List<Event> toWrite = new ArrayList<>();
     /** One journal writer at a time, outside this lock (a stream's move never waits for an insert). */
@@ -349,6 +358,35 @@ public final class ControllerReset {
             resetUnhomed = true; // its home will move the Z frame
             record(EVENT_RESET, now, unknownWhy);
         }
+    }
+
+    /** BR-93: "the link to the controller was lost at 15:07 (the controller left USB: … is gone)". */
+    public static String linkLostWhy(long atMs, String cause) {
+        return "the link to the controller was lost at " + ZCheck.clock(atMs) + " (" + cause + ")";
+    }
+
+    /**
+     * BR-93: the open link to the controller was lost at {@code atMs} ({@code why}, {@link #linkLostWhy}): it may have
+     * been a reset, as at a connect whose position could not be read. The position is unknown until a home (the
+     * attested one), that home moves the Z frame, and the screw's motor may have gone off (a reset boots with it off):
+     * the start angle wants a measure. On record once per loss; no I/O (the driver's reader thread calls it): {@link
+     * #flush} writes it. Returns whether it was new.
+     */
+    public synchronized boolean linkLost(long atMs, String why) {
+        if (linkLostAtMs != null && linkLostAtMs == atMs) {
+            return false;
+        }
+        linkLostAtMs = atMs;
+        idleCheck(clock.getAsLong()); // an idle switch-off before it goes on record first
+        unknown(why + ", so the controller may have been reset", atMs);
+        resetUnhomed = true; // and its home may move the Z frame
+        watchdogTripAtMs = null; // maybe a reset: a trip reported now is a new one
+        record(EVENT_UNREAD, atMs, unknownWhy);
+        Event off = new Event(EVENT_MOTOR_OFF, atMs, offText(atMs, "the link to the controller was lost: a reset "
+                + "switches it off"));
+        switchedOff(off);
+        toWrite.add(off);
+        return true;
     }
 
     /**
