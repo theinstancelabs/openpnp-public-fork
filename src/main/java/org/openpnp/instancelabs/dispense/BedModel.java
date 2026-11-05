@@ -360,8 +360,8 @@ public final class BedModel {
         zMarginMm = atLeast0(j, "zMarginMm", "");
         Double depth = optional(j, "contactDepthMm", "");
         contactDepthMm = depth == null ? 0.25 : depth;
-        if (contactDepthMm < 0) {
-            throw new IllegalArgumentException("contactDepthMm must be 0 or more");
+        if (contactDepthMm < 0 || contactDepthMm > 1.0) {
+            throw new IllegalArgumentException("contactDepthMm must be 0 to 1.0"); // as lumen-sim's loader (Infra 11-04)
         }
         JsonObject bed = object(j, "bed", "");
         JsonObject plane = object(bed, "plane", "bed");
@@ -414,6 +414,15 @@ public final class BedModel {
         JsonArray ts = array(j, "tools", "");
         for (int i = 0; i < ts.size(); i++) {
             tools.add(readTool(ts.get(i), "tools[" + i + "]", toolIds));
+        }
+        int n1s = 0, needles = 0;
+        for (Tool t : tools) {
+            n1s += "n1".equals(t.moves) ? 1 : 0;
+            needles += "needle".equals(t.moves) ? 1 : 0;
+        }
+        if (n1s != 1 || needles != 1) {
+            throw new IllegalArgumentException("tools: exactly one with moves n1 and one with moves needle (here " + n1s
+                    + " and " + needles + "): every leg sweeps both tips");
         }
         for (Tool t : tools) {
             for (Layer l : t.layers) {

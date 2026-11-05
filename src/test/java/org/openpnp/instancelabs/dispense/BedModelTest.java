@@ -9,6 +9,7 @@ import java.util.function.Consumer;
 
 import org.junit.jupiter.api.Test;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -67,6 +68,13 @@ public class BedModelTest {
         refused("moves", j -> tool(j, 1).addProperty("moves", "both"));
         refused("mmPerRaw", j -> j.getAsJsonObject("seesaw").getAsJsonObject("n1").remove("mmPerRaw"));
         refused("endStopsRaw", j -> j.getAsJsonObject("seesaw").add("endStopsRaw", new JsonParser().parse("[63,0]")));
+        // the check sweeps N1 and the needle on every leg: exactly one of each (#66 review MAJOR 4)
+        refused("moves needle", j -> j.add("tools", tools(j, 0, 2)));
+        refused("moves n1", j -> j.add("tools", tools(j, 1, 2)));
+        refused("moves n1", j -> tool(j, 1).addProperty("moves", "n1"));
+        // both loaders cap the contact depth (Infra and Backend 11-04)
+        refused("contactDepthMm must be 0 to 1.0", j -> j.addProperty("contactDepthMm", 1.5));
+        refused("contactDepthMm must be 0 to 1.0", j -> j.addProperty("contactDepthMm", -0.1));
         // Process's per-part methods: any non-empty how, never a fixed list (Backend 20:5x)
         JsonObject ok = BedFixture.json();
         obj(ok, 0).getAsJsonObject("measured").getAsJsonObject("top").addProperty("how", "caliper height + margin");
@@ -138,6 +146,15 @@ public class BedModelTest {
 
     static JsonObject tool(JsonObject j, int i) {
         return j.getAsJsonArray("tools").get(i).getAsJsonObject();
+    }
+
+    /** The fixture's tools {@code keep}, in that order. */
+    static JsonArray tools(JsonObject j, int... keep) {
+        JsonArray a = new JsonArray();
+        for (int i : keep) {
+            a.add(tool(j, i));
+        }
+        return a;
     }
 
     static JsonObject layer(JsonObject j, int tool, int layer) {

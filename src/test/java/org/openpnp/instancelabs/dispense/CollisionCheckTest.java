@@ -31,11 +31,11 @@ public class CollisionCheckTest {
         return CollisionCheck.check(m, Arrays.asList(legs), CollisionCheck.Options.contact(HOME));
     }
 
-    /** A model with one fixed tool (a plate under the head) and one block on the bed. */
+    /** The fixture's tools plus a fixed one (a plate under the head), and one block on the bed. */
     static BedModel plateAndBlock() throws Exception {
         JsonObject j = BedFixture.json();
-        j.add("tools", new JsonParser().parse("[{\"id\": \"probe\", \"moves\": \"fixed\", \"layers\": [{\"name\": \"plate\", "
-                + "\"at\": \"head\", \"outline\": {\"box\": [-1, -1, 1, 1]}, \"bottomZ\": 5}]}]"));
+        j.getAsJsonArray("tools").add(new JsonParser().parse("{\"id\": \"probe\", \"moves\": \"fixed\", \"layers\": "
+                + "[{\"name\": \"plate\", \"at\": \"head\", \"outline\": {\"box\": [-1, -1, 1, 1]}, \"bottomZ\": 5}]}"));
         j.add("objects", new JsonParser().parse("[{\"id\": \"block\", \"name\": \"the block\", \"kind\": \"fixed\", "
                 + "\"outline\": {\"box\": [10, -5, 20, 5]}, \"topZ\": 6, \"marginMm\": 1.0, \"touchable\": false, "
                 + "\"measured\": {\"top\": {\"how\": \"n1-touch\", \"errMm\": 0.05}}, \"state\": \"measured\"}]"));

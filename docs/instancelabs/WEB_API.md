@@ -601,7 +601,9 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
 The model is `<config>/instancelabs/collision-model.json` (schema 1, design §2, plus each object's `marginMm` in X/Y
 and a top-level `zMarginMm`; the fixture `src/test/resources/config/DispenseSimMachine/instancelabs/collision-model.json`
 is one file for the unit tests, the in-process SIM and lumen-sim). The engine reads it at its start and journals its
-version and SHA-256 (`BED_MODEL` `{at: start, file, version, digest, error}`); only the engine writes it.
+version and SHA-256 (`BED_MODEL` `{at: start, file, version, digest, error}`); only the engine writes it. Besides the
+design's rules, the loader (the engine's, as lumen-sim's) refuses a model without exactly one tool with `moves: n1` and
+one with `moves: needle` (every leg sweeps both tips), and a `contactDepthMm` outside 0 to 1.0.
 **Rollout:** no file: nothing is checked and every route runs as before; a file that fails validation: every hooked
 move answers 409 `collision` naming the problem; a valid file: enforced. Hooked in this build: `POST /api/jog`,
 `POST /api/move-to`, `POST /api/gcode` (G0/G1). Not yet: Home, the engine's programs, the N1 probe, OpenPnP's own
