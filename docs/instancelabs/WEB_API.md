@@ -107,7 +107,7 @@ is on: Pressure off first`).
 | `POST /api/prime` | `{rotationDeg?, wait?}` | Engine `runShots(waste, rotation, 1)`: a complete session (pressurise, prime, vent). Default `primeRotationDeg` (360.36° = one screw revolution of 1600 steps). Full I4. Manual only: board runs purge on the purge row. 409 while OpenPnP is busy (§2). |
 | `POST /api/test-dot` | `{rotationDeg?, wait?}` | Engine `runShots("waste-test-dot", rotation, 1)`; that place is kept = waste + `testDotOffset`. Default rotation = one dot of the dispense profile (`dispense.testDot.defaultRotationDeg`, 180.1802° for half a turn). Full I4. 409 while OpenPnP is busy (§2). |
 | `GET /api/locations` · `PUT /api/locations/{name}` | `{x, y, z}` | Named places: x/y of N2, z = surface Z in OpenPnP's frame (the N1 nozzle Z touching it). `waste-test-dot` is derived and cannot be set. Each place carries `setAtMs` and `homeAtMs` (the Z frame it was set under; null for a place saved before they were kept): after a failed Z check of this home ("Z moved"), a place set before that home is refused (409, I4 `place 'waste' Z 5.500 was taken at 13:40, before the home at 14:02 where Z moved 0.80 mm: take its Z again with N1 touching (Setup › Places)`) by prime, the test dot, shots, the dot ladder's and the touch-off's prime at the waste, a coupon's probe and weigh dots, until it is set again (the same values too). |
-| `POST /api/height-switch/measure` | `{tool: "n1" \| "needle", presses? (1..20, 5), zStart?, zFloor? (raw Z), tipClean?}` | BR-94: the tool presses the bed's height switch (PA5) `presses` times over the `height-switch` place (`PUT /api/locations/height-switch {x, y}`: the switch's top centre; the needle is aimed as programs aim it, with its landing + trim), in the steps of Process's `tools/switchz.py` (`HeightSwitch`): for either tool, the needle's valve and then its pump off first (`M107 P3`, `M107 P2`, as STOP orders them: the passthrough may have left them on, and N1's measure would carry a pressurised needle across the bed); travel Z, the pull-up and the idle read; down to `zStart` in the tool's coarse steps, each read (refused if it reads pressed on the way or there: start higher; a start past the trip goes at most one coarse step past it); a coarse descent (N1 0.25 mm, the needle 0.10) to the first trip; 0.40 back (refused if still pressed: the switch sticks or the tool is caught); a fine descent of 0.025 from 0.30 above to one fine step past the coarse trip, the trip being the first fine step that reads pressed; each later press from 1.0 above the last trip; no step past `zFloor`, and none above travel Z (the back move, the fine start and the lift stop there: past it the see-saw lowers the other tool); travel Z at the end, also after a refusal. A reply with no level (`Analog in`, `Output`, `protected`, no PA5) is read once more after the pull-up; a second one, or a line that times out, sends the tool up to travel Z (Z only) and ends the measure (409 with the reason, then the engine's recovery: position read back, unhomed); a STOP sends nothing more. N1 goes down as raw Z falls, the needle (the see-saw's other side) as it rises; the window is at most 2.0 mm. Without `zStart`/`zFloor`: 1.0 above and 0.5 past the tool's accepted trip of this home. Waits for the measure: `{tool, trips (raw Z), tripRawZ (mean), sdMm, rangeMm, presses, idleLevel, accepted, refused, why, homeAtMs, atMs}`. **Accepted** (at least 5 presses within 0.05 mm) is recorded at once as the tool's trip of this home (`status.dispense.heightSwitch`), no Use step; a measure that is not (no trip, a spread, fewer presses) answers 200 with `accepted: false` and `why`. 409 with the reason (and the `result`): no place; the needle while where it lands is not checked (`the needle is aimed at the switch by where it lands: <why>, then clean the tip`, checked first, nothing sent; #60 review: an unchecked landing may aim it up to 15 mm off; a stopgap until the aim from below, BR-94's needle aim follow-up); the needle without `tipClean: true` (`the needle presses the height switch only with a clean tip: paste must never touch it`, nothing sent); a needle change during the measure (409 `needle-changed`: no trip kept); unhomed, the position unknown, busy, a pressure hold; no window and no accepted trip of this home; pressed at the start, a switch that sticks, a window over 2 mm, `zStart` or `zFloor` outside Z's soft limits, a travel Z outside Z's safe zone; a STOP or a lost link (the engine's recovery: position read back, unhomed). 400: another tool, `presses` outside 1..20. Each measure is an `events` row `HEIGHT_SWITCH`. The place's circle (`outputZones.heightSwitchRadiusMm`) binds the engine's programs (I12), the pressure hold and jog/move-to; passthrough lines (`POST /api/gcode`: G0/G1, M106) do not check it (BR-72: the lock holder's own lines; BR-98's collision model will cover passthrough motion). |
+| `POST /api/height-switch/measure` | `{tool: "n1" \| "needle", presses? (1..20, 5), zStart?, zFloor? (raw Z), tipClean?}` | BR-94: the tool presses the bed's height switch (PA5) `presses` times over the `height-switch` place (`PUT /api/locations/height-switch {x, y}`: the switch's top centre; the needle is aimed as programs aim it, with its landing + trim), in the steps of Process's `tools/switchz.py` (`HeightSwitch`): for either tool, the needle's valve and then its pump off first (`M107 P3`, `M107 P2`, as STOP orders them: the passthrough may have left them on, and N1's measure would carry a pressurised needle across the bed); travel Z, the pull-up and the idle read; down to `zStart` in the tool's coarse steps, each read (refused if it reads pressed on the way or there: start higher; a start past the trip goes at most one coarse step past it); a coarse descent (N1 0.25 mm, the needle 0.10) to the first trip; 0.40 back (refused if still pressed: the switch sticks or the tool is caught); a fine descent of 0.025 from 0.30 above to one fine step past the coarse trip, the trip being the first fine step that reads pressed; each later press from 1.0 above the last trip; no step past `zFloor`, and none above travel Z (the back move, the fine start and the lift stop there: past it the see-saw lowers the other tool); travel Z at the end, also after a refusal. A reply with no level (`Analog in`, `Output`, `protected`, no PA5) is read once more after the pull-up; a second one, or a line that times out, sends the tool up to travel Z (Z only) and ends the measure (409 with the reason, then the engine's recovery: position read back, unhomed); a STOP sends nothing more. N1 goes down as raw Z falls, the needle (the see-saw's other side) as it rises; the window is at most 2.0 mm. Without `zStart`/`zFloor`: 1.0 above and 0.5 past the tool's accepted trip of this home. Waits for the measure: `{tool, trips (raw Z), tripRawZ (mean), sdMm, rangeMm, presses, idleLevel, accepted, refused, why, homeAtMs, atMs}`. **Accepted** (at least 5 presses within 0.05 mm) is recorded at once as the tool's trip of this home (`status.dispense.heightSwitch`), no Use step; a measure that is not (no trip, a spread, fewer presses) answers 200 with `accepted: false` and `why`. 409 with the reason (and the `result`): no place; the needle while where it lands is not checked (`the needle is aimed at the switch by where it lands: <why>, then clean the tip`, checked first, nothing sent; #60 review: an unchecked landing may aim it up to 15 mm off; a stopgap until the aim from below, BR-94's needle aim follow-up); the needle without `tipClean: true` (`the needle presses the height switch only with a clean tip: paste must never touch it`, nothing sent); a needle change during the measure (409 `needle-changed`: no trip kept); unhomed, the position unknown, busy, a pressure hold; no window and no accepted trip of this home; pressed at the start, a switch that sticks, a window over 2 mm, `zStart` or `zFloor` outside Z's soft limits, a travel Z outside Z's safe zone; a STOP or a lost link (the engine's recovery: position read back, unhomed). 400: another tool, `presses` outside 1..20. Each measure is an `events` row `HEIGHT_SWITCH`. The place's circle (`outputZones.heightSwitchRadiusMm`) binds the engine's programs (I12), the pressure hold and jog/move-to; passthrough lines (`POST /api/gcode`: G0/G1, M106) do not check it (BR-72: the lock holder's own lines; with a bed model in place BR-98 proves their G0/G1 moves against it, the switch too when the model has it: §3.9). |
 | `POST /api/height-switch/read` | | BR-94: PA5's level now (`M42 P53 T2`, then `M43 P5`; nothing moves): `{level, atMs}`, kept as `status.dispense.heightSwitch.lastRead`. Refused (409) unless the engine and OpenPnP are idle and no pressure hold is on. |
 | `POST /api/needle/changed` | `{why?, operator?}` | I4: blocks dispensing until the needle Z frame is recorded again, the needle is touched off and where it lands is checked. *Tips:* never refused; stops a running task, moves the needle token on, skips waiting coupons (§3.6). |
 | `POST /api/needle/anchor` | `{surfaceZ, needleContactZ, x?, y?, needleChangedAtMs}` or `{surfaceZ, needleContactRawSum, x?, y?, needleChangedAtMs}` (*tips:* the needle token, §3.6) | I4 needle Z frame: N1 contact Z and needle (N2) contact Z on the same surface; offset := difference. Instead of touching the needle, `needleContactRawSum` K uses the bench relation "needle contact raw Z = K − N1 contact Z" (side camera, 2026-10-27: K = 65.59; with OpenPnP's see-saw map z2 = 63 − raw that is N2 contact = N1 contact − 2.59, e.g. 5.5 → 2.91, offset −2.59 mm). Both at once: 400. The anchor records `rawSumMm`. A touch-off (or a confirmed offset) is still needed. K holds only for the home and the needle it was measured with (a sum of raw Z heights: a home that moved the Z zero moves it by about twice the shift, and a frame from an old K gives the old offset whatever N1 touched): while the last Z check of this home failed (`Z moved`), and after `POST /api/needle/changed`, `needleContactRawSum` answers 409 with `K was measured under another home: Z moved 0.80 mm at the home of 14:02, and K moves by about twice that. Record the needle frame with both tips touching the same spot` or `K was measured with the needle before the change at 13:40: record the needle frame with both tips touching the same spot`; after a home that moved the Z frame (BR-02, `zFrameMovedAtMs`), until a frame is recorded after it (with or without one before), `K was measured before the controller was reset: its home at 16:20 moved the Z frame, and K moves by about twice that. Record the needle frame with both tips touching the same spot` (the engine checks again under its lock); `status.dispense.needle.kRefusal` carries that reason (null when K is accepted). A frame recorded after such a home asks no `question` about the tip (the previous frame was of another Z frame). |
@@ -613,10 +613,9 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
 - BR-98 (§3.9): with a bed model in place each press and each move-to is proven against it after the checks above
   (which stay) and before anything moves: one leg for a jog (labelled `jog Z -2`), three for a move-to (`up to safe
   Z`, `X/Y at safe Z` with the tool going to its safe Z, `<tool> at the target (no move)`, as OpenPnP drives them);
-  409 `collision` otherwise. A jog's tool tip
-  may go down to the floor above over the probed surface under it (a measured touchable object holding the tip), never
-  deeper than `contactDepthMm` into that object's top in the model; every other layer and tool is held to the top +
-  `zMarginMm` + the errors.
+  409 `collision` otherwise. A jog's tool tip may go down to the floor above over the probed surface under it (a
+  measured touchable object holding the tip), never deeper than `contactDepthMm` into that object's top in the model;
+  every other layer and tool is held to the top + `zMarginMm` + the errors.
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
   `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
   ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.
@@ -631,9 +630,9 @@ design's rules, the loader (the engine's, as lumen-sim's) refuses a model withou
 one with `moves: needle` (every leg sweeps both tips), each with a `tip-end` layer with `aboveTipMm` 0 (its tip), a
 `contactDepthMm` outside 0 to 1.0, an explicit null anywhere (a key is given a value or left out: an unknown top, knee or
 K is left out), a string that is not exactly the JSON string the rule asks for (never trimmed; a number is not text),
-an `atMs` that is not a number or is later than now + 1 min (a time is ms since 1970), and a file that is not strict
-JSON (a comment, single quotes or unquoted text). Every bad file, listed for lumen-sim to mirror:
-`BedModelTest.BAD_FILES`.
+an `atMs` that is not a number or is later than now + 1 min (a time is ms since 1970), a file that is not strict JSON
+(a comment, single quotes or unquoted text) and one nested too deep to read (not valid; the engine still starts).
+Every bad file, listed for lumen-sim to mirror: `BedModelTest.BAD_FILES`.
 **Rollout:** no file: nothing is checked and every route runs as before; a file that fails validation: every hooked
 move answers 409 `collision` naming the problem; a valid file: enforced. Hooked in this build: `POST /api/jog`,
 `POST /api/move-to`, `POST /api/gcode` (G0/G1). Not yet: Home, the engine's programs, the N1 probe, OpenPnP's own
@@ -682,11 +681,13 @@ engine end measure, which is not hooked and records both. STOP, Home and the tip
 - **Journal:** a clear path: one `MOTION_PROOF` row `{what: jog|move-to|gcode, tool, modelVersion, start, legs,
   closest, checkMs}`; a refused one: a `MOTION_REFUSED` row with the 409 body.
 - **Writes** (guarded: the lock holder's, 409 `no-lock` while nobody holds it; 409 `refused` while anything moves:
-  OpenPnP busy, an engine task or pad calibration, a G-code batch or its moves not ended by an `M400`). Each is validated as the loader does (400
-  `bad-request` with the problem; nothing written), then `version` + 1, `changedAtMs`/`changedBy` stamped, the file
-  rewritten atomically, a `BED_MODEL` row `{who, what, version: [before, after], before, after}`, and the answer is
-  `GET /api/bed`'s. Two writes at once: the one whose model another write changed after it was read answers 409
-  `refused` `the bed model changed meanwhile: read it again` and writes nothing.
+  OpenPnP busy, an engine task or pad calibration, a G-code batch or its moves not ended by an `M400`). Each is
+  validated as the loader does (400 `bad-request` with the problem; nothing written), then `version` + 1,
+  `changedAtMs`/`changedBy` stamped, the file rewritten atomically, a `BED_MODEL` row `{who, what, version: [before,
+  after], before, after}`, and the answer is `GET /api/bed`'s. Two writes at once: the one whose model another write
+  changed after it was read answers 409 `refused` `the bed model changed meanwhile: read it again` and writes nothing. A
+  needle change during a write (it was held to the needle before): 409 `needle-changed` (`needleChangedAtMs`, the token
+  now), nothing written: send it again.
   - `PUT /api/bed {whole model}`: the first model (no file, or one that fails validation); with a valid model the
     same rules as the parts below.
   - `POST /api/bed/objects {name, outline, id?, kind? = movable, role?, marginMm? = 1.0, touchable? = false,
@@ -709,15 +710,16 @@ engine end measure, which is not hooked and records both. STOP, Home and the tip
   - **The rule:** a person's word may add, mark moved or removed, grow an outline or a tool layer, raise a top or a
     layer, lower a layer. What frees space needs a new measurement record where that part keeps it (`how` any words,
     `atMs` later than the stored record's, `evidence` naming journal events `event:<id>` or photos `photo:<id>` that
-    exist, none older than the stored record's `atMs` and no `BED_MODEL`, `MOTION_*` or `TIP` row (a needle's change,
-    mount, trims and landings are bookkeeping); after a needle change, for the needle's changed `tipEnd` and any
-    see-saw change, none older than the change either; any `atMs` later than now + 1 min: 400): a lower top, a smaller
-    top error, `touchable` switched on, or an unmeasured object becoming measured (`measured.top`); a smaller outline
-    or margin, or an unmeasured object becoming measured (`measured.xy`); any change of the bed plane or a smaller bed
-    outline (`bed.plane`, which is its own record); any see-saw change (`seesaw.measured`); a smaller, higher, removed
-    or moved tool layer, a changed `tipEnd` (its `atMs` too) or `moves` (`tools[].measured`). A removed object stops
-    blocking only through `/cleared`. A smaller `zMarginMm`, a deeper `contactDepthMm` or a tool leaving the model: not
-    through the API in this build. Otherwise 409 `measurement-needed`.
+    exist, none older than the stored record's `atMs` and no `BED_MODEL`, motion (`MOTION_*`, `Z_LEVEL`, `HOME_STARTED`)
+    or `TIP` row (a needle's change, mount, trims and landings are bookkeeping; a `HEIGHT_SWITCH` measure is evidence);
+    after a needle change, for the needle's changed `tipEnd` and any see-saw change, none older than the change either;
+    any `atMs` later than now + 1 min: 400): a lower top, a smaller top error, `touchable` switched on, or an unmeasured
+    object becoming measured (`measured.top`); a smaller outline or margin, or an unmeasured object becoming measured
+    (`measured.xy`); any change of the bed plane or a smaller bed outline (`bed.plane`, which is its own record); any
+    see-saw change (`seesaw.measured`); a smaller, higher, removed or moved tool layer, a changed `tipEnd` (its `atMs`
+    too) or `moves` (`tools[].measured`). A removed object stops blocking only through `/cleared`. A smaller
+    `zMarginMm`, a deeper `contactDepthMm` or a tool leaving the model: not through the API in this build. Otherwise 409
+    `measurement-needed`.
 
 ## 4. Pressure hold (Dispense tab)
 
@@ -829,19 +831,20 @@ Jargon is explained in tooltips (`title`/`abbr`).
 
 ## 6. Tests
 
-- BR-98 stage 1: `BedModelTest` (5: every bad file in one list, `BAD_FILES`, for lumen-sim to mirror (the model's
+- BR-98 stage 1: `BedModelTest` (6: every bad file in one list, `BAD_FILES`, for lumen-sim to mirror (the model's
   rules with one N1, one needle and the contact depth cap, exact strings, null nowhere, each tip's layer, the times,
-  strict JSON), the see-saw maps U2, the worst case, the tip errors) and `CollisionCheckTest` (7: the sweep U1, the
-  lowest point at a leg's end, the tip-only exemption U3, the jog floor bounded by the model's top, unmeasured objects
-  and the first leg, the everyday moves on the fixture with the G28 corner to the fiducial, U4 5,000 legs < 100 ms), no
-  machine; `BedGuardSimTest` (19) and `BedApiSimTest` (9) on the SIM with the fixture model: jog, move-to and
-  passthrough refused with nothing sent and proven beside the objects, the passthrough's unknown place (a batch cut
-  short, an interrupted move, after an M410, an M410's lost or interrupted ok, OpenPnP's own move between batches), a
-  batch stopped while queued, its proof on the machine thread, BR-97's levelling call not walked, a needle tip end or K
-  older than the needle change (also stamped ahead of the engine's clock) and what still runs then (the tip picture,
-  Home, STOP), no file, a file that fails validation, the dry run and a stale position (the views too), the reads, the writes and their rules (no holder,
-  two at once, the evidence (no tip row), the engine's threshold, the times, a removal on record (an id cleared and put
-  down again too), exact strings, null nowhere).
+  strict JSON, nested too deep), the store starting on a file nested too deep, the see-saw maps U2, the worst case, the
+  tip errors) and `CollisionCheckTest` (7: the sweep U1, the lowest point at a leg's end, the tip-only exemption U3, the
+  jog floor bounded by the model's top, unmeasured objects and the first leg, the everyday moves on the fixture with the
+  G28 corner to the fiducial, U4 5,000 legs < 100 ms), no machine; `BedGuardSimTest` (19) and `BedApiSimTest` (10) on
+  the SIM with the fixture model: jog, move-to and passthrough refused with nothing sent and proven beside the objects,
+  the passthrough's unknown place (a batch cut short, an interrupted move, after an M410, an M410's lost or interrupted
+  ok, OpenPnP's own move between batches), a batch stopped while queued, its proof on the machine thread, BR-97's
+  levelling call not walked, a needle tip end or K older than the needle change (also stamped ahead of the engine's
+  clock) and what still runs then (the tip picture, Home, STOP), no file, a file that fails validation, the dry run and
+  a stale position (the views too), the reads, the writes and their rules (no holder, two at once, a needle change
+  during a write, the evidence (no tip or motion row), the engine's threshold, the times, a removal on record (an id
+  cleared and put down again too), exact strings, null nowhere).
 
 - `mvn -T1 test -Dtest='ApiServerSimTest,ReviewSafetySimTest,RegistrationSimTest,BoardImportSimTest'` (part of `mvn
   test`): 23 + 11 + 11 + 12 tests on the engine's simulated machine (OpenPnP GcodeDriver over localhost TCP to
