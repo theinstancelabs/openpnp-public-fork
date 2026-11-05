@@ -101,6 +101,61 @@ public class TouchOffCheckDotsTest {
         assertTrue(held.found());
     }
 
+    /** {@link #seen} with the 2nd check dot's area {@code ratio} times the reference pair's (it lands where they did). */
+    static List<SpotDot> withCheckArea(double ratio) {
+        List<SpotDot> l = seen(new double[] {0, 0.01}, new double[] {0, 0.01});
+        double a = Math.PI * 1.2 * 1.2 / 4 * ratio;
+        l.set(14, SpotDot.dot(new Dot(0, 0.01, Math.sqrt(4 * a / Math.PI), a, 0.9)));
+        return l;
+    }
+
+    /**
+     * Process 11-04 15:1x: the needle's height can change without the tip moving sideways (it slipped up or down in the
+     * Luer at the floor): the 2nd check dot's area more than 25 % off the reference pair's mean refuses the apply too,
+     * after the landing check; a NaN fails closed.
+     */
+    @Test
+    public void aSecondCheckDotWhoseAreaIsOffRefusesTheApply() {
+        NeedleTouchOff.Analysis big = analyzed(withCheckArea(1.30));
+        assertEquals(0, big.landingShiftMm, 1e-9, "it landed where the pair did");
+        assertEquals(30, big.checkAreaOffPct, 1e-6);
+        assertEquals("the 2nd check dot's area is off by 30 % from the reference pair's (1.470 vs 1.131 mm², at most "
+                + "25 %): the needle's height may have changed; look at the tip from below and run the touch-off again",
+                big.landingProblem);
+        assertTrue(big.found(), "the contact stands: only its apply is refused");
+        assertTrue(analyzed(withCheckArea(0.70)).landingProblem.contains("off by 30 %"), "smaller counts too");
+        NeedleTouchOff.Analysis near = analyzed(withCheckArea(1.20));
+        assertEquals(20, near.checkAreaOffPct, 1e-6);
+        assertNull(near.landingProblem, "20 % is within the 25 %");
+        assertEquals(near.areasMm2[3] * 1.2, near.checkDots.get(1).areaMm2, 1e-9);
+        // a NaN area fails closed
+        List<SpotDot> nan = withCheckArea(1);
+        nan.set(14, SpotDot.dot(new Dot(0, 0.01, 1.2, Double.NaN, 0.9)));
+        assertEquals("the 2nd check dot's area cannot be compared with the reference pair's: look at the tip from below "
+                + "and run the touch-off again", analyzed(nan).landingProblem);
+        // the landing is checked first: a moved tip says so, whatever the area
+        List<SpotDot> both = seen(new double[] {0.15, 0.01}, new double[] {0, 0.01});
+        both.set(14, SpotDot.dot(new Dot(0.15, 0.01, 1.5, 1.77, 0.9)));
+        assertTrue(analyzed(both).landingProblem.startsWith("the 2nd check dot landed 0.150 mm"),
+                analyzed(both).landingProblem);
+    }
+
+    /** Process 11-04 15:1x: the record keeps every ladder dot's landing and area, and each check dot's area. */
+    @Test
+    public void everyLadderDotsLandingAndAreaAreRecorded() {
+        NeedleTouchOff.Analysis a = analyzed(seen(new double[] {0, 0.01}, null));
+        assertEquals(13, a.landingsMm.length);
+        assertEquals(13, a.areasMm2.length);
+        assertEquals(0.2, a.landingsMm[0][0], 1e-12, "a droplet's landing too");
+        assertEquals(0.01, a.landingsMm[3][0], 1e-12);
+        assertEquals(0.02, a.landingsMm[4][1], 1e-12);
+        assertEquals(Math.PI * 0.25 / 4, a.areasMm2[0], 1e-12);
+        assertEquals(Math.PI * 1.8 * 1.8 / 4, a.areasMm2[9], 1e-12, "a squashed dot's area");
+        assertNull(a.landingsMm[12], "no dot at the floor: no landing");
+        assertNull(a.areasMm2[12]);
+        assertEquals(Math.PI * 1.2 * 1.2 / 4, a.checkDots.get(0).areaMm2, 1e-12);
+    }
+
     @Test
     public void aSquashedDotsShiftAloneIsInformationAndTheFirstCheckDotIsNotCompared() {
         // the deepest squashed dot 0.2 mm off and the 1st check dot 0.3 mm off; the 2nd check dot where the pair landed

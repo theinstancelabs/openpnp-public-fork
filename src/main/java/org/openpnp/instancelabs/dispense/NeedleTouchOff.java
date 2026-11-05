@@ -6,6 +6,7 @@ import java.util.Locale;
 
 import org.openpnp.instancelabs.padprofile.DoseModel;
 import org.openpnp.instancelabs.padprofile.Tip;
+import org.openpnp.instancelabs.vision.Dot;
 import org.openpnp.instancelabs.vision.SpotDot;
 
 /**
@@ -54,6 +55,11 @@ public final class NeedleTouchOff {
     public static final int CHECK_DOTS = 2;
     /** BR-89: a 2nd check dot this far (mm) from the reference pair's landing refuses the apply (~2-3x the 25G's scatter). */
     public static final double LANDING_SHIFT_MAX_MM = 0.1;
+    /**
+     * BR-89 (Process 11-04 15:1x): the 2nd check dot's area may differ from the reference pair's mean by at most this
+     * share: more, and the needle's height may have changed (the tip slipped up or down in the Luer at the floor).
+     */
+    public static final double CHECK_AREA_MAX_OFF = 0.25;
     /**
      * The default start gap (mm): with no dot skipped the reference pair sits here and one step lower. BR-85: with
      * skipped dots the start gap must be that many steps higher, so the reference still sits here or higher; a ladder
@@ -109,8 +115,14 @@ public final class NeedleTouchOff {
          * paste spreads).
          */
         public Double landingShiftMm, squashedShiftMm;
+        /** BR-89: the 2nd check dot's area off the reference pair's mean (%, either way); null when not compared. */
+        public Double checkAreaOffPct;
         /** BR-89: why the new offset may not be applied (the tip may have moved, or the check could not be made). */
         public String landingProblem;
+        /** BR-89: per ladder dot its landing {dx, dy} (centroid offset from its planned spot, mm) and its area (mm²); null
+         * where no dot was measured. */
+        public double[][] landingsMm;
+        public Double[] areasMm2;
         /** The dots laid: the ladder's and the check dots. */
         public int dotsLaid;
         public final List<CheckDot> checkDots = new ArrayList<>();
@@ -133,8 +145,8 @@ public final class NeedleTouchOff {
     /** BR-89: what the camera saw at a check dot's spot: its state as {@link Analysis#dotStates}, size and landing. */
     public static class CheckDot {
         public String state;
-        /** Its diameter and centroid offset from its planned spot (mm), for a measured dot; else null. */
-        public Double diameterMm, dxMm, dyMm;
+        /** Its diameter and centroid offset from its planned spot (mm) and area (mm²), for a measured dot; else null. */
+        public Double diameterMm, dxMm, dyMm, areaMm2;
     }
 
     /** BR-89: the check dots' gap: the reference gap, the first counted dot's (after {@code skip}). */
@@ -152,6 +164,15 @@ public final class NeedleTouchOff {
         int n = a.gapsMm.length;
         a.dotsLaid = seen.size();
         a.checkGapMm = n > skip ? a.gapsMm[skip] : null;
+        a.landingsMm = new double[n][];
+        a.areasMm2 = new Double[n];
+        for (int i = 0; i < n && i < seen.size(); i++) {
+            Dot d = seen.get(i).state == SpotDot.State.DOT ? seen.get(i).dot : null;
+            if (d != null) {
+                a.landingsMm[i] = new double[] {d.xMm, d.yMm};
+                a.areasMm2[i] = d.areaMm2;
+            }
+        }
         for (int i = n; i < seen.size(); i++) {
             SpotDot s = seen.get(i);
             CheckDot d = new CheckDot();
@@ -160,6 +181,7 @@ public final class NeedleTouchOff {
                 d.diameterMm = s.dot.diameterMm;
                 d.dxMm = s.dot.xMm;
                 d.dyMm = s.dot.yMm;
+                d.areaMm2 = s.dot.areaMm2;
             }
             a.checkDots.add(d);
         }
@@ -185,6 +207,24 @@ public final class NeedleTouchOff {
             a.landingProblem = String.format(Locale.ROOT, "the 2nd check dot landed %.3f mm from where the first two "
                     + "counted dots landed (at most %s mm): the tip may have moved; look at it from below and run the "
                     + "touch-off again", a.landingShiftMm, DispenseProfile.plain(LANDING_SHIFT_MAX_MM));
+            return;
+        }
+        if (!a.found()) {
+            return; // areas only against a reference pair the analysis accepted (droplets already refuse the apply)
+        }
+        double refArea = (seen.get(skip).dot.areaMm2 + seen.get(skip + 1).dot.areaMm2) / 2;
+        double off = Math.abs(second.dot.areaMm2 / refArea - 1);
+        if (!Double.isFinite(off)) {
+            a.landingProblem = "the 2nd check dot's area cannot be compared with the reference pair's: look at the tip "
+                    + "from below and run the touch-off again";
+            return;
+        }
+        a.checkAreaOffPct = off * 100;
+        if (off > CHECK_AREA_MAX_OFF + 1e-9) {
+            a.landingProblem = String.format(Locale.ROOT, "the 2nd check dot's area is off by %.0f %% from the reference "
+                    + "pair's (%.3f vs %.3f mm², at most %.0f %%): the needle's height may have changed; look at the tip "
+                    + "from below and run the touch-off again", off * 100, second.dot.areaMm2, refArea,
+                    CHECK_AREA_MAX_OFF * 100);
         }
     }
 

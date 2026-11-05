@@ -240,6 +240,8 @@ public class TipSetupValuesSimTest {
     static final class LandingCamera extends ApiServerSimTest.FakeImager {
         final java.util.List<String> spots = new java.util.concurrent.CopyOnWriteArrayList<>();
         volatile double[] check2 = {0, 0}, floor = {0, 0};
+        /** The 2nd check dot's diameter against the steady dots' (Process 15:1x: its area against the pair's). */
+        volatile double check2Scale = 1;
 
         @Override
         public Frame capture(double xMm, double yMm) {
@@ -254,7 +256,7 @@ public class TipSetupValuesSimTest {
         public java.util.List<org.openpnp.instancelabs.vision.Dot> inspect(Frame before, Frame after) {
             int i = spots.indexOf(key(after.xMm, after.yMm));
             double[] at = i == 12 ? floor : i == 14 ? check2 : new double[] {0, 0};
-            double d = i < 3 ? 0.5 : i < 9 || i > 12 ? 1.2 : 1.8;
+            double d = (i < 3 ? 0.5 : i < 9 || i > 12 ? 1.2 : 1.8) * (i == 14 ? check2Scale : 1);
             return java.util.Collections.singletonList(new org.openpnp.instancelabs.vision.Dot(at[0], at[1], d,
                     Math.PI * d * d / 4, 0.9));
         }
@@ -305,6 +307,26 @@ public class TipSetupValuesSimTest {
         assertEquals(0.2, h.get("squashedShiftMm").getAsDouble(), 1e-6, "information only");
         assertTrue(h.get("landingProblem").isJsonNull(), h.toString());
         assertEquals(before - 0.0125, t.svc.getConfig().needleZOffsetMm, 1e-9, "applied: the contact gap");
+        // Process 15:1x: every ladder dot's landing and area are in the result (and the kept record), the check dots'
+        // areas too
+        assertEquals(13, h.getAsJsonArray("landingsMm").size(), h.toString());
+        assertEquals(13, h.getAsJsonArray("areasMm2").size());
+        assertEquals(Math.PI * 1.8 * 1.8 / 4, h.getAsJsonArray("areasMm2").get(9).getAsDouble(), 1e-9, "a squashed dot");
+        assertEquals(Math.PI * 1.2 * 1.2 / 4, h.getAsJsonArray("checkDots").get(1).getAsJsonObject().get("areaMm2")
+                .getAsDouble(), 1e-9);
+        assertEquals(0, h.get("checkAreaOffPct").getAsDouble(), 1e-9);
+        // a 2nd check dot 15 % wider (32 % more area) where the pair landed: the needle's height may have changed
+        cam.check2 = new double[] {0, 0};
+        cam.floor = new double[] {0, 0};
+        cam.check2Scale = 1.15;
+        double now = t.svc.getConfig().needleZOffsetMm;
+        JsonObject tall = laid(body).getAsJsonObject("result");
+        assertFalse(tall.get("applied").getAsBoolean(), tall.toString());
+        assertEquals(now, t.svc.getConfig().needleZOffsetMm, 0, "the frame unchanged");
+        assertTrue(TipSim.str(tall.getAsJsonObject("analysis"), "landingProblem").startsWith(
+                "the 2nd check dot's area is off by 32 % from the reference pair's"), tall.toString());
+        assertTrue(TipSim.str(tall.getAsJsonObject("run"), "message").contains("not applied: the 2nd check dot's area"),
+                tall.toString());
     }
 
     private static final java.util.regex.Pattern Z = java.util.regex.Pattern.compile("\\bZ(-?\\d+(?:\\.\\d+)?)");
