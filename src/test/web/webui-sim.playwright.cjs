@@ -532,6 +532,18 @@ async function runFirstDots(page, n) {
         dead.err === 'At least 0.325 mm: the tip’s recipe does not count the first 4 dots after the prime, so they go above 0.125 mm, where the counted dots start.' && dead.save, dead);
       r = await typeIn('pf-lstart', '0.35', false);
       check('profile: a start gap of 0.350 mm fits 4 dots not counted', r.err === '', r);
+      // the route's other rules under the skip, at the steps: skip + 3 at least, the lowest gap −0.100 mm or above
+      r = await typeIn('pf-lsteps', '6', true);
+      check('profile: 6 touch-off steps with 4 not counted are refused at the field with why (Save locked)', r.save && r.err
+        === 'At least 7: the tip’s recipe does not count the first 4 dots after the prime, the next two set the normal dot size, and one more shows the contact.', r);
+      r = await typeIn('pf-lsteps', '12', true);
+      check('profile: 12 steps of 0.050 mm from 0.350 mm are refused at the field (the lowest gap −0.200 mm; Save locked)', r.save
+        && r.err === 'The lowest gap would be −0.200 mm: keep it at −0.100 mm or above.', r);
+      r = await typeIn('pf-lstep', '3e', true);
+      check('profile: a touch-off step that is not a number (“3e”) is refused, never read as blank (Save locked)', r.err === 'Enter a number or leave it blank.' && r.save, r);
+      await page.fill('#pf-lstep', '0.05');
+      r = await typeIn('pf-lsteps', '9', false);
+      check('profile: back to 9 steps of 0.050 mm from 0.350 mm: taken', r.err === '' && (await errOf('pf-lstep')) === '', r);
       await saveNow();
       const pL2 = await waitStatus(page, (s) => s.dispense.profile.touchOffSkipDots === 4, 10000).then((s) => s.dispense.profile, () => null);
       check('profile: the skip and the ladder go in one save, and the engine takes both (4; 0.35 / 0.05 / 9)', !!pL2 && puts.length === 1

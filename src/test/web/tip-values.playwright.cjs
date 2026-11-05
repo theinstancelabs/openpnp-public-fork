@@ -353,11 +353,24 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     const fL2 = await stepsField();
     check('(2e) Process changes the ladder to 0.350 / 0.050 / 9: the start follows it, the typed 10 steps stay', fL2.start === '0.350' && fL2.step === '0.050'
       && fL2.value === '10' && fL2.err === '' && fL2.startErr === '', fL2);
+    // a typed step stays too (it was a fixed 0.025 before BR-90, now the ladder's)
+    await page.fill('#to-step', '0.03');
+    await blur();
+    ST.ladder = { startGapMm: 0.4, stepMm: 0.05, steps: 9 };
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.400', null, { timeout: 8000 }).catch(() => null);
+    const fLs = await stepsField();
+    check('(2e) a typed step of 0.03, then the ladder changes to 0.400 / 0.050 / 9: the start follows it, the typed step and steps stay', fLs.start === '0.400'
+      && fLs.step === '0.03' && fLs.value === '10' && fLs.err === '' && fLs.startErr === '', fLs);
     ST.ladder = null;
-    await page.waitForFunction(() => document.getElementById('to-start').value === '0.200', null, { timeout: 8000 }).catch(() => null);
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.215', null, { timeout: 8000 }).catch(() => null);
     const fL3 = await stepsField();
-    check('(2e) none set any more (null): the reference gap again (0.125 + 3 × 0.025: 0.200 mm at a step of 0.025), the typed 10 kept', fL3.start === '0.200'
-      && fL3.step === '0.025' && fL3.value === '10' && fL3.err === '' && fL3.startErr === '', fL3);
+    check('(2e) none set any more (null): the reference gap again, at the typed step (0.125 + 3 × 0.03: 0.215 mm), the typed 10 kept', fL3.start === '0.215'
+      && fL3.step === '0.03' && fL3.value === '10' && fL3.err === '' && fL3.startErr === '', fL3);
+    await page.fill('#to-step', '');
+    await blur();
+    await page.waitForFunction(() => document.getElementById('to-step').value === '0.025' && document.getElementById('to-start').value === '0.200', null, { timeout: 8000 }).catch(() => null);
+    const fL4 = await stepsField();
+    check('(2e) the step left blank: it opens at 0.025 again, the start at 0.200', fL4.step === '0.025' && fL4.start === '0.200', fL4);
     ST.ladder = undefined;
     ST.skip = undefined;
 
