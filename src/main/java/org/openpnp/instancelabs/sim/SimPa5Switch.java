@@ -29,8 +29,9 @@ import org.pmw.tinylog.Logger;
  * draw per press from a Random seeded with the switch's seed, and holds that point until the tool goes back past it or
  * leaves the window. After going back past it no new press starts until the head moves toward the switch again (no
  * chatter at rest); that release point follows the head as it moves away. The switch sees the head where each move
- * ends, when it ends, and where it is at each M43 P5. A press deeper than overtravelMm past its point is counted and
- * reported once. Nothing stops the head. With nothing wired the pin reads its M42 P53 T pull: T2 1, else 0.</p>
+ * ends, when it ends, and where it is at each M43 P5; not when the switch is wired (the next move end or read sees
+ * the head). A press deeper than overtravelMm past its point is counted and reported once. Nothing stops the head.
+ * With nothing wired the pin reads its M42 P53 T pull: T2 1, else 0.</p>
  *
  * <p>The switch is the machine's: one per scene file, kept across a reconnect and across the file written again with
  * the same block. A changed block is a new switch: its draws start from its seed, its count and messages from 0.</p>
@@ -40,6 +41,8 @@ public final class SimPa5Switch {
     static final String LINE = "PIN: PA5  (A9)   M42 P53          <unused/unknown>                       Input  = ";
     static final double EPS = 1e-9;
     /** The switch of each scene file: the machine's, so it outlives a reconnect (a GcodeServer per connect). */
+    // shortcut: one switch per scene file for the JVM's life (two simulated machines on one config would share it;
+    // entries are never dropped), key it by machine if a test ever runs two SIMs on one config at once
     private static final Map<String, SimPa5Switch> BY_FILE = new HashMap<>();
 
     private final Supplier<SimScene> scenes;
@@ -194,7 +197,9 @@ public final class SimPa5Switch {
         wired = s;
         double now = clockNs.getAsLong() / 1e9;
         // M400 returns up to a millisecond early: the plan's last end within the slack is reached, an earlier one is
-        // not before its time (a read would see the head behind it)
+        // not before its time (a read would see the head behind it). Every line looks here, before its own move is
+        // planned, so a G1 streamed within the slack also takes the last end early: harmless, the ends are still seen
+        // in order at their own positions, and only M43 P5 (the engine sends M400 first) shows the level
         boolean reached = !ends.isEmpty() && ends.peekLast()[3] <= now + SimVacuum.ARRIVAL_SLACK_NS / 1e9;
         while (!ends.isEmpty() && (reached || ends.peekFirst()[3] <= now)) {
             double[] e = ends.pollFirst();
