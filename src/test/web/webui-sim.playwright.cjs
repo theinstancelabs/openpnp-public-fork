@@ -804,10 +804,14 @@ async function runFirstDots(page, n) {
         const shots3 = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
           return sel && sel.options.length && ![...sel.options].some((o) => o.value === 'waste' || o.value === 'towel')
             ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value, runOff: document.getElementById('btn-shots-run').disabled,
-              why: (document.getElementById('shots-reason') || {}).textContent || '' } : null; },
+              why: (document.getElementById('shots-reason') || {}).textContent || '', pre: (document.getElementById('shots-pre') || {}).textContent || '',
+              banner: !document.getElementById('shots-noplace').hidden } : null; },
         null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
         check('Scale shots with no sink place: nothing chosen (not the blank or a coupon), Run locked', !!shots3
           && shots3.opts.includes('blank') && shots3.chosen === '' && shots3.runOff, shots3);
+        // and it says why: no cup place (the banner, Run's reason), with no place of the blank in its list (the re-check's MINOR on 7e8eb5a59d)
+        check('Scale shots with no sink place: "No cup place yet" and Run asks for a cup place; its list names no place (not the blank)', !!shots3
+          && shots3.banner && /cup place/.test(shots3.why) && !/Place “blank”/.test(shots3.pre), shots3 && { why: shots3.why, pre: shots3.pre, banner: shots3.banner });
         await page.unroute('**/api/status');
       }
       await nav(page, 'calibrate');
