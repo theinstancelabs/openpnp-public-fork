@@ -212,6 +212,22 @@ public class DoseRecordTest {
         }
     }
 
+    /** BR-75: a confirm keeps the angle and the partial-turn records made at it; a set of its value does not. */
+    @Test
+    public void aConfirmKeepsThePartialTurnRecordsASetDoesNot() {
+        for (String kind : new String[] {DoseRecord.OPTICAL, DoseRecord.COUPON}) {
+            DispenseConfig c = setup();
+            c.profile.startAngleChangedAtMs = c.profile.startAngleSetAtMs;
+            DoseRecord r = record(kind, 800, c, NOW - H);
+            c.profile.startAngleSetAtMs = NOW - H / 2; // confirmed after the record
+            assertNull(r.whyStale(NOW, c, MACHINE), kind);
+            c.profile.startAngleChangedAtMs = NOW - H / 2; // set after it
+            assertEquals("made before the screw start angle was set again", r.whyStale(NOW, c, MACHINE), kind);
+            c.profile.startAngleChangedAtMs = null; // settings from before BR-75: set or confirmed counts
+            assertEquals("made before the screw start angle was set again", r.whyStale(NOW, c, MACHINE), kind);
+        }
+    }
+
     /** Mass records (whole revolutions of dots) and records of whole turns survive a controller reset. */
     @Test
     public void massRecordsAndWholeTurnsSurviveAReset() {
