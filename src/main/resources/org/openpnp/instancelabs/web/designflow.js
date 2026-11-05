@@ -6,7 +6,8 @@
    - Set up (d2, #designs/setup/<name>): the checklist B1-B6. What the engine cannot do yet says "not built yet": the
      bottom side (BR-25), the copper check, the fine-pitch rehearsal (BR-27, BR-58), feeders (BR-28, BR-64), the
      holder. Panel: Set up the rest = the doses found, then the pad calibration (nothing moves before its own Start).
-   - Ready (d3): Make a board opens Run › Start with the design chosen.
+   - Ready (d3): Make a board opens Run › Start with the design chosen; it waits as Start's design cards do (Start under
+     way, a task).
    Nothing here moves the machine. Styles: tipflow.css (Designs). */
 'use strict';
 (function () {
@@ -270,7 +271,8 @@
     PP().setSource({ boardFile: f.file, boardName: title(f) });
     IL.go('#profile/needs');
   }
-  /** Why Make a board waits, as Start's own design cards do (runflow.js choose()): Start under way, a task, the lock. */
+  /** Why Make a board waits, as Start's own design cards do (runflow.js choose()): Start under way, else IL.lockReason as
+   *  choose() asks it (a task, a running pad calibration, an upload being read, offline). */
   const makeLock = (s) => (IL.runFlow && IL.runFlow.chaining() ? 'Start is under way' : IL.lockReason(s, { pressureOff: false }));
   /** Run › Start with this design chosen (its Load side 1 says where the board goes). */
   function make(f) {
@@ -341,10 +343,9 @@
     IL.show(n.pRest, canRest);
     // the visible reason for this and the steps' buttons (they show only when this does), as Needs' #needs-why; while a
     // pushed panel (the pad calibration's) covers this one, the steps' buttons keep the reason as their title
-    IL.gate(n.pRest, canRest ? (cal.length ? PP().calIdle : PP().idle)(s) : null, n.pWhy);
+    IL.gate(n.pRest, canRest ? (cal.length ? PP().calIdle : PP().idle)(s) : null, ready ? null : n.pWhy);
     IL.show(n.pMake, ready);
-    // after Set up the rest's gate (the two never show together): the reason line is Make a board's while it shows
-    if (ready) IL.gate(n.pMake, makeLock(s), n.pWhy);
+    if (ready) IL.gate(n.pMake, makeLock(s), n.pWhy);   // the reason line is Make a board's while it shows
     // nothing to run here: the step that comes next, on its own page
     const next = !st || ready || canRest ? null : measure.length ? ['Measure the tip’s dots', () => IL.go('#tip/checks')]
       : hand.length ? ['Set the doses by hand', () => byHand(f)] : tipRefs.length ? ['Change the tip', () => IL.go('#tip/which')] : null;
