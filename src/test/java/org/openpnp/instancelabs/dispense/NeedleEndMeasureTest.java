@@ -276,6 +276,30 @@ public class NeedleEndMeasureTest {
         assertNull(far.end);
     }
 
+    /**
+     * Re-review NIT 2: the default follow window, np1.py's 60 px, never aims at a brighter object either. The same
+     * object 5 mm from the end stays outside it (62 px from the first spot in a stepped frame at raw 36): the end comes
+     * out as drawn. 4 mm from the end (57 px at raw 36) it is inside it, and the frames that take it leave the step
+     * fit: the end not found, no end (without that check the drift, then the clean check's scale, refuses it).
+     */
+    @Test
+    public void aBrighterObjectNeverTakesTheAimAtTheDefaultFollowWindow() throws Exception {
+        FromBelowScene sc = new FromBelowScene(16);
+        sc.brightMm = new double[] {-3.536, -3.536};
+        NeedleEndMeasure.Result r = NeedleEndMeasure.measure(new Camera(sc), plan(sc, sc.endDx, sc.endDy));
+        assertTrue(r.ok, r.why);
+        for (DispenseConfig.EndHeight h : r.end.heights) {
+            assertEquals(sc.end(h.rawZ)[0], h.dxMm, 0.01, "dx at " + h.rawZ);
+            assertEquals(sc.end(h.rawZ)[1], h.dyMm, 0.01, "dy at " + h.rawZ);
+        }
+        FromBelowScene near = new FromBelowScene(16);
+        near.brightMm = new double[] {-2.828, -2.828};
+        Camera cam = new Camera(near);
+        NeedleEndMeasure.Result n = NeedleEndMeasure.measure(cam, plan(near, near.endDx, near.endDy));
+        refused(n, NeedleEndMeasure.NOT_FOUND, "the needle at raw Z 36.000: the frames do not follow the head's steps",
+                cam);
+    }
+
     /** A loose tip creeping 0.3 px a frame: the centre frames 1.5 px apart (c). */
     @Test
     public void aCreepingEndIsRefusedByItsDrift() throws Exception {
