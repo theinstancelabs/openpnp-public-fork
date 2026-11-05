@@ -55,7 +55,8 @@ the home), link-lost-at-planned-stop (as the planned stop runs; it still answers
 link-lost-at-enable (as the Start connects: it answers 409 "could not start the machine: ... IO Error ..."),
 link-lost-at-home (just before the home: #53 refuses it), link-lost-during-home (mid-G28: "homing failed: ... IO
 Error ..."), link-lost-after-homed (right after the health check's homed read: the second GET /api/machine that reads
-homed, after the not-busy wait's), link-lost-at-stop (as a STOP runs: a write on a flaky link fails as its lines go out).
+homed, after the not-busy wait's), link-lost-at-stop (as a STOP runs: a write on a flaky link fails as its lines go out),
+link-lost-at-2nd-stop (the same at the second STOP only: a failed check's own STOP keeps the link).
 BR-93's machine.linkLost {atMs, why, next} (fake-machine.json "link_lost", null while the link is fine): while set
 connected and homed read false and a home answers 409 refused "MACHINE: <why>: <next>"; a Start clears it (a connect).
 As #53, the planned stop does not look at it (it answers 200 on a lost link).
@@ -137,6 +138,7 @@ class FakeOpenPnP:
         self.planned_refusals = int(machine.get("planned_refusals", 0))
         self.link_lost = machine.get("link_lost")  # BR-93's machine.linkLost, None while the link is fine
         self.homed_reads = 0  # GET /api/machine answers that read homed ("link-lost-after-homed")
+        self.stops = 0  # POST /api/stop answers ("link-lost-at-2nd-stop")
         log_dir = os.path.join(config_dir, "log")
         os.makedirs(log_dir, exist_ok=True)
         # OpenPnP's tinylog RollingFileWriter (StartupPolicy) starts a new OpenPnP.log at each start
@@ -421,7 +423,8 @@ class FakeOpenPnP:
             c.close()
 
     def stop(self):
-        if "link-lost-at-stop" in self.fail:
+        self.stops += 1
+        if "link-lost-at-stop" in self.fail or ("link-lost-at-2nd-stop" in self.fail and self.stops == 2):
             self.lose_link()
         with self.lock:
             sends = self.enabled  # MachineEndpoints.stop: OpenPnP's Stop (the DISABLE_COMMAND) on a started machine only

@@ -93,7 +93,9 @@ class Decisions(unittest.TestCase):
         ok, detail = d.stop_machine()
         self.assertFalse(ok, detail)
         self.assertEqual(api.posts, [])
-        self.assertFalse(d.stop_after_failure(), "a live but slow OpenPnP is not killed without a STOP")
+        ok, why = d.stop_after_failure()
+        self.assertFalse(ok, "a live but slow OpenPnP is not killed without a STOP")
+        self.assertIn("its STOP was not confirmed (", why)
         self.assertFalse(self.svc.stopped)
 
     def test_non_200_is_unknown_and_waits(self):

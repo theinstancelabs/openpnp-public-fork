@@ -281,7 +281,7 @@ Exit codes:
 - Never stops, starts or homes a machine whose controller link is lost (BR-93: `machine.linkLost` in `/api/status`
   and `/api/machine`, absent before BR-93, null while the link is fine, anything else counts as lost): the idle
   check is not idle, so no deploy (its restart would clear it). The stop before the switch reads it again after its
-  planned stop: lost, or no answer, is not idle (exit 3, OpenPnP left running, nothing deployed). The recovery's
+  planned stop: lost, or no answer, is not idle (exit 3, OpenPnP left running, nothing changed). The recovery's
   service stop after a failed check reads it after its STOP: lost leaves OpenPnP alone (held, nothing put back or
   restarted, the build not marked bad). The health check reads it before its stop of an enabled machine and after
   it (before the Start), before its home, and before and after its last stop (#53's planned stop answers 200 on a
