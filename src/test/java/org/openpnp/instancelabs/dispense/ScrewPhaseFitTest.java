@@ -133,6 +133,10 @@ public class ScrewPhaseFitTest {
         assertEquals("the peak's standard error is 13.5° (high at most 10°)", low.why.get(0));
         assertEquals(179.1, low.featureDeg(), 1e-9);
         assertEquals(15.77, noisy(0.6, 0.25).peakSeDeg, 0.01);
+        // ± 0.25 at 0.85 read high (9.4°) before the small-sample factor; × 1.18 at 8 dots it is low
+        ScrewPhaseFit.Halves wider = noisy(0.85, 0.25);
+        assertEquals(ScrewPhaseFit.LOW, wider.confidence);
+        assertEquals("the peak's standard error is 11.1° (high at most 10°)", wider.why.get(0));
         assertEquals(ScrewPhaseFit.HIGH, noisy(0.85, 0.2).confidence, "SE 8.9°, every half's dots within 1.5× its "
                 + "median");
         assertEquals(94.61, noisy(0.1, 0.25).peakSeDeg, 0.01);
