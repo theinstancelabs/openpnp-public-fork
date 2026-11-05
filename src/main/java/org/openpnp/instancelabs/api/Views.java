@@ -90,6 +90,7 @@ final class Views {
         m.put("suckBackDeg", p.suckBackDeg);
         m.put("startAngleDeg", p.startAngleDeg);
         m.put("startAngleSetAtMs", p.startAngleSetAtMs);
+        m.put("startAngleChangedAtMs", p.startAngleChangedAtMs);
         m.put("screwRpm", p.screwRpm);
         m.put("screwAccelDegS2", p.screwAccelDegS2);
         m.put("dwellMs", p.dwellMs);

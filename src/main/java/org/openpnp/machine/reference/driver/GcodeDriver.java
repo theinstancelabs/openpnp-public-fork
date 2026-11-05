@@ -318,6 +318,25 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             this.cause = cause;
         }
     }
+
+    /** Instance Labs (BR-75): the planned stop {@link #disableAsPlannedStop} runs on this thread, or none. */
+    private final ThreadLocal<PlannedStop> plannedStop = new ThreadLocal<>();
+
+    /**
+     * Instance Labs (BR-75): a planned stop's disable of this driver: the lines it sends instead of the DISABLE_COMMAND,
+     * and what the controller made of them, in order.
+     */
+    public static final class PlannedStop {
+        final String lines;
+        /** The lines the controller acknowledged. */
+        public final List<String> acknowledged = new ArrayList<>();
+        /** The lines that failed or got no answer in time. */
+        public final List<String> failed = new ArrayList<>();
+
+        PlannedStop(String lines) {
+            this.lines = lines;
+        }
+    }
     
     static public class Line {
         final String line;
@@ -581,6 +600,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     @Override
     public void setEnabled(boolean enabled) throws Exception {
+        PlannedStop planned = enabled ? null : plannedStop.get();
         boolean relink = false;
         if (enabled && connected && keptAliveLinkIsDead()) {
             // Instance Labs (BR-44): a link kept open while the machine was off (connection-keep-alive) died meanwhile,
@@ -609,15 +629,21 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                 motionPending = false;
                 sendGcode(getCommand(null, CommandType.ENABLE_COMMAND));
             }
+            else if (planned != null) {
+                // Instance Labs (BR-75): a planned stop's lines instead of the DISABLE_COMMAND: no M18 B
+                sendEveryLine(planned.lines, planned);
+            }
             else {
                 // Instance Labs (BR-66): the Stop's lines one by one, as the dispense engine's I1 shutdown. A controller
                 // error left pending, or a line that fails or gets no answer, no longer keeps the lines after it (M410
                 // first, then the valves and pumps off) from going out.
                 String disable = getCommand(null, CommandType.DISABLE_COMMAND);
-                sendEveryLine(disable);
+                sendEveryLine(disable, null);
                 if (disable != null && !disable.trim().isEmpty()) {
                     disableCommandsSent.incrementAndGet(); // BR-02: its M18 B may have switched the screw off
                 }
+            }
+            if (!enabled) {
                 try {
                     drainCommandQueue(getTimeoutAtMachineSpeed());
                 }
@@ -630,7 +656,9 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         }
 
         if (connected && !enabled) {
-            if (isInSimulationMode() || !connectionKeepAlive) {
+            // Instance Labs (BR-75): a planned stop closes it, keep-alive or not (OpenPnP's quit would send the
+            // DISABLE_COMMAND on it)
+            if (planned != null || isInSimulationMode() || !connectionKeepAlive) {
                 disconnect();
             }
         }
@@ -1275,6 +1303,25 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         return disableCommandsSent.get();
     }
 
+    /**
+     * Instance Labs (BR-75): runs {@code disable} (OpenPnP's Stop) with this driver's disable on this thread a planned
+     * stop's. STOP's order is kept: the machine's disable listeners act on the open link first (outputs off), then this
+     * driver sends {@code lines} (its DISABLE_COMMAND without the line that switches the screw's motor off) as a Stop
+     * sends its own, not counted in {@link #getDisableCommandsSent}, and closes the link, keep-alive or not. A disable
+     * on another thread (a real STOP) still sends the DISABLE_COMMAND.
+     */
+    public PlannedStop disableAsPlannedStop(String lines, Runnable disable) {
+        PlannedStop p = new PlannedStop(lines);
+        plannedStop.set(p);
+        try {
+            disable.run();
+        }
+        finally {
+            plannedStop.remove();
+        }
+        return p;
+    }
+
     /** Instance Labs (BR-02): how many moves and homes this driver sent for OpenPnP (not raw lines). */
     public long getMotionCommandsSent() {
         return motionCommandsSent.get();
@@ -1397,9 +1444,10 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
      * (no answer within the timeout), the next lines wait at most 1 s each: a silent controller cannot act on them
      * anyway, and the Stop then ends in about the timeout plus a second per line, not the timeout per line.
      * GcodeAsyncDriver (not the live machine's driver) only queues the lines here; its writer thread still drops a
-     * line whose predecessor's ok timed out under confirmation flow control (upstream behaviour).
+     * line whose predecessor's ok timed out under confirmation flow control (upstream behaviour). BR-75: {@code record},
+     * or null, is told which lines the controller acknowledged and which failed.
      */
-    private void sendEveryLine(String gCode) {
+    private void sendEveryLine(String gCode, PlannedStop record) {
         if (gCode == null) {
             return;
         }
@@ -1412,6 +1460,9 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             for (int attempt = 1;; attempt++) {
                 try {
                     sendCommand(command, timeout);
+                    if (record != null) {
+                        record.acknowledged.add(command);
+                    }
                     break;
                 }
                 catch (Exception e) {
@@ -1422,6 +1473,9 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                         continue;
                     }
                     Logger.warn(e, "{} Stop line {} failed; the next lines go out anyway", getName(), command);
+                    if (record != null) {
+                        record.failed.add(command);
+                    }
                     timeout = Math.min(timeout, 1000);
                     break;
                 }

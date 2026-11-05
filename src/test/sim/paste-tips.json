@@ -1,0 +1,63 @@
+{
+  "about": "INF-06 per-tip SIM pastes (il_sim_scene.py --paste-by-tip KEY:preset=NAME), from Process's measured reference docs/research/paste-model-reference-per-tip.md (11-04). Values marked 'fit' are chosen so SimPasteReferenceTest lands on that reference; the rest are measured. The 25G's sub-turn behaviour is not modelled (wholeTurnsOnly, PM 11-04) and its sub-turn values stay provisional until Process's per-contact weighing.",
+  "presets": {
+    "22g-bent": {
+      "mRevMg": 2.11,
+      "footprint": {
+        "c": 0.911,
+        "e": 0.77
+      },
+      "cv": 0.1,
+      "ripple": 1.23,
+      "transferRatio": 0.75,
+      "landingSdMm": 0.035,
+      "maxGapMm": 0.35,
+      "threadShare": 0,
+      "primeTurns": 75,
+      "emptyDotsAfterPowerCycle": 12,
+      "newPhaseOnMotorOff": true
+    },
+    "25g-plastic": {
+      "mRevMg": 1.95,
+      "footprint": {
+        "c": 0.862,
+        "e": 0.77
+      },
+      "cv": 0.075,
+      "transferRatio": 0.75,
+      "landingSdMm": 0.045,
+      "maxGapMm": 0.35,
+      "threadShare": 0,
+      "primeTurns": 230,
+      "newPhaseOnMotorOff": true,
+      "wholeTurnsOnly": true
+    }
+  },
+  "sources": {
+    "22g-bent": {
+      "mRevMg": "§1: 169 mg / 160 half turns at ~19 psi (10-28, one weighing)",
+      "footprint": "fit: §2 half-turn mean area on a flat blank, no pad, as the SIM blank: 0.94 mm2 (10-31), not the masked 0603 rows (board 3's 0.788 is pad-capped, Process 11-04; p29's 0.747 is on masked 0603 pads too); c 0.911 lays 0.940 (the SIM's phase-averaged mean); e 0.77 is the SIM's law (unverified, §2)",
+      "cv": "fit: §2 area CV 7.5 % (board 3) at the balanced phase (7.6 % mean over 100 seeds); of pad-capped dots: the flat blank's row has no CV",
+      "ripple": "fit: §3 A 0.56-0.60 as tools/lumen.py fits it: f(phi) = 1 + A cos(phi - peak) the flow per degree, dot area the dose proxy, consecutive half turns (the tip bead carries paste between them); 1.23 gives A 0.579. Above 1 the flow goes negative over part of a turn, so a sub-turn dot near the trough lays nothing: this preset is for half and whole turns, as the reference",
+      "transferRatio": "fit: the swing A depends on it (each dot leaves 1 - 0.75 of its paste on the tip for the next): set here, not taken from the SIM's base paste",
+      "landingSdMm": "§7: ~0.03-0.04 per axis",
+      "maxGapMm": "§6: dots land alike over 0.00-0.35",
+      "threadShare": "§6: never strings at 18-22 psi",
+      "primeTurns": "What matters: ~70-80 turns",
+      "emptyDotsAfterPowerCycle": "§5: ~12 empty half-turn dots after a power cycle",
+      "newPhaseOnMotorOff": "§4: every motor-off, a uniform random phase"
+    },
+    "25g-plastic": {
+      "mRevMg": "§1: +39 mg / 20 whole turns at 13.7 psi (11-04 02:37, one weighing; repeat pending)",
+      "footprint": "fit: §2 whole turn on flat FR4, no pad, as the SIM blank: ~1.50 mm2 (the 20 weighed dots, 11-04 02:2x; the bare-Cu rows 1.29 and 1.58-1.71 are an edge-fit core and a dot with its tail, Process 11-04); c 0.862 lays 1.44 (-4 %)",
+      "cv": "fit: §2 area CV ~6 % (5.7 %, Process 11-04) on flat FR4, no pad (the 20 weighed dots): 5.67 % mean over the test's 16 seeds",
+      "transferRatio": "fit: the CV depends on it (the tip bead averages successive dots): set here, not taken from the SIM's base paste",
+      "landingSdMm": "§7: 0.04-0.06 on the board, 0.02-0.05 on the tile",
+      "maxGapMm": "§6: dots land alike over 0.10-0.30 (drag at 0.05 not modelled)",
+      "threadShare": "§6: 0 threads with the cure (13.7 psi, 3 mm lift + 0.5 s); the strings without it are not modelled",
+      "primeTurns": "What matters: ~200-258 turns",
+      "newPhaseOnMotorOff": "§4",
+      "wholeTurnsOnly": "§2-3 + PM 11-04 04:4x: sub-turn dots follow a threshold and their history, not a cosine"
+    }
+  }
+}
