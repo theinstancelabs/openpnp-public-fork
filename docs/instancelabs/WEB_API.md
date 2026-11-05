@@ -572,16 +572,22 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   height) → `{tool, from: {x, y, z}, to: {x, y, z}, positions}`.
 - Refused (409, the reason in words): not started, unhomed (nothing moves), switching off, busy (OpenPnP, a task, a
   G-code batch, a pressure hold, a pad calibration), another move still running; X/Y while either nozzle is below
-  its safe zone; the camera's `dz`; a Z press while the dispense engine is not running (it holds the floors; a
-  configuration load restarts it); a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
+  its safe zone (while the engine has not found both: every nozzle of the head, named as in OpenPnP); the camera's
+  `dz`; a Z press while the dispense engine is not running (it holds the floors; a configuration load restarts it:
+  one it left mid-press) or has not found N1 or the needle (`the dispense engine has not found the needle (no
+  dispenser nozzle 'N9' in the machine): …`: a nozzle renamed in OpenPnP, or `nozzle` in the settings not matching;
+  a press moves both, so neither moves); a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
   always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current frame (anchored and
   touched off since the needle change, and no failed Z check of this home) and where its tip lands checked
   (`needle.xyChecked`: a needle change keeps the old tip's landing, and a change of N2's head offset makes it 0, 0,
   until a landing check), not below the surface where its tip lands (N2 + its landing and trim) nor the one under N2
   (the higher holds) + its offset, nor its I4 floor, without them not below its safe zone, anywhere (409 names which
-  is missing); over the height switch (BR-94: its place's circle of
+  is missing, in the engine's words; with no lower safe zone on Z in OpenPnP not lower at all: `the needle has no
+  floor …`); over the height switch (BR-94: its place's circle of
   `outputZones.heightSwitchRadiusMm`; the needle where its tip lands) neither tool below its safe zone, whatever its
   floor, also through the see-saw (only the measure presses it); OpenPnP's soft limits. 404 for an unknown place.
+  503 for `n1` and `needle` while the engine is not running (`the dispense engine is not running …`: it finds them),
+  and for `needle` while it has not found it (`the dispenser is unavailable: …`).
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
   `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
   ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.
