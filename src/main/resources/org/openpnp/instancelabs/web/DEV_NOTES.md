@@ -116,7 +116,9 @@ browser keeps them. A value left in
   never re-send. Default timeout 10 s (status 2.5 s, STOP 2 s are internal).
 - `IL.errorText(e)` one line incl. interlock violations (for actions). `IL.readErrorText(e)` for a read (GET): no
   "Outcome unknown" (a read changes nothing), a bare HTTP status named; `IL.errorText` and `IL.refuse` give a GET's
-  error (`e.method`) in those words too, so every read says it wherever it is shown. A failed read of the designs list says
+  error (`e.method`) in those words too, so every read says it wherever it is shown. A poll that follows a job a
+  write started (Tip's landing check) gives up with `new IL.ApiError(e.status, e.data, e.message)`, no method: the
+  job's outcome is unknown, so it says "Outcome unknown: look at the machine." A failed read of the designs list says
   `IL.listReadError(reason, kept)` everywhere (Start, Run's Board step, Designs and Set up), with `IL.retryButton(read,
   key)` (Retry); after a failed read only Retry, the next visit or OpenPnP answering again (`online`) reads it again.
 - `IL.pollNow()` poll at once (after an action). `IL.render()` schedule one render (coalesced per frame).

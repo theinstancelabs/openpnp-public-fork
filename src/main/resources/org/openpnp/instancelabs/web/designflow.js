@@ -42,7 +42,7 @@
     return load();
   }
   async function readCheck(file) {
-    try { D.checks.set(file, { c: await IL.api('GET', '/api/pad-profile/check?boardFile=' + encodeURIComponent(file)) }); } catch (e) { D.checks.set(file, { error: e.message || String(e) }); }
+    try { D.checks.set(file, { c: await IL.api('GET', '/api/pad-profile/check?boardFile=' + encodeURIComponent(file)) }); } catch (e) { D.checks.set(file, { error: IL.readErrorText(e) }); }
   }
   /** What a design waits on, from its check: {state: ready | wait | tip | reading | error, text, g: split groups}. */
   function stateOf(f) {

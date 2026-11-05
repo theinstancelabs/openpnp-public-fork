@@ -475,7 +475,7 @@
   }
   IL.ApiError = ApiError;
   /**
-   * fetch + JSON. Resolves with the parsed body; rejects with ApiError {status, data, code}. status 0 = no
+   * fetch + JSON. Resolves with the parsed body; rejects with ApiError {status, data, code, method}. status 0 = no
    * answer (code 'timeout' or 'network'). opts.timeoutMs (default 10 s).
    */
   IL.api = async function (method, path, body, opts) {

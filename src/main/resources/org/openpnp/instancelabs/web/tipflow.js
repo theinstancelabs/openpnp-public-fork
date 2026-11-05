@@ -287,7 +287,7 @@
             W.job = await IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(r.id));
             misses = 0;
           } catch (e) {
-            if (++misses >= 10) throw e;
+            if (++misses >= 10) throw new IL.ApiError(e.status, e.data, e.message);   // the job's outcome, not a read's: it may still be laying dots
             continue;
           }
           IL.render();
