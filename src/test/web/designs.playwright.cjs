@@ -18,7 +18,8 @@
  * line follows a design saved in Run's Board step in this tab; (6) a ready design: Make a board opens Run › Start with it chosen;
  * a failed read of the list keeps the cards Start and Designs have and says so in one wording everywhere (no "look at the
  * machine" after a read), with Retry on Start, Designs and Set up (a Retry pressed from the keyboard keeps the focus);
- * nothing reads the list again by itself but OpenPnP answering again (online); (7) nothing moves (only
+ * nothing reads the list again by itself but OpenPnP answering again (online); every other read with no answer (core's
+ * loads, Records' runs line) never says "look at the machine" either, a write still does (6f); (7) nothing moves (only
  * uploads, the apply and the test's own set-up writes are sent), no JavaScript errors, no native dialogs. Designs are
  * routed by their board file's path: names repeat, and every board saved from one KiCad file shows the same upload.
  * Self-contained: it marks chip-0603 characterized (SIM only, as the sim acceptance and pad-profile do), uploads its own
@@ -717,8 +718,41 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     check('(6e) every step settled: no read of the list in flight or repeating by itself', unsettled6 === 0, { unsettled6, reads6, done6 });
     await tab.close();
 
+    // ---- (6f) every other read with no answer says what failed and never "look at the machine" either (#68's follow-up:
+    // a GET changes nothing): core's loads of the runs, the config and the events, and Records' runs line; a write with no
+    // answer still says "Outcome unknown: look at the machine." (the test's own POST, aborted before the server)
+    const abort = (route) => (route.request().method() === 'GET' ? route.abort('failed') : route.fallback());
+    const READS = ['**/api/runs?limit=50', '**/api/config', '**/api/events?limit=50'];
+    for (const u of READS) await page.route(u, abort);
+    await page.route('**/api/test-no-answer', (route) => route.abort('failed'));
+    const loads6 = await page.evaluate(async () => {
+      IL.S.runs = null;   // as before the first answer: Records shows the failed load
+      await Promise.all([IL.loadRuns(), IL.loadConfig(), IL.loadEvents()]);
+      return ['runs', 'config', 'events'].map((k) => (IL.loadError(k) || {}).text || null);
+    });
+    await page.evaluate(() => IL.go('#records'));
+    const rec6 = await page.waitForFunction(() => { const t = (document.getElementById('rec-runs-sum') || {}).textContent || ''; return /^Could not load the runs: /.test(t) ? t : null; },
+      null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+    // the root every caller's words come from: IL.errorText and IL.refuse (its box) on a read and on a write with no answer
+    const root6 = await page.evaluate(async () => {
+      const fail = (m) => IL.api(m, '/api/test-no-answer', m === 'GET' ? undefined : {}).then(() => null, (e) => e);
+      const box = (e) => { const host = document.createElement('div'); IL.refuse(e, { host }); return host.textContent; };
+      const g = await fail('GET'), p = await fail('POST');
+      return { getText: IL.errorText(g), getBox: box(g), postText: IL.errorText(p), postBox: box(p) };
+    });
+    await page.unroute('**/api/test-no-answer');
+    for (const u of READS) await page.unroute(u, abort);
+    await page.evaluate(() => Promise.all([IL.loadRuns(), IL.loadConfig(), IL.loadEvents()]));
+    check('(6f) core\'s loads with no answer (runs, config, events) say what failed, no "Outcome unknown … look at the machine"',
+      loads6.every((t) => noAdvice(t) && /^OpenPnP did not answer \(.*\)\.$/.test(t)), loads6);
+    check('(6f) and Records\' runs line says it in those words', noAdvice(rec6) && rec6 === 'Could not load the runs: ' + loads6[0], { rec6, runs: loads6[0] });
+    check('(6f) the root, a read with no answer: IL.errorText says what failed, IL.refuse "Failed: …", neither "Outcome unknown … look at the machine"',
+      noAdvice(root6.getText) && /^OpenPnP did not answer \(.*\)\.$/.test(root6.getText) && noAdvice(root6.getBox) && root6.getBox === 'Failed: ' + root6.getText, root6);
+    check('(6f) a write with no answer still says "Outcome unknown: look at the machine." (IL.errorText), IL.refuse "Outcome unknown: … Look at the machine."',
+      /^OpenPnP did not answer \(.*\)\. Outcome unknown: look at the machine\.$/.test(root6.postText) && /^Outcome unknown: OpenPnP did not answer \(.*\)\. Look at the machine\.$/.test(root6.postBox), root6);
+
     // ---- (7) ----------------------------------------------------------------------------------------------------------
-    const allowed = ['POST /api/boards/import', 'POST /api/boards/import/save', 'POST /api/boards/import/attach', 'POST /api/pad-profile/apply', 'POST /api/package-mappings',
+    const allowed = ['POST /api/test-no-answer', 'POST /api/boards/import', 'POST /api/boards/import/save', 'POST /api/boards/import/attach', 'POST /api/pad-profile/apply', 'POST /api/package-mappings',
       'PUT /api/pad-types/chip-0603'];
     check('(7) nothing moves: only uploads, the apply and the test\'s own set-up writes were sent', writes.every((w) => allowed.includes(w)), [...new Set(writes)]);
     check('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
