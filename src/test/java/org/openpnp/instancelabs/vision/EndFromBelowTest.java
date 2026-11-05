@@ -174,6 +174,7 @@ public class EndFromBelowTest {
         assertEquals(65.129, p.k, 0.0005);
         assertEquals(0.087, p.spread, 0.0005);
         assertEquals(673.5, p.fPx, 0.05);
+        assertEquals(1.0148, p.needleMmPerRawMm, 0.00005, "needle_mm_per_rawz");
         // a see-saw drawn exactly: K wherever N1 is, no spread
         double f = 673.5, c = -18.6, k = 65.0;
         double[] n1z = {19, 25}, ndz = {36, 42}, n1k = new double[2], ndk = new double[2];
@@ -184,6 +185,7 @@ public class EndFromBelowTest {
         EndFromBelow.Parallax exact = EndFromBelow.parallaxK(n1z, n1k, ndz, ndk);
         assertEquals(65.0, exact.k, 1e-9);
         assertEquals(0, exact.spread, 1e-9);
+        assertEquals(1.0, exact.needleMmPerRawMm, 1e-9, "a true see-saw");
     }
 
     /** A straight line through points and the fit of a pixel against the step recover what drew them. */

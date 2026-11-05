@@ -587,6 +587,25 @@ public class HeightSwitchTest {
         assertEquals("kParallax", HeightSwitch.needleWindow(c, end, 200L, 1).from);
     }
 
+    /**
+     * Review NIT: X/Y over the switch is approached from (−a, −a), as the end measure's frames, so backlash leaves the
+     * press point where the end was aimed; with no approach set it goes straight there, as before.
+     */
+    @Test
+    public void thePressPointIsApproachedFromTheFramesSide() throws Exception {
+        FakeSwitch sw = new FakeSwitch(12.0, -1);
+        HeightSwitch.Plan p = plan("n1", -1, 13.0, 11.0, 1);
+        p.approachMm = 0.5;
+        HeightSwitch.measure(sw, p);
+        int at = sw.lines.indexOf("G1 X100.000 Y200.000 F6000");
+        assertEquals("G1 X99.500 Y199.500 F6000", sw.lines.get(at - 1), sw.lines.toString());
+        assertEquals("G1 Z31.500 F600", sw.lines.get(at - 2), "at travel Z");
+        FakeSwitch straight = new FakeSwitch(12.0, -1);
+        HeightSwitch.measure(straight, plan("n1", -1, 13.0, 11.0, 1));
+        int s = straight.lines.indexOf("G1 X100.000 Y200.000 F6000");
+        assertEquals("G1 Z31.500 F600", straight.lines.get(s - 1));
+    }
+
     /** Each press announces itself before its descent: the task's progress (press n of N). */
     @Test
     public void eachPressIsAnnouncedForTheTasksProgress() throws Exception {

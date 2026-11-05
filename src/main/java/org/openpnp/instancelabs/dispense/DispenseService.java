@@ -5117,6 +5117,7 @@ public final class DispenseService {
         p.travelZ = s.mapper.toRaw(here[0], here[1], c.travelSafeZMm).z;
         p.down = HeightSwitch.down(mapper, place.x, place.y, c.travelSafeZMm);
         p.coarseMm = needle ? 0.10 : 0.25;
+        p.approachMm = c.needleEndMeasure.approachMm; // both tools press the one point, from the same side
         double x = place.x, y = place.y;
         if (needle) {
             // its end from below, right before the press in this task: nothing else runs between them; N1's frames only

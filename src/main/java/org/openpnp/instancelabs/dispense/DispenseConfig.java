@@ -425,6 +425,12 @@ public class DispenseConfig {
      */
     public static class NeedleEndSettings {
         /**
+         * The bottom camera's scale at the nearest heights allowed (px per mm): N1 at raw 19 17.9, the needle at raw 44
+         * about 17 (Process's p34/t2_px25: f 673.5 px).
+         */
+        static final double MAX_PX_PER_MM = 18;
+
+        /**
          * The needle's raw Z heights: Process's parallax run p34/t2_px25 (the 25G: K 65.13, spread 0.09) and np1.py's
          * 40.4 (the bottom camera's focus, the clean check's pose).
          */
@@ -509,6 +515,12 @@ public class DispenseConfig {
                             + "camera's opening)");
                 }
             }
+            // review NIT: a step moves a tip at most MAX_PX_PER_MM px per mm: followPx (n1SearchPx) must reach it
+            if (!(needleStepMm * MAX_PX_PER_MM < followPx && n1StepMm * MAX_PX_PER_MM < n1SearchPx)) {
+                p.add(String.format(java.util.Locale.ROOT, "needleEndMeasure: a step moves a tip up to %.0f px per mm, "
+                        + "so needleStepMm x %.0f must stay under followPx and n1StepMm x %.0f under n1SearchPx",
+                        MAX_PX_PER_MM, MAX_PX_PER_MM, MAX_PX_PER_MM));
+            }
             if (!(approachMm > 0 && approachMm <= 1) || settleMs < 0 || settleMs > 5000) {
                 p.add("needleEndMeasure.approachMm must be above 0 and at most 1 mm, settleMs 0..5000");
             }
@@ -582,6 +594,11 @@ public class DispenseConfig {
         /** The worst height's residual in mm (the end's scatter about its fit); K's spread over N1's heights (mm). */
         public double errXyMm;
         public Double errKMm;
+        /**
+         * K's by-products (parallax_k.py prints both; null without N1): the focal length f N1's scales give (px), and
+         * how far the needle's end comes nearer the camera per raw mm (1 on a true see-saw; Process's 25G 1.015).
+         */
+        public Double fPx, needleMmPerRawMm;
         public java.util.List<Long> photoIds = new java.util.ArrayList<>();
         /**
          * Every frame as taken (nothing drawn; review MINOR 4: Process re-runs its tools on them), in the order taken:

@@ -644,8 +644,11 @@ public class HeightSwitchSimTest {
         assertEquals(150 - aim.get("endDxMm").getAsDouble(), aim.get("rawX").getAsDouble(), 1e-3, "the head at the "
                 + "place minus the end");
         assertEquals(200 - aim.get("endDyMm").getAsDouble(), aim.get("rawY").getAsDouble(), 1e-3);
-        assertTrue(l.contains(String.format(java.util.Locale.ROOT, "G1 X%.3f Y%.3f F6000", aim.get("rawX")
-                .getAsDouble(), aim.get("rawY").getAsDouble())), "pressed there: " + l);
+        int press = l.indexOf(String.format(java.util.Locale.ROOT, "G1 X%.3f Y%.3f F6000", aim.get("rawX")
+                .getAsDouble(), aim.get("rawY").getAsDouble()));
+        assertTrue(press > 0, "pressed there: " + l);
+        assertEquals(String.format(java.util.Locale.ROOT, "G1 X%.3f Y%.3f F6000", aim.get("rawX").getAsDouble() - 0.5,
+                aim.get("rawY").getAsDouble() - 0.5), l.get(press - 1), "approached from (-0.5, -0.5), as the frames");
         JsonObject run = ok("GET", "/api/status", null).getAsJsonObject("run");
         String phases = run.getAsJsonArray("phases").toString();
         assertTrue(phases.contains("needle end: the needle at raw Z 40.400 (3 of 4)") && phases.contains(

@@ -101,6 +101,8 @@ public final class HeightSwitch {
         public double zStart, zFloor;
         /** The coarse step: 0.25 for N1, 0.10 for the needle. */
         public double coarseMm;
+        /** X/Y over the switch is approached from (−this, −this) mm, as the end measure's frames (0: straight). */
+        public double approachMm;
         public int presses;
         /** Raw Z's soft limits {low, high} (NaN: that side open), null: none: the window lies inside them. */
         public double[] zLimits;
@@ -338,6 +340,10 @@ public final class HeightSwitch {
         io.send(ControllerCommands.VALVE_OFF);
         io.send(ControllerCommands.PUMP_OFF);
         io.send(move(p.travelZ, 600));
+        if (p.approachMm > 0) {
+            // the side the end measure's frames came from: backlash leaves the press point where it was aimed
+            io.send(String.format(Locale.ROOT, "G1 X%.3f Y%.3f F6000", p.rawX - p.approachMm, p.rawY - p.approachMm));
+        }
         io.send(String.format(Locale.ROOT, "G1 X%.3f Y%.3f F6000", p.rawX, p.rawY));
         io.send("M42 P" + M42_PIN + " T2");
         io.send("M400");

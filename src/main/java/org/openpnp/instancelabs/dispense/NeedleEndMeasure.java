@@ -447,6 +447,8 @@ public final class NeedleEndMeasure {
             }
             e.kParallax = par.k;
             e.errKMm = par.spread;
+            e.fPx = par.fPx;
+            e.needleMmPerRawMm = par.needleMmPerRawMm;
         }
         e.tiltXMmPerRawMm = EndFromBelow.line(z, dx)[0];
         e.tiltYMmPerRawMm = EndFromBelow.line(z, dy)[0];

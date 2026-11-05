@@ -283,14 +283,18 @@ public final class EndFromBelow {
         return new double[] {slope, (sy - slope * sx) / n};
     }
 
-    /** K by parallax: its value and its spread over N1's heights (mm), and the focal length f it implies (px). */
+    /**
+     * K by parallax: its value and its spread over N1's heights (mm), the focal length f it implies (px) and how far the
+     * needle's end comes nearer the camera per raw mm (parallax_k.py's needle_mm_per_rawz: 1 on a true see-saw).
+     */
     public static final class Parallax {
-        public final double k, spread, fPx;
+        public final double k, spread, fPx, needleMmPerRawMm;
 
-        Parallax(double k, double spread, double fPx) {
+        Parallax(double k, double spread, double fPx, double needleMmPerRawMm) {
             this.k = k;
             this.spread = spread;
             this.fPx = fPx;
+            this.needleMmPerRawMm = needleMmPerRawMm;
         }
     }
 
@@ -308,7 +312,7 @@ public final class EndFromBelow {
             hi = Math.max(hi, z);
         }
         double kLo = kAt(lo, s1, s2), kHi = kAt(hi, s1, s2);
-        return new Parallax(kAt((lo + hi) / 2, s1, s2), Math.abs(kHi - kLo), 1 / s1[0]);
+        return new Parallax(kAt((lo + hi) / 2, s1, s2), Math.abs(kHi - kLo), 1 / s1[0], -s2[0] / s1[0]);
     }
 
     private static double kAt(double zn, double[] s1, double[] s2) {

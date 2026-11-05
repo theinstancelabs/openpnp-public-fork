@@ -130,6 +130,8 @@ public class NeedleEndMeasureTest {
         assertEquals(sc.end(43.0)[1], at[1], 0.015);
         assertEquals(65.0, e.kParallax, 0.1);
         assertTrue(e.errKMm < 0.1, "K's spread " + e.errKMm);
+        assertEquals(sc.fPx, e.fPx, 0.015 * sc.fPx, "f, by N1's scales");
+        assertEquals(1.0, e.needleMmPerRawMm, 0.02, "the drawn see-saw's");
         assertTrue(e.errXyMm < 0.02 && e.residualPx < 0.3 && e.driftPx < 0.3, e.errXyMm + " " + e.residualPx);
         assertEquals(3, e.n1.size());
         for (DispenseConfig.EndHeight h : e.n1) {
@@ -425,6 +427,28 @@ public class NeedleEndMeasureTest {
         assertEquals(NeedleEndMeasure.PASTE, p.code, p.why);
         assertEquals(43, p.framePhotoIds.size());
         assertEquals(Long.valueOf(1042), p.clean.framePhotoId);
+    }
+
+    /**
+     * Review NIT: a step moves a tip up to 18 px per mm at the nearest heights allowed, so a step the follow window
+     * cannot reach (followPx for the needle, n1SearchPx for N1) is refused with the other settings.
+     */
+    @Test
+    public void aStepTheFollowWindowCannotReachIsRefused() {
+        DispenseConfig.NeedleEndSettings s = new DispenseConfig.NeedleEndSettings();
+        List<String> p = new ArrayList<>();
+        s.validate(p);
+        assertEquals(new ArrayList<String>(), p, "the defaults: 1 mm under 60 px, 5 mm under 140");
+        s.needleStepMm = 4; // 72 px
+        s.validate(p);
+        assertTrue(p.stream().anyMatch(x -> x.contains("needleStepMm x 18 must stay under followPx")), p.toString());
+        p.clear();
+        s.needleStepMm = 3; // 54 px
+        s.validate(p);
+        assertEquals(new ArrayList<String>(), p);
+        s.n1SearchPx = 80; // N1's 5 mm: 90 px
+        s.validate(p);
+        assertTrue(p.stream().anyMatch(x -> x.contains("n1SearchPx")), p.toString());
     }
 
     /** A room-lit frame (the ring's glow not white): the clean check's light, the end not found (light or focus). */
