@@ -77,6 +77,17 @@
     if (st === 'unmeasured') return { text: 'not measured', note: ((a.dotNotes || [])[i]) || null };
     return { text: isNum(d) ? IL.fmt(d, 3) : !st || st === 'none' ? 'no dot' : '—', note: null };
   };
+  /**
+   * BR-89: a touch-off's check dots (laid after its ladder at the first counted dot's gap) as rows under the ladder's
+   * table of `cols` columns: a "Check dots" row, then each dot's gap and size read as the ladder's. None before BR-89.
+   */
+  pcr.touchOffCheckRows = function (a, cols) {
+    const dots = (a && a.checkDots) || [];
+    return dots.length ? [el('tr', {}, el('th', { colspan: String(cols), text: 'Check dots' }))].concat(dots.map((d) => el('tr', { 'data-state': d.state || null },
+      el('td', { class: 'r', text: IL.fmtSigned(a.checkGapMm, 3) }),
+      el('td', { class: 'r', text: pcr.touchOffDot({ dotStates: [d.state], diametersMm: [d.diameterMm] }, 0).text }),
+      cols > 2 ? el('td', {}) : null))) : [];
+  };
   const taskOf = (s) => (s && s.run && CAL_TASKS.has(s.run.label) ? s.run : null);
   /** The engine ends a touch-off OK even when its analysis found no contact (then nothing is recorded): say so. */
   function noContact(run) {
@@ -498,6 +509,8 @@
   const skipDots = () => { const k = ((S.status && S.status.dispense && S.status.dispense.profile) || {}).touchOffSkipDots; return Number.isInteger(k) && k > 0 ? k : 0; };
   /** The engine's NeedleTouchOff.REFERENCE_GAP_MM: the counted dots start here, the uncounted ones go above it (#44). */
   const REFERENCE_GAP_MM = 0.125;
+  /** The engine's NeedleTouchOff.CHECK_DOTS (BR-89): laid after the ladder, one space on, at its first counted dot's gap. */
+  const CHECK_DOTS = 2;
   /** The lowest start that keeps the counted dots at 0.125 mm or above, rounded up to 1 µm as the engine's 400 is. */
   const minStart = (skip, step) => Math.ceil((REFERENCE_GAP_MM + skip * step) * 1000 - 1e-9) / 1000;
   function minStartText(skip, step) {
@@ -520,22 +533,26 @@
     // the smallest pitch is the engine's (the dot of the dose + 0.4 mm): its refusal shows at the field (F14)
     const refused = C.pitchErr && C.pitchErr.key === pitchKey(pitch.v, rot.v) ? C.pitchErr.text : null;
     const errs = { 'to-start': a.err, 'to-step': b.err, 'to-steps': n.err, 'to-rot': rot.err, 'to-pitch': pitch.err || refused };
-    let gaps = null, lowest = null;
+    let gaps = null, lowest = null, check = null;
     if (!a.err && !b.err && !n.err) {
       gaps = [];
       for (let i = 0; i < n.v; i++) gaps.push(a.v - i * b.v);
       lowest = gaps[gaps.length - 1];
+      check = a.v - skip * b.v;   // the engine's NeedleTouchOff.checkGapMm
       if (lowest < -0.1 - 1e-9) errs['to-steps'] = 'The lowest gap would be ' + IL.fmt(lowest, 3) + ' mm: keep it at −0.100 mm or above.';
     }
-    return { errs, gaps, lowest, body: { startGapMm: a.v, stepMm: b.v, steps: n.v, rotationDeg: rot.v, pitchMm: pitch.v, locationName: $('to-place').value || undefined, apply: $('to-apply').checked } };
+    return { errs, gaps, check, lowest, body: { startGapMm: a.v, stepMm: b.v, steps: n.v, rotationDeg: rot.v, pitchMm: pitch.v, locationName: $('to-place').value || undefined, apply: $('to-apply').checked } };
   }
   async function startTouchOff() {
     const p = touchOffPlan();
     const e = Object.values(p.errs).find(Boolean);
     if (e) throw new Error(e);
-    C.toReq = { gaps: p.gaps, at: Date.now() };
+    // its gaps name only the dots of the first run that starts after it: the status listener (at mount) binds its runId
+    const req = { gaps: p.gaps, check: p.check, after: ((S.status && S.status.run) || {}).startedAtMs || 0 };
     try {
-      return await IL.api('POST', '/api/calibrations/touch-off', p.body);
+      const r = await IL.api('POST', '/api/calibrations/touch-off', p.body);
+      C.toReq = req;
+      return r;
     } catch (x) {
       // a pitch with no room between these dots (400 before anything moves): the reason goes to the Pitch field
       if (x.status !== 400 || !/^the touch-off pitch /.test(x.message)) throw x;
@@ -712,8 +729,8 @@
     showErrs(p.errs);
     IL.setText($('to-steps-wrap').querySelector('.unit'), minSteps + ' to 20');
     IL.setAttr($('to-steps'), 'min', String(minSteps));
-    IL.setText($('to-plan'), p.gaps ? IL.plural(p.gaps.length, 'dot') + (place ? ' on “' + place + '”' : '') + ' at gaps ' + p.gaps.map((g) => IL.fmt(g, 3)).join(', ') + ' mm'
-      + ' · one profile dot each' + (IL.num('to-rot') ? ' (here ' + IL.fmt(IL.num('to-rot'), 2) + '°)' : '') + ' · ' + pitchLine(s, p.body.pitchMm) : 'Enter the gaps to see the dots.');
+    IL.setText($('to-plan'), p.gaps ? IL.plural(p.gaps.length + CHECK_DOTS, 'dot') + (place ? ' on “' + place + '”' : '') + ': ' + p.gaps.length + ' at gaps ' + p.gaps.map((g) => IL.fmt(g, 3)).join(', ') + ' mm'
+      + ', then ' + CHECK_DOTS + ' check dots at ' + IL.fmt(p.check, 3) + ' mm after an empty space · one profile dot each' + (IL.num('to-rot') ? ' (here ' + IL.fmt(IL.num('to-rot'), 2) + '°)' : '') + ' · ' + pitchLine(s, p.body.pitchMm) : 'Enter the gaps to see the dots.');
     const blockers = renderPrereqs($('to-pre'), prereqs(s, { machine: true, engine: true, frame: true, zmoved: true, place: true, surface: true, pressure: true }, place));
     const first = Object.values(p.errs).find(Boolean);
     // the long refusals (the engine's pitch, too few steps) stand at their fields: the line under the button points there
@@ -722,9 +739,11 @@
         : first && first === minStartText(skipDots(), IL.num('to-step')) ? 'The start gap is too low for this tip’s recipe: see the Start gap field.' : first) || (!place ? 'Choose the place.' : null);
     IL.gate($('btn-to-run'), runReason(s, blockers, own), $('to-reason'));
     renderLive($('to-live'), s, 'needle touch-off', (run) => {
-      const g = C.toReq && C.toReq.gaps;
-      const i = Math.min(run.dotsDone, (g || []).length - 1);
-      return g && g.length ? 'gap ' + IL.fmt(g[i], 3) + ' mm · ' + (run.phase || '') : run.phase || '';
+      const q = C.toReq;
+      const g = q && q.runId && q.runId === run.runId ? q.gaps : null;
+      // the ladder's dots, then its check dots (the engine's dotsPlanned counts them); once laid, only what the run does
+      return g && run.dotsDone < g.length + CHECK_DOTS ? (run.dotsDone < g.length ? 'gap ' + IL.fmt(g[run.dotsDone], 3) : 'check dot at gap ' + IL.fmt(q.check, 3))
+        + ' mm · ' + (run.phase || '') : run.phase || '';
     }, (run) => (noContact(run) ? { kind: 'need', head: 'Finished {t} · no contact found: nothing recorded' } : null));
     renderTouchOffResult(s);
   }
@@ -767,7 +786,7 @@
               return el('tr', { class: inBracket(g) ? 'is-contact' : null, 'data-state': ((a.dotStates || [])[i]) || null },
                 el('td', { class: 'r', text: IL.fmtSigned(g, 3) }), el('td', { class: 'r', text: dot.text, title: dot.note }),
                 el('td', { class: 'dim', text: isNum(a.contactGapMm) && Math.abs(g - a.contactGapMm) < 1e-9 ? 'contact' : inBracket(g) ? 'bracket' : dot.note ? IL.nb(dot.note) : '' }));
-            })))),
+            }), pcr.touchOffCheckRows(a, 3)))),
         el('button', { type: 'button', class: 'btn btn--sm btn--quiet', onclick: () => IL.go('#records/touch-offs') }, 'Last 20 touch-offs', IL.icon('i-chev'))];
     });
     IL.gate($('to-use'), IL.lockReason(s, { pressureOff: false }));
@@ -1183,6 +1202,8 @@
       pcr.stickyTop(root);
       IL.on('taskend', (run) => { if (CAL_TASKS.has(run.label) || C.data) loadCalibrations(); if (run.label === 'pad calibration') loadArea(); });
       IL.on('coupon-reading', () => loadArea());   // a pending coupon weighed or skipped (padprofile.js pendingForm)
+      // this page's touch-off request belongs to the first run that starts after it, seen from any screen
+      IL.on('status', (st) => { const q = C.toReq, r = st && st.run; if (q && !q.runId && r && r.label === 'needle touch-off' && r.startedAtMs > q.after) q.runId = r.runId; });
     },
     show() { loadCalibrations(); loadArea(); if (!S.config) IL.loadConfig(); },
     route(r) {
