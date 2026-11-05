@@ -153,8 +153,8 @@ final class BedGuard {
 
     /**
      * Move-to's three legs, as {@code MovableUtils.moveToLocationAtSafeZ} drives them: the head up into the Z axis's
-     * safe zone (every head-mountable to its safe Z: raw clamped to the zone), X/Y with the tool to its safe Z, then the
-     * move to the target, which is no move here (the route's target is the tool's safe Z).
+     * safe zone (every head-mountable to its safe Z: raw clamped to the zone), X/Y with the tool to its safe Z, then
+     * the move to the target, which is no move here (the route's target is the tool's safe Z).
      */
     List<CollisionCheck.Leg> moveToLegs(Machine m, HeadMountable hm, Location to, Start s, String tool)
             throws Exception {
@@ -191,8 +191,8 @@ final class BedGuard {
                     "restart OpenPnP (il-openpnp) so its engine starts", legs, null, dry);
         }
         if (st.model == null) {
-            throw refusal(COLLISION, null, "the bed model is not valid (" + st.error + ")", "send a valid model with PUT "
-                    + "/api/bed", legs, null, dry);
+            throw refusal(COLLISION, null, "the bed model is not valid (" + st.error + ")", "send a valid model with "
+                    + "PUT /api/bed", legs, null, dry);
         }
         BedModel m = st.model;
         Long changed = svc.getConfig().needleChangedAtMs;
@@ -200,9 +200,9 @@ final class BedGuard {
             // the full fix: the engine derives the tip end from N2's head offset, the landing and the trim at a mount
             if ("needle".equals(t.moves) && changed != null && (t.tipEndAtMs == null || t.tipEndAtMs < changed)) {
                 throw refusal(BedEndpoints.MEASUREMENT_NEEDED, null, "the needle's tip end in the bed model (tools '"
-                        + t.id + "'.tipEnd) is from before the needle change at " + ZCheck.clock(changed), "measure the "
-                                + "mounted needle's tip end, then send it with PUT /api/bed/tools/" + t.id + " (a later "
-                                + "tipEnd.atMs and a measurement record)", legs, m.version, dry);
+                        + t.id + "'.tipEnd) is from before the needle change at " + ZCheck.clock(changed),
+                        "measure the mounted needle's tip end, then send it with PUT /api/bed/tools/" + t.id
+                                + " (a later tipEnd.atMs and a measurement record)", legs, m.version, dry);
             }
         }
         if (!s.known) {

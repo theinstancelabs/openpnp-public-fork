@@ -291,8 +291,9 @@ public class BedApiSimTest {
         refused(409, "measurement-needed", "emptyBedMaxDiff", call("POST", "/api/bed/objects/blank-front/cleared", "{"
                 + camera + "," + n1 + "}", UI));
         ok("PUT", "/api/config", "{\"emptyBedMaxDiff\":2.0}");
+        String looser = camera.replace("\"diff\":0.8,\"threshold\":2.0", "\"diff\":2.5,\"threshold\":3.0");
         refused(409, "measurement-needed", "threshold", call("POST", "/api/bed/objects/blank-front/cleared", "{"
-                + camera.replace("\"diff\":0.8,\"threshold\":2.0", "\"diff\":2.5,\"threshold\":3.0") + "," + n1 + "}", UI));
+                + looser + "," + n1 + "}", UI));
         // a measurement from before the removal does not clear it
         refused(409, "measurement-needed", "older than", call("POST", "/api/bed/objects/blank-front/cleared", "{"
                 + camera.replaceAll("event:\\d+", early) + "," + n1 + "}", UI));
@@ -440,7 +441,8 @@ public class BedApiSimTest {
         try {
             reel = CompletableFuture.supplyAsync(() -> {
                 try {
-                    call("POST", "/api/bed/objects", "{\"name\":\"A reel\",\"outline\":{\"box\":[300,400,340,440]}}", UI);
+                    call("POST", "/api/bed/objects", "{\"name\":\"A reel\",\"outline\":{\"box\":[300,400,340,440]}}",
+                            UI);
                     return status + " " + body;
                 }
                 catch (Exception e) {

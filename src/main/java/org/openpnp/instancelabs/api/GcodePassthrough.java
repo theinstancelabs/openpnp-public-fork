@@ -201,8 +201,8 @@ final class GcodePassthrough {
      * left it while that is not re-read yet) and proven before any line is sent; a blocked batch is refused whole. Raw
      * G-code has no semantics: a tip may go the model's contact depth into a measured touchable top, as in lumen-sim.
      * Where the head is may be unknown (the last batch cut short, or a quick stop earlier in this batch): then no line
-     * moves X, Y or Z, whatever its legs (review MAJOR 1). On the machine thread before the first line (review MINOR b),
-     * as jog and move-to prove theirs.
+     * moves X, Y or Z, whatever its legs (review MAJOR 1). Made on the machine thread before the first line, as jog and
+     * move-to make theirs (review MINOR b).
      */
     private void prove(Machine m, Batch b, List<PassthroughLines.Line> lines) throws ApiException {
         // BR-97's see-saw levelling (Z alone while not homed) stays outside the check (design §3, §4): its own walk

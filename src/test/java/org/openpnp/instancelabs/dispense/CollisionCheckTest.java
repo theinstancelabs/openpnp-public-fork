@@ -34,8 +34,9 @@ public class CollisionCheckTest {
     /** The fixture's tools plus a fixed one (a plate under the head), and one block on the bed. */
     static BedModel plateAndBlock() throws Exception {
         JsonObject j = BedFixture.json();
-        j.getAsJsonArray("tools").add(new JsonParser().parse("{\"id\": \"probe\", \"moves\": \"fixed\", \"layers\": "
-                + "[{\"name\": \"plate\", \"at\": \"head\", \"outline\": {\"box\": [-1, -1, 1, 1]}, \"bottomZ\": 5}]}"));
+        j.getAsJsonArray("tools").add(new JsonParser().parse("{\"id\": \"probe\", \"moves\": \"fixed\", "
+                + "\"layers\": [{\"name\": \"plate\", \"at\": \"head\", \"outline\": {\"box\": [-1, -1, 1, 1]}, "
+                + "\"bottomZ\": 5}]}"));
         j.add("objects", new JsonParser().parse("[{\"id\": \"block\", \"name\": \"the block\", \"kind\": \"fixed\", "
                 + "\"outline\": {\"box\": [10, -5, 20, 5]}, \"topZ\": 6, \"marginMm\": 1.0, \"touchable\": false, "
                 + "\"measured\": {\"top\": {\"how\": \"n1-touch\", \"errMm\": 0.05}}, \"state\": \"measured\"}]"));
@@ -183,8 +184,8 @@ public class CollisionCheckTest {
         assertTrue(r.clear, () -> "travel: " + r.hit);
         assertTrue(r.hit.mm > 10, "the closest is far below: " + r.hit);
         assertTrue(r.hit.vertical);
-        // OpenPnP's visual homing after G28: the camera from the homing corner to the fiducial (217.081, 200.223) at the
-        // home's raw Z passes the black blank (#66 review: its r 20 reached 0.22 mm into the blank's front at y 220)
+        // OpenPnP's visual homing after G28: the camera from the homing corner to the fiducial (217.081, 200.223) at
+        // the home's raw Z passes the black blank (#66 review: its r 20 reached 0.22 mm into it with its front at 220)
         CollisionCheck.Leg fiducial = leg("G28 corner to the fiducial", 0, 0, 31.5, 217.081, 200.223, 31.5);
         assertTrue(strict(m, fiducial).clear, () -> "to the fiducial: " + strict(m, fiducial).hit);
         // G28's Z at the homing corner: N1 to its end stop raw 0 hits nothing

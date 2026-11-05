@@ -361,7 +361,8 @@ public final class BedModel {
         Double depth = optional(j, "contactDepthMm", "");
         contactDepthMm = depth == null ? 0.25 : depth;
         if (contactDepthMm < 0 || contactDepthMm > 1.0) {
-            throw new IllegalArgumentException("contactDepthMm must be 0 to 1.0"); // as lumen-sim's loader (Infra 11-04)
+            // the cap of both loaders, the engine's and lumen-sim's (Infra and Backend 11-04)
+            throw new IllegalArgumentException("contactDepthMm must be 0 to 1.0");
         }
         JsonObject bed = object(j, "bed", "");
         JsonObject plane = object(bed, "plane", "bed");

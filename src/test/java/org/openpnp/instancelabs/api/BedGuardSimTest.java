@@ -358,7 +358,7 @@ public class BedGuardSimTest {
 
     /**
      * A batch stopped with its move in flight (a STOP, a take-over, the route's time bound) leaves where the head went
-     * unknown, with the machine still on after the time bound: no move until an M400 alone re-reads it (review MAJOR 1).
+     * unknown, the machine still on after the time bound: no move until an M400 alone re-reads it (review MAJOR 1).
      */
     @Test
     public void afterAnInterruptedMoveNoLineMovesTheHead() throws Exception {

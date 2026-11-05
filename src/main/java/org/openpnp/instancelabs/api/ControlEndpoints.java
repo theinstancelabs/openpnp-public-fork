@@ -228,8 +228,8 @@ final class ControlEndpoints {
         if (ctx.passthrough.positionStale()) {
             // the real routes re-read it first; a dry run sends nothing and holds no lock (#66 review MINOR e)
             throw ApiException.refused("OpenPnP's position is not re-read after the G-code passthrough's moves yet, so "
-                    + "the path cannot be checked from where the head is: the move itself reads it first; for a dry run "
-                    + "the lock holder sends M400");
+                    + "the path cannot be checked from where the head is: the move itself reads it first; for a dry "
+                    + "run the lock holder sends M400");
         }
         Location from = mm(hm.getLocation());
         Map<String, Object> proof;

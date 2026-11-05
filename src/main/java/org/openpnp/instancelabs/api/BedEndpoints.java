@@ -30,16 +30,16 @@ import com.google.gson.JsonPrimitive;
  *
  * <p>A person's word may add an object (it blocks its outline at every height until measured), mark one moved or
  * removed, grow an outline or a tool layer, raise a top. Anything that frees space needs a new measurement record (a
- * later {@code atMs} than the stored one, a non-empty {@code how}, {@code evidence} naming journal events or photos that
- * exist, none older than the stored record and no bed-model or motion row) where that part keeps its records: a lower or newly measured top, a smaller top error or a touchable top
- * ({@code measured.top}); a smaller outline or margin, or an unmeasured object becoming measured ({@code measured.xy});
- * any change of the bed plane or the bed's smaller outline ({@code bed.plane}); any see-saw change
- * ({@code seesaw.measured}); a smaller, higher or moved tool layer, a changed tipEnd (its atMs too) or moves
- * ({@code tools[].measured}). A removed object stops blocking only through {@code /cleared} with both of Process's
- * measurements since it was removed: the top camera against the stored empty-bed picture of that spot (the engine's
- * fixed threshold, no person judging) and N1 lowered to its floor at 3 points inside the outline with no contact (N1
- * cannot touch the bare bed). A smaller Z margin or a deeper contact depth frees space everywhere: not through the API
- * in this build.</p>
+ * later {@code atMs} than the stored one, a non-empty {@code how}, {@code evidence} naming journal events or photos
+ * that exist, none older than the stored record and no bed-model or motion row) where that part keeps its records: a
+ * lower or newly measured top, a smaller top error or a touchable top ({@code measured.top}); a smaller outline or
+ * margin, or an unmeasured object becoming measured ({@code measured.xy}); any change of the bed plane or the bed's
+ * smaller outline ({@code bed.plane}); any see-saw change ({@code seesaw.measured}); a smaller, higher or moved tool
+ * layer, a changed tipEnd (its atMs too) or moves ({@code tools[].measured}). A removed object stops blocking only
+ * through {@code /cleared} with both of Process's measurements since it was removed: the top camera against the stored
+ * empty-bed picture of that spot (the engine's fixed threshold, no person judging) and N1 lowered to its floor at 3
+ * points inside the outline with no contact (N1 cannot touch the bare bed). A smaller Z margin or a deeper contact
+ * depth frees space everywhere: not through the API in this build.</p>
  */
 final class BedEndpoints {
     static final String MEASUREMENT_NEEDED = "measurement-needed";
