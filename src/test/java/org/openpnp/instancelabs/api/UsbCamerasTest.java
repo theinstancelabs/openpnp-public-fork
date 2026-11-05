@@ -306,6 +306,115 @@ public class UsbCamerasTest {
         return new String(r.body, StandardCharsets.UTF_8);
     }
 
+    /**
+     * BR-102 "Cost": the UI's 2×2 view polls 4 cameras, one request at a time each, 2/s, w=640, after= the last frame.
+     * Fake sources give frames of the real sizes (three 1920x1080, the gauge 1280x720) as JPEGs that OpenCV decodes
+     * per read, as the V4L2 capture decodes the MJPEG stream (and, for comparison, as frames ready-decoded), then the
+     * engine's own scale and encode. Prints the process CPU over 15 s after a 5 s warm-up; run alone with
+     * {@code -Dil.measure=true}.
+     */
+    @Test
+    @org.junit.jupiter.api.condition.EnabledIfSystemProperty(named = "il.measure", matches = "true")
+    public void measureTheCpuOfFourCamerasAtTwoFramesASecond() throws Exception {
+        MachineEndpoints m = new MachineEndpoints(null);
+        UsbCameras.Encoder enc = (img, w) -> m.encodeFrame(MachineEndpoints.scaled(img, w));
+        BufferedImage scene;
+        try (InputStream in = UsbCamerasTest.class.getResourceAsStream("/usbcameras/machine.jpg")) {
+            scene = javax.imageio.ImageIO.read(in);
+        }
+        StringBuilder report = new StringBuilder();
+        for (boolean decodeEach : new boolean[] {true, false}) {
+            List<UsbCameras.Capture> caps = new ArrayList<>();
+            for (int[] s : new int[][] {{1920, 1080}, {1920, 1080}, {1920, 1080}, {1280, 720}}) {
+                BufferedImage frame = noisy(scene, s[0], s[1]);
+                byte[] jpg = org.openpnp.instancelabs.dispense.JpegEncoder.encode(frame, 0.85f);
+                UsbCameras.Opener open = cam -> new UsbCameras.FrameSource() {
+                    @Override
+                    public BufferedImage read() {
+                        return decodeEach ? UsbCameras.decode(jpg) : frame;
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                };
+                UsbCameras.Capture c = new UsbCameras.Capture("cam" + caps.size(), cam(BY_ID, "MJPG", s[0], s[1]), open,
+                        null);
+                captures.add(c);
+                caps.add(c);
+            }
+            java.lang.management.OperatingSystemMXBean os = java.lang.management.ManagementFactory
+                    .getOperatingSystemMXBean();
+            com.sun.management.OperatingSystemMXBean cpu = (com.sun.management.OperatingSystemMXBean) os;
+            AtomicInteger frames = new AtomicInteger(), errors = new AtomicInteger();
+            java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
+            List<Thread> clients = new ArrayList<>();
+            for (UsbCameras.Capture c : caps) {
+                Thread t = new Thread(() -> {
+                    long last = System.currentTimeMillis();
+                    while (!stop.get()) {
+                        long t0 = System.currentTimeMillis();
+                        try {
+                            UsbCameras.Frame f = c.await(last, t0 + 5000, 30_000);
+                            f.encoded(640, enc);
+                            last = f.at;
+                            frames.incrementAndGet();
+                        }
+                        catch (Exception e) {
+                            errors.incrementAndGet();
+                        }
+                        sleep(Math.max(0, 500 - (System.currentTimeMillis() - t0)));
+                    }
+                });
+                t.start();
+                clients.add(t);
+            }
+            Thread.sleep(5000);
+            long cpu0 = cpu.getProcessCpuTime(), wall0 = System.nanoTime();
+            int n0 = frames.get();
+            Thread.sleep(15_000);
+            long cpu1 = cpu.getProcessCpuTime(), wall1 = System.nanoTime();
+            int n = frames.get() - n0;
+            stop.set(true);
+            for (Thread t : clients) {
+                t.join(10_000);
+            }
+            for (UsbCameras.Capture c : caps) {
+                c.stop();
+            }
+            report.append(String.format(java.util.Locale.ROOT,
+                    "BR-102 CPU, 4 cameras x 2/s at w=640 (%s): %.1f %% of one core; %d frames in %.1f s = %.2f/s, "
+                            + "%.1f ms CPU each; %d errors; %d cores%n",
+                    decodeEach ? "each frame decoded from JPEG, as from the camera" : "frames ready-decoded",
+                    100.0 * (cpu1 - cpu0) / (wall1 - wall0), n, (wall1 - wall0) / 1e9, n / ((wall1 - wall0) / 1e9),
+                    (cpu1 - cpu0) / 1e6 / Math.max(1, n), errors.get(), os.getAvailableProcessors()));
+        }
+        System.out.print(report);
+        Files.write(Path.of(System.getProperty("java.io.tmpdir"), "br102-cpu.txt"),
+                report.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** The scene at w x h with the sensor noise of a camera frame (a noiseless picture compresses unrealistically). */
+    static BufferedImage noisy(BufferedImage scene, int w, int h) {
+        BufferedImage b = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        java.awt.Graphics2D g = b.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION,
+                java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.drawImage(scene, 0, 0, w, h, null);
+        g.dispose();
+        java.util.Random r = new java.util.Random(102);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int rgb = b.getRGB(x, y), d = r.nextInt(9) - 4;
+                int red = Math.max(0, Math.min(255, (rgb >> 16 & 0xff) + d));
+                int grn = Math.max(0, Math.min(255, (rgb >> 8 & 0xff) + d));
+                int blu = Math.max(0, Math.min(255, (rgb & 0xff) + d));
+                b.setRGB(x, y, red << 16 | grn << 8 | blu);
+            }
+        }
+        return b;
+    }
+
     // ------------------------------------------------------------------------------------------
     // The device rules (Infra 11-05 01:4x)
     // ------------------------------------------------------------------------------------------
