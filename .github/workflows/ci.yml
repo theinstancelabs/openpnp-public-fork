@@ -56,7 +56,7 @@ jobs:
           path: |
             target/openpnp-gui-*.jar
             target/lib/
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
 
   queued:
@@ -148,7 +148,7 @@ jobs:
           name: surefire-reports
           path: target/surefire-reports/
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 1
 
   deploy-e2e:
     name: Deploy dry run (real OpenPnP + lumen-sim, deploy and rollback)
@@ -184,7 +184,7 @@ jobs:
           name: deploy-e2e
           path: ${{ runner.temp }}/deploy-e2e/
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 1
 
   controller-e2e:
     name: Simulated controller behind OpenPnP (home, STOP in G28, long prime)
@@ -215,7 +215,7 @@ jobs:
             /tmp/openpnp-uinav-*/*/*.log
             /tmp/openpnp-uinav-*/*/openpnp.out
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 1
 
   ui-e2e:
     # One fresh SIM session per leg (WEBUI_SCRIPTS): infra/ci/webui_shards.py names each leg's scripts; "rest" runs
@@ -260,7 +260,7 @@ jobs:
             /tmp/openpnp-uinav-*/*/openpnp.out
             /tmp/openpnp-uinav-*/*/config/log/
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 1
 
   ui-boardview:
     name: UI end-to-end (boardview)
@@ -288,7 +288,7 @@ jobs:
             /tmp/openpnp-uinav-*/*/*.log
             /tmp/openpnp-uinav-*/*/openpnp.out
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 1
 
   acceptance:
     name: SIM acceptance (${{ matrix.shard }}${{ matrix.controller == 'pty' && ', on lumen-sim' || '' }})
@@ -339,7 +339,7 @@ jobs:
             /tmp/openpnp-uinav-*/*/*.log
             /tmp/openpnp-uinav-*/*/openpnp.out
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 1
 
   gate:
     name: gate
@@ -397,7 +397,7 @@ jobs:
         with:
           name: gate-needs
           path: needs.json
-          retention-days: 7
+          retention-days: 1
           overwrite: true  # a re-run's gate replaces it
           if-no-files-found: error
 
@@ -444,3 +444,23 @@ jobs:
           python3 infra/ci/publish_release.py --dir "$RUNNER_TEMP/rel" --tag "$TAG" --sha "$GITHUB_SHA" \
             --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" \
             --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  prune-artifacts:
+    name: Keep only the newest build artifact
+    needs: [release]
+    # The user (11-04 20:2x, 62 GB of artifacts): only the newest openpnp-build is kept. Each run downloads its own
+    # within the run and no job reads an older run's, so a completed run's build is dead weight (re-run such a run
+    # whole, not --failed). Its own job: the release keeps exactly the permissions publishing needs.
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Delete every openpnp-build but this run's and unfinished runs'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 infra/ci/prune_artifacts.py --repo "$GITHUB_REPOSITORY" --keep-run "$GITHUB_RUN_ID"
