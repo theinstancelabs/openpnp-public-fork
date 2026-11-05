@@ -577,7 +577,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       // a press in the frame before the render locks it (a status that starts a task): make() refuses by itself, with a toast
       await page.evaluate(() => { const b = document.getElementById('btn-design-make'); b.disabled = false; b.click(); });
       const kept = await page.evaluate(() => ({ hash: location.hash, chosen: IL.run.form.sel, toast: (document.getElementById('toast') || {}).textContent || '' }));
-      await make(true);   // the next render locks it again
+      const relock = await make(true);   // the next render locks it again
       ST.task = null;
       await page.evaluate((h) => { if (location.hash !== h) IL.go(h); }, routeOf(rd));   // a Make a board that went to Run: back
       const mFree = await make(false);
@@ -588,8 +588,8 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       const mEnd = await make(false);
       check('(6b2) Make a board waits as Start\'s design cards: locked while a task runs (the panel says why), Start keeps its design; free after; locked while Start is under way',
         mTask.dis && mTask.why === 'Locked while the needle touch-off runs' && kept.hash === routeOf(rd) && kept.chosen === 'file:' + late.file
-          && /Locked while the needle touch-off runs/.test(kept.toast) && !mFree.dis && mFree.why === null && chaining.dis && chaining.why === 'Start is under way'
-          && !mEnd.dis && mEnd.why === null, { mTask, kept, mFree, chaining, mEnd });
+          && /Locked while the needle touch-off runs/.test(kept.toast) && relock.dis && mFree.dis === false && mFree.why === null && chaining.dis && chaining.why === 'Start is under way'
+          && mEnd.dis === false && mEnd.why === null, { mTask, kept, relock, mFree, chaining, mEnd });
     }
 
     // one wording for a failed read of the list (#48's re-checks): kept cards, or none
