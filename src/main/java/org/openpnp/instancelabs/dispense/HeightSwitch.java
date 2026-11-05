@@ -45,6 +45,15 @@ public final class HeightSwitch {
     /** Accepted (recorded as the tool's trip) with at least this many presses within {@link #MAX_RANGE_MM}. */
     public static final int MIN_ACCEPTED = 5;
     public static final double MAX_RANGE_MM = 0.05;
+    /**
+     * The needle's accepted trip, or null when it was measured before the needle now on was put on: another tip's trip
+     * gives neither a window nor K_switch (#60 review).
+     */
+    public static DispenseConfig.HeightSwitchTrip needleTrip(DispenseConfig c) {
+        DispenseConfig.HeightSwitchTrip t = c.heightSwitch.needle;
+        return t == null || c.needleChangedAtMs != null && t.atMs < c.needleChangedAtMs ? null : t;
+    }
+
     private static final Pattern INPUT = Pattern.compile("Input\\s*=\\s*(\\d+|HIGH|LOW)", Pattern.CASE_INSENSITIVE);
     private static final Pattern NOT_AN_INPUT = Pattern.compile("Analog in|Output|protected", Pattern.CASE_INSENSITIVE);
 

@@ -5058,6 +5058,11 @@ public final class DispenseService {
         if (needle && !tipClean) {
             throw refused("the needle presses the height switch only with a clean tip: paste must never touch it");
         }
+        String unchecked = needle ? needleXyProblem(c) : null;
+        if (unchecked != null) {
+            // an unchecked landing may aim it up to 15 mm off: down to zFloor beside the plunger (#60 review)
+            throw refused("the needle is aimed at the switch by where it lands, and " + unchecked);
+        }
         String unknown = positionUnknownWhy();
         if (unknown != null) {
             throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
@@ -5067,7 +5072,7 @@ public final class DispenseService {
         }
         Long home = homeTracker.getLastHomeAtMs();
         res.homeAtMs = home;
-        DispenseConfig.HeightSwitchTrip last = needle ? c.heightSwitch.needle : c.heightSwitch.n1;
+        DispenseConfig.HeightSwitchTrip last = needle ? HeightSwitch.needleTrip(c) : c.heightSwitch.n1;
         if ((zStart == null || zFloor == null) && (last == null || home == null || !home.equals(last.homeAtMs))) {
             throw refused("zStart and zFloor (raw Z) are needed: " + (needle ? "the needle" : "N1")
                     + " has no accepted trip on the height switch in this home");

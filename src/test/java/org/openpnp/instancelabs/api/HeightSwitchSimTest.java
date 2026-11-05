@@ -156,6 +156,18 @@ public class HeightSwitchSimTest {
         return ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("heightSwitch");
     }
 
+    /** Where the mounted needle lands, checked now under N2's head offset (the needle is aimed at the switch by it). */
+    void checkedLanding() throws Exception {
+        DispenseConfig c = svc.getConfig();
+        DispenseConfig.NeedleLanding l = new DispenseConfig.NeedleLanding();
+        double[] ho = svc.headOffsetNow();
+        l.headOffsetXMm = ho[0];
+        l.headOffsetYMm = ho[1];
+        l.setAtMs = System.currentTimeMillis();
+        c.needleLanding = l;
+        svc.updateConfig(c);
+    }
+
     /**
      * The route: no place, then N1 with its window; the needle only with the clean-tip word (nothing moves without
      * it); the status keeps both trips and K_switch, their sum in the same home.
@@ -376,5 +388,55 @@ public class HeightSwitchSimTest {
                 120, TimeUnit.SECONDS);
         assertTrue(r.refused && r.why.contains("only with a clean tip: paste must never touch it"), r.why);
         assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "nothing sent");
+    }
+
+    /**
+     * #60 review (MAJOR, safety): the needle is aimed at the switch by where it lands. Until that is checked (a new or
+     * changed needle, N2's head offset changed) the aim may be off by up to 15 mm, and the tip would go down to zFloor
+     * beside the plunger or onto the housing: refused, nothing moves.
+     */
+    @Test
+    public void theNeedlePressesTheSwitchOnlyOnceWhereItLandsIsChecked() throws Exception {
+        svc.setLocation(HeightSwitch.PLACE, 150, 200, 0);
+        Thread.sleep(5); // the change comes later than the SIM's landing, in ms
+        DispenseConfig c = svc.getConfig();
+        c.needleChangedAtMs = System.currentTimeMillis(); // a new needle: where it lands is not checked yet
+        svc.updateConfig(c);
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5,\"tipClean\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("aimed at the switch by where it lands")
+                && lastBody.contains("where it lands has not been checked"), lastBody);
+        assertEquals(new ArrayList<String>(), moves(), "nothing moved");
+        checkedLanding();
+        assertTrue(ok("POST", "/api/height-switch/measure",
+                "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5,\"tipClean\":true}").get("accepted")
+                .getAsBoolean());
+    }
+
+    /**
+     * #60 review (MAJOR, safety): a needle change voids the old needle's trip. No default window from it (a longer new
+     * tip would go its extra length further down, onto the housing) and no K_switch from it.
+     */
+    @Test
+    public void aNeedleChangeVoidsTheOldNeedlesTrip() throws Exception {
+        svc.setLocation(HeightSwitch.PLACE, 150, 200, 0);
+        checkedLanding();
+        ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        ok("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5,\"tipClean\":true}");
+        assertFalse(heightSwitchStatus().get("kSwitch").isJsonNull());
+        Thread.sleep(5); // the change comes later than the trip, in ms
+        DispenseConfig c = svc.getConfig();
+        c.needleChangedAtMs = System.currentTimeMillis();
+        svc.updateConfig(c);
+        checkedLanding(); // the new needle's landing is checked: only its trip is missing
+        JsonObject hs = heightSwitchStatus();
+        assertTrue(hs.get("kSwitch").isJsonNull() && hs.get("needle").isJsonNull(), hs.toString());
+        assertTrue(hs.get("kSwitchWhy").getAsString().startsWith("the needle has no accepted trip"), hs.toString());
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"tipClean\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("zStart and zFloor (raw Z) are needed"), lastBody);
+        assertEquals(new ArrayList<String>(), moves(), "nothing moved");
     }
 }
