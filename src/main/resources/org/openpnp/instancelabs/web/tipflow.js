@@ -287,12 +287,13 @@
             W.job = await IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(r.id));
             misses = 0;
           } catch (e) {
-            if (++misses >= 10) throw new IL.ApiError(e.status, e.data, e.message);   // the job's outcome, not a read's: it may still be laying dots
+            if (++misses >= 10) throw new IL.ApiError(0, null, IL.readErrorText(e));   // the job's outcome is unknown, not a read's: it may still be laying dots
             continue;
           }
           IL.render();
           if (W.job.state !== 'running') break;
         }
+        if (W.job.state === 'running') throw new IL.ApiError(0, null, 'Still running after 10 minutes: this page stopped following it.');
         // done only when it was saved: a check that found no dot, did not fit or asks whether this tip is on saved nothing
         const res = W.job.result || {}, L = res.landing || {};
         W.lands = L.saved === true ? 'done' : { error: L.question || res.sentence || L.text || 'The landing check ended: ' + W.job.state, ask: !!L.question };

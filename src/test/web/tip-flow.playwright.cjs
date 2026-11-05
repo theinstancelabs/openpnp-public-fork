@@ -317,11 +317,12 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
     // step says its outcome is unknown and to look at the machine (a read's own failure never does, #68's follow-up)
     jobNow = { id: 'tf-lost' };
     await page.unroute('**/api/pad-calibrations/tf-*');
-    await page.route('**/api/pad-calibrations/tf-*', (r) => r.abort('failed'));
+    let lostReads = 0;
+    await page.route('**/api/pad-calibrations/tf-*', (r) => { if (/\/tf-lost$/.test(new URL(r.request().url()).pathname)) lostReads++; return r.abort('failed'); });
     await runChecks(page, 30000);
-    const lost5 = await stepOf(page, 'lands');
-    check('(5) a landing check it lost track of (ten reads with no answer) is not done: "… Outcome unknown: look at the machine."', !!lost5 && lost5.s !== 'done'
-      && /^OpenPnP did not answer .*\. Outcome unknown: look at the machine\.$/.test(lost5.d), lost5);
+    const lost5 = Object.assign({ reads: lostReads }, await stepOf(page, 'lands'));
+    check('(5) a landing check it lost track of (ten reads with no answer) is not done: "… Outcome unknown: look at the machine."', lost5.reads === 10 && lost5.s !== 'done'
+      && /^OpenPnP did not answer .*\. Outcome unknown: look at the machine\.$/.test(lost5.d || ''), lost5);
     for (const u of ['**/api/tip-setups/*/picture', '**/api/pad-calibrations', '**/api/pad-calibrations/tf-*']) await page.unroute(u);
     await page.waitForSelector('#btn-tip-checks-start:enabled', { timeout: 10000 }).catch(() => null);
     await page.click('#btn-tip-checks-start');

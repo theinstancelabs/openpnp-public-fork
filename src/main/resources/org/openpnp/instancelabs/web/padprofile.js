@@ -1096,7 +1096,7 @@
     if (!id) return job(s);
     if (!C.other || C.other.id !== id) {
       const x = C.other = { id, j: null, loading: true, error: null };
-      IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(id)).then((j) => { x.j = j; }, (e) => { x.error = IL.errorText(e); })
+      IL.api('GET', '/api/pad-calibrations/' + encodeURIComponent(id)).then((j) => { x.j = j; }, (e) => { x.error = IL.errorText(e); x.gone = e.status === 404; })
         .then(() => { x.loading = false; IL.render(); });
     }
     return C.other.j;
@@ -1388,7 +1388,8 @@
     const other = routeJob();
     const j = viewJob(s);
     if (!j) {
-      IL.setText($('pcal-live'), other ? (C.other && C.other.error ? 'This calibration is no longer in OpenPnP’s memory (it keeps the last 5 since its start): ' + C.other.error : 'Reading the calibration…')
+      IL.setText($('pcal-live'), other ? (C.other && C.other.error ? (C.other.gone ? 'This calibration is no longer in OpenPnP’s memory (it keeps the last 5 since its start): '
+        : 'Could not read this calibration: ') + C.other.error : 'Reading the calibration…')
         : 'The pad calibration is no longer known (OpenPnP restarted): its coupons are in Calibrate › Pad calibration.');
       return;
     }
