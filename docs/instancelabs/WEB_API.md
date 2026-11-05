@@ -623,7 +623,7 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   (the picture is exposed after it), and encoded once per requested width. Device work runs on the camera's own
   thread: nothing of the engine waits on a camera, a request at most `frameWaitMs`. `present: false` with `why`, and
   frame.jpg 503 `{error: "camera-unavailable", reason, why}`, when it is `refused: …` (the rules below), `not plugged
-  in: <device> is gone`, `busy: <program> (pid N) has it open` (from /proc, looked up when the open's failure changes,
+  in: <device> is gone`, `busy: <program> (pid N) has it open` (from /proc, looked up once per failure streak,
   not at every poll; nobody found: `could not open (busy, or no access)`), `the camera stopped giving pictures (…)` (a
   device that vanishes mid-stream is closed), or `the camera did not take MJPG 1280x720 (it gave …)` (never streamed
   in another mode). The next request tries again: a camera listed busy stays so until a frame request opens it, so

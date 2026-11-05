@@ -459,8 +459,8 @@ final class UsbCameras {
         final String id;
         final DispenseConfig.UsbCamera cam;
         private final Opener opener;
-        /** The capture this one replaced (its settings changed): its device is released before this one opens. */
-        private final Capture replaced;
+        /** The last thread of the capture this one replaced (its settings changed): it releases the device first. */
+        private final Thread replaced;
         // guarded by this:
         /** The running capture's thread, null while released. */
         private Thread thread;
@@ -475,7 +475,7 @@ final class UsbCameras {
         private String lastWhy;
         private int attempts, failedAttempt;
         private String failedWhy;
-        /** The last attempt whose open failed (not gone) and its message: /proc is scanned when the failure changes. */
+        /** The last attempt whose open failed (not gone) and its message: /proc is scanned once per failure streak. */
         private int openFailedAttempt;
         private String openFailure;
         private long askedAtMs, idleMs;
@@ -487,7 +487,9 @@ final class UsbCameras {
             this.id = id;
             this.cam = cam;
             this.opener = opener;
-            this.replaced = replaced;
+            // its thread, not the capture (stopped first, it starts no other): a kept capture would keep its last
+            // frame, and every capture before it
+            this.replaced = replaced == null ? null : replaced.lastThread();
         }
 
         boolean serves(DispenseConfig.UsbCamera c) {
@@ -547,7 +549,7 @@ final class UsbCameras {
 
         private void run(Thread before, int attempt) {
             join(before);
-            join(replaced == null ? null : replaced.lastThread());
+            join(replaced);
             FrameSource src = null;
             boolean opened = false;
             try {
