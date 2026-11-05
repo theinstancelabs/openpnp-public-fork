@@ -33,6 +33,7 @@ import org.opencv.core.Mat;
 import org.opencv.core.MatOfByte;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.openpnp.util.OpenCvUtils;
+import org.pmw.tinylog.Logger;
 
 /**
  * The pictures (tip setups design §22.4). Every photo is re-encoded by the engine (JPEG quality 0.85, at
@@ -353,6 +354,8 @@ public final class PhotoStore {
             throw e;
         }
         catch (IOException | RuntimeException e) {
+            // logged: a decoder that failed for a reason of its own read as "not a picture" unseen (BR-105)
+            Logger.warn(e, "photos: a picture could not be decoded");
             throw notAnImage();
         }
     }
@@ -391,8 +394,9 @@ public final class PhotoStore {
                 : Imgcodecs.IMREAD_COLOR;
         nu.pattern.OpenCV.loadLocally();
         MatOfByte buf = new MatOfByte(bytes);
-        Mat m = Imgcodecs.imdecode(buf, reduced | Imgcodecs.IMREAD_IGNORE_ORIENTATION);
+        Mat m = null;
         try {
+            m = Imgcodecs.imdecode(buf, reduced | Imgcodecs.IMREAD_IGNORE_ORIENTATION);
             if (m.empty()) {
                 throw notAnImage();
             }
@@ -400,19 +404,22 @@ public final class PhotoStore {
         }
         finally {
             buf.release();
-            m.release();
+            if (m != null) {
+                m.release();
+            }
         }
     }
 
-    /** A JPEG's width and height from its frame header (SOF0-15), or null without one before the scan. */
+    /**
+     * A JPEG's width and height from its first frame header (SOF0-15), read as libjpeg reads the markers, or null without
+     * one before the scan.
+     */
     static int[] jpegSize(byte[] b) {
         int i = 2;
         while (i + 3 < b.length) {
-            if ((b[i] & 0xff) != 0xFF) {
-                return null;
-            }
             int m = b[i + 1] & 0xff;
-            if (m == 0xFF) { // fill byte
+            // skips what libjpeg skips (bytes before a marker, FF 00, fill FFs), so it reads the SOF OpenCV decodes
+            if ((b[i] & 0xff) != 0xFF || m == 0x00 || m == 0xFF) {
                 i++;
                 continue;
             }

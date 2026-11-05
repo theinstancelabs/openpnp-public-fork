@@ -190,8 +190,8 @@ public class PhotoStoreTest {
             }
 
             @Override
-            public boolean canDecodeInput(Object source) {
-                return true;
+            public boolean canDecodeInput(Object source) throws IOException {
+                return real.canDecodeInput(source);
             }
 
             @Override
@@ -217,8 +217,35 @@ public class PhotoStoreTest {
 
     /** A JPEG of only its frame header (SOF0): {@code w} × {@code h} px (nothing to decode). */
     static byte[] jpegHeader(int w, int h) {
-        return new byte[] {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xC0, 0, 17, 8, (byte) (h >> 8), (byte) h,
-            (byte) (w >> 8), (byte) w, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, (byte) 0xFF, (byte) 0xD9};
+        return jpeg(sof(0xC0, w, h));
+    }
+
+    /** A frame header (SOFn) of {@code w} × {@code h} px, 3 components. */
+    static byte[] sof(int marker, int w, int h) {
+        return new byte[] {(byte) 0xFF, (byte) marker, 0, 17, 8, (byte) (h >> 8), (byte) h, (byte) (w >> 8), (byte) w, 3,
+            1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1};
+    }
+
+    /** SOI, the parts, EOI. */
+    static byte[] jpeg(byte[]... parts) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(0xFF);
+        out.write(0xD8);
+        for (byte[] b : parts) {
+            out.write(b, 0, b.length);
+        }
+        out.write(0xFF);
+        out.write(0xD9);
+        return out.toByteArray();
+    }
+
+    /** {@code jpeg} with 3 stray bytes after its first segment (libjpeg warns and reads on, as ImageIO does). */
+    static byte[] withStrayBytes(byte[] jpeg) {
+        int at = 4 + ((jpeg[4] & 0xFF) << 8 | (jpeg[5] & 0xFF));
+        byte[] out = new byte[jpeg.length + 3];
+        System.arraycopy(jpeg, 0, out, 0, at);
+        System.arraycopy(jpeg, at, out, at + 3, jpeg.length - at);
+        return out;
     }
 
     /** BR-105: "the result photos of the locator step were not stored: This file is not a JPEG or PNG picture." */
@@ -230,12 +257,26 @@ public class PhotoStoreTest {
         PhotoStore[] s = new PhotoStore[1];
         try (DispenseDb db = DispenseDb.inMemory()) {
             s[0] = store(db);
-            withImageIoJpegReaderBroken(() -> {
-                kept.add(s[0].store(upload(jpg))); // the reader that fails when made
-                kept.add(s[0].store(upload(phone))); // then none at all
-                kept.add(s[0].store(upload(withOrientation6(jpg))));
-            });
+            JpegEncoder.imageIo = false; // the machine lost the JPEG writer too: OpenCV encodes
+            try {
+                withImageIoJpegReaderBroken(() -> {
+                    kept.add(s[0].store(upload(jpg))); // the reader that fails when made
+                    kept.add(s[0].store(upload(phone))); // then none at all
+                    kept.add(s[0].store(upload(withOrientation6(jpg))));
+                    kept.add(s[0].store(upload(withStrayBytes(jpg))));
+                });
+            }
+            finally {
+                JpegEncoder.imageIo = true;
+            }
         }
+        BufferedImage back = stored(s[0], kept.get(0));
+        int centre = back.getRGB(150, 100), corner = back.getRGB(10, 10);
+        assertTrue((centre >> 16 & 0xFF) > 200 && (centre & 0xFF) < 80, "the orange oval stays orange (not BGR): "
+                + Integer.toHexString(centre));
+        assertTrue((corner & 0xFF) > (corner >> 16 & 0xFF) + 60, "the blue ground stays blue: " + Integer.toHexString(
+                corner));
+        assertEquals(300, kept.get(3).widthPx, "stray bytes between segments are read on, as ImageIO reads them");
         assertEquals(300, kept.get(0).widthPx);
         assertEquals(200, kept.get(0).heightPx);
         assertEquals(640, kept.get(1).widthPx);
@@ -263,6 +304,14 @@ public class PhotoStoreTest {
                         assertThrows(EngineRefusal.class, () -> s.store(upload(small))).getMessage());
                 assertEquals(400, assertThrows(EngineRefusal.class, () -> s.store(upload(jpegHeader(7000, 6000))))
                         .status);
+                byte[] fill = jpeg(new byte[] {(byte) 0xFF}, sof(0xC0, 20000, 100));
+                byte[] progressive = jpeg(sof(0xC2, 20000, 100));
+                // FF 00 is no marker: libjpeg skips it and the bytes after it, so the first frame header is the big one
+                byte[] hidden = jpeg(new byte[] {(byte) 0xFF, 0, 0, 21}, sof(0xC0, 20000, 100), sof(0xC0, 100, 100));
+                for (byte[] b : new byte[][] {fill, progressive, hidden}) {
+                    assertEquals("The picture is 20000 × 100 px: at least 64 and at most 12,000 px a side.",
+                            assertThrows(EngineRefusal.class, () -> s.store(upload(b))).getMessage());
+                }
                 BufferedImage decoded = PhotoStore.decode(big);
                 assertEquals(3000, decoded.getWidth(), "subsampled by 2: never the full 6000 x 4000 raster");
                 assertEquals(2000, decoded.getHeight());
