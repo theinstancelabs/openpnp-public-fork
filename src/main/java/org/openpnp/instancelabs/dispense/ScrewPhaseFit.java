@@ -36,6 +36,8 @@ public final class ScrewPhaseFit {
      */
     static final double OUTLIER_SHARE = 1.5;
     static final int MIN_FOUND_PER_HALF = 3;
+    /** Halves: the fewest pairs a measure lays; a half left with fewer dots is too few to see a ripple. */
+    public static final int MIN_PAIRS = 6;
     /**
      * Halves: a half's error × this by its dots (3-16, the last above) so 1.96 errors hold a row's x 95 % of the time
      * (Monte Carlo of the formula on normal scatter, seed 20261104, 2·10⁶ rows per count; the bias alone is 1.59 at 4).
@@ -113,6 +115,7 @@ public final class ScrewPhaseFit {
     public static Halves halves(List<Dot> row1, double s1, List<Dot> row2, double s2) {
         Halves h = new Halves();
         List<String> notes = new ArrayList<>();
+        String outlier = null;
         double maxSe = 0, fewestAt = 0;
         int fewest = Integer.MAX_VALUE;
         double[] starts = {norm(s1), norm(s2)};
@@ -138,8 +141,9 @@ public final class ScrewPhaseFit {
                 List<Double> t = trimmed(half.get(j));
                 double m = median(half.get(j)), top = java.util.Collections.max(t);
                 if (top > OUTLIER_SHARE * m) {
-                    notes.add("two outliers in one half at " + deg(r.startDeg + 180 * j) + ": a dot at "
-                            + DispenseProfile.plain(round1(top / m)) + "× the half's median is left after the trim");
+                    outlier = "two outliers in one half at " + deg(r.startDeg + 180 * j) + ": a dot at "
+                            + DispenseProfile.plain(round1(top / m)) + "× the half's median is left after the trim";
+                    notes.add(outlier);
                 }
                 if (half.get(j).size() < fewest) {
                     fewest = half.get(j).size();
@@ -160,9 +164,17 @@ public final class ScrewPhaseFit {
         // the error of atan2(−x1, −x2) by x1 and x2
         h.peakSeDeg = k == 0 ? null : Math.toDegrees(Math.hypot(x2 * r1.xSe, x1 * r2.xSe) / (k * k));
         if (k == 0 || k < RIPPLE_SE * maxSe) {
-            // 3 dots in a half cannot tell a small ripple from none
-            h.why.add(fewest <= 3 ? "too few dots per half to see a ripple: " + dots(fewest) + " at " + deg(fewestAt)
-                    : "no ripple: a whole-turn recipe needs no start angle");
+            // too few dots in a half, or a second blob, widen the error until a real ripple hides in it
+            if (fewest < MIN_PAIRS) {
+                h.why.add("too few dots per half to see a ripple: " + dots(fewest) + " at " + deg(fewestAt));
+            }
+            else if (outlier != null) {
+                notes.remove(outlier);
+                h.why.add("no ripple can be told from these dots: " + outlier);
+            }
+            else {
+                h.why.add("no ripple: a whole-turn recipe needs no start angle");
+            }
         }
         else if (h.peakSeDeg > LOW_SE_DEG) {
             h.why.add(String.format(Locale.ROOT, "the peak is uncertain: its standard error is %s° (at most %s° to set "

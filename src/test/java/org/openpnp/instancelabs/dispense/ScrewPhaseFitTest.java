@@ -97,6 +97,12 @@ public class ScrewPhaseFitTest {
         assertEquals(ScrewPhaseFit.NONE, blind.confidence);
         assertEquals("too few dots per half to see a ripple: 3 dots at 118°", blind.why.get(0));
         assertEquals("5 dots not found at 118° (a half turn always lays paste): left out", blind.why.get(1));
+        // a real 0.47 ripple (± 0.1 on each dot), high from every dot, hides in a 4-dot half's error, the widest
+        // (× 3.19): below MIN_PAIRS dots in a half it is too few dots, not "no ripple" (review 11-04)
+        assertEquals(ScrewPhaseFit.HIGH, noisy(0.47, 0.1).confidence);
+        assertEquals("[too few dots per half to see a ripple: 4 dots at 118°, 4 dots not found at 118° (a half turn "
+                + "always lays paste): left out]", noisy(0.47, 0.1, 4).why.toString());
+        assertEquals(ScrewPhaseFit.NONE, noisy(0.47, 0.1, 4).confidence);
         // 2 of the 8 dots at 118 found
         List<ScrewPhaseFit.Dot> r1 = modelRow(298, 179.1, 0.47);
         for (int i = 1; i < r1.size(); i += 2) {
@@ -190,11 +196,12 @@ public class ScrewPhaseFitTest {
         assertTrue(t.peakSeDeg < 10, "the error alone would say high: " + t.peakSeDeg);
         assertTrue(t.why.stream().anyMatch(w -> w.startsWith("two outliers in one half at 298°: a dot at ")
                 && w.endsWith("× the half's median is left after the trim")), t.why.toString());
-        // a stronger second blob (2.5×) widens the error past the ripple: none, and the note says why
+        // a stronger second blob (2.5×) widens the error past the ripple: none, and the blob is why, not "no ripple"
         two.set(4, new ScrewPhaseFit.Dot(298, 2.5 * r1.get(4).areaMm2));
         ScrewPhaseFit.Halves t2 = ScrewPhaseFit.halves(two, 298, r2, 28);
         assertEquals(ScrewPhaseFit.NONE, t2.confidence, t2.why.toString());
-        assertTrue(t2.why.stream().anyMatch(w -> w.startsWith("two outliers in one half at 298°")), t2.why.toString());
+        assertEquals("[no ripple can be told from these dots: two outliers in one half at 298°: a dot at 2.6× the half's "
+                + "median is left after the trim]", t2.why.toString());
         // 3 dots per half: the trim leaves the middle one and winsorizing leaves no spread, so the sample SD stands in
         List<ScrewPhaseFit.Dot> few = new ArrayList<>();
         for (double a : new double[] {1.0, 1.1, 1.3}) {
@@ -240,13 +247,19 @@ public class ScrewPhaseFitTest {
 
     /** Rows of 8 pairs from 298 and 28 with x at the peak 179.1 and amplitude a, ± e on each dot. */
     static ScrewPhaseFit.Halves noisy(double a, double e) {
+        return noisy(a, e, 0);
+    }
+
+    /** The same with the last {@code missed} dots at 118° not found. */
+    static ScrewPhaseFit.Halves noisy(double a, double e, int missed) {
         List<List<ScrewPhaseFit.Dot>> rows = new ArrayList<>();
         for (double s : new double[] {298, 28}) {
             double x = -(2 * a / Math.PI) * Math.sin(Math.toRadians(s - 179.1));
             List<ScrewPhaseFit.Dot> l = new ArrayList<>();
             for (int i = 0; i < 8; i++) {
                 l.add(new ScrewPhaseFit.Dot(s, 1 + x + (i % 2 == 0 ? e : -e)));
-                l.add(new ScrewPhaseFit.Dot((s + 180) % 360, 1 - x - (i % 2 == 0 ? e : -e)));
+                l.add(new ScrewPhaseFit.Dot((s + 180) % 360, s == 298 && i >= 8 - missed ? 0
+                        : 1 - x - (i % 2 == 0 ? e : -e)));
             }
             rows.add(l);
         }

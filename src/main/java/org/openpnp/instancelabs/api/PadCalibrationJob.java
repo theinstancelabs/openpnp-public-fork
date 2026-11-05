@@ -708,7 +708,7 @@ final class PadCalibrationJob {
      * BR-77 (Process 11-04 16:4x): the fewest half-turn pairs a halves measure lays. With 4 the small-sample error
      * (95 % coverage) leaves the measure answering "none" 70 % of the time: dots and time for nothing.
      */
-    static final int MIN_PAIRS = 6;
+    static final int MIN_PAIRS = ScrewPhaseFit.MIN_PAIRS;
 
     private static int count(Integer v, int dflt, int min, int max, String name) throws ApiException {
         int n = v == null ? dflt : v;
