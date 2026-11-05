@@ -5283,6 +5283,14 @@ public final class DispenseService {
             return "the needle's end from below: " + String.join("; ", bad) + " (Process sets them: PUT /api/config "
                     + "needleEndMeasure)";
         }
+        double[] at = cam.locationMm();
+        List<Double> fit = c.needleEndMeasure.centrePxCameraXy;
+        if (Math.abs(at[0] - fit.get(0)) > 1e-6 || Math.abs(at[1] - fit.get(1)) > 1e-6) {
+            // review MINOR 7: the camera's pixel and its location are one pair: a new calibration needs a new fit
+            return String.format(Locale.ROOT, "the bottom camera's location in OpenPnP (%.3f, %.3f) is not the one its "
+                    + "centre pixel was fitted at (%.3f, %.3f): a new camera calibration; Process fits "
+                    + "needleEndMeasure.centrePx again and sets centrePxCameraXy", at[0], at[1], fit.get(0), fit.get(1));
+        }
         if (c.needleEndMeasure.clean.get(c.tip.key) == null) {
             return "no clean-check thresholds for this tip kind: Process sets them (needleEndMeasure.clean for the "
                     + c.tip.name + ", '" + c.tip.key + "')";

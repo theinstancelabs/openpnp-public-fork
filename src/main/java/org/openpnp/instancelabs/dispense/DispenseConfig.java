@@ -461,6 +461,13 @@ public class DispenseConfig {
          */
         public java.util.List<Double> centrePx = new java.util.ArrayList<>(java.util.Arrays.asList(957.5, 534.8));
         /**
+         * The bottom camera's location in OpenPnP (x, y, mm) that {@link #centrePx} was fitted at, the pair the end is
+         * aimed by (review MINOR 7): another location there (a new camera calibration) refuses the measure until Process
+         * fits centrePx again. Machine.xml's since 10-27, so on 11-04 too.
+         */
+        public java.util.List<Double> centrePxCameraXy = new java.util.ArrayList<>(java.util.Arrays.asList(217.129,
+                152.319));
+        /**
          * Check (a): the end's top-hat peak at least this many times the sd of the rest of its window (Process 11-05
          * 04:3x: real ends 15-45 times, noise about 6).
          */
@@ -513,6 +520,11 @@ public class DispenseConfig {
             if (centrePx == null || centrePx.size() != 2 || centrePx.stream().anyMatch(v -> v == null
                     || !(v >= 0 && v < 100000))) {
                 p.add("needleEndMeasure.centrePx must be [x, y] (px)");
+            }
+            if (centrePxCameraXy == null || centrePxCameraXy.size() != 2 || centrePxCameraXy.stream().anyMatch(v -> v
+                    == null || v.isNaN() || v.isInfinite())) {
+                p.add("needleEndMeasure.centrePxCameraXy must be [x, y] (mm): the bottom camera's location centrePx was "
+                        + "fitted at");
             }
             if (!(minPeakToSd > 0 && maxResidualPx > 0 && maxDriftPx > 0 && maxKSpreadMm > 0
                     && maxFromNominalMm > 0 && maxKFromSwitchMm > 0)) {

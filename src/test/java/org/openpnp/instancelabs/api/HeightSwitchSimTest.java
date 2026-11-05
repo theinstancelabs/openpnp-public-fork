@@ -741,6 +741,32 @@ public class HeightSwitchSimTest {
         assertFalse(phases.contains("needle end: N1 at raw Z"), phases);
     }
 
+    /**
+     * Review MINOR 7: the camera's pixel (needleEndMeasure.centrePx) holds for the camera location it was fitted at
+     * (centrePxCameraXy). After a new calibration of the bottom camera both routes are refused before anything is sent,
+     * naming both locations; Process's new fit lets the end be measured again.
+     */
+    @Test
+    public void aNewCameraCalibrationRefusesTheEndUntilItsPixelIsFittedAgain() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        camAt[0] += 0.1; // the camera moved 0.1 mm and OpenPnP's calibration followed it
+        scene.camX += 0.1;
+        for (String[] route : new String[][] {{"/api/needle/end/measure", null}, {"/api/height-switch/measure",
+            "{\"tool\":\"needle\"}"}}) {
+            sim.server.mark();
+            call("POST", route[0], route[1]);
+            assertEquals(409, lastStatus, lastBody);
+            assertTrue(lastBody.contains("the bottom camera's location in OpenPnP (217.229, 152.319) is not the one its "
+                    + "centre pixel was fitted at (217.129, 152.319)"), lastBody);
+            assertEquals(new ArrayList<String>(), sim.server.sinceMark(), route[0] + ": nothing sent");
+        }
+        ok("PUT", "/api/config", "{\"needleEndMeasure\":{\"centrePx\":[957.5,534.8],\"centrePxCameraXy\":[217.229,"
+                + "152.319]}}");
+        JsonObject r = ok("POST", "/api/needle/end/measure", null);
+        assertTrue(r.get("ok").getAsBoolean(), r.toString());
+    }
+
     /** Without N1's trip in this home, or without clean-check limits for the tip kind: refused, nothing sent. */
     @Test
     public void theNeedleWaitsForN1AndForItsTipKindsCleanLimits() throws Exception {
