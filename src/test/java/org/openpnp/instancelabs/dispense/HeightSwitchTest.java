@@ -150,19 +150,23 @@ public class HeightSwitchTest {
      * (N1 pressed at raw 25.50 still read pressed at 25.90). After each trip the tool lifts in 0.25 mm steps until it
      * reads released: 5 presses accepted for both tools, each trip within one fine step, each release recorded, and
      * the differential is their mean distance at 0.25 mm resolution (0.45 reads 0.50, 0.9 reads 1.00, 1.6 reads 1.75).
+     * Release review MINOR: right after each press's release the next press starts 1 mm above its trip, also when the
+     * release lies above that (1.6). NIT: a trip off the coarse grid (0.07 past a step) records the press's release,
+     * not the coarse trip's.
      */
     @Test
     public void aLeverThatLetsGoWellAboveItsTripIsMeasuredWithItsReleases() {
         List<Executable> cases = new ArrayList<>(); // each case passes or fails on its own
         for (int down : new int[] {-1, 1}) {
-            for (double[] c : new double[][] {{0.45, 0.50}, {0.9, 1.00}, {1.6, 1.75}}) {
+            // the differential, what it reads, how far past a coarse step the switch trips
+            for (double[] c : new double[][] {{0.45, 0.50, 0}, {0.9, 1.00, 0}, {1.6, 1.75, 0}, {0.45, 0.50, 0.07}}) {
                 cases.add(() -> {
-                    double trip = down < 0 ? 12.0 : 52.0;
+                    double grid = down < 0 ? 12.0 : 52.0, trip = grid + down * c[2];
                     FakeSwitch sw = new FakeSwitch(trip, down);
                     sw.differential = c[0];
                     HeightSwitch.Result r = HeightSwitch.measure(sw, plan(down < 0 ? "n1" : "needle", down,
-                            trip - down, trip + down, 5));
-                    String at = (down < 0 ? "N1" : "the needle") + ", differential " + c[0] + ": ";
+                            grid - down, grid + down, 5));
+                    String at = (down < 0 ? "N1" : "the needle") + ", trip " + trip + ", differential " + c[0] + ": ";
                     assertTrue(r.accepted, at + r.why);
                     assertEquals(5, r.trips.size(), at + r.trips);
                     assertEquals(5, r.releases.size(), at + r.releases);
@@ -174,6 +178,17 @@ public class HeightSwitchTest {
                     }
                     assertEquals(c[1], r.differentialMm, 1e-9, at);
                     assertEquals("G1 Z31.500 F600", sw.lines.get(sw.lines.size() - 2), at + "travel Z at the end");
+                    // right after each press's release, the next press's start 1 mm above its trip (not the release)
+                    String release = String.format(Locale.ROOT, "G1 Z%.3f F600", r.releases.get(0)), last = "",
+                            start = String.format(Locale.ROOT, "G1 Z%.3f F600", r.trips.get(0) - down);
+                    int starts = 0;
+                    for (String l : sw.lines) {
+                        if (l.endsWith(" F600")) {
+                            starts += last.equals(release) && l.equals(start) ? 1 : 0;
+                            last = l;
+                        }
+                    }
+                    assertEquals(5, starts, at + release + " then " + start + ", once a press");
                 });
             }
         }
@@ -227,8 +242,8 @@ public class HeightSwitchTest {
             };
             HeightSwitch.Result r = HeightSwitch.measure(sw, plan(down < 0 ? "n1" : "needle", down, trip - down,
                     trip + down, 5));
-            assertEquals(String.format(Locale.ROOT, "pressed again 0.30 above the coarse trip after its release at Z "
-                    + "%.3f: the switch is erratic", trip - down * 0.25), r.why);
+            assertEquals(String.format(Locale.ROOT, "pressed again 0.30 mm above the coarse trip after its release at "
+                    + "Z %.3f: the switch is erratic", trip - down * 0.25), r.why);
             assertTrue(r.refused && r.trips.isEmpty() && !r.accepted, String.valueOf(r.trips));
             assertEquals("G1 Z31.500 F600", sw.lines.get(sw.lines.size() - 2), sw.lines.toString());
             assertEquals(31.5, sw.z, 1e-9);
