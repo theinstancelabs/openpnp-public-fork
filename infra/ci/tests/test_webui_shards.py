@@ -82,6 +82,13 @@ class RunnerList(unittest.TestCase):
         return subprocess.run(["bash", "-c", 'set -euo pipefail\n' + snippet + '\nprintf "%s" "$WEBUI_SCRIPTS"'],
                               env=dict(base, **env), capture_output=True, text=True, timeout=30)
 
+    def test_every_playwright_script_but_boardview_is_listed(self):
+        """A script dropped from the list (a merge that keeps the wrong side) or a typo fails here, not in the slow
+        rest leg. boardview runs in its own job (ci.yml ui-boardview)."""
+        web = os.path.dirname(RUNNER)
+        files = sorted(f[:-len(".playwright.cjs")] for f in os.listdir(web) if f.endswith(".playwright.cjs"))
+        self.assertEqual(sorted(webui_shards.all_scripts(self.text)), [f for f in files if f != "boardview"])
+
     def test_one_script_per_line(self):
         literal = re.search(r'^ALL_SCRIPTS="([^"]*)"', self.text, re.M).group(1)
         self.assertEqual([l for l in literal.splitlines() if len(l.split()) > 1], [])
@@ -95,6 +102,7 @@ class RunnerList(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         r = self.run_list(WEBUI_SCRIPTS="nope")
         self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.run_list(WEBUI_SCRIPTS="tip").returncode, 2, "a part of a name is no name")
         known = " ".join(webui_shards.all_scripts(self.text))
         self.assertIn("unknown script 'nope' (known: %s)" % known, r.stderr)
 
