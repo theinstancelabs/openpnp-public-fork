@@ -56,7 +56,8 @@ public class TouchOffCheckDotsTest {
     }
 
     /**
-     * The 25G's ladder as a camera sees it: 3 droplets, the reference pair at 1.2 mm and 4 steady dots at 1.25 mm (a
+     * The 25G's ladder as a camera sees it: 3 droplets, the reference pair at 1.15 and 1.25 mm (unequal: an area taken
+     * from one of them alone would show; the re-review's MINOR) and 4 steady dots at 1.25 mm (a
      * free dot grows as the gap shrinks: a wrong pair's area would show), then squashed (contact between 0.000 and
      * -0.025 mm); the droplets landed at (0.2, 0) (a wrong pair would show), the reference pair at (0.01, 0) and
      * (-0.01, 0.02), the 1st check dot 0.3 mm off (paste from the floor), the 2nd at {@code check2}, the deepest
@@ -68,7 +69,7 @@ public class TouchOffCheckDotsTest {
             double[] at = i < 3 ? new double[] {0.2, 0} : i == 3 ? new double[] {0.01, 0} : i == 4
                     ? new double[] {-0.01, 0.02} : i == 12 ? floor
                     : i == 13 ? new double[] {0.3, 0} : i == 14 ? check2 : new double[] {0, 0.01};
-            double d = i < 3 ? 0.5 : i < 5 || i > 12 ? 1.2 : i < 9 ? 1.25 : 1.8;
+            double d = i < 3 ? 0.5 : i == 3 ? 1.15 : i == 4 || i > 4 && i < 9 ? 1.25 : i > 12 ? 1.2 : 1.8;
             l.add(at == null ? SpotDot.none() : SpotDot.dot(new Dot(at[0], at[1], d, Math.PI * d * d / 4, 0.9)));
         }
         return l;
@@ -105,7 +106,7 @@ public class TouchOffCheckDotsTest {
     /** {@link #seen} with the 2nd check dot's area {@code ratio} times the reference pair's (it lands where they did). */
     static List<SpotDot> withCheckArea(double ratio) {
         List<SpotDot> l = seen(new double[] {0, 0.01}, new double[] {0, 0.01});
-        double a = Math.PI * 1.2 * 1.2 / 4 * ratio;
+        double a = (Math.PI * 1.15 * 1.15 / 4 + Math.PI * 1.25 * 1.25 / 4) / 2 * ratio; // the pair's mean area
         l.set(14, SpotDot.dot(new Dot(0, 0.01, Math.sqrt(4 * a / Math.PI), a, 0.9)));
         return l;
     }
@@ -120,7 +121,7 @@ public class TouchOffCheckDotsTest {
         NeedleTouchOff.Analysis big = analyzed(withCheckArea(1.30));
         assertEquals(0, big.landingShiftMm, 1e-9, "it landed where the pair did");
         assertEquals(30, big.checkAreaOffPct, 1e-6);
-        assertEquals("the 2nd check dot's area is off by 30 % from the reference pair's (1.470 vs 1.131 mm², at most "
+        assertEquals("the 2nd check dot's area is off by 30 % from the reference pair's (1.473 vs 1.133 mm², at most "
                 + "25 %): the needle's height may have changed; look at the tip from below and run the touch-off again",
                 big.landingProblem);
         assertTrue(big.found(), "the contact stands: only its apply is refused");
@@ -128,7 +129,7 @@ public class TouchOffCheckDotsTest {
         NeedleTouchOff.Analysis near = analyzed(withCheckArea(1.20));
         assertEquals(20, near.checkAreaOffPct, 1e-6);
         assertNull(near.landingProblem, "20 % is within the 25 %");
-        assertEquals(near.areasMm2[3] * 1.2, near.checkDots.get(1).areaMm2, 1e-9);
+        assertEquals((near.areasMm2[3] + near.areasMm2[4]) / 2 * 1.2, near.checkDots.get(1).areaMm2, 1e-9);
         // a NaN area fails closed
         List<SpotDot> nan = withCheckArea(1);
         nan.set(14, SpotDot.dot(new Dot(0, 0.01, 1.2, Double.NaN, 0.9)));
@@ -187,7 +188,7 @@ public class TouchOffCheckDotsTest {
         l.set(4, SpotDot.none());
         l.set(14, SpotDot.dot(new Dot(0.15, 0.01, 1.5, 1.77, 0.9)));
         NeedleTouchOff.Analysis a = analyzed(l);
-        assertEquals("only the first dot after the 3 not counted formed before a missing one (1.200 mm at gap 0.125, "
+        assertEquals("only the first dot after the 3 not counted formed before a missing one (1.150 mm at gap 0.125, "
                 + "none at gap 0.100): a contact needs two steady dots before it (the first may be a droplet from too "
                 + "high); run the ladder again from another start gap", a.reason);
         assertNull(a.landingProblem);
