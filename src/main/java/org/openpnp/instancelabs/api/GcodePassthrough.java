@@ -19,6 +19,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import org.openpnp.instancelabs.dispense.CollisionCheck;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DriverGcodeChannel;
@@ -65,6 +66,11 @@ final class GcodePassthrough {
     private boolean motionPending;
     /** OpenPnP's coordinates may differ from the controller's (a passthrough move or G92 not re-read yet). */
     private boolean positionStale;
+    /**
+     * BR-98: raw X, Y, Z where the passthrough's acknowledged moves leave the head, kept while OpenPnP's position is
+     * stale (the next batch is walked from here); null when not known (a line cut short, a quick stop).
+     */
+    private double[] commanded;
     private final Object logLock = new Object();
 
     /** One running batch. */
@@ -108,6 +114,7 @@ final class GcodePassthrough {
     synchronized void machineStopped() {
         motionPending = false;
         positionStale = false;
+        commanded = null;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -154,6 +161,7 @@ final class GcodePassthrough {
             running = b;
         }
         try {
+            prove(m, lines);
             Future<Outcome> f = m.submit(() -> execute(m, d, b, lines, timeoutMs), null, true);
             long bound = lines.size() * (timeoutMs + 1000L) + 30000L;
             try {
@@ -170,6 +178,40 @@ final class GcodePassthrough {
                 if (running == b) {
                     running = null;
                 }
+            }
+        }
+    }
+
+    /**
+     * BR-98: the batch's G0/G1 moves walked from where the head is (OpenPnP's raw position, or where the last batch
+     * left it while that is not re-read yet) and proven before any line is sent; a blocked batch is refused whole. Raw
+     * G-code has no semantics: a tip may go the model's contact depth into a measured touchable top, as in lumen-sim.
+     */
+    private void prove(Machine m, List<PassthroughLines.Line> lines) throws ApiException {
+        BedGuard.Start s = ctx.bed.start(m);
+        double[] at;
+        synchronized (this) {
+            at = !positionStale ? new double[] {s.x, s.y, s.z} : commanded == null ? null : commanded.clone();
+        }
+        List<CollisionCheck.Leg> legs = new ArrayList<>();
+        double[] p = at == null ? new double[] {s.x, s.y, s.z} : at;
+        for (int i = 0; i < lines.size(); i++) {
+            PassthroughLines.Line l = lines.get(i);
+            if (l.motion) {
+                double[] q = l.applyTo(p);
+                if (!Arrays.equals(p, q)) {
+                    legs.add(new CollisionCheck.Leg("line " + (i + 1) + ": " + l.text, p[0], p[1], p[2], q[0], q[1],
+                            q[2]));
+                }
+                p = q;
+            }
+        }
+        if (!legs.isEmpty()) {
+            ctx.bed.prove("gcode", null, s.at(at), legs, CollisionCheck.Options.contact(null), false);
+        }
+        synchronized (this) {
+            if (at != null) {
+                commanded = at; // execute follows the batch's moves from here
             }
         }
     }
@@ -250,6 +292,7 @@ final class GcodePassthrough {
                 synchronized (this) {
                     motionPending = motionPending || l.motion; // it may have been queued
                     positionStale = positionStale || l.frame;
+                    commanded = l.motion ? null : commanded;
                 }
                 return new Outcome(why.contains("timeout") ? "controller-timeout" : "controller-error", results,
                         ms(t0), i, l.text, replies, why);
@@ -266,12 +309,16 @@ final class GcodePassthrough {
             synchronized (this) {
                 if (l.motion) {
                     motionPending = true;
+                    commanded = commanded == null ? null : l.applyTo(commanded);
                 }
                 if (l.sync) {
                     motionPending = false;
                 }
                 if (l.frame) {
                     positionStale = true;
+                }
+                if ("M410".equals(l.text)) {
+                    commanded = null; // a quick stop leaves the head short of its target
                 }
             }
             Map<String, Object> res = new LinkedHashMap<>();
@@ -326,6 +373,7 @@ final class GcodePassthrough {
         synchronized (this) {
             motionPending = motionPending || l.motion;
             positionStale = positionStale || l.frame;
+            commanded = l.motion ? null : commanded;
         }
         return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i, l.text, replies,
                 stop);
@@ -428,6 +476,7 @@ final class GcodePassthrough {
         }
         synchronized (this) {
             positionStale = false;
+            commanded = null;
         }
     }
 

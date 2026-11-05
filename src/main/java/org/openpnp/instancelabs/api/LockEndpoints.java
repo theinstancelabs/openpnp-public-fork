@@ -49,7 +49,7 @@ final class LockEndpoints {
             "(PUT /api/pad-types/[^/]+/rule|POST /api/pad-types/[^/]+/copy)", "POST /api/package-mappings",
             "PUT /api/pad-calibrations/[^/]+/label", "POST /api/pad-calibrations/[^/]+/wrong-tip",
             "POST /api/coupons/[^/]+/reading", "POST /api/tip-setups", "PUT /api/tip-setups/[^/]+",
-            "POST /api/tip-setups/[^/]+/(retire|unretire)");
+            "POST /api/tip-setups/[^/]+/(retire|unretire)", "POST /api/motion/check");
 
     private final ApiContext ctx;
     private final MachineEndpoints machine;

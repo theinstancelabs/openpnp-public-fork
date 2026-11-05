@@ -126,7 +126,7 @@ public final class BedModel {
         }
 
         /** Every vertex of {@code o} inside this one (both convex: all of it). */
-        boolean contains(Poly o) {
+        public boolean contains(Poly o) {
             for (int i = 0; i < o.x.length; i++) {
                 if (!contains(o.x[i], o.y[i])) {
                     return false;
@@ -643,6 +643,11 @@ public final class BedModel {
             return Double.NEGATIVE_INFINITY;
         }
         return g2 * ((kRaw - rc) - (rawZ == null || k2 == null ? rHi : Math.max(rawZ, k2)));
+    }
+
+    /** Whether the tool's height follows its raw Z: its knee known, and K for the needle (else: its worst case). */
+    public boolean mapKnown(Tool t) {
+        return "n1".equals(t.moves) ? k1 != null : "needle".equals(t.moves) && k2 != null && kRaw != null;
     }
 
     /**

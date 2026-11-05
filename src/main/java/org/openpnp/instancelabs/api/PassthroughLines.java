@@ -48,14 +48,29 @@ final class PassthroughLines {
         final boolean sync;
         /** Moves an axis or sets its position: OpenPnP's coordinates must be re-read afterwards. */
         final boolean frame;
+        /** A G0/G1's raw X, Y and Z, NaN where the line leaves the axis (BR-98's walk). */
+        final double x, y, z;
 
         Line(String text, String refusal, boolean empty, boolean motion, boolean sync, boolean frame) {
+            this(text, refusal, empty, motion, sync, frame, Double.NaN, Double.NaN, Double.NaN);
+        }
+
+        Line(String text, String refusal, boolean empty, boolean motion, boolean sync, boolean frame, double x, double y,
+                double z) {
             this.text = text;
             this.refusal = refusal;
             this.empty = empty;
             this.motion = motion;
             this.sync = sync;
             this.frame = frame;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+
+        /** Raw X, Y, Z after this line from {@code p} (moves are absolute: G91 is refused). */
+        double[] applyTo(double[] p) {
+            return new double[] {Double.isNaN(x) ? p[0] : x, Double.isNaN(y) ? p[1] : y, Double.isNaN(z) ? p[2] : z};
         }
     }
 
@@ -128,7 +143,13 @@ final class PassthroughLines {
         // M410 flushes queued moves (none pending after it) and may stop one short: OpenPnP re-reads the position
         boolean quickStop = "M410".equals(word);
         return new Line(text, null, false, motion, "M400".equals(word) || quickStop,
-                motion || "G92".equals(word) || quickStop);
+                motion || "G92".equals(word) || quickStop, axis(p, 'X', motion), axis(p, 'Y', motion), axis(p, 'Z',
+                        motion));
+    }
+
+    private static double axis(Map<Character, Double> p, char a, boolean motion) {
+        Double v = motion ? p.get(a) : null;
+        return v == null ? Double.NaN : v;
     }
 
     private static String render(Map<Character, Double> p) {

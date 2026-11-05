@@ -152,6 +152,8 @@ final class DispenseEndpoints {
         out.put("machine", machine.machineStatus());
         // BR-72: who holds the machine, what it does, since when
         out.put("lock", ctx.lock.view());
+        // BR-98: the collision model's version, its unmeasured objects, whether the head's place is known
+        out.put("bed", ctx.bed.statusView());
         Map<String, Object> d = new LinkedHashMap<>();
         out.put("dispense", d);
         Map<String, Object> pressure = ctx.pressure.snapshot();

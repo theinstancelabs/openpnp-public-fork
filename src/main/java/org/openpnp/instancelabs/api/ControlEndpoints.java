@@ -1,6 +1,7 @@
 package org.openpnp.instancelabs.api;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -11,6 +12,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
+import org.openpnp.instancelabs.dispense.CollisionCheck;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SurfacePlane;
@@ -66,6 +68,7 @@ final class ControlEndpoints {
     void register(ApiServer s) {
         s.route("POST", "/api/jog", this::jog);
         s.route("POST", "/api/move-to", this::moveTo);
+        s.route("POST", "/api/motion/check", this::check);
         s.route("GET", "/api/cameras", r -> cameras());
         s.route("GET", "/api/cameras/([a-z]{1,10})/frame\\.jpg", this::frame);
     }
@@ -77,6 +80,21 @@ final class ControlEndpoints {
     Object jog(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
         String tool = Json.str(b, "tool", null);
+        double[] d = press(b, tool);
+        Machine m = ctx.machine();
+        HeadMountable hm = tool(tool);
+        return motion(m, "jog", () -> {
+            Location from = mm(hm.getLocation());
+            Location to = from.add(new Location(LengthUnit.Millimeters, d[0], d[1], d[2], 0));
+            proveJog(m, hm, tool, to, d, false);
+            hm.moveTo(to);
+            m.getMotionPlanner().waitForCompletion(hm, MotionPlanner.CompletionType.WaitForStillstand);
+            return answer(tool, hm, from);
+        });
+    }
+
+    /** A press as BR-49 limits it: {dx, dy, dz}. */
+    private static double[] press(JsonObject b, String tool) throws ApiException {
         double dx = num(b, "dx"), dy = num(b, "dy"), dz = num(b, "dz");
         if (Math.abs(dx) > MAX_XY_MM || Math.abs(dy) > MAX_XY_MM) {
             throw ApiException.badRequest("a press moves at most " + plain(MAX_XY_MM) + " mm in X and Y");
@@ -94,30 +112,82 @@ final class ControlEndpoints {
         if ("camera".equals(tool) && dz != 0) {
             throw ApiException.refused("the camera has no Z of its own: jog N1 or the needle up or down");
         }
-        Machine m = ctx.machine();
-        HeadMountable hm = tool(tool);
-        return motion(m, "jog", () -> {
-            Location from = mm(hm.getLocation());
-            Location to = from.add(new Location(LengthUnit.Millimeters, dx, dy, dz, 0));
-            if (dx != 0 || dy != 0) {
-                requireTravelHeight();
+        return new double[] {dx, dy, dz};
+    }
+
+    /**
+     * The jog's own checks (travel height for X/Y, the floors for Z: they stay), then BR-98's proof of its one leg; a
+     * refusal throws before anything moves.
+     */
+    private Map<String, Object> proveJog(Machine m, HeadMountable hm, String tool, Location to, double[] d,
+            boolean dry) throws Exception {
+        if (d[0] != 0 || d[1] != 0) {
+            requireTravelHeight();
+        }
+        if (d[2] != 0) {
+            requireFloors(m, hm, to);
+        }
+        BedGuard.Start s = ctx.bed.start(m);
+        double[] t = BedGuard.rawTarget(m, hm, to, null);
+        StringBuilder label = new StringBuilder("jog");
+        for (int i = 0; i < 3; i++) {
+            if (d[i] != 0) {
+                label.append(' ').append("XYZ".charAt(i)).append(' ').append(d[i] > 0 ? "+" : "").append(plain(d[i]));
             }
-            if (dz != 0) {
-                requireFloors(m, hm, to);
-            }
-            hm.moveTo(to);
-            m.getMotionPlanner().waitForCompletion(hm, MotionPlanner.CompletionType.WaitForStillstand);
-            return answer(tool, hm, from);
-        });
+        }
+        return ctx.bed.prove("jog", tool, s, Collections.singletonList(new CollisionCheck.Leg(label.toString(), s.x,
+                s.y, s.z, t[0], t[1], t[2])), jogOptions(m, hm, tool, to), dry);
+    }
+
+    /**
+     * BR-98's jog exemption (design §3 step 4): over a probed surface the jogged tool's tip may go down to the floor
+     * this route already holds it to ({@link #requireFloors}); every other layer and tool stays strict.
+     */
+    private CollisionCheck.Options jogOptions(Machine m, HeadMountable hm, String tool, Location to) throws Exception {
+        CollisionCheck.Options o = CollisionCheck.Options.strict(null);
+        if ("camera".equals(tool) || !Double.isFinite(surfaceUnder(to.getX(), to.getY()))) {
+            return o;
+        }
+        double floor = isNeedle(hm) ? needleFloor(hm, to.getX(), to.getY()) : n1Floor(to.getX(), to.getY());
+        if (Double.isFinite(floor)) {
+            o.jogTool = tool;
+            o.jogFloorRaw = BedGuard.rawTarget(m, hm, new Location(LengthUnit.Millimeters, to.getX(), to.getY(), floor,
+                    to.getRotation()), null)[2];
+        }
+        return o;
     }
 
     Object moveTo(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
         String tool = Json.str(b, "tool", null);
-        String place = Json.str(b, "place", null);
-        Double x = Json.num(b, "x", null), y = Json.num(b, "y", null);
         Machine m = ctx.machine();
         HeadMountable hm = tool(tool);
+        double[] xy = place(b);
+        return motion(m, "move-to", () -> {
+            Location from = mm(hm.getLocation());
+            Location to = moveToTarget(hm, tool, from, xy);
+            BedGuard.Start s = ctx.bed.start(m);
+            ctx.bed.prove("move-to", tool, s, BedGuard.moveToLegs(m, hm, to, s, tool), CollisionCheck.Options.strict(
+                    null), false);
+            MovableUtils.moveToLocationAtSafeZ(hm, to);
+            m.getMotionPlanner().waitForCompletion(hm, MotionPlanner.CompletionType.WaitForStillstand);
+            return answer(tool, hm, from);
+        });
+    }
+
+    /**
+     * It ends at the tool's safe Z, the bottom of its safe zone: on the see-saw that is the other nozzle's zone too, so
+     * both end at travel height (#19 review of BR-49: never a tool left low at the new place).
+     */
+    private static Location moveToTarget(HeadMountable hm, String tool, Location from, double[] xy) {
+        double z = "camera".equals(tool) ? from.getZ() : safeLow(hm);
+        return new Location(LengthUnit.Millimeters, xy[0], xy[1], z, from.getRotation());
+    }
+
+    /** A named place's X/Y, or x and y. */
+    private double[] place(JsonObject b) throws ApiException {
+        String place = Json.str(b, "place", null);
+        Double x = Json.num(b, "x", null), y = Json.num(b, "y", null);
         if (place != null) {
             DispenseConfig.NamedLocation p = ctx.svc().getConfig().location(place);
             if (p == null) {
@@ -129,17 +199,46 @@ final class ControlEndpoints {
         if (x == null || y == null || !Double.isFinite(x) || !Double.isFinite(y)) {
             throw ApiException.badRequest("a place, or x and y");
         }
-        double tx = x, ty = y;
-        return motion(m, "move-to", () -> {
-            Location from = mm(hm.getLocation());
-            // it ends at the tool's safe Z, the bottom of its safe zone: on the see-saw that is the other nozzle's
-            // zone too, so both end at travel height (#19 review of BR-49: never a tool left low at the new place)
-            double z = "camera".equals(tool) ? from.getZ() : safeLow(hm);
-            Location to = new Location(LengthUnit.Millimeters, tx, ty, z, from.getRotation());
-            MovableUtils.moveToLocationAtSafeZ(hm, to);
-            m.getMotionPlanner().waitForCompletion(hm, MotionPlanner.CompletionType.WaitForStillstand);
-            return answer(tool, hm, from);
-        });
+        return new double[] {x, y};
+    }
+
+    /**
+     * BR-98 (design §6.2): the dry run of a jog or a move-to: the route's own checks and the path's proof, nothing
+     * moved, no lock, nothing journaled. Clear: 200 with the closest object; blocked: the 409 the route would give.
+     */
+    Object check(ApiServer.Request r) throws Exception {
+        JsonObject b = r.json();
+        String kind = Json.str(b, "kind", null);
+        if ("home".equals(kind) || "run".equals(kind)) {
+            throw ApiException.badRequest("kind '" + kind + "' is not in this build yet: it checks jog and move-to");
+        }
+        if (!"jog".equals(kind) && !"move-to".equals(kind)) {
+            throw ApiException.badRequest("'kind' is jog, move-to, home or run");
+        }
+        String tool = Json.str(b, "tool", null);
+        double[] d = "jog".equals(kind) ? press(b, tool) : place(b);
+        Machine m = ctx.machine();
+        HeadMountable hm = tool(tool);
+        requireFree(m);
+        Location from = mm(hm.getLocation());
+        Map<String, Object> proof;
+        if ("jog".equals(kind)) {
+            proof = proveJog(m, hm, tool, from.add(new Location(LengthUnit.Millimeters, d[0], d[1], d[2], 0)), d, true);
+        }
+        else {
+            Location to = moveToTarget(hm, tool, from, d);
+            BedGuard.Start s = ctx.bed.start(m);
+            proof = ctx.bed.prove("move-to", tool, s, BedGuard.moveToLegs(m, hm, to, s, tool),
+                    CollisionCheck.Options.strict(null), true);
+        }
+        if (proof == null) {
+            return Views.map("clear", null, "why", BedGuard.NO_MODEL);
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> closest = (Map<String, Object>) proof.get("closest");
+        return Views.map("clear", true, "clearanceMm", closest == null ? null : closest.get("clearanceMm"), "closest",
+                closest, "path", proof.get("legs"), "modelVersion", proof.get("modelVersion"), "start", proof.get(
+                        "start"));
     }
 
     @FunctionalInterface

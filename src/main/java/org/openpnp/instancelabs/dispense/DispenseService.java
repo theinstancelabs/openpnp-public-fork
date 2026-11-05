@@ -228,6 +228,8 @@ public final class DispenseService {
     private volatile TipCamera tipCameraOverride;
     /** The pictures (tip setups design §22.4). */
     private final PhotoStore photoStore;
+    /** BR-98: the collision model, read and journaled at the start. */
+    private final BedModelStore bedModel;
     /** The mounted setup with its dot table and the identity it was made for ({@link #mountedTip}). */
     private volatile TipCache tipCache;
     /** The anchor {@link #familyAnchor} found last and what it was found for. */
@@ -378,6 +380,7 @@ public final class DispenseService {
             }
         }
         this.photoStore = new PhotoStore(PhotoStore.folderFor(configDir), db);
+        this.bedModel = new BedModelStore(configDir, db);
         try {
             photoStore.sweep(System.currentTimeMillis());
         }
@@ -3746,6 +3749,11 @@ public final class DispenseService {
     /** Connects, disables, homes and the latest Z check. */
     public HomeTracker getHomeTracker() {
         return homeTracker;
+    }
+
+    /** BR-98: the collision model as the engine holds it (no file: the check is off). */
+    public BedModelStore getBedModel() {
+        return bedModel;
     }
 
     /** Whether a task must home first now, and why (setting homeBeforeRun). */

@@ -41,6 +41,8 @@ final class ApiContext {
     final MachineLock lock = new MachineLock(() -> System.currentTimeMillis() + lockClockSkewMs.get());
     /** BR-72: the lock holder's G-code through OpenPnP's driver. */
     final GcodePassthrough passthrough = new GcodePassthrough(this);
+    /** BR-98: the collision check of the API's moves, and the bed's views. */
+    final BedGuard bed = new BedGuard(this);
     private DispenseService listened;
 
     ApiContext(Configuration configuration) {
