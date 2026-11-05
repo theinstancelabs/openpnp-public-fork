@@ -1347,6 +1347,29 @@ public class PowerCycleSimTest {
         powerCycle();
         lockForProcess();
         walk(0, 1);
+        attestedHomeThatEndsUnhomed();
+        walk(31.5, -0.5);
+        refusedLevel(level("w", -1), "32 mm");
+    }
+
+    /**
+     * BR-97 re-review (MAJOR, the review's probe): that home, then an OpenPnP restart (a deploy, BR-93's restart): the
+     * home's start is on record, so the restart does not bring back the reset's boot Z 0 (31.5 below level in the frame
+     * G28 set: the probe walked to Z -32).
+     */
+    @Test
+    public void aHomeThatEndsUnhomedStillCountsAfterAnOpenPnpRestart() throws Exception {
+        powerCycle();
+        lockForProcess();
+        attestedHomeThatEndsUnhomed();
+        restartOpenPnpAndTheApi();
+        lockForProcess();
+        walk(31.5, -0.5);
+        refusedLevel(level("w", -1), "32 mm");
+    }
+
+    /** An attested home whose G28 runs (Z 31.5) but that ends unhomed: its visual homing fails. */
+    void attestedHomeThatEndsUnhomed() throws Exception {
         org.openpnp.spi.base.AbstractHead head = (org.openpnp.spi.base.AbstractHead) sim.machine.getDefaultHead();
         head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod.ResetToFiducialLocation);
         try {
@@ -1359,8 +1382,6 @@ public class PowerCycleSimTest {
         assertTrue(lastBody.contains("homing failed"), lastBody);
         assertFalse(sim.machine.isHomed());
         assertEquals(31.5, sim.server.position('Z'), 1e-9, "its G28 ran");
-        walk(31.5, -0.5);
-        refusedLevel(level("w", -1), "32 mm");
     }
 
     /**

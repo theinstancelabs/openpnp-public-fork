@@ -65,7 +65,8 @@ import java.util.regex.Pattern;
  * measures it turns it; {@link #whyNoAngle}): the angle shown before it, one click away, would otherwise clear I11.</p>
  *
  * <p>BR-97: the see-saw's levelling before a home stays within 32 mm of where the position became unknown
- * ({@link #levelReference}): Marlin's boot Z 0 after a detected reset, also after a restart (it is on record).</p>
+ * ({@link #levelReference}): Marlin's boot Z 0 after a detected reset, also after a restart (it is on record, and so
+ * is a home's start, which ends it: {@link #EVENT_HOME_STARTED}).</p>
  *
  * <p>Times are epoch ms from an injectable clock. Thread safe.</p>
  */
@@ -114,6 +115,8 @@ public final class ControllerReset {
      * (I4).
      */
     public static final String EVENT_FRAME_MOVED = "Z_FRAME_MOVED";
+    /** BR-97: a home started: its G28 may have moved the controller's frame, even if the home ended unhomed. */
+    public static final String EVENT_HOME_STARTED = "HOME_STARTED";
     private static final double TOL = 1e-3;
     private static final Pattern WORD = Pattern.compile("(?:^|\\s)([A-Z]):(-?\\d+(?:\\.\\d+)?)");
 
@@ -220,7 +223,7 @@ public final class ControllerReset {
                 tripEndedAt = later(tripEndedAt, e.atMs); // it boots without the trip
                 detectedAtMs = e.atMs; // what it reported is not journaled: reported stays null
                 unknown(e.message, e.atMs);
-                levelRefZ = 0.0; // BR-97: the boot Z, unless a newer event clears it (a possible reset, a home)
+                levelRefZ = 0.0; // BR-97: the boot Z, until a newer possible reset, home or home's start clears it
                 stopIdleClock(e.atMs); // the controller boots with its motors off
             }
             else if (EVENT_MOTOR_OFF.equals(e.code)) {
@@ -244,6 +247,9 @@ public final class ControllerReset {
             else if (EVENT_KNOWN.equals(e.code)) {
                 positionKnown = true;
                 unknownWhy = null;
+                levelRefZ = null;
+            }
+            else if (EVENT_HOME_STARTED.equals(e.code)) {
                 levelRefZ = null;
             }
         }
@@ -666,10 +672,16 @@ public final class ControllerReset {
 
     /**
      * BR-97: a home starts (its G28 next): its G28 may move the controller's frame even if the home ends unhomed, so the
-     * next levelling takes its reference afresh.
+     * next levelling takes its reference afresh, also after a restart (journaled).
      */
-    public synchronized void homeStarted() {
-        levelRefZ = null;
+    public void homeStarted() {
+        synchronized (this) {
+            levelRefZ = null;
+            long now = clock.getAsLong();
+            record(EVENT_HOME_STARTED, now, "a home started at " + ZCheck.clock(now) + ": its G28 may move the "
+                    + "controller's Z frame, so the see-saw's levelling takes its reference afresh");
+        }
+        writeOut();
     }
 
     /** When the last home after a detected reset moved the Z frame (also before a restart), or null. */

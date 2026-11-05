@@ -723,6 +723,7 @@ public class ControllerResetTest {
         assertEquals(0.0, restarted.levelReference(30), 1e-9, "an OpenPnP restart: the reset is on record");
         restarted.homeStarted();
         assertEquals(31.5, restarted.levelReference(31.5), 1e-9, "a home's G28 moved the frame, homed or not");
+        assertEquals(31.5, run(false, false).levelReference(31.5), 1e-9, "a home's start is on record (re-review)");
         now = 2000;
         restarted.connected(null, 'B', "no answer");
         assertEquals(12.0, restarted.levelReference(12), 1e-9, "a possible reset: taken afresh");
