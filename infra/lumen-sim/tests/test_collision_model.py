@@ -20,12 +20,12 @@ PARK = (100.0, 50.0, 31.5)  # whole steps from the switches: homes land exactly 
 FLAT = [[0, 0, 4.0], [100, 0, 4.0], [0, 100, 4.0]]    # N1 meets the bed at raw 4 everywhere
 TILTED = [[0, 0, 4.0], [100, 0, 4.1], [0, 100, 4.2]]  # rc(x, y) = 4 + 0.001 x + 0.002 y
 BLOCK = {"id": "block", "name": "a block", "kind": "fixed", "role": "fixture", "outline": {"box": [170, 70, 190, 90]},
-         "topZ": 15.4, "marginMm": 1.0, "noPaste": False, "surface": None,
+         "topZ": 15.4, "marginMm": 1.0, "noPaste": False, "surface": None, "touchable": False,
          "measured": {"top": {"how": "n1-touch", "by": "Infra", "atMs": 0, "errMm": 0.05}}, "state": "measured",
          "invalidatedBy": ["moved", "touched"]}
 BLANK = {"id": "blank", "name": "the front blank", "kind": "movable", "role": "blank",
          "outline": {"box": [200, 200, 260, 260]}, "topZ": 1.6, "marginMm": 1.0, "noPaste": False,
-         "surface": "blank-front", "state": "measured", "invalidatedBy": ["moved"]}
+         "surface": "blank-front", "touchable": True, "state": "measured", "invalidatedBy": ["moved"]}
 MODEL = {
     "schema": 1, "version": 7, "changedAtMs": 0, "changedBy": "Infra", "frame": {"xy": "machine", "z": "above-bed"},
     "bed": {"outline": {"box": [-30, -70, 450, 490]},
@@ -143,6 +143,10 @@ class Load(unittest.TestCase):
         [(("tools", 2, "layers", 0), {"name": "camera", "at": "head", "outline": {"circle": [0, 0, 20]},
                                       "aboveTipMm": 2})],  # a fixed part has no tip to be above
         [(("tools", 1, "tipEnd"), DELETE)],
+        [(("tools", 1, "tipEnd"), {})], [(("tools", 1, "tipEnd"), [])], [(("tools", 1, "tipEnd"), 0)],
+        [(("tools", 1, "tipEnd"), "")], [(("tools", 2, "tipEnd"), {})],  # an empty tipEnd is not (0, 0)
+        [(("contactDepthMm",), -0.1)], [(("contactDepthMm",), "0.25")], [(("contactDepthMm",), True)],
+        [(("objects", 1, "touchable"), "true")], [(("objects", 1, "touchable"), 1)], [(("objects", 1, "touchable"), 0)],
         [(("tools", 1, "layers", 0, "at"), "tip")],
         [(("seesaw", "n1", "mmPerRaw"), 0)],
         [(("seesaw", "endStopsRaw"), [66, -1])],
@@ -165,15 +169,27 @@ class Load(unittest.TestCase):
         self.assertFalse(reply["ok"])
         self.assertEqual(cm(b), before)
 
+    def test_keys_it_does_not_use_load(self):
+        """The engine's zMarginMm (lumen-sim uses no margins), notes; a fixed part's tipEnd null is no tipEnd."""
+        b = loaded(model((("zMarginMm",), 2.0), (("_comment",), ["a fixture"]), (("objects", 0, "note"), "a guess"),
+                         (("tools", 2, "tipEnd"), None)))
+        self.assertEqual(cm(b)["version"], 7)
+
     def test_the_cli_flag_loads_the_file(self):
+        """At boot Z is not powered: the head starts at restRaw, the fall swept (the hub's edge over the block, as in
+        SeeSaw's fall test)."""
         tmp = tempfile.mkdtemp(prefix="lumen-sim-test-")
         self.addCleanup(shutil.rmtree, tmp, True)
         path = os.path.join(tmp, "collision-model.json")
         with open(path, "w") as f:
-            json.dump(MODEL, f)
-        sim = SimProcess("--collision-model", path)
+            json.dump(model((("seesaw", "restRaw"), 60.0)), f)
+        sim = SimProcess("--park", "145,150,31.5", "--collision-model", path)
         try:
-            self.assertEqual(sim.ctl({"cmd": "state"})["state"]["collision_model"]["version"], 7)
+            st = sim.ctl({"cmd": "state"})["state"]
+            self.assertEqual(st["collision_model"]["version"], 7)
+            self.assertEqual(st["head"]["physical"]["Z"], 60.0)
+            self.assertEqual([(e["object"], e["layer"], e["overlapMm"]) for e in st["sim_errors"]],
+                             [("block", "hub", 10.4)])
         finally:
             sim.stop()
 
@@ -205,6 +221,39 @@ class TipHeights(unittest.TestCase):
                 to(b, z=r)
                 self.assertEqual(cm(b)["tips"], {"n1": n1, "needle": needle})
         self.assertEqual(hits(b), [])
+
+    def test_unequal_gains_and_the_tilt_in_n1s_mm(self):
+        """N1's gain 0.5, the needle's 2; the bed rises 0.01 raw per mm in X (rc = 4 + 0.01 x). Head at (200, 250),
+        raw 31.5: N1's tip at (180, 190), h1 = 0.5 (31.5 - 5.8) = 12.85; the needle's at (220, 180),
+        h2 = 2 ((64 - 6.2) - 31.5) = 52.6. The tilt counts in N1's mm (the plane is N1's contact raw): the camera, 40
+        above the bed at the head, moves on in Y over a block 40.1 high 10 to 12 mm to its right, which stands
+        0.5 x 0.01 x 12 = 0.06 mm higher on the bed: 0.16 mm into it."""
+        tall = {"id": "tall", "outline": {"box": [210, 299, 212, 301]}, "topZ": 40.1, "state": "measured"}
+        b = loaded(model((("bed", "plane", "points"), [[0, 0, 4.0], [100, 0, 5.0], [0, 100, 4.0]]),
+                         (("seesaw", "n1", "mmPerRaw"), 0.5), (("seesaw", "needle", "mmPerRaw"), 2),
+                         (("objects",), [tall])))
+        to(b, 200, 250)
+        self.assertEqual(cm(b)["tips"], {"n1": 12.85, "needle": 52.6})
+        to(b, y=300)
+        self.assertEqual(hits(b), [("tall", "camera", "camera and light", 0.16)])
+
+    def test_the_plane_is_fitted_through_every_point(self):
+        """Four points off one plane: the least-squares fit is rc = 3.9 + 0.002 x + 0.002 y (the first three alone
+        give 4 everywhere). Head at (120, 150): N1's tip at (100, 90), rc 4.28, h1 = 31.5 - 4.28; the needle's at
+        (140, 80), rc 4.34, h2 = (64 - 4.34) - 31.5."""
+        b = loaded(model((("bed", "plane", "points"), FLAT + [[100, 100, 4.4]])))
+        to(b, 120, 150)
+        self.assertEqual(cm(b)["tips"], {"n1": 27.22, "needle": 28.16})
+
+    def test_the_tips_follow_the_head_during_a_move(self):
+        """Read mid-move, the tips are where the head is then: on the flat bed the needle's h2 = 60 - r."""
+        b = loaded()
+        b.send("G1 Z50 F600")
+        b.run(1.0)
+        s = state(b)
+        r = s["head"]["physical"]["Z"]
+        self.assertTrue(s["moving"] and 31.5 < r < 50, r)
+        self.assertAlmostEqual(s["collision_model"]["tips"]["needle"], 60 - r, places=5)
 
 
 class Sweep(unittest.TestCase):
@@ -272,6 +321,34 @@ class Sweep(unittest.TestCase):
         to(b, y=120)       # back across: a new one
         self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)] * 3)
 
+    def test_after_a_fault_jump_once_counts_from_where_the_head_is(self):
+        """A jump that leaves the hub in the block keeps that collision reported; one that carries it out makes a
+        move back in a new collision; one that lands it in the block is reported by the next leg."""
+        def lost(**xy):
+            self.assertTrue(b.sim.control(dict(cmd="fault", fault="lost_steps", **xy), b.t)["ok"])
+        b = self.at_the_start()
+        to(b, y=150)  # the hub's edge 1 mm over the block
+        lost(x=-0.5)  # still 0.5 mm over it
+        to(b, z=50.5)
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
+        lost(y=-40)   # out, 40 mm to the front
+        to(b, y=190)  # back in: Y 150 on the machine
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4), ("block", "needle", "hub", 0.9)])
+        to(b, y=150)  # out: Y 110
+        lost(y=40)    # in
+        to(b, z=50.6)
+        self.assertEqual(hits(b)[2:], [("block", "needle", "hub", 1.0)])
+
+    def test_a_circle_is_the_64_gon_around_it(self):
+        """The hub (r 6) as the 64-gon around it, a vertex at 6 / cos(pi / 64) = 6.0072 mm on X each side of its
+        centre: a block 6.004 mm to its right is hit, 0.4 mm below its top; one 6.008 mm to its left is not."""
+        near = {"id": "near", "outline": {"box": [126.004, 129, 140, 131]}, "topZ": 15.4, "state": "measured"}
+        far = {"id": "far", "outline": {"box": [100, 129, 113.992, 131]}, "topZ": 15.4, "state": "measured"}
+        b = loaded(model((("objects",), [near, far])))
+        to(b, 100, 200)  # the hub at (120, 130)
+        to(b, z=50)
+        self.assertEqual(hits(b), [("near", "needle", "hub", 0.4)])
+
     def test_an_unmeasured_object_blocks_at_every_height(self):
         """Added (no topZ) or moved (a topZ it no longer has): the camera, 40 mm up, is over it."""
         added = {"id": "added", "outline": {"box": [300, 300, 320, 320]}, "topZ": None, "state": "added"}
@@ -284,16 +361,26 @@ class Sweep(unittest.TestCase):
         self.assertEqual(state(b)["sim_errors"][0]["error"], "collision: camera (camera and light) over added, "
                                                              "not measured")
 
-    def test_a_tip_resting_on_a_top_is_contact(self):
-        """N1's tip on the blank's top (raw 5.6) and down to 0.25 mm into it is resting on it; deeper is a collision.
-        Any other layer below a top is one: the hub 0.1 mm into the block."""
-        b = loaded()
-        to(b, 250, 290)  # N1's tip at (230, 230), over the blank
-        for r in (5.6, 5.35):
-            to(b, z=r)
-            self.assertEqual(hits(b), [], r)
-        to(b, z=5.325)
-        self.assertEqual(hits(b), [("blank", "n1", "tip", 0.275)])
+    def test_a_tip_resting_on_a_touchable_top_is_contact(self):
+        """N1's tip on the touchable blank's top (raw 5.6) and down to contactDepthMm into it (0.25 when the file has
+        none) is resting on it; deeper is a collision. Anything else below a top collides at any depth: N1's tip in
+        the blank not touchable, or in the bare bed, and the hub 0.1 mm into the block."""
+        for edits, resting, deeper, mm in (((), 5.35, 5.325, 0.275),
+                                           (((("contactDepthMm",), 0.1),), 5.5, 5.475, 0.125)):
+            b = loaded(model(*edits))
+            to(b, 250, 290)  # N1's tip at (230, 230), over the blank
+            for r in (5.6, resting):
+                to(b, z=r)
+                self.assertEqual(hits(b), [], (edits, r))
+            to(b, z=deeper)
+            self.assertEqual(hits(b), [("blank", "n1", "tip", mm)])
+        b = loaded(model((("objects", 1, "touchable"), False)))
+        to(b, 250, 290)
+        to(b, z=5.575)
+        to(b, z=31.5)
+        to(b, 120, 290)  # N1's tip at (100, 230), over the bare bed
+        to(b, z=3.9)
+        self.assertEqual(hits(b), [("blank", "n1", "tip", 0.025), ("bed", "n1", "tip", 0.1)])
         b = self.at_the_start()
         to(b, z=49.7)
         to(b, y=190)
@@ -313,11 +400,11 @@ class SeeSaw(unittest.TestCase):
                 elif release == "M112":
                     b.write("M112\n")
                     b.run(1.0)  # stock: the steppers go off 0.85 s after the kill
-                else:  # il-safety's kill stops the head at once and lets go: it falls from where it stopped
+                else:  # il-safety's kill stops the head at once; it falls from there when Z lets go, 0.85 s later
                     b.send("G1 Z20 F60")
                     b.run(2.0)
                     b.write("M112\n")
-                    b.run(0.1)
+                    b.run(1.0)
                 self.assertEqual(z(b), 60.0)
                 self.assertEqual(hits(b), [])
 
@@ -329,12 +416,36 @@ class SeeSaw(unittest.TestCase):
         self.assertEqual(hits(b), [("block", "needle", "hub", 10.4)])
         self.assertIsNone(state(b)["sim_errors"][0]["line"])
 
+    def test_a_model_set_while_z_is_off_puts_it_at_rest(self):
+        """Z not powered since the boot, or let go before the model came: the arm already rests at restRaw, so the
+        head goes there when the model is set, the fall swept as above; a power cycle then leaves it there."""
+        for how in ("boot", "M18 Z"):
+            with self.subTest(how):
+                b = Bench(park=(145.0, 150.0, 31.5))
+                if how == "M18 Z":
+                    b.send("G28")
+                    to(b, 145, 150)
+                    b.send("M18 Z")
+                put(b, model((("seesaw", "restRaw"), 60.0)))
+                self.assertEqual(z(b), 60.0)
+                self.assertEqual(hits(b), [("block", "needle", "hub", 10.4)])
+                b.sim.power_cycle(b.t)
+                self.assertEqual((z(b), len(hits(b))), (60.0, 1))
+
     def test_the_end_stops_hold_it(self):
+        """Also where the fall is swept, and during a move. The fall stops at 66: the needle's tip 6 mm into the bed
+        (it meets it at 60), the hub over the block 16.4 mm into it and 1 mm into the bed (at 70: 10, 20.4, 5)."""
         b = loaded(model((("seesaw", "restRaw"), 70.0)))
+        to(b, 145, 150)
         b.sim.power_cycle(b.t)
         self.assertEqual(z(b), 66.0)
+        self.assertEqual(hits(b), [("bed", "needle", "tip", 6.0), ("block", "needle", "hub", 16.4),
+                                   ("bed", "needle", "hub", 1.0)])
         b = put(Bench(park=PARK), MODEL)  # not homed: only the arm's end stops limit Z
-        to(b, z=40)
+        b.send("G1 Z40 F600")
+        b.run(3.9)  # 69.5 by now without the stop, still moving
+        self.assertEqual((z(b), state(b)["moving"]), (66.0, True))
+        b.send("M400")
         self.assertEqual(z(b), 66.0)
         to(b, z=0)
         self.assertEqual(z(b), 26.0, "the 5.5 mm the arm could not go are lost")
@@ -349,18 +460,25 @@ class SeeSaw(unittest.TestCase):
 
 
 class Vacuum(unittest.TestCase):
-    def test_n1_seals_on_a_measured_blank_at_least_2_mm_inside(self):
+    def test_n1_seals_on_a_measured_touchable_blank_at_least_2_mm_inside(self):
         b = loaded()
         self.assertEqual(sealed(b, 250, 290, (5.625, 5.6)), [False, True], "the blank's top: 4 + 1.6")
         self.assertEqual(sealed(b, 222, 290, (5.625, 5.6)), [False, True], "2 mm inside its edge")
         self.assertEqual(sealed(b, 221, 290, (5.6, 5.0)), [False, False], "1 mm inside its edge")
 
-    def test_never_on_the_bare_bed_or_a_fixture(self):
+    def test_never_on_the_bare_bed_or_an_object_not_touchable(self):
         b = loaded()
         self.assertTrue(b.sim.control({"cmd": "set", "surface_z": 5.3}, b.t)["ok"])  # replaced by the model
         self.assertEqual(sealed(b, 120, 290, (5.3, 0.5)), [False, False], "the bare bed")
         self.assertEqual(hits(b), [("bed", "n1", "tip", 3.5)], "N1 at raw 0.5 is 3.5 mm below the bed plane")
-        self.assertEqual(sealed(b, 200, 140, (19.4, 19.0)), [False, False], "the block: no surface")
+        self.assertEqual(sealed(b, 200, 140, (19.4, 19.0)), [False, False], "the block: not touchable")
+
+    def test_touchable_says_where_not_surface(self):
+        """The blank keeps its surface but is not touchable: no seal. The block, touchable with no surface, seals at
+        its top (4 + 15.4)."""
+        b = loaded(model((("objects", 1, "touchable"), False), (("objects", 0, "touchable"), True)))
+        self.assertEqual(sealed(b, 250, 290, (5.6, 5.5)), [False, False], "the blank, not touchable")
+        self.assertEqual(sealed(b, 200, 140, (19.425, 19.4)), [False, True], "the block, touchable")
 
 
 class NoModel(unittest.TestCase):

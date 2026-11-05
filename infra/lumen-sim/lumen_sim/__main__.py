@@ -76,7 +76,7 @@ def run(argv):
     if args.collision_model:
         try:
             with open(args.collision_model, encoding="utf-8") as f:
-                sim.machine.collision = collision.Model(json.load(f))
+                sim.fw.set_collision(collision.Model(json.load(f)))  # at boot: Z unpowered, at its rest
         except (OSError, ValueError) as e:  # JSONDecodeError is a ValueError
             ap.error("--collision-model: %s" % e)
     guard = LinkGuard()  # before anything is opened: it must hold none of it

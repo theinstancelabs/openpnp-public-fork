@@ -176,7 +176,7 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
   `surface_z: null` removes it. Surfaces are the machine's, so they outlive a power cycle and `clear`.
 - Because it follows the physical head, a `z_shift` or a `z_drop` moves the contact the backend's N1 touch reads.
 - The state shows `surface_z`, `surfaces`, `seal_drop` and `n1_sealed`. The I2C mux and register are not checked.
-- With a collision model loaded, its flat tops replace `surface_z` and `surfaces` ("The collision model", below).
+- With a collision model loaded, its touchable tops replace `surface_z` and `surfaces` ("The collision model", below).
 - A callable `vacuum=(firmware) -> int` passed to `Simulator` replaces all of this.
 
 **The PA5 switch (the user, 11-04).** A limit switch near the first feeder on PA5 (the HACK header); N1 and the needle
@@ -218,14 +218,17 @@ fault the engine cannot see, shows up in `sim_errors`.
 - Loading checks what lumen-sim uses: schema 1, an integer `version`, every outline (`box` [x0, y0, x1, y1] with
   x0 < x1 and y0 < y1, `circle` [cx, cy, r] with r > 0, `polygon` [[x, y], ...] convex and counter-clockwise with no
   point on a line between two others), the see-saw (knees, `mmPerRaw` > 0, `K.raw`, `endStopsRaw` [low, high],
-  `restRaw` or null), each object's `id`, `state` and `topZ` (or null) and each tool's `moves` (`n1`, `needle` or
-  `fixed`), `tipEnd` (needed on the see-saw) and layers (`at` `head` or `tip-end`, and one of `aboveTipMm` and
-  `bottomZ`; a fixed part takes only `bottomZ`). It ignores the measurement records, margins, `errMm`, `homeAtMs` and
-  `homeRepeatMm`: those are the proof's error terms. A bad model is refused whole (`ValueError: collision_model...`)
-  and the one loaded stays; the CLI exits 2.
+  `restRaw` or null), `contactDepthMm` (>= 0; null or absent: 0.25), each object's `id`, `state`, `topZ` (or null)
+  and `touchable` (true or false; null or absent: false) and each tool's `moves` (`n1`, `needle` or `fixed`),
+  `tipEnd` (an object with `dx` and `dy`; needed on the see-saw, while a fixed part's null or absent one is the head)
+  and layers (`at` `head` or `tip-end`, and one of `aboveTipMm` and `bottomZ`; a fixed part takes only `bottomZ`). It
+  ignores the measurement records, the margins (`marginMm`, `zMarginMm`), `errMm`, `homeAtMs` and `homeRepeatMm`:
+  those are the proof's error terms; and any other key (notes). A bad model is refused whole
+  (`ValueError: collision_model...`) and the one loaded stays; the CLI exits 2.
 - The bed: rc(x, y), N1's contact raw with the bed, is the least-squares plane through `bed.plane.points`. lumen-sim
-  places every height on it, so it needs at least 3 points not on one line. The bed is an object too: top 0 inside
-  `bed.outline`, id `bed`.
+  places every height on it, so it needs at least 3 points not on one line and refuses fewer, as the engine's loader
+  does (its writer never writes such a file): a "plane unmeasured" fixture is for the in-process SIM only. The bed is
+  an object too: top 0 inside `bed.outline`, id `bed`, not touchable.
 - Tip heights, each at its own tip's X/Y (the head + `tipEnd`), with r the head's physical Z: N1 h1 = g1 (min(r, k1) -
   rc), the needle h2 = g2 ((K - rc) - max(r, k2)). A layer's bottom is its tool's tip + `aboveTipMm`; a part that does
   not ride the see-saw has `bottomZ` above the bed at the head (+ its `tipEnd`, if it has one). Heights are compared in
@@ -235,24 +238,31 @@ fault the engine cannot see, shows up in `sim_errors`.
   The layer collides when its lowest bottom on the leg (at an end: the see-saw maps are monotonic) is below the
   object's highest top over the overlap. A circle is the 64-gon around it (at most 0.12 % of r outside it); sides
   that only touch do not overlap. An object not measured (`topZ` null, or state added, moved or removed) blocks its
-  outline at every height (`overlapMm` null).
-- Contact: a tip (a layer at the tip end) up to 0.25 mm into a measured top is resting on it, as on what it probes or
-  dispenses on, and is no collision. 0.25 mm is a guess (one coarse probe step: a touch stops within a step past the
-  top) until Process measures the tips' give. Any other layer below a top, or a tip deeper, collides.
+  outline at every height (`overlapMm` null). It has no top here, not even the one a moved entry keeps, so N1 never
+  seals on it: an engine Measure of a moved or added blank reports a collision and finds no seal in lumen-sim (its
+  top reads not measured) until the file marks the object measured.
+- Contact: a tip (a layer at the tip end) up to `contactDepthMm` into the measured top of an object marked
+  `touchable: true` (a blank, a board, the PA5 switch, a feeder's pick pocket) is resting on it, as on what it probes,
+  presses or dispenses on, and is no collision. The default 0.25 mm is a guess (one coarse probe step: a touch stops
+  within a step past the top) until Process weighs the tips' give. Anything else below a top collides at any depth:
+  a tip deeper, a tip in the bed or in an object not touchable (no correct path rests a tip there), any other layer.
 - Each collision goes to `sim_errors` once, as `{"t", "line", "error": "collision: needle (hub) 0.400 mm below the top
   of block", "object", "tool", "layer", "overlapMm"}` ("collision: camera (camera and light) over added, not measured"
   for one not measured); `line` is the block's G-code line, null for a fall. It is not reported again while that
-  layer stays in that object, and again after a leg that ended clear of it. The head is not stopped.
-- The see-saw: when the Z driver lets go (a power cycle, `M18`/`M84` with Z, the idle timeout, `M112`: stock 0.85 s
-  after it, where its coast ended, il-safety at once, where the head stopped), Z goes to `seesaw.restRaw`, or by the
-  `z_drop` when the rest is null, as without a model. The fall is swept. `seesaw.endStopsRaw` hold Z, also before a
-  home: steps past a stop are lost (the counts go on, the head does not).
-- N1's vacuum: with a model, N1 seals only on the top of a measured object that names its `surface` (a board, a
-  blank: flat), at least 2 mm inside its outline (Process 11-04). Never on the bare bed (out of N1's reach) or a
-  fixture; `surface_z` and `surfaces` count for nothing then.
+  layer stays in that object, and again after a leg that ended clear of it. The head is not stopped. A physical
+  fault's jump (`lost_steps`, `z_shift`) is not swept; after it a collision stays reported only while its layer is
+  still in that object, so the next leg reports one the jump carried it out of and back into, or landed it in.
+- The see-saw: when the Z driver lets go (a power cycle, `M18`/`M84` with Z, the idle timeout, `M112` 0.85 s after
+  the kill: stock where its coast ended, il-safety where the head stopped at once), Z goes to `seesaw.restRaw`, or by
+  the `z_drop` when the rest is null, as without a model. The fall is swept. A model set while Z is not powered
+  (since the boot, as `--collision-model` always is, or since a release) puts Z at its `restRaw` at once (the arm
+  has been resting there) and sweeps that fall. `seesaw.endStopsRaw` hold Z, also before a home: steps past a stop
+  are lost (the counts go on, the head does not).
+- N1's vacuum: with a model, N1 seals only on the top of a measured object marked `touchable: true` (Process's flag,
+  not inferred from `surface`), at least 2 mm inside its outline (Process 11-04). Never on the bare bed (out of N1's
+  reach) or an object not touchable; `surface_z` and `surfaces` count for nothing then.
 - The state's `collision_model`: `version`, and `tips`, each see-saw tip's height above the bed under it now; null
-  without a model. The model is the machine's: it outlives a power cycle and `clear`. Not swept: a physical fault's
-  jump (`lost_steps`, `z_shift`).
+  without a model. The model is the machine's: it outlives a power cycle and `clear`.
 
 **Homing (`G28`).**
 - It waits for motion, then homes X, then Y, then Z. Z homes at the safe point (0,0), then moves to Z 31.5. A and B
@@ -432,8 +442,9 @@ python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 - `tests/golden/` holds excerpts of `runs/serial.log`; see its README.
 - `tests/test_physical.py` covers INF-08: the physical faults (also during a home), the Z release and drop, the idle
   timeout (also at non-round times, under a hang guard, `tests/hang.py`) and the N1 touch against surfaces.
-- `tests/test_collision_model.py` covers INF-12: loading, tip heights on a tilted bed, the sweep, the see-saw's rest
-  and end stops, N1's seal, and that nothing changes without a model.
+- `tests/test_collision_model.py` covers INF-12: loading, tip heights (a tilted bed, unequal gains, the plane's fit,
+  mid-move), the sweep (the 64-gon, contact, once, a fault's jump), the see-saw's rest (also for a model set with Z
+  off) and end stops, N1's seal, and that nothing changes without a model.
 - `tests/test_docs.py` checks the README's USB-identity instructions, including that its `sed` line works.
 - The golden tests compare reply text exactly and timing within 3 %.
 - `--sim-cap` (BR-47): with it off, M115 equals the golden byte for byte; with it on, the line comes last before the
@@ -538,7 +549,7 @@ Results on 10-31 (before BR-43/47):
     a collision model's end stops);
   - how a released Z moves: the `z_drop` (or the see-saw's rest) is instant and fixed, with no slow sag and no snap to
     a full step when re-energised;
-  - a collision's force: the head is not stopped, and a tip pressing on a top has no give but the 0.25 mm;
+  - a collision's force: the head is not stopped, and a tip pressing on a top has no give but `contactDepthMm`;
   - USB identity: a pty has none;
   - the boot banner, which is lost on USB CDC anyway;
   - `N` line numbers and checksums;

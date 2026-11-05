@@ -8,15 +8,15 @@ import math
 from collections import namedtuple
 
 CIRCLE_SIDES = 64  # a circle is the 64-gon around it: at most 0.12 % of its radius outside it
-# A tip (a layer at the tip end) up to this far into a measured top is resting on it, as on the surface it probes or
-# dispenses on: contact, not a collision. One coarse probe step (probe.py, 0.25 mm): a touch stops within one step past
-# the top. A guess, as long as Process has no number for the tips' give.
+# contactDepthMm when the file has none: a tip (a layer at the tip end) up to this far into a measured top is resting on
+# it, as on the surface it probes or dispenses on: contact, not a collision. One coarse probe step (probe.py, 0.25 mm):
+# a touch stops within one step past the top. A guess until Process weighs the tips' give.
 TIP_CONTACT_MM = 0.25
-SEAL_INSIDE_MM = 2.0  # N1 seals on a flat top only this far inside its outline (Process 11-04 17:3x)
+SEAL_INSIDE_MM = 2.0  # N1 seals on a touchable top only this far inside its outline (Process 11-04 17:3x)
 STATES = ("measured", "added", "moved", "removed")
 MOVES = ("n1", "needle", "fixed")  # which side of the see-saw a tool rides, or none
 
-Object = namedtuple("Object", "id pts box top flat")  # top: topZ, None when not measured
+Object = namedtuple("Object", "id pts box top touchable")  # top: topZ, None when not measured; touchable: measured too
 Tool = namedtuple("Tool", "id moves dx dy layers")    # dx, dy: tipEnd, the tip's end from the head
 Layer = namedtuple("Layer", "name pts above bottom tip")  # pts from the head; above: aboveTipMm, bottom: bottomZ
 
@@ -139,6 +139,10 @@ class Model:
         self.version = raw.get("version")
         if isinstance(self.version, bool) or not isinstance(self.version, int):
             raise ValueError("%s.version must be an integer, not %r" % (w, self.version))
+        depth = raw.get("contactDepthMm")
+        self.contact = TIP_CONTACT_MM if depth is None else _num(depth, w + ".contactDepthMm")
+        if self.contact < 0:
+            raise ValueError("%s.contactDepthMm must be >= 0, not %r" % (w, depth))
         bed = _get(raw, "bed", w)
         self.a, self.b, self.c = _plane(_get(bed, "plane", w + ".bed").get("points"), w + ".bed.plane.points")
         bed_pts = _outline(bed.get("outline"), w + ".bed.outline")
@@ -165,7 +169,10 @@ class Model:
             top = None if o.get("topZ") is None else _num(o["topZ"], what + ".topZ")
             if o["state"] != "measured":
                 top = None  # added, moved or removed: it blocks its outline at every height
-            self.objects.append(Object(o["id"], pts, _box(pts), top, top is not None and o.get("surface") is not None))
+            touchable = False if o.get("touchable") is None else o["touchable"]  # absent or null: not touchable
+            if not isinstance(touchable, bool):
+                raise ValueError("%s.touchable must be true or false, not %r" % (what, touchable))
+            self.objects.append(Object(o["id"], pts, _box(pts), top, top is not None and touchable))
         self.objects.append(Object("bed", bed_pts, _box(bed_pts), 0.0, False))  # the bed plane: Z 0 inside it
         self.tools = []
         for i, t in enumerate(_get(raw, "tools", w, list)):
@@ -174,8 +181,9 @@ class Model:
                 raise ValueError("%s needs an id (a string) and moves (%s), not %r" % (what, ", ".join(MOVES), t))
             if t.get("tipEnd") is None and t["moves"] != "fixed":
                 raise ValueError("%s: a tool on the see-saw needs its tipEnd" % what)
-            end = t.get("tipEnd") or {"dx": 0, "dy": 0}  # a fixed part's tip end: the head, unless it has one
-            dx, dy = (_num(end.get(k) if isinstance(end, dict) else None, what + ".tipEnd." + k) for k in ("dx", "dy"))
+            # a fixed part's tip end: the head, unless it has one
+            end = {"dx": 0, "dy": 0} if t.get("tipEnd") is None else _get(t, "tipEnd", what)
+            dx, dy = (_num(end.get(k), what + ".tipEnd." + k) for k in ("dx", "dy"))
             layers = []
             for j, la in enumerate(_get(t, "layers", what, list)):
                 lw = "%s.layers[%d]" % (what, j)
@@ -238,7 +246,7 @@ class Model:
                     if low is None:
                         low = min(self._bottom(tool, layer, p) for p in (a, b))
                     depth = obj.top + max(self.bed(x, y) for x, y in over) - low
-                    if depth > (TIP_CONTACT_MM if layer.tip else 0.0) + 1e-6:
+                    if depth > (self.contact if layer.tip and obj.touchable else 0.0) + 1e-6:
                         hits[(obj.id, tool.id, layer.name)] = depth
         return hits
 
@@ -256,13 +264,18 @@ class Model:
                 "object": obj, "tool": tool, "layer": layer, "overlapMm": None if mm is None else round(mm, 6) + 0.0})
         return out
 
+    def jumped(self, p):
+        """The head jumped to p (X, Y, raw Z) with no move (a physical fault): a collision stays reported only while
+        its layer is still in that object there, so the next leg reports one the jump left or landed in."""
+        self.colliding &= set(self._hits(p, p))
+
     def n1_sealed(self, x, y, r):
-        """N1's tip at or below the top of a measured flat object (one with a surface: a board, a blank), at least
-        2 mm inside its outline, with the head at x, y and raw Z r. Never on the bare bed (out of N1's reach)."""
+        """N1's tip at or below the top of a measured object marked touchable (a board, a blank, the PA5 switch), at
+        least 2 mm inside its outline, with the head at x, y and raw Z r. Never on the bare bed (out of N1's reach)."""
         for tool in self.tools:
             if tool.moves == "n1":
                 tx, ty, h = self.tip(tool, x, y, r)
-                return any(o.flat and h <= o.top + 1e-9 and min(
+                return any(o.touchable and h <= o.top + 1e-9 and min(
                     _cross(p, q, (tx, ty)) / math.dist(p, q) for p, q in zip(o.pts[-1:] + o.pts[:-1], o.pts))
                     >= SEAL_INSIDE_MM - 1e-9 for o in self.objects)
         return False

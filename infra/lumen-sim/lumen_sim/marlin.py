@@ -578,11 +578,21 @@ class Firmware:
         """stepper.disable_axis(): the driver lets go. A released Z falls (Machine.release_z): to the see-saw's rest,
         else by the machine's z_drop."""
         if axis == "Z" and self.enabled["Z"]:
-            self.stepper.update(self.now)  # il-safety's kill freezes the stepper now: the head stops, then falls
-            start = self.machine.physical[:3]
-            self.machine.release_z()
-            self._moved(start)  # a drop under or off the switch, and what the fall hits
+            self._fall()
         self.enabled[axis] = False
+
+    def set_collision(self, model):
+        """The machine's collision model from now on (None: none). An unpowered Z has rested at the model's restRaw
+        all along: the head goes there now, the fall swept as a release's."""
+        self.machine.collision = model
+        if model is not None and model.rest is not None and not self.enabled["Z"]:
+            self._fall()
+
+    def _fall(self):
+        self.stepper.update(self.now)  # the moves that ended by now first: the head falls from where it is
+        start = self.machine.physical[:3]
+        self.machine.release_z()
+        self._moved(start)  # a drop under or off the switch, and what the fall hits
 
     # ------------------------------------------------------------------ positions
     def logical(self):

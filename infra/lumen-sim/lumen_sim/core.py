@@ -279,6 +279,8 @@ class Simulator:
         else:                        # z_drop: how far the head moves each time the Z driver lets go
             m.z_drop = v["z"]
         self.fw.pa5(t)  # the head moved under the switch (or off it), where it is now (a move may run)
+        if m.collision is not None:
+            m.collision.jumped(m.physical[:3])
         # a homing move running toward a switch now ends where that switch triggers, and the firmware's wait with it
         self.fw.stepper.recheck_endstops(t)
         self.fw.wake(t)
@@ -327,7 +329,7 @@ class Simulator:
             self.machine.pa5 = pa5
             self.fw.pa5(t)  # wired under the head: its state from where the head is
         if "collision_model" in req:
-            self.machine.collision = model
+            self.fw.set_collision(model)
         return {"ok": True}
 
     @staticmethod
