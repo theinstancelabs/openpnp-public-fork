@@ -869,7 +869,6 @@ public final class DispenseService {
         }
     }
 
-    /** BR-02: the journal's pending changes are written on the journal thread (no insert on a stream's thread). */
     /**
      * BR-93: the controller's link was lost (heard on the driver's reader thread, or found by a status read or a route):
      * on record once as a possible reset ({@link ControllerReset#linkLost}), written soon after (no I/O on that thread).
@@ -880,6 +879,7 @@ public final class DispenseService {
         }
     }
 
+    /** BR-02: the journal's pending changes are written on the journal thread (no insert on a stream's thread). */
     private void flushLater() {
         try {
             journalWriter.execute(controllerReset::flush);

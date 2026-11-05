@@ -304,6 +304,8 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             new java.util.concurrent.atomic.AtomicReference<>();
     /** Instance Labs (BR-93): told once of each loss, on the thread that found it (the reader's); or null. */
     private volatile java.util.function.Consumer<LinkLoss> linkLossWatcher;
+    /** Instance Labs (BR-93): counts connects; a reader reports only its own link's loss (a connect closes the old one). */
+    private volatile int linkGeneration;
 
     /** Instance Labs (BR-93): the open link to the controller was lost unasked: when (epoch ms), and why. */
     public static final class LinkLoss {
@@ -528,6 +530,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     public synchronized void connect() throws Exception {
         disconnectRequested = false;
+        linkGeneration++; // Instance Labs (BR-93): the old link's reader, closed below, reports nothing
         getCommunications().setDriverName(getName());
         Logger.debug("[{}] Connect", getCommunications().getConnectionName());
         getCommunications().connect();
@@ -1304,7 +1307,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
      * homed until a Stop, so whatever moves the machine asks here first. A connect that opens the link again clears it.
      */
     public LinkLoss getLinkLoss() {
-        if (linkLoss.get() == null && connected && devicePathGone(serialPortName())) {
+        if (linkLoss.get() == null && connected && devicePathGone(openedSerialDevice())) {
             linkLost(null); // the reader may not have failed yet
         }
         return linkLoss.get();
@@ -1312,10 +1315,10 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     /** Instance Labs (BR-93): a loss goes on record once, unless the link is being closed on purpose. */
     private void linkLost(String cause) {
-        if (disconnectRequested) {
-            return; // a disconnect on purpose ends the reader too
+        if (disconnectRequested || SerialPortCommunications.jvmShuttingDown) {
+            return; // a disconnect on purpose ends the reader too, and so does OpenPnP's exit
         }
-        String port = serialPortName();
+        String port = openedSerialDevice();
         String usb = devicePathGone(port) ? "the controller left USB: " + port + " is gone" : null;
         LinkLoss l = new LinkLoss(System.currentTimeMillis(), usb == null ? cause : cause == null ? usb
                 : usb + "; " + cause);
@@ -1333,9 +1336,13 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         }
     }
 
-    /** Instance Labs (BR-93): the serial port's name (machine.xml's /dev/serial/by-id/… path), or null for other links. */
-    private String serialPortName() {
-        return getCommunicationsType() == CommunicationsType.serial ? getSerial().getPortName() : null;
+    /**
+     * Instance Labs (BR-93): the serial device the last connect opened (BR-47 may open another than the configured name:
+     * the board's serial number, its description), or null for other links and in simulation mode.
+     */
+    private String openedSerialDevice() {
+        return communicationsType == CommunicationsType.serial && !isInSimulationMode() ? getSerial().getOpenedRealPath()
+                : null;
     }
 
     /**
@@ -1714,6 +1721,16 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     }
 
     protected class ReaderThread extends Thread {
+        /** Instance Labs (BR-93): the connect this reader belongs to. */
+        private final int generation = linkGeneration;
+
+        /** Instance Labs (BR-93): a loss of this reader's own link only. */
+        private void lost(String cause) {
+            if (generation == linkGeneration) {
+                linkLost(cause);
+            }
+        }
+
         @Override
         public void run() {
             // Get the copies that are valid for this thread.
@@ -1727,7 +1744,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                     if (receivedLine == null) {
                         // Line read failed eg. due to socket closure
                         Logger.error("[{}] Failed to read gcode response", connectionName);
-                        linkLost("the link ended"); // Instance Labs (BR-93)
+                        lost("the link ended"); // Instance Labs (BR-93)
                         return;
                     }
                     receivedLine = receivedLine.trim();
@@ -1742,7 +1759,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                     }
                     else {
                         Logger.error(e, "[{}] Read error", connectionName);
-                        linkLost("a read failed (" + e.getMessage() + ")"); // Instance Labs (BR-93)
+                        lost("a read failed (" + e.getMessage() + ")"); // Instance Labs (BR-93)
                         return;
                     }
                 }

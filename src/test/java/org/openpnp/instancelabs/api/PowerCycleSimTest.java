@@ -281,6 +281,30 @@ public class PowerCycleSimTest {
         ok("POST", "/api/stop", null); // STOP still runs (it switches off what it can)
     }
 
+    /** BR-93 (#53 review MINOR 4): a link that breaks hard (the read fails, as at 15:07:57 on the machine) is lost too. */
+    @Test
+    public void aLinkThatBreaksHardIsLostToo() throws Exception {
+        sim.server.resetLink();
+        JsonObject m = awaitLinkLost();
+        String why = m.getAsJsonObject("linkLost").get("why").getAsString();
+        assertTrue(why.contains("a read failed ("), why);
+        assertFalse(m.get("connected").getAsBoolean() || m.get("positionKnown").getAsBoolean(), m.toString());
+    }
+
+    /**
+     * BR-93 (#53 review MINOR 3): a connect while the old link's reader still runs (a Start whose CONNECT_COMMAND timed
+     * out leaves it) closes that link on purpose: its reader's error is no loss of the new link, and no possible reset.
+     */
+    @Test
+    public void theOldReaderOfAReconnectReportsNothing() throws Exception {
+        sim.driver.connect(); // the old link's reader is alive and blocked in its read
+        Thread.sleep(300);
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertTrue(m.get("linkLost").isJsonNull(), m.toString());
+        assertTrue(m.get("positionKnown").getAsBoolean(), "no possible reset was recorded: " + m);
+        assertTrue(events(ControllerReset.EVENT_UNREAD).isEmpty(), "nothing journaled");
+    }
+
     /** BR-93: a Stop closes the link on purpose: no loss shows, and the Start after it is a plain reconnect. */
     @Test
     public void aStopsDisconnectIsNoLostLink() throws Exception {
