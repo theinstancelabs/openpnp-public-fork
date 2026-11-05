@@ -400,9 +400,8 @@ async function runFirstDots(page, n) {
     // ---- BR-82: the recipe's own lift and the pause after it (the 25G's 3 mm + 0.5 s), then back to the defaults -----
     {
       const prof = async () => (await (await page.request.get(BASE + 'api/status')).json()).dispense.profile;
-      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked. The error shows
-       *  on input, Save's lock at the next render frame (and the value before may have shown the same error): a refused
-       *  value waits for both, else the read can come between them (#78's queue run, 11-05 13:06Z) */
+      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked (both set on
+       *  input); a refused value waits for both. */
       const typeIn = async (id, v, refused) => {
         await page.fill('#' + id, '');
         await page.locator('#' + id).pressSequentially(v);
@@ -455,18 +454,45 @@ async function runFirstDots(page, n) {
       r = await typeIn('pf-lift', '3e', true);
       check('profile: a lift that is not a number (“3e”) is refused, never read as blank (Save would clear the saved 3 mm; Save locked)',
         r.err === 'Enter a number or leave it blank.' && r.save, r);
-      await page.fill('#pf-lift', '');
-      await waitText(page, 'pf-diff-t', /lift after a dot 3\.0 mm → the machine’s hop height/, 5000).catch(() => {});
-      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
-      await page.click('#btn-pf-save');
-      const p2 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 0 && s.dispense.profile.liftMm === null, 10000).then((s) => s.dispense.profile, () => null);
-      check('profile: a blank lift is saved as null (the machine’s hop height); the fingerprint is the one before, byte for byte',
-        !!p2 && p2.fingerprint === fp0, { fp0, fp: p2 && p2.fingerprint, liftMm: p2 && p2.liftMm });
       // BR-85: the dots the touch-off does not count after the prime (the 25G's 3) are the recipe's, editable here; not part of a dot
       check('profile: “Dots not counted after the prime” comes after “Pause after the lift” and shows the recipe’s 0 (the SIM’s)', await page.evaluate(() => {
         const e = document.getElementById('pf-skip');
         return !!e && e.value === '0' && !!(document.getElementById('pf-liftpause').compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING);
       }));
+      await page.fill('#pf-lift', '');
+      await waitText(page, 'pf-diff-t', /lift after a dot 3\.0 mm → the machine’s hop height/, 5000).catch(() => {});
+      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+      // a field refused while that save is still on its way (its PUT held): when the save ends, Save stays locked. IL.act's
+      // end once unlocked its button until the next render locked it again, and a read in between failed the checks below
+      // in the merge queue (#79's group, 11-05 14:51Z)
+      let releasePut = null;
+      const putHeld = new Promise((res) => { releasePut = res; });
+      const holdPut = async (route) => { if (route.request().method() === 'PUT') await putHeld; return route.fallback(); };
+      await page.route('**/api/config', holdPut);
+      await page.click('#btn-pf-save');
+      await page.waitForFunction(() => document.getElementById('btn-pf-save').getAttribute('aria-busy') === 'true', null, { timeout: 5000 }).catch(() => {});
+      await page.fill('#pf-skip', '6');
+      const busy6 = await page.evaluate(() => {
+        const b = document.getElementById('btn-pf-save'), m = document.getElementById('pf-skip-err');
+        window.__pfUnlocked = [];
+        window.__pfObs = new MutationObserver(() => { if (!b.disabled && !m.hidden) window.__pfUnlocked.push(m.textContent); });
+        window.__pfObs.observe(b, { attributes: true, attributeFilter: ['disabled'] });
+        return { busy: b.getAttribute('aria-busy') === 'true', err: m.hidden ? '' : m.textContent };
+      });
+      releasePut();
+      await page.waitForFunction(() => !document.getElementById('btn-pf-save').hasAttribute('aria-busy'), null, { timeout: 10000 }).catch(() => {});
+      await page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));   // the render after it
+      const end6 = await page.evaluate(() => {
+        window.__pfObs.disconnect();
+        const b = document.getElementById('btn-pf-save');
+        return { unlocked: window.__pfUnlocked, busy: b.hasAttribute('aria-busy'), save: b.disabled };
+      });
+      await page.unroute('**/api/config', holdPut);
+      const p2 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 0 && s.dispense.profile.liftMm === null, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: a blank lift is saved as null (the machine’s hop height); the fingerprint is the one before, byte for byte',
+        !!p2 && p2.fingerprint === fp0, { fp0, fp: p2 && p2.fingerprint, liftMm: p2 && p2.liftMm });
+      check('profile: a save that ends while a field shows its error leaves Save locked (never unlocked, not for a frame)',
+        busy6.busy && busy6.err === 'Must be 0 to 5 dots.' && !end6.busy && end6.unlocked.length === 0 && end6.save, { busy6, end6 });
       for (const [v, err] of [['6', 'Must be 0 to 5 dots.'], ['-1', 'Must be 0 to 5 dots.'], ['2.5', 'Must be a whole number.'], ['', 'Enter a number.']]) {
         r = await typeIn('pf-skip', v, true);
         check('profile: “' + v + '” dots not counted is refused at the field, as the engine refuses it (Save locked)', r.err === err && r.save, r);
