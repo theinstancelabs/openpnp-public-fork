@@ -221,6 +221,14 @@ public class DispenseConfig {
      */
     public Long newSeatAtMs = null;
 
+    // --- the bed model (BR-98, collision-model-design.md §6.4) -----------------------------------
+    /**
+     * Process's number: the largest difference the top camera's comparison of a removed object's spot with its stored
+     * empty-bed picture may show for {@code POST /api/bed/objects/{id}/cleared} (the engine's threshold, never the
+     * caller's); null until Process sets it: nothing is cleared.
+     */
+    public Double emptyBedMaxDiff = null;
+
     // --- pad calibration (profile calibration design §5.4) ---------------------------------------
     /** The needle: pad types and dose records name it; its OD sets the same-pad dot pitch. */
     public TipSpec tip = new TipSpec();

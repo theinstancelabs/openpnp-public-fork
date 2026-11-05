@@ -643,8 +643,8 @@ moves with each needle. In this build nothing rewrites it at a mount: while the 
   to the side beyond the margin).
 - **Journal:** a clear path: one `MOTION_PROOF` row `{what: jog|move-to|gcode, tool, modelVersion, start, legs,
   closest, checkMs}`; a refused one: a `MOTION_REFUSED` row with the 409 body.
-- **Writes** (guarded: the lock holder's; 409 `refused` while anything moves: OpenPnP busy, an engine task or pad
-  calibration, a G-code batch or its moves not ended by an `M400`). Each is validated as the loader does (400
+- **Writes** (guarded: the lock holder's, 409 `no-lock` while nobody holds it; 409 `refused` while anything moves:
+  OpenPnP busy, an engine task or pad calibration, a G-code batch or its moves not ended by an `M400`). Each is validated as the loader does (400
   `bad-request` with the problem; nothing written), then `version` + 1, `changedAtMs`/`changedBy` stamped, the file
   rewritten atomically, a `BED_MODEL` row `{who, what, version: [before, after], before, after}`, and the answer is
   `GET /api/bed`'s. Two writes at once: the one whose model another write changed after it was read answers 409
@@ -657,17 +657,19 @@ moves with each needle. In this build nothing rewrites it at a mount: while the 
   - `POST /api/bed/objects/{id}/moved {outline?}`: the entry becomes `moved` (it keeps blocking); with an outline a new
     entry `<id>-2` (`added`) there. `.../removed {}`: `removed` (it keeps blocking; the API shows `removed, not
     checked`).
-  - `POST /api/bed/objects/{id}/cleared {camera: {reference, diff, threshold, evidence}, n1: {points, floorRaw,
-    evidence}, by?, atMs?}` (Process 11-04 20:5x): a removed object leaves the model only with both measurements:
-    the top camera's comparison of the old outline's area with the stored empty-bed picture of that spot (`diff` ≤
-    its fixed `threshold`) and N1 lowered to its floor at ≥ 3 points inside the outline with no contact. Anything
-    less: 409 `measurement-needed`, it stays removed. Not removed: 409 `refused`.
+  - `POST /api/bed/objects/{id}/cleared {camera: {reference, diff, evidence}, n1: {points, floorRaw, evidence}, by?,
+    atMs?}` (Process 11-04 20:5x): a removed object leaves the model only with both measurements, each with evidence
+    from since it was marked removed: the top camera's comparison of the old outline's area with the stored empty-bed
+    picture of that spot (`diff` ≤ the engine's fixed threshold, dispense-config `emptyBedMaxDiff`, Process's number:
+    unset, nothing clears; a `threshold` sent is not used, the record keeps the engine's) and N1 lowered to its floor
+    at ≥ 3 points inside the outline with no contact. Anything less: 409 `measurement-needed`, it stays removed. Not
+    removed: 409 `refused`.
   - `PUT /api/bed/objects/{id}`, `PUT /api/bed/tools/{id}` (a new id adds the tool), `PUT /api/bed/plane {the
     bed.plane block}`, `PUT /api/bed/seesaw {the seesaw block}`: the part as the file holds it.
   - **The rule:** a person's word may add, mark moved or removed, grow an outline or a tool layer, raise a top or a
     layer, lower a layer. What frees space needs a new measurement record where that part keeps it (`how` any words,
     `atMs` later than the stored record's, `evidence` naming journal events `event:<id>` or photos `photo:<id>` that
-    exist): a lower top, a smaller top error, `touchable` switched on, or an unmeasured object becoming measured
+    exist, none older than the stored record's `atMs` and no `BED_MODEL` or `MOTION_*` row): a lower top, a smaller top error, `touchable` switched on, or an unmeasured object becoming measured
     (`measured.top`); a smaller outline or margin, or an unmeasured object becoming measured (`measured.xy`); any
     change of the bed plane or a smaller bed outline (`bed.plane`, which is its own record); any see-saw change
     (`seesaw.measured`); a smaller, higher, removed or moved tool layer, a changed `tipEnd` (its `atMs` too) or

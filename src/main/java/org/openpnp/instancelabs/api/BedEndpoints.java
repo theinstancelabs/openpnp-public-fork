@@ -5,12 +5,14 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
 import org.openpnp.instancelabs.dispense.BedModel;
 import org.openpnp.instancelabs.dispense.BedModelStore;
 import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.Photo;
 import org.openpnp.spi.Machine;
 
 import com.google.gson.JsonArray;
@@ -29,14 +31,15 @@ import com.google.gson.JsonPrimitive;
  * <p>A person's word may add an object (it blocks its outline at every height until measured), mark one moved or
  * removed, grow an outline or a tool layer, raise a top. Anything that frees space needs a new measurement record (a
  * later {@code atMs} than the stored one, a non-empty {@code how}, {@code evidence} naming journal events or photos that
- * exist) where that part keeps its records: a lower or newly measured top, a smaller top error or a touchable top
+ * exist, none older than the stored record and no bed-model or motion row) where that part keeps its records: a lower or newly measured top, a smaller top error or a touchable top
  * ({@code measured.top}); a smaller outline or margin, or an unmeasured object becoming measured ({@code measured.xy});
  * any change of the bed plane or the bed's smaller outline ({@code bed.plane}); any see-saw change
  * ({@code seesaw.measured}); a smaller, higher or moved tool layer, a changed tipEnd (its atMs too) or moves
  * ({@code tools[].measured}). A removed object stops blocking only through {@code /cleared} with both of Process's
- * measurements: the top camera against the stored empty-bed picture of that spot (a fixed threshold, no person
- * judging) and N1 lowered to its floor at 3 points inside the outline with no contact (N1 cannot touch the bare bed). A
- * smaller Z margin or a deeper contact depth frees space everywhere: not through the API in this build.</p>
+ * measurements since it was removed: the top camera against the stored empty-bed picture of that spot (the engine's
+ * fixed threshold, no person judging) and N1 lowered to its floor at 3 points inside the outline with no contact (N1
+ * cannot touch the bare bed). A smaller Z margin or a deeper contact depth frees space everywhere: not through the API
+ * in this build.</p>
  */
 final class BedEndpoints {
     static final String MEASUREMENT_NEEDED = "measurement-needed";
@@ -67,13 +70,13 @@ final class BedEndpoints {
 
     /** The first whole model (no file, or one that fails validation); after that the same rules as the parts. */
     Object putModel(ApiServer.Request r) throws Exception {
-        BedModelStore st = store();
+        BedModelStore st = store(r);
         return save(r, st, st.state().model, r.json(), "PUT /api/bed", null, null);
     }
 
     /** A person's word: the object blocks its outline at every height until it is measured. */
     Object add(ApiServer.Request r) throws Exception {
-        BedModelStore st = store();
+        BedModelStore st = store(r);
         BedModel m = current(st);
         JsonObject b = r.json();
         for (String k : new String[] {"topZ", "measured", "state"}) {
@@ -113,7 +116,7 @@ final class BedEndpoints {
 
     /** Process's numbers for one object: the whole object as the file holds it. */
     Object putObject(ApiServer.Request r) throws Exception {
-        BedModelStore st = store();
+        BedModelStore st = store(r);
         BedModel m = current(st);
         String id = r.group(1);
         JsonObject b = r.json();
@@ -128,7 +131,7 @@ final class BedEndpoints {
 
     /** Moved (the old entry blocks, a new one at the given outline), removed (it blocks), cleared (both checks). */
     Object mark(ApiServer.Request r) throws Exception {
-        BedModelStore st = store();
+        BedModelStore st = store(r);
         BedModel m = current(st);
         String id = r.group(1), what = r.group(2);
         JsonObject next = m.json();
@@ -142,7 +145,7 @@ final class BedEndpoints {
                 throw ApiException.refused(id + " is " + state + ": only a removed object is cleared (mark it removed "
                         + "first)");
             }
-            JsonObject cleared = cleared(b);
+            JsonObject cleared = cleared(b, removedAt(id));
             replace(next, "objects", id, null);
             JsonObject after = new JsonObject();
             after.add("cleared", cleared);
@@ -171,7 +174,7 @@ final class BedEndpoints {
     }
 
     Object putTool(ApiServer.Request r) throws Exception {
-        BedModelStore st = store();
+        BedModelStore st = store(r);
         BedModel m = current(st);
         String id = r.group(1);
         JsonObject b = r.json();
@@ -189,7 +192,7 @@ final class BedEndpoints {
 
     /** The bed plane (its record is the block: how, by, atMs, errMm, homeAtMs, evidence) or the see-saw block. */
     Object putPart(ApiServer.Request r) throws Exception {
-        BedModelStore st = store();
+        BedModelStore st = store(r);
         BedModel m = current(st);
         String part = r.group(1);
         JsonObject next = m.json(), b = r.json();
@@ -204,8 +207,14 @@ final class BedEndpoints {
     // Writing
     // ------------------------------------------------------------------------------------------
 
-    /** The engine's store, for a write: never while anything moves. */
-    private BedModelStore store() throws ApiException {
+    /** The engine's store, for a write: the lock holder's only, never while anything moves. */
+    private BedModelStore store(ApiServer.Request r) throws ApiException {
+        if (r.lockActivity == null) {
+            // nobody holds the lock and the caller sent neither a token nor the UI's header (#66 review MINOR d)
+            throw new ApiException(409, "no-lock", "the bed model changes only by the lock holder: POST "
+                    + "/api/lock/acquire, then send its token as " + MachineLock.TOKEN_HEADER).with("lock", ctx.lock
+                            .view());
+        }
         DispenseService svc = ctx.svc();
         Machine m = ctx.configuration.getMachine();
         if (m != null && m.isBusy()) {
@@ -260,7 +269,7 @@ final class BedEndpoints {
                 throw new ApiException(409, MEASUREMENT_NEEDED, String.join("; ", needs)).with("needs", needs);
             }
         }
-        String who = r.lockActivity == null ? "?" : r.lockActivity.holder.who;
+        String who = r.lockActivity.holder.who;
         if (b == null) {
             b = before == null ? JsonNull.INSTANCE : before.json();
             a = next;
@@ -364,15 +373,20 @@ final class BedEndpoints {
             problem = "it is not later than the stored record: a new measurement has its own time";
         }
         else {
-            problem = evidence(rec.get("evidence"));
+            problem = evidence(rec.get("evidence"), old != null && number(old, "atMs") ? Long.valueOf(Math.round(old
+                    .get("atMs").getAsDouble())) : null, "the stored record");
         }
         if (problem != null) {
             needs.add("frees space: a new measurement record at " + path + " is needed (" + problem + ")");
         }
     }
 
-    /** Null when {@code e} names journal events ({@code event:<id>}) or photos ({@code photo:<id>}) that all exist. */
-    private String evidence(JsonElement e) throws SQLException {
+    /**
+     * Null when {@code e} names journal events ({@code event:<id>}) or photos ({@code photo:<id>}) that all exist, each
+     * a measurement's own (#66 review MINOR c): no bed-model or motion row, none older than {@code notBefore} (the
+     * time of {@code since}; null: any).
+     */
+    private String evidence(JsonElement e, Long notBefore, String since) throws SQLException {
         List<String> items = new ArrayList<>();
         if (e != null && e.isJsonArray()) {
             for (JsonElement x : e.getAsJsonArray()) {
@@ -399,11 +413,38 @@ final class BedEndpoints {
             catch (NumberFormatException ex) {
                 n = -1;
             }
-            boolean found = svc != null && n >= 0 && ("event".equals(p[0]) ? !svc.getDb().query(
-                    "SELECT id FROM events WHERE id = ?", n).isEmpty() : "photo".equals(p[0]) && svc.getDb().photo(n)
-                            != null);
-            if (!found) {
+            Long at = null;
+            String code = null;
+            if (svc != null && n >= 0 && "event".equals(p[0])) {
+                List<Map<String, Object>> row = svc.getDb().query("SELECT ts, code FROM events WHERE id = ?", n);
+                at = row.isEmpty() ? null : ((Number) row.get(0).get("ts")).longValue();
+                code = row.isEmpty() ? null : (String) row.get(0).get("code");
+            }
+            else if (svc != null && n >= 0 && "photo".equals(p[0])) {
+                Photo photo = svc.getDb().photo(n);
+                at = photo == null ? null : photo.createdAtMs;
+            }
+            if (at == null) {
                 return "'" + x + "' is not a journal event or photo that exists (event:<id>, photo:<id>)";
+            }
+            if (code != null && (BedModelStore.EVENT.equals(code) || code.startsWith("MOTION_"))) {
+                return "'" + x + "' is a " + code + " row, not a measurement's";
+            }
+            if (notBefore != null && at < notBefore) {
+                return "'" + x + "' is older than " + since + ": a new measurement names its own rows";
+            }
+        }
+        return null;
+    }
+
+    /** When {@code id} was last marked removed (its {@value BedModelStore#EVENT} row), or null. */
+    private Long removedAt(String id) throws SQLException, ApiException {
+        String route = "POST /api/bed/objects/" + id + "/removed";
+        for (Map<String, Object> e : ctx.svc().getDb().query("SELECT ts, message FROM events WHERE code = ? ORDER BY "
+                + "id DESC", BedModelStore.EVENT)) {
+            JsonElement m = new JsonParser().parse(String.valueOf(e.get("message")));
+            if (m.isJsonObject() && route.equals(Json.str(m.getAsJsonObject(), "what", null))) {
+                return ((Number) e.get("ts")).longValue();
             }
         }
         return null;
@@ -411,29 +452,38 @@ final class BedEndpoints {
 
     /**
      * Process's two measurements that clear a removed object (20:5x): the top camera's comparison of the old outline's
-     * area with the stored empty-bed reference picture of that spot (diff within its fixed threshold), and N1 lowered
-     * to its floor at 3 points or more inside the outline with no contact. Anything less: 409, it stays removed.
+     * area with the stored empty-bed reference picture of that spot (diff within the engine's fixed threshold, never
+     * the caller's), and N1 lowered to its floor at 3 points or more inside the outline with no contact, both since it
+     * was marked removed ({@code removedAt}; null: any time). Anything less: 409, it stays removed.
      */
-    private JsonObject cleared(JsonObject b) throws ApiException, SQLException {
+    private JsonObject cleared(JsonObject b, Long removedAt) throws ApiException, SQLException {
         List<String> needs = new ArrayList<>();
         JsonObject cam = member(b, "camera"), n1 = member(b, "n1");
         if (cam == null) {
             needs.add("camera: the top camera's comparison with the empty-bed reference picture {reference, diff, "
-                    + "threshold, evidence}");
+                    + "evidence}");
         }
         else {
             if (!cam.has("reference") || !cam.get("reference").isJsonPrimitive() || cam.get("reference").getAsString()
                     .trim().isEmpty()) {
                 needs.add("camera: the reference picture it was compared with");
             }
-            if (!number(cam, "diff") || !number(cam, "threshold")) {
-                needs.add("camera: diff and threshold");
+            Double max = ctx.svc().getConfig().emptyBedMaxDiff;
+            if (!number(cam, "diff")) {
+                needs.add("camera: diff, the comparison's difference");
             }
-            else if (cam.get("diff").getAsDouble() > cam.get("threshold").getAsDouble()) {
-                needs.add("camera: the difference " + cam.get("diff") + " is above its threshold " + cam.get("threshold")
+            else if (max == null) {
+                needs.add("camera: the engine's threshold for the comparison is not set (dispense-config "
+                        + "emptyBedMaxDiff, Process's number)");
+            }
+            else if (!(cam.get("diff").getAsDouble() <= max)) {
+                needs.add("camera: the difference " + cam.get("diff") + " is above the engine's threshold " + max
                         + ": something is still there");
             }
-            String e = evidence(cam.get("evidence"));
+            else {
+                cam.addProperty("threshold", max); // the threshold on record is the one applied
+            }
+            String e = evidence(cam.get("evidence"), removedAt, "its removal");
             if (e != null) {
                 needs.add("camera: " + e);
             }
@@ -449,7 +499,7 @@ final class BedEndpoints {
             if (!number(n1, "floorRaw")) {
                 needs.add("n1: floorRaw, the raw Z it was lowered to");
             }
-            String e = evidence(n1.get("evidence"));
+            String e = evidence(n1.get("evidence"), removedAt, "its removal");
             if (e != null) {
                 needs.add("n1: " + e);
             }

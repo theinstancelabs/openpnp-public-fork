@@ -124,8 +124,9 @@ public class BedApiSimTest {
         return l;
     }
 
-    /** A journal event that exists, to name as evidence. */
+    /** A new measurement's own journal row (as a probe or camera run writes one), to name as evidence. */
     String evidence() throws Exception {
+        svc.getDb().event(null, "INFO", "PROBE", "a bench measurement");
         return "event:" + svc.getDb().recentEvents(1).get(0).get("id");
     }
 
@@ -267,6 +268,8 @@ public class BedApiSimTest {
     @Test
     public void aRemovedObjectIsClearedOnlyByBothMeasurements() throws Exception {
         start(true);
+        String early = evidence();
+        Thread.sleep(5);
         ok("POST", "/api/bed/objects/blank-front/moved", "{\"outline\":{\"box\":[60,210,160,290]}}");
         assertEquals("moved", object("blank-front").get("state").getAsString());
         JsonObject moved = object("blank-front-2");
@@ -284,6 +287,15 @@ public class BedApiSimTest {
                 + evidence() + "\"}";
         String n1 = "\"n1\":{\"points\":3,\"floorRaw\":0.5,\"evidence\":\"" + evidence() + "\"}";
         int v = version();
+        // the threshold is the engine's (Process's number), never the caller's: none set yet, nothing clears (#66 c)
+        refused(409, "measurement-needed", "emptyBedMaxDiff", call("POST", "/api/bed/objects/blank-front/cleared", "{"
+                + camera + "," + n1 + "}", UI));
+        ok("PUT", "/api/config", "{\"emptyBedMaxDiff\":2.0}");
+        refused(409, "measurement-needed", "threshold", call("POST", "/api/bed/objects/blank-front/cleared", "{"
+                + camera.replace("\"diff\":0.8,\"threshold\":2.0", "\"diff\":2.5,\"threshold\":3.0") + "," + n1 + "}", UI));
+        // a measurement from before the removal does not clear it
+        refused(409, "measurement-needed", "older than", call("POST", "/api/bed/objects/blank-front/cleared", "{"
+                + camera.replaceAll("event:\\d+", early) + "," + n1 + "}", UI));
         refused(409, "measurement-needed", "n1", call("POST", "/api/bed/objects/blank-front/cleared", "{" + camera + "}",
                 UI));
         refused(409, "measurement-needed", "camera", call("POST", "/api/bed/objects/blank-front/cleared", "{" + n1 + "}",
@@ -300,6 +312,8 @@ public class BedApiSimTest {
         assertEquals("blank-front", row.getAsJsonObject("before").get("id").getAsString());
         assertEquals(3, row.getAsJsonObject("after").getAsJsonObject("cleared").getAsJsonObject("n1").get("points")
                 .getAsInt());
+        assertEquals(2.0, row.getAsJsonObject("after").getAsJsonObject("cleared").getAsJsonObject("camera").get(
+                "threshold").getAsDouble(), 0, "the engine's threshold on record");
         // only a removed object is cleared
         refused(409, "refused", "removed", call("POST", "/api/bed/objects/holder-left/cleared", "{" + camera + "," + n1
                 + "}", UI));
@@ -343,10 +357,43 @@ public class BedApiSimTest {
         assertEquals(5, bed.get("version").getAsInt());
     }
 
+    /**
+     * A record's evidence is a measurement's own: a journal row or photo at or after the stored record's time, never a
+     * bed-model or motion row (#66 review MINOR c).
+     */
+    @Test
+    public void evidenceIsANewMeasurementsOwnRow() throws Exception {
+        start(true);
+        String first = evidence();
+        Thread.sleep(5);
+        JsonObject h = new JsonParser().parse(objectWith("holder-left", "topZ", "13")).getAsJsonObject();
+        h.getAsJsonObject("measured").add("top", new JsonParser().parse(record("n1 on top", first)));
+        ok("PUT", "/api/bed/objects/holder-left", h.toString());
+        Thread.sleep(5);
+        // lowered again on a newer record naming the first measurement's row, which is older than the stored record
+        h.addProperty("topZ", 12.5);
+        h.getAsJsonObject("measured").add("top", new JsonParser().parse(record("n1 on top", first)));
+        refused(409, "measurement-needed", "older than", call("PUT", "/api/bed/objects/holder-left", h.toString(), UI));
+        // a bed-model row or a motion proof is no measurement
+        for (String code : new String[] {BedModelStore.EVENT, "MOTION_PROOF"}) {
+            svc.getDb().event(null, "INFO", code, "{}");
+            h.getAsJsonObject("measured").add("top", new JsonParser().parse(record("n1 on top", "event:" + svc.getDb()
+                    .recentEvents(1).get(0).get("id"))));
+            refused(409, "measurement-needed", "not a measurement", call("PUT", "/api/bed/objects/holder-left",
+                    h.toString(), UI));
+        }
+        h.getAsJsonObject("measured").add("top", new JsonParser().parse(record("n1 on top", evidence())));
+        ok("PUT", "/api/bed/objects/holder-left", h.toString());
+        assertEquals(12.5, object("holder-left").get("topZ").getAsDouble(), 0);
+    }
+
     /** Writes are the lock holder's and never while anything moves. */
     @Test
     public void writesAreTheHoldersAndNeverWhileMoving() throws Exception {
         start(true);
+        // nobody holds the lock: a write with neither a token nor the UI's header is refused (#66 review MINOR d)
+        refused(409, "no-lock", "lock holder", call("POST", "/api/bed/objects/blank-front/removed", "{}", null));
+        assertEquals(1, version(), "nothing written");
         String token = new JsonParser().parse(postAcquire()).getAsJsonObject().get("token").getAsString();
         refused(409, "locked", "", call("POST", "/api/bed/objects/blank-front/removed", "{}", UI));
         sim.server.delayBeforeOkMs.put("M400", 3000L);
