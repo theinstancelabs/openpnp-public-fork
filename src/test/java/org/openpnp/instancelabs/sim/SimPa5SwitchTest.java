@@ -98,6 +98,13 @@ public class SimPa5SwitchTest {
         out = socket.getOutputStream();
     }
 
+    /** A new connection: OpenPnP makes a new GcodeServer on every connect. */
+    void reconnect() throws Exception {
+        server.shutdown();
+        socket.close();
+        start(null);
+    }
+
     /** One line and its reply lines up to "ok". */
     List<String> send(String line) throws Exception {
         out.write((line + "\n").getBytes(StandardCharsets.UTF_8));
@@ -136,6 +143,45 @@ public class SimPa5SwitchTest {
         return server.getPa5();
     }
 
+    /** The route's step (mm). */
+    static final double STEP = 0.025;
+
+    static double round3(double v) {
+        return Math.round(v * 1000) / 1000.0;
+    }
+
+    /** From {@code from}, steps toward the switch ({@code way}: -1 N1, Z falls; 1 the needle) until M43 P5 reads 1. */
+    double stepUntilPressed(double from, int way) throws Exception {
+        double z = from;
+        z(z);
+        while (level() == 0) {
+            z = round3(z + way * STEP);
+            assertTrue(Math.abs(z - from) < 1, "pressed within 1 mm of " + from);
+            z(z);
+        }
+        return z;
+    }
+
+    /** N1's window, then the needle's: its X, the Z the route starts from, the way Z goes to press it. */
+    static final double[][] TOOLS = {{100, 12.2, -1}, {200, 51.8, 1}};
+
+    /** The model alone: a move to (x, 50, z) ends now, then M43 P5 there: the pin's level. */
+    static int to(SimPa5Switch sw, double x, double z) {
+        sw.moveEnds(x, 50, z, 0);
+        return read(sw, x, z);
+    }
+
+    /** The model alone: M43 P5 with the head at (x, 50, z). */
+    static int read(SimPa5Switch sw, double x, double z) {
+        String r = sw.onLine("M43 P5", x, 50, z);
+        assertTrue(r != null && r.matches(Pattern.quote(LINE) + "[01]"), r);
+        return Integer.parseInt(r.substring(LINE.length()));
+    }
+
+    static SimScene sceneOf(String pa5) {
+        return SimScene.of(SimSceneTest.json(scene(pa5)));
+    }
+
     @Test
     public void withoutASceneM43IsAsBefore() throws Exception {
         start(null);
@@ -153,6 +199,33 @@ public class SimPa5SwitchTest {
         assertFalse(pa5().pressed());
         assertNull(pa5().tool());
         assertEquals(0, pa5().overtravels());
+    }
+
+    /**
+     * M42 P53 T sets PA5's input mode, so what it reads with nothing wired (lumen-sim's pa5_pull): T2 pull-up 1, T3
+     * pull-down and T0 floating 0 (as read 11-02); other M42 forms only ack. A new connection boots the controller.
+     */
+    @Test
+    public void thePullWithoutASwitch() throws Exception {
+        start(scene(null));
+        for (String[] m : new String[][] {{"T2", "1"}, {"T3", "0"}, {"T0", "0"}, {"T2", "1"}}) {
+            assertEquals(List.of("ok"), send("M42 P53 " + m[0]));
+            assertEquals(Integer.parseInt(m[1]), level(), m[0]);
+        }
+        send("M42 P44 T3");
+        send("M42 P53 T1");
+        assertEquals(1, level(), "another pin, an output mode: as it was");
+        reconnect();
+        assertEquals(0, level(), "the pin as at boot");
+    }
+
+    /** pressedLevel and the other level are the switch's: M42's pull shows only with nothing wired. */
+    @Test
+    public void aWiredSwitchReadsItsOwnLevelsWhateverThePull() throws Exception {
+        start(scene(wired()));
+        place(100, 50, 13);
+        send("M42 P53 T2");
+        assertEquals(0, level());
     }
 
     @Test
@@ -220,12 +293,19 @@ public class SimPa5SwitchTest {
         assertEquals(List.of(LINE + "0", "ok"), send("M43 P5"), "still on its way down");
         send("M400");
         assertEquals(1, level());
-        z(13);
-        send("G1 Z11 F120"); // 2 mm/s: past the trip after 0.5 s, at Z 11 after 1 s
-        Thread.sleep(700);
-        assertEquals(1, level(), "pressed where the head is, before the move ends");
+        // Across N1's window 0.1 mm past its point, from outside it to outside it: only reads mid-move can see it.
+        z(11.9);
+        send("G1 X95 F12000");
         send("M400");
-        assertEquals(1.0, pa5().depthMm(), 1e-9, "and seen where the move ended");
+        assertEquals(0, level());
+        send("G1 X105 F600"); // 10 mm/s: over the window (x 99-101) for 0.2 s of about 1 s
+        List<Integer> seen = new ArrayList<>();
+        for (long until = System.nanoTime() + 1_500_000_000L; System.nanoTime() < until; ) {
+            seen.add(level());
+            Thread.sleep(10);
+        }
+        assertTrue(seen.contains(1), "pressed while over it: " + seen);
+        assertEquals(0, level(), "released past it");
     }
 
     @Test
@@ -271,16 +351,152 @@ public class SimPa5SwitchTest {
                 pa5().messages());
     }
 
+    /**
+     * A press holds its own point until released: pressed at the first step past it (so within the noise of it), each
+     * read and each move that stays past it reads pressed, press after press.
+     */
     @Test
     public void aPressHoldsItsPointUntilReleased() throws Exception {
+        start(scene(wired(0.01, 1, 0)));
+        place(100, 50, 12.2);
+        for (int press = 1; press <= 12; press++) {
+            double z = stepUntilPressed(12.2, -1);
+            Double trip = pa5().tripZ();
+            z(round3(z - 0.01));
+            z(z);
+            assertEquals(List.of(1, 1, 1), List.of(level(), level(), level()), "press " + press);
+            assertEquals(trip, pa5().tripZ(), "press " + press);
+        }
+    }
+
+    /**
+     * The route steps toward the switch until it reads pressed, then one step back: released, and it stays released
+     * while the head stands still (a new press needs a move toward the switch), whatever each press's own point. Many
+     * presses of one seed: Java's first draws for seeds 0..39 are mostly high, so one press per seed would miss it.
+     */
+    @Test
+    public void aOneStepBackOffReleasesItPressAfterPress() throws Exception {
+        start(scene(wired(0.01, 1, 0)));
+        for (double[] t : TOOLS) {
+            place(t[0], 50, t[1]);
+            for (int press = 1; press <= 12; press++) {
+                double z = stepUntilPressed(t[1], (int) t[2]);
+                z(round3(z - t[2] * STEP));
+                assertEquals(List.of(0, 0), List.of(level(), level()), "x " + t[0] + ", press " + press);
+            }
+        }
+    }
+
+    /**
+     * The release point follows the head as it moves away: back at the switch after a lift, a press whose own point
+     * lies behind the release point trips there, not a step late.
+     */
+    @Test
+    public void afterABackOffAndALiftTheNextPressTripsAtItsOwnPoint() throws Exception {
+        start(scene(wired(0.01, 1, 0)));
+        for (double[] t : TOOLS) {
+            place(t[0], 50, t[1]);
+            for (int press = 1; press <= 12; press++) {
+                double z = stepUntilPressed(t[1], (int) t[2]);
+                z(round3(z - t[2] * STEP)); // one step back: released
+                z(round3(t[1] - t[2] * 0.3)); // lifted away
+                stepUntilPressed(t[1], (int) t[2]);
+                Double depth = pa5().depthMm();
+                assertTrue(depth != null && depth < STEP, "x " + t[0] + ", press " + press + ": depth " + depth);
+            }
+        }
+    }
+
+    /** Off the window, or in another tool's, the release point is gone: back in a window a press starts afresh. */
+    @Test
+    public void leavingTheWindowClearsTheReleasePoint() {
+        String n1b = "{\"tool\": \"n1\", \"x0\": 109.0, \"y0\": 49.0, \"x1\": 111.0, \"y1\": 51.0, \"tripZ\": 12.1}";
+        for (double[] away : new double[][] {{105, 12.025}, {200, 20}}) { // in no window; in the needle's
+            SimPa5Switch sw = new SimPa5Switch(sceneOf("{\"presses\": [" + N1 + ", " + n1b + ", " + NEEDLE + "]}"));
+            assertEquals(1, to(sw, 100, 12.0));
+            assertEquals(0, to(sw, 100, 12.025), "one step back: released");
+            to(sw, away[0], away[1]);
+            assertEquals(1, to(sw, 110, 12.025), "via x " + away[0] + ": N1's other window, 0.075 mm past its point");
+        }
+    }
+
+    /** A changed switch is a new one: with the head at rest after a back-off, it sees the head afresh. */
+    @Test
+    public void aChangedSwitchStartsAfresh() {
+        SimScene[] now = {sceneOf(wired())};
+        SimPa5Switch sw = new SimPa5Switch(() -> now[0], System::nanoTime);
+        assertEquals(1, to(sw, 100, 12.0));
+        assertEquals(0, to(sw, 100, 12.025), "one step back: released");
+        now[0] = sceneOf("{\"presses\": [" + N1.replace("12.0", "12.05") + "]}");
+        assertEquals(1, read(sw, 100, 12.025), "at rest 0.025 mm past the new switch's point");
+    }
+
+    /**
+     * The scene file written again with the same switch (the acceptance scripts change other keys mid-session) keeps
+     * it: its press, count, messages and draws. A changed switch is a new one: count and messages from 0 together.
+     */
+    @Test
+    public void theSameSwitchReadAgainKeepsItsState() throws Exception {
+        File f = new File(sim.configDir, "pa5-scene.json");
+        Files.write(f.toPath(), scene(wired(0.01, 1, 7)).getBytes(StandardCharsets.UTF_8));
+        long[] ms = {0};
+        SimPa5Switch sw = new SimPa5Switch(new SimScene.Source(f, () -> ms[0], (sc) -> null), System::nanoTime);
+        List<Double> trips = new ArrayList<>();
+        for (int i = 1; i <= 4; i++) {
+            sw.moveEnds(100, 50, 11.0, 0); // 1 mm past its point: reported
+            trips.add(sw.tripZ());
+            if (i == 2) {
+                String other = scene(wired(0.01, 1, 7)).replace("\"version\": 1", "\"version\": 1, \"bedZ\": 2.5");
+                Files.write(f.toPath(), other.getBytes(StandardCharsets.UTF_8));
+                ms[0] += 1000;
+                sw.moveEnds(100, 50, 11.0, 0); // the head still there
+                assertEquals(trips.get(1), sw.tripZ(), "the press under way, kept");
+            }
+            assertEquals(i, sw.overtravels());
+            assertEquals(i, sw.messages().size(), "one report per press");
+            sw.moveEnds(100, 50, 13, 0);
+        }
+        assertEquals(trips(7).subList(0, 4), trips, "the draws go on");
+        Files.write(f.toPath(), scene(wired(0.01, 1, 8)).getBytes(StandardCharsets.UTF_8));
+        ms[0] += 1000;
+        assertEquals(0, sw.overtravels());
+        assertEquals(List.of(), sw.messages());
+        sw.moveEnds(100, 50, 11.0, 0);
+        assertEquals(List.of(1, 1), List.of(sw.overtravels(), sw.messages().size()));
+    }
+
+    /** The switch is the machine's: a reconnect (a new GcodeServer) keeps its count, messages and draws. */
+    @Test
+    public void theSwitchOutlivesAReconnect() throws Exception {
         start(scene(wired(0.01, 1, 7)));
         place(100, 50, 13);
-        z(11.9);
-        double trip = pa5().tripZ();
-        assertNotEquals(12.0, trip, "its own point");
-        z(11.95);
-        z(11.9);
-        assertEquals(trip, pa5().tripZ(), 0);
+        z(11.0); // 1 mm past its point: reported
+        z(13);
+        reconnect();
+        place(100, 50, 13);
+        z(11.0);
+        assertEquals(trips(7).get(1), pa5().tripZ(), "the seed's second point");
+        assertEquals(2, pa5().overtravels());
+        assertEquals(2, pa5().messages().size());
+    }
+
+    /**
+     * M400 returns up to a millisecond early, so the plan's last end within 2 ms counts as reached. An end within 2 ms
+     * with a move after it does not: a read then sees the head on its way, never behind an end already seen.
+     */
+    @Test
+    public void onlyThePlansLastEndIsSeenEarly() {
+        long[] ns = {0};
+        SimScene sc = sceneOf(wired());
+        SimPa5Switch sw = new SimPa5Switch(() -> sc, () -> ns[0]);
+        sw.moveEnds(100, 50, 13, 0);
+        sw.moveEnds(100, 50, 11.999, 0.001); // down past its point (12.0), ending in 1 ms
+        sw.moveEnds(100, 50, 13, 0.1); // then up again
+        assertEquals(0, read(sw, 100, 12.0005), "on its way down, not yet at its point");
+        ns[0] = 2_000_000;
+        assertTrue(sw.pressed(), "seen where the move down ended");
+        ns[0] = 99_000_000;
+        assertFalse(sw.pressed(), "the last end, 1 ms ahead: reached");
     }
 
     /** Repeat noise: a new trip point per press, tripZ + N(0, repeatSdMm), the same for the same seed. */
@@ -329,7 +545,19 @@ public class SimPa5SwitchTest {
                 "{\"presses\": [" + N1 + "], \"seed\": 1.5}",
                 "{\"presses\": [{\"tool\": \"n1\", " + window + ", \"tripZ\": 12.0, \"extra\": 1}]}",
                 "{\"presses\": [" + N1 + "], \"overtravels\": 3}",
-                "{\"presses\": []}"};
+                "{\"presses\": []}",
+                "{\"presses\": [{\"tool\": [\"n1\"], " + window + ", \"tripZ\": 12.0}]}",
+                "{\"presses\": {\"tool\": \"n1\"}}",
+                "{\"presses\": [" + N1 + "], \"repeatSdMm\": 2.0}",
+                "{\"presses\": [" + N1 + "], \"overtravelMm\": 11.0}",
+                // As lumen-sim: null is no default; a level or seed written as a fraction or exponent is no integer.
+                "{\"presses\": [" + N1 + "], \"overtravelMm\": null}",
+                "{\"presses\": [" + N1 + "], \"repeatSdMm\": null}",
+                "{\"presses\": [" + N1 + "], \"pressedLevel\": null}",
+                "{\"presses\": [" + N1 + "], \"seed\": null}",
+                "{\"presses\": [" + N1 + "], \"pressedLevel\": 1.0}",
+                "{\"presses\": [" + N1 + "], \"seed\": 1e3}",
+                "{\"presses\": [" + N1 + "], \"seed\": 9223372036854775808}"};
         // The scene file of a running session: a file the scene refuses keeps the last good one, and so the switch.
         File f = new File(sim.configDir, "pa5-scene.json");
         Files.write(f.toPath(), scene(wired()).getBytes(StandardCharsets.UTF_8));
@@ -347,9 +575,18 @@ public class SimPa5SwitchTest {
             assertEquals(12.0, sw.tripZ(), 0, "the press as it was: " + b);
             assertEquals(2, good.pa5Switch.presses.size());
         }
+        // lumen-sim's limits, edges included: overtravelMm 0-10, repeatSdMm 0-1.
+        SimScene edges = sceneOf("{\"presses\": [" + N1 + "], \"overtravelMm\": 10, \"repeatSdMm\": 1}");
+        assertEquals(List.of(10.0, 1.0), List.of(edges.pa5Switch.overtravelMm, edges.pa5Switch.repeatSdMm));
+        // A seed is any integer in lumen-sim; here any long (java.util.Random takes no more).
+        for (long seed : new long[] {-4294967296L, Long.MAX_VALUE}) {
+            assertEquals(seed, sceneOf("{\"presses\": [" + N1 + "], \"seed\": " + seed + "}").pa5Switch.seed);
+        }
         // Set in code: validate() refuses it (the models take the scene as validated, as SimVacuum does).
         SimScene sc = SimScene.of(SimSceneTest.json(scene(wired())));
-        sc.pa5Switch.repeatSdMm = Double.NaN;
-        assertThrows(IllegalArgumentException.class, sc::validate);
+        for (double sd : new double[] {Double.NaN, 1.5}) {
+            sc.pa5Switch.repeatSdMm = sd;
+            assertThrows(IllegalArgumentException.class, sc::validate, "repeatSdMm " + sd);
+        }
     }
 }

@@ -340,7 +340,7 @@ public final class SimScene {
     public List<Coupon> coupons = new ArrayList<>();
     /** Null: no SIM balance (the readings are typed). */
     public Balance balance;
-    /** The PA5 switch; null: nothing wired (M43 P5 reads 0, as the board did). */
+    /** The PA5 switch; null: nothing wired (M43 P5 reads M42 P53's pull: 0 at boot, as the board did). */
     public Pa5Switch pa5Switch;
     /** The file this scene was read from; null for a scene built in code (SimPaste keys its deposits by it). */
     public File file;
@@ -519,8 +519,8 @@ public final class SimScene {
 
     /**
      * The "pa5Switch" block: {presses: [{tool, x0, y0, x1, y1, tripZ}], overtravelMm, repeatSdMm, pressedLevel, seed},
-     * lumen-sim's pa5_switch in the scene's names. An unknown key or a number given as text is refused, as lumen-sim
-     * refuses it: a typo would wire another switch than the test meant.
+     * lumen-sim's pa5_switch in the scene's names. An unknown key, a number given as text, a null, or a level or seed
+     * written as no integer is refused, as lumen-sim refuses it: a typo would wire another switch than the test meant.
      */
     static Pa5Switch pa5SwitchOf(JsonElement e) {
         JsonObject o = e.isJsonObject() ? e.getAsJsonObject() : null;
@@ -542,8 +542,12 @@ public final class SimScene {
         }
         w.overtravelMm = finite(o, "overtravelMm", w.overtravelMm);
         w.repeatSdMm = finite(o, "repeatSdMm", w.repeatSdMm);
-        w.pressedLevel = integer(o, "pressedLevel", w.pressedLevel);
-        w.seed = integer(o, "seed", 0);
+        long level = whole(o, "pressedLevel", w.pressedLevel);
+        if (level != 0 && level != 1) {
+            throw new IllegalArgumentException("pressedLevel must be 0 or 1, not " + level);
+        }
+        w.pressedLevel = (int) level;
+        w.seed = whole(o, "seed", 0);
         return w;
     }
 
@@ -556,10 +560,13 @@ public final class SimScene {
         }
     }
 
-    /** A finite JSON number; missing or null: {@code dflt} (null: required). Gson would read "12" as 12. */
+    /**
+     * A finite JSON number, not text (Gson would read "12" as 12) or null, as lumen-sim; missing: {@code dflt} (null:
+     * required).
+     */
     private static double finite(JsonObject o, String key, Double dflt) {
         JsonElement e = o.get(key);
-        if ((e == null || e.isJsonNull()) && dflt != null) {
+        if (e == null && dflt != null) {
             return dflt;
         }
         double v = e != null && e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber() ? e.getAsDouble() : Double.NaN;
@@ -567,6 +574,23 @@ public final class SimScene {
             throw new IllegalArgumentException(key + " must be a finite number, not " + e);
         }
         return v;
+    }
+
+    /** A JSON integer, written without a fraction or exponent as lumen-sim's int; missing: {@code dflt}. */
+    private static long whole(JsonObject o, String key, long dflt) {
+        JsonElement e = o.get(key);
+        if (e == null) {
+            return dflt;
+        }
+        String v = e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber() ? e.getAsString() : "";
+        try {
+            if (v.matches("-?\\d+")) {
+                return Long.parseLong(v);
+            }
+        }
+        catch (NumberFormatException x) { // beyond a long: lumen-sim takes it, java.util.Random could not
+        }
+        throw new IllegalArgumentException(key + " must be an integer, not " + e);
     }
 
     /** Throws IllegalArgumentException (the message starting with {@code what}) for a paste the model cannot use. */
@@ -650,10 +674,9 @@ public final class SimScene {
                             PA5_TOOLS) + "), finite x0 <= x1, y0 <= y1 and tripZ");
                 }
             }
-            if (!DoubleStream.of(pa5Switch.overtravelMm, pa5Switch.repeatSdMm)
-                    .allMatch((v) -> v >= 0 && v < Double.POSITIVE_INFINITY)
-                    || pa5Switch.pressedLevel != 0 && pa5Switch.pressedLevel != 1) {
-                throw new IllegalArgumentException("pa5Switch: overtravelMm and repeatSdMm must be finite and >= 0, "
+            if (!(pa5Switch.overtravelMm >= 0 && pa5Switch.overtravelMm <= 10 && pa5Switch.repeatSdMm >= 0
+                    && pa5Switch.repeatSdMm <= 1) || pa5Switch.pressedLevel != 0 && pa5Switch.pressedLevel != 1) {
+                throw new IllegalArgumentException("pa5Switch: overtravelMm must be 0-10 and repeatSdMm 0-1 (mm), "
                         + "pressedLevel 0 or 1");
             }
         }
