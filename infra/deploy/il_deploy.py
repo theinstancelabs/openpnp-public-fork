@@ -1418,7 +1418,8 @@ def stop_sequence(api, wait_s, stop_timeout, poll, clock):
 # watchdog trip always are (a rollback's old database would lose them).
 ENGINE_DB = os.path.join("instancelabs", "dispense.db")
 ROUTINE_JOURNAL = ("SCREW_MOTOR_OFF", "SCREW_MOTION", "SCREW_COUNT_EPOCH", "HOST_WATCHDOG_ARMED", "POSITION_KNOWN",
-                   "RESET_JOURNAL", "SCREW_IDLE_CUT", "SCREW_IDLE_HOLD")  # SCREW_IDLE_*: BR-92, the holdB marker read at every connect
+                   "RESET_JOURNAL", "HOME_STARTED",  # HOME_STARTED: BR-97, every home's start, the health check's too
+                   "SCREW_IDLE_CUT", "SCREW_IDLE_HOLD")  # SCREW_IDLE_*: BR-92, the holdB marker read at every connect
 JOURNAL_SETTLE_S, JOURNAL_SETTLE_MAX_S = 1.0, 5.0  # the engine writes its journal on a thread, a moment later
 ENGINE_DB_TIMEOUT_S = 5.0  # a database another writer holds locked: give up (compared by bytes), never wait forever
 

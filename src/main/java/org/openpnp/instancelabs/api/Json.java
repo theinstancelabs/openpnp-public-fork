@@ -72,6 +72,16 @@ public final class Json {
         return s.isEmpty() ? def : s;
     }
 
+    /** {@link #str} on one line: control characters (a newline, a tab) would split or forge a journal row (400). */
+    public static String line(JsonObject o, String name, String def) throws ApiException {
+        String s = str(o, name, def);
+        if (s != null && s.chars().anyMatch(Character::isISOControl)) {
+            throw ApiException.badRequest("'" + name + "' is one line of text: no control characters (a newline, a "
+                    + "tab)");
+        }
+        return s;
+    }
+
     public static Double num(JsonObject o, String name, Double def) throws ApiException {
         JsonElement e = field(o, name);
         if (e == null || (e.isJsonPrimitive() && e.getAsJsonPrimitive().isString()

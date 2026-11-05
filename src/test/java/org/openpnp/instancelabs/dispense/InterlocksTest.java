@@ -268,7 +268,7 @@ public class InterlocksTest {
         assertTrue(r.has("MACHINE"), r.toString());
         assertTrue(r.toString().contains("the controller was reset (a power cycle): home first (Home); the home first "
                 + "drives the head to its homing corner"), r.toString());
-        assertTrue(r.toString().contains("check that nothing is under either tool"), r.toString());
+        assertTrue(r.toString().contains("before Home, nothing is under either tool"), r.toString());
         assertTrue(Interlocks.checkBasic(in).has("MACHINE"), "the tasks that never dispense too");
     }
 
