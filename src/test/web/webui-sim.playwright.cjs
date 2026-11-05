@@ -1570,7 +1570,7 @@ async function runFirstDots(page, n) {
         await page.evaluate(() => { const d = document.getElementById('set-advanced'); if (d && !d.open) d.open = true; });
         const orig = await page.waitForFunction(() => { const t = document.getElementById('set-json'); return t && t.value.trim().startsWith('{') ? t.value : null; },
           null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
-        let sj = null;
+        let sj = null, restored = false;
         if (orig) {
           await page.evaluate(() => { const t = document.getElementById('set-json'); const cfg = JSON.parse(t.value);
             cfg.doseAnchor = { test: 1 }; cfg.heightSwitch = { test: 1 }; cfg.paste = Object.assign({}, cfg.paste, { loadedAtMs: 12345 });
@@ -1582,12 +1582,13 @@ async function runFirstDots(page, n) {
               pasteRo: !!pl && pl.classList.contains('su-diff--ro'), head: h ? h.textContent : '' } : null; },
           null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
           // Reload: only stamped keys were changed, so nothing is kept and the editor is clean again for later steps
-          await page.click('#set-advanced button:has-text("Reload and keep my edits")').catch(() => null);
-          await page.waitForFunction(() => !document.getElementById('set-json').classList.contains('input--dirty'), null, { timeout: 10000 }).catch(() => null);
+          restored = await page.click('#btn-settings-json-reload', { timeout: 5000 }).then(() => page.waitForFunction(() =>
+            !document.getElementById('set-json').classList.contains('input--dirty'), null, { timeout: 10000 })).then(() => true, () => false);
           await page.evaluate(() => { document.getElementById('set-advanced').open = false; });
         }
         check('Settings › advanced JSON: the dose anchor, the switch\'s measures and the paste\'s load time are read-only and not sent (the engine stamps them)',
           !!sj && sj.anchorRo && sj.switchRo && sj.pasteRo && /^0 changed keys will be sent/.test(sj.head), sj || { orig: !!orig });
+        check('Settings › advanced JSON: Reload leaves the editor clean again (only stamped keys were changed: nothing kept)', restored, { restored });
       }
 
       // 12. A fiducial not found (FID2 hidden in the scene): the REG fixes, then a plan without fiducial correction

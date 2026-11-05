@@ -1,5 +1,6 @@
 package org.openpnp.instancelabs.api;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -46,6 +47,8 @@ public class WebEditorSettingsListsTest {
         }
         assertCovers(DispenseEndpoints.PROTECTED_SETTINGS, jsSet(js, "STAMPED_TOP"), "protected settings (STAMPED_TOP)");
         assertCovers(DispenseEndpoints.PROTECTED_NESTED, jsSet(js, "STAMPED_NESTED"), "protected nested settings (STAMPED_NESTED)");
-        assertCovers(DispenseEndpoints.NESTED_SETTINGS, jsSet(js, "NESTED"), "nested settings (NESTED)");
+        // exactly the server's: a name only the editor has makes it send a partial object the server then sets whole
+        assertEquals(new TreeSet<>(DispenseEndpoints.NESTED_SETTINGS), new TreeSet<>(jsSet(js, "NESTED")),
+                "nested settings: web/setup.js NESTED must equal DispenseEndpoints.NESTED_SETTINGS");
     }
 }
