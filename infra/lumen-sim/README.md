@@ -443,7 +443,7 @@ UINAV_DIR=/home/lumen/instancelabs/wt/uinav-pty LUMEN_SIM_E2E_OUT=/tmp/lumen-e2e
     python3 infra/lumen-sim/e2e/test_openpnp_pty.py -v
 ```
 
-Three tests in two OpenPnP sessions, one after the other, about 2.5 min. The 60 s is OpenPnP's own G28 timeout. Two
+Three tests in two OpenPnP sessions, one after the other, about 2.5 min. Since INF-13 a fourth session runs lumen-sim's il-holdB build (BR-92's marker read at the connect). The 60 s is OpenPnP's own G28 timeout. Two
 runs on 10-31 after the test's last fix passed all three:
 
 | Check | Through | Result |

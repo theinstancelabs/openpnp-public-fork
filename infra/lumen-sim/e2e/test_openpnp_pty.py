@@ -18,9 +18,11 @@ the config the SIM acceptance uses, plus visual homing off (the SIM camera has n
       lock and drives the board through POST /api/gcode; the UI's Take control during the agent's long move stops it
       as the web STOP does (lumen-sim sees M410, M107 P3, P2, P1, P0, M18 B in that order; the machine ends off), the
       user holds the lock and the agent's next call is refused as lock-lost; taken from an idle agent, only the four
-      M107 lines go out and the machine stays started and homed, so the user's Home works at once.
+      M107 lines go out and the machine stays started and homed, so the user's Home works at once;
+  (e) BR-92 on both firmware builds (INF-13): on lumen-sim's il-holdB the engine reads the marker in M115 at the
+      connect (machine.screwIdleCut.cut false), on stock (a) it reads the stock name (cut true).
 
-Skipped unless LUMEN_SIM_E2E=1 and LUMEN_SIM_E2E_JAR names the OpenPnP jar. Takes about 5 minutes (OpenPnP's own
+Skipped unless LUMEN_SIM_E2E=1 and LUMEN_SIM_E2E_JAR names the OpenPnP jar. Takes about 6 minutes (OpenPnP's own
 60 s G28 timeout is part of (b)). One OpenPnP at a time, stopped at the end.
 
     LUMEN_SIM_E2E=1 LUMEN_SIM_E2E_JAR=target/openpnp-gui-0.0.1-alpha-SNAPSHOT.jar \\
@@ -276,10 +278,10 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(ports, [self.s.lumen["link"]])
         self.assertRegex(os.path.realpath(ports[0]), r"^/dev/pts/\d+$")
 
-    def screw_idle_cut(self):
-        """BR-92: what the engine read in M115 at the connect: does the controller's idle timeout cut the screw?"""
-        st = self.s.wait_status(lambda st: (st["machine"].get("screwIdleCut") or {}).get("readAtMs"), 30,
-                                "the engine read M115 at the connect")
+    def screw_idle_cut(self, since_ms):
+        """BR-92: what the engine read in M115 at the connect after since_ms: does the idle timeout cut the screw?"""
+        st = self.s.wait_status(lambda st: ((st["machine"].get("screwIdleCut") or {}).get("readAtMs") or 0) >= since_ms,
+                                30, "the engine read M115 at this connect")  # a staged dispense.db keeps an older read
         return st["machine"]["screwIdleCut"]
 
     def enable(self):
@@ -299,12 +301,13 @@ class HomeAndPrimeTest(SessionTest):
         self.check_safe_copy()
         st = self.s.status()
         self.assertFalse(st["server"]["simulatorConfirmed"])  # SimGuard: a serial board, i.e. a real machine
+        t_connect = time.time() * 1000
         self.enable()
         # SimGuard asked at the connect (M115): the board's own answer, without lumen-sim's simulator line (BR-47)
         self.assertFalse(self.s.status()["server"]["simulatorConfirmed"])
-        cut = self.screw_idle_cut()  # the stock build: the idle timeout switches the screw's motor off
+        cut = self.screw_idle_cut(t_connect)  # the stock build: the idle timeout switches the screw's motor off
         self.assertTrue(cut["cut"], cut)
-        self.assertNotIn("il-holdB", cut["firmware"] or "")
+        self.assertRegex(cut["firmware"] or "", r"^Marlin bugfix-2\.1\.x \(", cut)  # read, not "no M115" (also cut)
         n0 = self.s.io()[1]
         t0 = time.time()
         code, r = self.s.api("POST", "/api/machine/home", HOME, timeout=180)
@@ -433,8 +436,9 @@ class HoldBConnectTest(SessionTest):
 
     def test_the_engine_reads_the_holdb_marker_at_the_connect(self):
         self.check_safe_copy()
+        t_connect = time.time() * 1000
         self.enable()
-        cut = self.screw_idle_cut()
+        cut = self.screw_idle_cut(t_connect)
         self.assertFalse(cut["cut"], cut)
         self.assertIn("il-holdB", cut["firmware"], cut)
         self.assertEqual(self.s.sim()["personality"], "il-holdB")
