@@ -120,7 +120,7 @@
       title: 'Read a KiCad board file (.kicad_pcb) and save it as a design. Nothing moves.' },
     IL.icon('i-plus'), el('span', { text: 'Upload a design…' }));   // the dialog's own title
     upload.addEventListener('click', () => IL.boardImport.open({ onSaved: onImported }));
-    const thumbs = el('div', { class: 'board-thumbs', id: 'board-thumbs', role: 'group', 'aria-label': 'Boards with a drawing: press one to choose it', hidden: true });
+    const thumbs = el('div', { class: 'board-thumbs', id: 'board-thumbs', role: 'group', 'aria-label': 'Designs with a drawing: press one to choose it', hidden: true });
     const imported = el('div', { class: 'reason bf-imported', id: 'board-imported', hidden: true });
     thumbs.addEventListener('scroll', () => edges(thumbs), { passive: true });
     // the upload button first (always in view), then one row of pictures of every board with a drawing, two whole
@@ -175,8 +175,8 @@
     const lab = st.fid.lastChild;
     if (lab.textContent !== 'Camera is on ' + name) lab.textContent = 'Camera is on ' + name;
     const why = job ? 'Job boards take their position from OpenPnP'
-      : !e ? 'Choose a board file first'
-        : !f ? (e.fiducials ? 'This board has no fiducials: use the camera X/Y on its origin, or type it' : 'The board list has no fiducial positions for this board')
+      : !e ? 'Choose a design from the list first'   // also after "Other board file…": its fiducials come from the list
+        : !f ? (e.fiducials ? 'This board has no fiducials: use the camera X/Y on its origin, or type it' : 'The list has no fiducial positions for this design')
           : IL.lockReason(s, { connected: true, pressureOff: false }) || (!cam ? 'No top camera position' : null);
     IL.gate(st.fid, why);
     if (!why) IL.setAttr(st.fid, 'title', 'Board origin X/Y from the top camera centred on ' + name + ' (board ' + IL.fmt(f.bx, 2) + ', ' + IL.fmt(f.by, 2)

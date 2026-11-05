@@ -3,7 +3,6 @@ package org.openpnp.instancelabs.api;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Future;
 
 import org.openpnp.instancelabs.dispense.Calibration;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
@@ -154,8 +153,8 @@ final class CalibrationEndpoints {
                 || loc.equals(DispenseEndpoints.TEST_DOT_LOCATION);
         refuseReservedCoupon(svc, loc);
         dispense.startChecks(svc, DispenseService.shotsScope(loc, reference), "Scale shots");
-        ctx.tracker.expect("scale shots");
-        Future<RunResult> f = svc.runShots(loc, rot, count, reference);
+        RunTracker.Started<RunResult> f = ctx.tracker.start("scale shots",
+                () -> svc.runShots(loc, rot, count, reference));
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, rr -> Views.run(rr, false),
                 Views.map("kind", "scale shots", "locationName", loc, "rotationDeg", rot, "count", count));
     }
@@ -190,8 +189,8 @@ final class CalibrationEndpoints {
         refuseReservedCoupon(svc, req.locationName == null ? cfg.blankLocationName : req.locationName);
         dispense.startChecks(svc, DispenseService.blankScope(cfg, req.locationName == null ? cfg.blankLocationName
                 : req.locationName, req.primeAtWaste, false, null), "Dot ladder");
-        ctx.tracker.expect("dot ladder");
-        Future<DotLadderCalibration.Result> f = svc.runDotLadder(req);
+        RunTracker.Started<DotLadderCalibration.Result> f = ctx.tracker.start("dot ladder",
+                () -> svc.runDotLadder(req));
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, res -> {
             List<Map<String, Object>> rows = new ArrayList<>();
             for (DotLadderRow row : res.rows) {
@@ -265,8 +264,8 @@ final class CalibrationEndpoints {
         refuseReservedCoupon(svc, req.locationName == null ? cfg.blankLocationName : req.locationName);
         dispense.startChecks(svc, DispenseService.blankScope(cfg, req.locationName == null ? cfg.blankLocationName
                 : req.locationName, req.primeAtWaste, true, null), "Needle touch-off");
-        ctx.tracker.expect("needle touch-off");
-        Future<org.openpnp.instancelabs.dispense.DispenseService.TouchOffResult> f = svc.runNeedleTouchOff(req, apply);
+        RunTracker.Started<DispenseService.TouchOffResult> f = ctx.tracker.start("needle touch-off",
+                () -> svc.runNeedleTouchOff(req, apply));
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, res -> Views.map("analysis", res.analysis,
                 "previousOffsetMm", res.previousOffsetMm, "newOffsetMm", res.newOffsetMm, "applied", res.applied, "run",
                 Views.run(res.run, false)), Views.map("kind", "needle touch-off", "apply", apply, "pitchMm",

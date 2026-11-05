@@ -1,7 +1,6 @@
 package org.openpnp.instancelabs.api;
 
 import java.util.Map;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
@@ -220,16 +219,18 @@ final class ApiContext {
 
     /**
      * With {@code wait}, blocks until the engine task finishes (bounded) and returns its result;
-     * otherwise returns at once. The UI follows progress through /api/status either way.
+     * otherwise returns at once. The UI follows progress through /api/status either way, by the
+     * {@code runId} the answer names (BR-101: status.run.runId while it runs).
      */
-    static <T> Object awaitIf(boolean wait, Future<T> f, Function<T, Object> view, Map<String, Object> accepted)
-            throws Exception {
+    static <T> Object awaitIf(boolean wait, RunTracker.Started<T> task, Function<T, Object> view,
+            Map<String, Object> accepted) throws Exception {
+        accepted.put("runId", task.runId);
         if (!wait) {
             accepted.put("started", true);
             return ApiServer.Response.json(202, accepted);
         }
         try {
-            accepted.put("result", view.apply(f.get(MAX_WAIT_MS, TimeUnit.MILLISECONDS)));
+            accepted.put("result", view.apply(task.future.get(MAX_WAIT_MS, TimeUnit.MILLISECONDS)));
             accepted.put("finished", true);
             return accepted;
         }

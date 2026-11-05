@@ -72,8 +72,12 @@ Engine texts start with a code the web UI turns into fix-its: `I<n>:`, `MACHINE:
 
 Every mutating machine action goes through the engine (`DispenseService`) and its interlocks. The API runs the
 engine's pre-flight check synchronously so a refusal comes back at once with the reason; the engine re-checks when
-it runs (authoritative). Runs return `202 {"started": true}` immediately; add `"wait": true` to block until the run
-ends (max 10 min) and get `"result"` (RunResult view).
+it runs (authoritative). Runs return `202 {"started": true, "runId"}` immediately; add `"wait": true` to block until
+the run ends (max 10 min) and get `"result"` (RunResult view). BR-101: `runId` (with `wait` too) is the id of the run
+the request started, as `status.run.runId` shows it while it runs and `GET /api/runs` lists it: the board run, the
+clean-pad check, prime, the test dot, the scale shots, the dot ladder, the touch-off, Register board, the blank probe,
+Check Z and the tip picture. A pad calibration's start names its job instead (`id`, as `status.padCalibration.id`):
+its runs are its steps, started later by the job.
 
 Every engine endpoint (runs, the clean-pad check, prime, the test dot, the calibrations' shots, dot ladder and
 touch-off, Pressure on, Register board, the probes, Check Z, Home, the pad calibration's start, and the profile writes
@@ -179,7 +183,7 @@ Also added for Register board and the home at run:
 | `boardImport` | `{reading, savedAtMs}`. `reading`: a board upload holds the import pipeline (a preview, save or attach reads its file); every engine endpoint refuses meanwhile (§2), and the web UI locks them. `savedAtMs` (BR-88): the last save, replace or attach of this OpenPnP run that succeeded, null until one: the saved record's time (epoch ms, the `imported.atMs` it gave its board, taken as the save starts); compare it for a change, not against your clock. A page that sees it change reads `GET /api/boards` again (an upload made in another tab: `reading` lasts too short for a poll to see). |
 | `run.detail` | Structured progress. Register board: `{stage, stepsDone, stepsPlanned, estimatedSecondsLeft, home: {needed, whyCode, why, estimateS}, fiducials: [{name, expected, found, state, iterations, frames}], seat, movedMm, probes: [{n, x, y, state, z, lastZ, alternate}]}`; the blank probe: the same without fiducials and seat; a board run: `{stage: home \| z check \| dispense, home, zCheck}`. |
 | `run.nextPlanId` | Register board: the plan made at its end (another page loads it once). |
-| `run.label` | Adds `board registration`, `blank probe`, `z check` (`runs` kinds `board-registration`, `surface-probe`, `z-check`), and `pad calibration` while a pad calibration's engine step runs (`runs` kinds `pad-ladder`, `pad-weigh`; `run.detail` `{stage, home, blocks, dots, stepsDone, stepsPlanned, estimatedSecondsLeft}`). |
+| `run.label` | Adds `board registration`, `blank probe`, `z check` (`runs` kinds `board-registration`, `surface-probe`, `z-check`), and `pad calibration` while a pad calibration's engine step runs (`runs` kinds `pad-ladder`, `pad-weigh`; `run.detail` `{stage, home, blocks, dots, stepsDone, stepsPlanned, estimatedSecondsLeft}`). BR-101: a label is its own run's (the route names the run before it is queued): a task refused before its run started labels no other run, and a run started without one shows its kind. |
 | `padCalibration` | The pad calibration of this session (running, waiting for the readings, or the last one that ended), else null: the job view of §3.5. Next to `run`; a second browser shows the same job. |
 
 The run view (`lastRun`, `/api/runs/last`, a run's `result`) adds `profile` (the profile used), `cleanCheck`
