@@ -63,6 +63,7 @@ final class PadCalibrationEndpoints {
         s.route("GET", "/api/dose-records", this::doseRecords);
         s.route("GET", "/api/coupons/pending", r -> pendingView(ctx.svc()));
         s.route("POST", "/api/coupons/([0-9]{1,12})/reading", this::reading);
+        s.route("POST", "/api/screw/start-angle/measure", this::measureStartAngle);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -217,6 +218,68 @@ final class PadCalibrationEndpoints {
         accepted.put("finished", finished);
         accepted.put("result", job.view());
         return finished ? accepted : ApiServer.Response.json(202, accepted);
+    }
+
+    /**
+     * BR-77: POST /api/screw/start-angle/measure, a pad calibration job of its own (the lock, STOP, cancel, busy and the
+     * status as every job): 400 for the request's shape, 409 refused before anything moves; with {@code wait} 200 and
+     * the result when it ended, else 202.
+     */
+    Object measureStartAngle(ApiServer.Request r) throws Exception {
+        JsonObject b = r.json();
+        DispenseService svc = ctx.availableSvc();
+        PadCalibrationJob.Request q = new PadCalibrationJob.Request();
+        q.measure = PadCalibrationJob.MEASURE_START_ANGLE;
+        q.operator = Json.str(b, "operator", null);
+        q.startAngle = new PadCalibrationJob.StartAngle();
+        q.startAngle.mode = Json.str(b, "mode", null);
+        q.startAngle.targets = spots(b, "targets", 2);
+        q.startAngle.throwaways = spots(b, "throwaways", 3);
+        q.startAngle.surface = Json.str(b, "surface", null);
+        q.startAngle.startDeg = Json.num(b, "startDeg", null);
+        q.startAngle.pairs = Json.integer(b, "pairs", null);
+        q.startAngle.turns = Json.integer(b, "turns", null);
+        q.startAngle.apply = Json.bool(b, "apply", false);
+        PadCalibrationJob job = PadCalibrationJob.prepare(ctx, profile, dispense, svc, q);
+        if (job.refusal != null) {
+            throw new ApiException(409, job.refusalCode, job.refusal).with("preview", job.preview());
+        }
+        ctx.padCalJobs.start(job);
+        Map<String, Object> accepted = Views.map("kind", "start-angle measure", "job", job.id, "started", true);
+        if (!Json.bool(b, "wait", false)) {
+            return ApiServer.Response.json(202, accepted);
+        }
+        boolean finished = await(job);
+        Map<String, Object> result = job.startAngleView();
+        result.put("sentence", job.sentence());
+        accepted.put("finished", finished);
+        accepted.put("result", result);
+        return finished ? accepted : ApiServer.Response.json(202, accepted);
+    }
+
+    /** [[x, y], …] machine mm, up to {@code n} numbers each (the ones left out are 0): a 400 otherwise. */
+    private static List<double[]> spots(JsonObject b, String key, int n) throws ApiException {
+        JsonElement e = b.get(key);
+        String shape = "'" + key + "' must be [[x, y" + (n > 2 ? ", layers?" : "") + "], …] (N2 machine mm)";
+        if (e == null || !e.isJsonArray()) {
+            throw ApiException.badRequest(shape);
+        }
+        List<double[]> l = new ArrayList<>();
+        for (JsonElement p : e.getAsJsonArray()) {
+            if (!p.isJsonArray() || p.getAsJsonArray().size() < 2 || p.getAsJsonArray().size() > n) {
+                throw ApiException.badRequest(shape);
+            }
+            double[] v = new double[n];
+            for (int i = 0; i < p.getAsJsonArray().size(); i++) {
+                JsonElement x = p.getAsJsonArray().get(i);
+                if (!x.isJsonPrimitive() || !x.getAsJsonPrimitive().isNumber() || !Double.isFinite(x.getAsDouble())) {
+                    throw ApiException.badRequest(shape);
+                }
+                v[i] = x.getAsDouble();
+            }
+            l.add(v);
+        }
+        return l;
     }
 
     /** Waits (bounded) until the job ends or waits for the operator. */

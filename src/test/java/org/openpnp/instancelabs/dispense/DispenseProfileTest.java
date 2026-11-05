@@ -209,6 +209,31 @@ public class DispenseProfileTest {
     }
 
     /**
+     * BR-77: the feature a measure stored with the start angle survives the field-by-field copy and the file; it
+     * changes no dot, so neither fingerprint.
+     */
+    @Test
+    public void theStartAngleFeatureIsCopiedAndNoPartOfADot() {
+        DispenseProfile p = new DispenseProfile();
+        assertEquals(null, p.startAngleFeature, "unknown until a measure sets the angle");
+        p.startAngleFeature = new DispenseProfile.StartAngleFeature("halves", 179.1, 1000L, "pc-1");
+        DispenseProfile x = p.copy();
+        assertEquals("halves", x.startAngleFeature.mode);
+        assertEquals(179.1, x.startAngleFeature.deg, 0);
+        assertEquals(1000L, x.startAngleFeature.measuredAtMs);
+        assertEquals("pc-1", x.startAngleFeature.runId);
+        DispenseConfig c = new DispenseConfig();
+        c.profile = p;
+        assertEquals("pc-1", c.copy().profile.startAngleFeature.runId, "kept in the file");
+        assertEquals(new DispenseProfile().fingerprint(), p.fingerprint());
+        assertEquals(new DispenseProfile().doseFingerprint(), p.doseFingerprint());
+        // the copies share it: nothing may change it in place
+        for (java.lang.reflect.Field f : DispenseProfile.StartAngleFeature.class.getDeclaredFields()) {
+            assertTrue(java.lang.reflect.Modifier.isFinal(f.getModifiers()), f.getName() + " is final");
+        }
+    }
+
+    /**
      * BR-82: the pause at the lift height before travel (the plastic 25G recipe's 500 ms), 0 to 5000 ms. At 0 (the
      * default, and older files) both fingerprints stay byte for byte what every dose record and plan stored.
      */
