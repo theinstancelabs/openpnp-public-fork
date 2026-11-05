@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Future;
 
 import org.openpnp.Main;
 import org.openpnp.gui.MainFrame;
@@ -413,8 +412,8 @@ final class DispenseEndpoints {
         checkRotation(rot, 3600);
         DispenseConfig.NamedLocation waste = requireWaste(cfg);
         startChecks(svc, DispenseService.shotsScope(cfg.wasteLocationName, true), "Prime");
-        ctx.tracker.expect("prime");
-        Future<RunResult> f = svc.runShots(cfg.wasteLocationName, rot, 1, true);
+        RunTracker.Started<RunResult> f = ctx.tracker.start("prime",
+                () -> svc.runShots(cfg.wasteLocationName, rot, 1, true));
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, rr -> Views.run(rr, false),
                 Views.map("kind", "prime", "rotationDeg", rot, "location", waste));
     }
@@ -435,8 +434,8 @@ final class DispenseEndpoints {
             // The engine dispenses shots at named locations; keep this one derived from the waste place (and its time).
             svc.setLocation(TEST_DOT_LOCATION, spot.x, spot.y, spot.z, waste);
         }
-        ctx.tracker.expect("test dot");
-        Future<RunResult> f = svc.runShots(TEST_DOT_LOCATION, rot, 1, true);
+        RunTracker.Started<RunResult> f = ctx.tracker.start("test dot",
+                () -> svc.runShots(TEST_DOT_LOCATION, rot, 1, true));
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, rr -> Views.run(rr, false),
                 Views.map("kind", "test dot", "rotationDeg", rot, "location", spot));
     }
@@ -829,6 +828,10 @@ final class DispenseEndpoints {
         DispenseConfig next = Json.fromJson(cur, DispenseConfig.class);
         if (next.locations == null) {
             next.locations = new LinkedHashMap<>();
+        }
+        if (next.nozzle != null && !next.nozzle.equals(live.nozzle) && svc.namesProbeNozzle(next.nozzle)) {
+            throw ApiException.badRequest("'nozzle' is the needle's nozzle: '" + next.nozzle + "' is N1, the probe "
+                    + "nozzle");
         }
         if (next.padCalibration != null && !simulated) {
             // the shortened statistics of the SIM tests are refused on the machine (PROFILE_CALIBRATION_DESIGN.md §5.4)
@@ -1280,8 +1283,7 @@ final class DispenseEndpoints {
         if (Json.bool(b, "wiped", false)) {
             ctx.paste.wiped(e.source); // the operator wiped this board: its pads have no paste now
         }
-        ctx.tracker.expect("board");
-        Future<RunResult> f = svc.runPlan(p);
+        RunTracker.Started<RunResult> f = ctx.tracker.start("board", () -> svc.runPlan(p));
         Map<String, Object> accepted = Views.map("kind", "board", "planId", p.planId, "parentPlanId",
                 p == full ? null : full.planId, "dots", p.dots.size(), "pads", p.pads.size(), "homeFirst", home.needed,
                 "homeWhyCode", home.whyCode, "homeWhy", home.why, "homeSinceMs", home.sinceMs, "homeEstimateS",
@@ -1312,9 +1314,8 @@ final class DispenseEndpoints {
         ctx.requireMachineIdle();
         ctx.requirePositionKnown(svc);
         PlanStore.Entry e = requirePlan(r.group(1));
-        ctx.tracker.expect("clean-pad check");
-        Future<PadCleanReport> f = svc.checkCleanPads(e.plan);
-        e.cleanCheckFuture = f;
+        RunTracker.Started<PadCleanReport> f = ctx.tracker.start("clean-pad check", () -> svc.checkCleanPads(e.plan));
+        e.cleanCheckFuture = f.future;
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, Views::cleanCheck,
                 Views.map("kind", "clean-pad check", "planId", e.plan.planId, "dots", e.plan.dots.size()));
     }

@@ -67,7 +67,7 @@ The live `~/.openpnp2` was not touched in any of these sessions.
 | Board 3 probe | 5 of 5 contacts, Z 5.25–5.50, plane residual 0.015 mm (limit 0.04), slope 0.0037 mm/mm, no alternate needed. | `s3_register_probe2.json` |
 | Z across an OpenPnP home | The same 5 points after a home: +0.025, +0.025, +0.025, +0.025, 0.000 mm. OpenPnP's homes repeat to one fine step (0.025 mm). | `s4_register_after_home.json` |
 | Same-seat check | Registered again at the same seat: the 3 stored points re-touched +0.025 mm each (tolerance 0.03): surface kept. | `s4_register_r12_2.json` |
-| N1 open air | Baselines −1.63 M to −1.67 M counts (window −1.90 M to −1.20 M); seal threshold 15 % of the baseline ≈ 244–251 k counts. | the probe points (`baseline`, `drop`) |
+| N1 open air | Baselines −1.63 M to −1.67 M counts (window −1.90 M to −1.20 M); touch threshold 40 k below the baseline (BR-100; the 15 % seal before ≈ 244–251 k counts). | the probe points (`baseline`, `drop`) |
 | Release | At 14 of the 15 board-3 contacts (the three full probes of session 3) the last open coarse step still held a partial seal after 1.5 s; each let go one coarse step (0.25 mm) higher, as designed. Point 3 of `s3_register_probe2.json` let go at once. | the points' notes in `s3_register_probe2.json`, `s4_register_after_home.json`, `s4_register_r12_1.json` |
 
 ### What the machine showed (session 4)

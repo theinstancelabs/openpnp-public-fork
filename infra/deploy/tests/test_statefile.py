@@ -272,6 +272,19 @@ class AtomicEdit(unittest.TestCase):
         self.assertEqual(il_deploy.released_value("deploy", "20:20", None, "nobody"),
                          "nobody (released by Infra deploy at 20:20)")
 
+    def test_released_value_drops_the_closing_emphasis_of_an_emphasised_nobody(self):
+        """A Holder written '**nobody since …** (…)' leaves no dangling '**' in the text carried after 'earlier:'."""
+        stamp = "nobody (released by Infra deploy at 22:39)"
+        cases = {"**nobody since 11-04 20:12** (released after the weighing)":
+                     stamp + "; earlier: since 11-04 20:12 (released after the weighing)",
+                 "_nobody since 20:12_ (x)": stamp + "; earlier: since 20:12 (x)",
+                 "**nobody** (x) **y**": stamp + "; earlier: (x) **y**",
+                 "**nobody since 20:12 (x)": stamp + "; earlier: since 20:12 (x)"}
+        for prev, want in cases.items():
+            v = il_deploy.released_value("deploy", "22:39", None, prev)
+            self.assertEqual(v, want, prev)
+            self.assertTrue(il_deploy.parse_holder("- **Holder:** " + v).idle, v)
+
     def test_note_cannot_break_the_stamp(self):
         v = il_deploy.released_value("deploy", "20:20", "X failed (home: HTTP 409); wants? check", "nobody")
         self.assertNotIn("(home", v)

@@ -87,16 +87,16 @@ class Simulator:
     def receive(self, data, t):
         self.run_until(t)
         self.fw.feed(bytes(data), t)
-        self._check_halt()
+        self._check_halt(t)
 
     def run_until(self, t):
         while self._timed and self._timed[0][0] <= t:
             when, _, data = heapq.heappop(self._timed)
             self.fw.advance(when)
-            self._check_halt()
+            self._check_halt(t)  # t, not when: the runner sees the halt now
             self._queue(when, data)
         self.fw.advance(t)
-        self._check_halt()
+        self._check_halt(t)
         if self._dfu_at is not None and self._dfu_at <= t:
             self._dfu_at = None
             self._actions.append({"action": "disconnect", "down_s": None})
@@ -137,11 +137,13 @@ class Simulator:
         self.faults.on_line(self.seq, text)
         return self.seq
 
-    def _check_halt(self):
+    def _check_halt(self, t):
         """Once the board stops dead (halt fault, kill, DFU, sim error) it sends nothing more: output it had not sent
         by then (an ok a delay_ok holds, and all queued behind it) and pending injections are dropped. DFU also takes
         the port away, DFU_DRAIN_S later: flashFirmware() lets USB CDC send what was due (its echo with it) first, and
-        a pty master closed at once would take the bytes the host had not read yet with it."""
+        a pty master closed at once would take the bytes the host had not read yet with it. The drain counts from t,
+        when the caller sees the halt, so a late wake of the runner writes that output before the port goes (a stall
+        of DFU_DRAIN_S between a host read or a control request that sees it and the next write can still lose it)."""
         fw = self.fw
         if not fw.halted or self._halt_seen:
             return
@@ -150,7 +152,7 @@ class Simulator:
         self._last_release = self.out[-1][0] if self.out else -math.inf
         self._timed = []
         if fw.halt_reason == "DFU":
-            self._dfu_at = fw.halt_time + DFU_DRAIN_S
+            self._dfu_at = max(fw.halt_time, t) + DFU_DRAIN_S
 
     # ------------------------------------------------------------------ power
     def power_cycle(self, t):
@@ -252,7 +254,7 @@ class Simulator:
             if not isinstance(reason, str):
                 raise ValueError("reason must be a string, not %r" % (reason,))
             self.fw.halt(reason, t)
-            self._check_halt()
+            self._check_halt(t)
         elif kind == "disconnect":
             down = req.get("down_s", 0.0)
             down = None if down is None else seconds(down, "down_s")

@@ -11,7 +11,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.Future;
 
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseDb;
@@ -573,8 +572,7 @@ final class TipSetupEndpoints {
         }
         q.stopEpoch = svc.stopEpoch();
         q.operator = Json.str(b, "operator", null);
-        ctx.tracker.expect("tip picture");
-        Future<TipPictureResult> f = svc.takeTipPicture(q);
+        RunTracker.Started<TipPictureResult> f = ctx.tracker.start("tip picture", () -> svc.takeTipPicture(q));
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, Views::tipPicture, Views.map("kind", "tip picture",
                 "setupKey", s.key));
     }

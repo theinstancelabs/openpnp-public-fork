@@ -16,7 +16,7 @@
          form's seat, Full, with the live top camera and a 5 mm scale bar (shown: true while it is drawn).
      onPad(padId, ev), onPart(ref, ev)    H2: a click on a pad or a part opens the pad inspector (padinspect.js)
      recordsMap(bv, plan)                 H4: the plan's drawing under Records' done-dot map, Full
-     onImported(saved)                    "Use this board" in the upload dialog: the board list again, the board chosen
+     onImported(saved)                    "Use this design" in the upload dialog: the board list again, the board chosen
      preview() → the hero's path preview (IL.pathPreview: play, pause, seek, state), null before the hero is drawn
    Board drawings come from IL.boardart.get (the browser's HTTP cache keeps them: the server marks them immutable). */
 'use strict';
@@ -117,10 +117,10 @@
     const row = body.querySelector('.board-sel-row');
     if (!row) return;
     const upload = el('button', { type: 'button', class: 'btn bf-upload', id: 'btn-board-upload',
-      title: 'Read a KiCad board file (.kicad_pcb) and save it as a board here. Nothing moves.' },
-    IL.icon('i-plus'), el('span', { text: 'Upload KiCad board…' }));
+      title: 'Read a KiCad board file (.kicad_pcb) and save it as a design. Nothing moves.' },
+    IL.icon('i-plus'), el('span', { text: 'Upload a design…' }));   // the dialog's own title
     upload.addEventListener('click', () => IL.boardImport.open({ onSaved: onImported }));
-    const thumbs = el('div', { class: 'board-thumbs', id: 'board-thumbs', role: 'group', 'aria-label': 'Boards with a drawing: press one to choose it', hidden: true });
+    const thumbs = el('div', { class: 'board-thumbs', id: 'board-thumbs', role: 'group', 'aria-label': 'Designs with a drawing: press one to choose it', hidden: true });
     const imported = el('div', { class: 'reason bf-imported', id: 'board-imported', hidden: true });
     thumbs.addEventListener('scroll', () => edges(thumbs), { passive: true });
     // the upload button first (always in view), then one row of pictures of every board with a drawing, two whole
@@ -175,8 +175,8 @@
     const lab = st.fid.lastChild;
     if (lab.textContent !== 'Camera is on ' + name) lab.textContent = 'Camera is on ' + name;
     const why = job ? 'Job boards take their position from OpenPnP'
-      : !e ? 'Choose a board file first'
-        : !f ? (e.fiducials ? 'This board has no fiducials: use the camera X/Y on its origin, or type it' : 'The board list has no fiducial positions for this board')
+      : !e ? 'Choose a design from the list first'   // also after "Other board file…": its fiducials come from the list
+        : !f ? (e.fiducials ? 'This board has no fiducials: use the camera X/Y on its origin, or type it' : 'The list has no fiducial positions for this design')
           : IL.lockReason(s, { connected: true, pressureOff: false }) || (!cam ? 'No top camera position' : null);
     IL.gate(st.fid, why);
     if (!why) IL.setAttr(st.fid, 'title', 'Board origin X/Y from the top camera centred on ' + name + ' (board ' + IL.fmt(f.bx, 2) + ', ' + IL.fmt(f.by, 2)
@@ -261,7 +261,7 @@
     st.o.setXY(x, y);
     IL.toast('Board origin X ' + IL.fmt(x, 2) + ' · Y ' + IL.fmt(y, 2) + ' mm: ' + f.id + ' under the top camera, rotation ' + IL.fmtDeg(Number(form.rot) || 0) + '.', 'ok');
   }
-  /** "Use this board" after an upload: the Board step, the list read again, the board chosen. */
+  /** "Use this design" after an upload: the Board step, the list read again, the board chosen. */
   async function onImported(saved) {
     if (!saved || !saved.file) return;
     M.just = { file: saved.file, fiducial: saved.fiducial || null };

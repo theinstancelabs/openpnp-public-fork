@@ -41,7 +41,7 @@ refused too.
 | Option | Meaning |
 |---|---|
 | `--link PATH` | Where the pty slave is published (name `ttyLUMEN*`). The link exists only while the port does: it is removed when the port goes down (disconnect, DFU, a power cycle's down time) and on exit, and made again for the new pty. |
-| `--personality stock\|il-safety` | Firmware build (below). Default `stock`. |
+| `--personality stock\|il-safety\|il-holdB` | Firmware build (below). Default `stock`. |
 | `--control SOCK` | Unix socket for the control channel (JSON lines). |
 | `--io-log FILE` | Append the traffic in `serial.log` format. |
 | `--time-scale 1.0` | Simulator seconds per wall second, a finite number > 0. Keep 1.0 when host timeouts matter: they are wall clock. |
@@ -121,10 +121,11 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 - Soft endstops 0..433 / 0..487 / 0..63 clamp homed axes only, silently. `M211` reports them in logical coordinates.
 - Fans P0-P3 with a timestamped history, LED, I2C mux and register, stepper enable flags.
 - Idle timeout (`DEFAULT_STEPPER_TIMEOUT_SEC` 3600, `DISABLE_IDLE_X/Y/Z/I/J`): once the planner has been empty that
-  long, counted from the end of the last block, a `G28` or an `M18`/`M84 S`, every axis is released, silently. Once
-  only, until a block is queued again (`M17` alone does not re-arm it). It also runs inside waits such as `G4`. The
-  check and the firmware's wake for it use one expression (last move + timeout), so the release lands on its deadline
-  at any time; computed two ways, rounding once made the loop spin at that instant for ever.
+  long, counted from the end of the last block, a `G28` or an `M18`/`M84 S`, every axis is released (il-holdB keeps
+  B: "Personalities"), silently. Once only, until a block is queued again (`M17` alone does not re-arm it). It also
+  runs inside waits such as `G4`. The check and the firmware's wake for it use one expression (last move + timeout),
+  so the release lands on its deadline at any time; computed two ways, rounding once made the loop spin at that
+  instant for ever.
 - The board compares the time as a signed 32-bit number (`ELAPSED`, `core/millis_t.h`). So `M18`/`M84 S` of
   2147484 s or more (2^31 ms; a bigger value saturates at 0xFFFFFFFF ms) has run out at once: every axis is released
   on the next pass and again each time the planner runs empty, and Z drops. Use `S0` for "never".
@@ -200,7 +201,7 @@ nothing.
   mm past its trip point (overtravel 0.50 mm)", `line` null), seen at the end of each move (a quick stop's too, and
   one that ends in a stock kill's coast), at each read, at a Z release (`z_drop`) and at a physical fault (where the
   head is then, also mid-move), and when it is wired under the head (a new switch wired under a head already past its
-  point reports it once more). At M112 both personalities hold Z and let every stepper go 0.85 s after the kill
+  point reports it once more). At M112 every personality holds Z and lets every stepper go 0.85 s after the kill
   (minkill(): cli() at 0.6 s, disable_all_steppers() 0.25 s later; stock coasts until the cli(), il-safety's kill
   stops the motion at once), so a `z_drop` lands then, where the motion ended, whether or not anything reads the
   state. Not seen: an X/Y move that crosses a window deep and ends outside it. The head is not stopped (no hard stop
@@ -323,7 +324,7 @@ fault the engine cannot see, shows up in `sim_errors`.
     does. RESEARCH.md section 7 says "any phase". An M410 in `Z_AFTER` is a plain quick-stop.
 - **il-safety:** below.
 
-**`M112`.** It kills at once (stock: on read). In both personalities the drivers hold through minkill() and every
+**`M112`.** It kills at once (stock: on read). In every personality the drivers hold through minkill() and every
 stepper lets go 0.85 s after the kill (`cli()` at 0.6 s, then 0.25 s); a power cycle before then lets them go at the
 power off (a released Z drops once). How the motion ends: "kill" below. The `Homing Failed` kill leaves the motors
 energised.
@@ -339,7 +340,16 @@ energised.
 | M106 P2/P3 | S as given | any S>0 is 255 |
 | Z steps/mm, B max accel, B current | 40, 10000, 200 mA | 160, 20000, 540 mA |
 | kill | fans unchanged, motion runs 0.6 s more | all four outputs off, planner stopped first |
-| M997 | unknown | quick-stop, all four outputs off, every stepper let go, `echo:M997: entering STM32 DFU bootloader (0483:df11)`; then it answers nothing more and, 0.1 s later (the firmware's wait for USB to send what was due, that echo with it), enters DFU: the port goes away until a power cycle |
+| M997 | unknown | quick-stop, all four outputs off, every stepper let go, `echo:M997: entering STM32 DFU bootloader (0483:df11)`; then it answers nothing more and, 0.1 s later (the firmware's wait for USB to send what was due, that echo with it; counted from when lumen-sim sees the halt, so a late wake still sends it), enters DFU: the port goes away until a power cycle |
+
+`il-holdB` (il/holdB 75fb46ebc, Backend's holdB build for BR-92) is `stock` in every row above, and differs in two
+things:
+- M115's firmware line carries the marker: `FIRMWARE_NAME:Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:38:38) ...`
+  (two spaces in `Nov  4`; the whole line is `HOLDB_FIRMWARE_LINE` in `personality.py`). The Cap lines are stock's.
+  The engine reads the `il-holdB` marker in FIRMWARE_NAME at every connect.
+- `DISABLE_IDLE_J` is off: the idle timeout (above, also one of 2^31 ms or more) releases X, Y, Z and A, never B.
+  `M18 B`, a bare `M18`/`M84`, `M112` and a power cycle still release B. On `stock` and `il-safety` the idle timeout
+  releases B with the rest.
 
 ## The simulator line (`--sim-cap`, BR-47)
 
@@ -474,7 +484,9 @@ python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 - `tests/test_docs.py` checks the README's USB-identity instructions, including that its `sed` line works.
 - The golden tests compare reply text exactly and timing within 3 %.
 - `--sim-cap` (BR-47): with it off, M115 equals the golden byte for byte; with it on, the line comes last before the
-  `ok` on both personalities (`test_golden.py` `SimulatorCapability`, and through the pty in `test_transport.py`).
+  `ok` on stock and il-safety (`test_golden.py` `SimulatorCapability`, and through the pty in `test_transport.py`).
+- `tests/test_il_holdb.py` covers il-holdB (BR-92): its M115, and B held through the idle timeout while `M18 B`, `M84`
+  and a power cycle still release it.
 
 | Golden | Board | lumen-sim |
 |---|---|---|
@@ -581,3 +593,6 @@ Results on 10-31 (before BR-43/47):
   - `N` line numbers and checksums;
   - M206 offsets.
 - The il-safety firmware line keeps the stock build date; the real il build's date is unknown.
+- The il-holdB firmware line is the one Backend's linux_native build printed, with its build date and
+  `MACHINE_TYPE:SimRap 1.4`; the flashed image's differs in both (firmware/holdB/README.md: `… il-holdB (Nov  4 2026
+  22:37:24)`, and the board says `MACHINE_TYPE:LumenPnP`). The engine reads only the marker.

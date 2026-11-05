@@ -136,6 +136,12 @@ final class PadCalibrationJob {
     /** §22.2: a tip wider than the 22G's bore is counted with the bench mass x 1.5 until it is weighed. */
     static final double WIDE_BORE_MM = 0.41, WIDE_BORE_MASS = 1.5;
 
+    /** BR-103: a caller's expected landing (mm from N2's head offset) and its evidence. */
+    static final class ExpectedLanding {
+        double dxMm, dyMm;
+        String evidence;
+    }
+
     /** What the operator asked for (POST body, or the preview's query). */
     static final class Request {
         String planId;
@@ -158,6 +164,11 @@ final class PadCalibrationJob {
         String measure;
         /** The landing check searches ±9 mm (offered after its locator found nothing). */
         boolean wide;
+        /**
+         * BR-103: where a tip with no landing of its own is expected to land from N2's head offset (mm), e.g. from its
+         * end measured from below, and that evidence in words; the check then searches ±2 mm around it. Null: none.
+         */
+        ExpectedLanding expectedLanding;
         /** BR-77, {@link #MEASURE_START_ANGLE}: what the measure route asks for. */
         StartAngle startAngle;
     }
@@ -293,6 +304,8 @@ final class PadCalibrationJob {
     PadLadder.LandingLayout landingLayout;
     double[] expected;
     double searchMm;
+    /** BR-103: {@link #expected} is the request's: nothing aims with it, so the dot lands there from the locator. */
+    boolean expectedFromRequest;
     // the start-angle measure (BR-77)
     /** Its mode, the candidate start P, the surface its dots lie on (null: none found, saProblem says why). */
     String saMode;
@@ -595,6 +608,14 @@ final class PadCalibrationJob {
     }
 
     /**
+     * The search the band is sized for: ±R, grown by an expected Y shift nothing aims with (BR-103), so the locator's
+     * dot and the lines laid from it stay inside the band.
+     */
+    private double bandSearchMm() {
+        return searchMm + (expectedFromRequest ? Math.abs(expected[1]) : 0);
+    }
+
+    /**
      * Check where it lands (§22.3): the band of the calibration area it reserves, E (the setup's own landing under N2's
      * head offset now, else 0, 0) and the search R; the blank's surface probed first when it is stale.
      */
@@ -605,9 +626,23 @@ final class PadCalibrationJob {
         boolean ownNow = own != null && !moved(svc.headOffsetNow(), own.headOffsetXMm, own.headOffsetYMm);
         boolean straight = TipSetup.FORM_STRAIGHT.equals(c.tip.form);
         boolean pointed = TipSetup.FORM_BENT.equals(c.tip.form) && c.tip.bendToward != null;
-        expected = svc.landingInEffect();
-        searchMm = LandingFit.searchMm(ownNow, straight, pointed, req.wide);
-        landingLayout = PadLadder.landingLayout(landingArea, searchMm, d95(c.profile.netStepsPerDot), fovMm(), null);
+        expectedFromRequest = req.expectedLanding != null;
+        if (expectedFromRequest) {
+            if (ownNow) {
+                throw ApiException.refused("The " + c.tip.name + " has a landing of its own (" + Views.signed(own.dxMm)
+                        + ", " + Views.signed(own.dyMm) + " mm): the check searches ±"
+                        + Texts.num(LandingFit.searchMm(true, straight, pointed, false), 0)
+                        + " mm around it. Leave expectedLanding out.");
+            }
+            expected = new double[] {req.expectedLanding.dxMm, req.expectedLanding.dyMm};
+            searchMm = LandingFit.SEARCH_KNOWN_MM;
+        }
+        else {
+            expected = svc.landingInEffect();
+            searchMm = LandingFit.searchMm(ownNow, straight, pointed, req.wide);
+        }
+        landingLayout = PadLadder.landingLayout(landingArea, bandSearchMm(), d95(c.profile.netStepsPerDot), fovMm(),
+                null);
         if (area != null && landingLayout.problem == null) {
             planBlank(c);
         }
@@ -1649,8 +1684,7 @@ final class PadCalibrationJob {
             if (stopRequested) {
                 throw new Halt(stopReason);
             }
-            ctx.tracker.expect("pad calibration");
-            f = submit.submit();
+            f = ctx.tracker.start("pad calibration", submit::submit).future;
         }
         T res;
         try {
@@ -1765,7 +1799,8 @@ final class PadCalibrationJob {
         DoseBlocksRequest.Block b = new DoseBlocksRequest.Block(steps, "locator", surface);
         b.xy.add(landingLayout.locator.clone());
         b.hopMm = DEFAULT_HOP_MM;
-        b.matchRadiusMm = searchMm;
+        // BR-103: nothing aims with a request's expectation, so the dot lands that far from its spot
+        b.matchRadiusMm = searchMm + (expectedFromRequest ? Math.hypot(expected[0], expected[1]) : 0);
         r.blocks.add(b);
         r.lookXy = looks(b.xy);
         r.purgeXy = new ArrayList<>(); // the needle was primed until paste came out: no purge before the locator
@@ -1774,7 +1809,16 @@ final class PadCalibrationJob {
         results.add(res);
         storePhotos(res);
         List<double[]> blobs = blobs(res);
-        double[] coarse = LandingFit.locate(blobs, landingLayout.locator, searchMm);
+        double[] target = landingLayout.locator.clone();
+        if (expectedFromRequest) {
+            target[0] += expected[0];
+            target[1] += expected[1];
+        }
+        // C = blob - target: with a request's expectation (BR-103) the miss against it, so T = E + trim + C + residual
+        // still holds; the dot itself landed C + E from its spot (nothing aimed with E), which the lines are laid from
+        double[] coarse = LandingFit.locate(blobs, target, searchMm);
+        double[] landed = coarse == null || !expectedFromRequest ? coarse
+                : new double[] {coarse[0] + expected[0], coarse[1] + expected[1]};
         if (coarse == null) {
             lr.found = blobs.size();
             landing = lr;
@@ -1785,11 +1829,11 @@ final class PadCalibrationJob {
             return;
         }
         lr.coarse = coarse;
-        done(LOCATOR, String.format(Locale.ROOT, "the locator dot landed %s, %s mm from its spot", Views.signed(coarse[0]),
-                Views.signed(coarse[1])));
+        done(LOCATOR, String.format(Locale.ROOT, "the locator dot landed %s, %s mm from its spot", Views.signed(landed[0]),
+                Views.signed(landed[1])));
         begin(ROW);
         double[] fov = fovMm();
-        PadLadder.LandingLayout l = PadLadder.landingLayout(landingArea, searchMm, d95(steps), fov, coarse);
+        PadLadder.LandingLayout l = PadLadder.landingLayout(landingArea, bandSearchMm(), d95(steps), fov, landed);
         if (l.problem != null) {
             landing = lr;
             landingText = l.problem;
@@ -1799,12 +1843,12 @@ final class PadCalibrationJob {
         }
         DoseBlocksRequest r2 = landingRequest();
         DoseBlocksRequest.Block row = new DoseBlocksRequest.Block(steps, "landing row", surface);
-        row.xy.addAll(shifted(l.row, coarse));
+        row.xy.addAll(shifted(l.row, landed));
         row.hopMm = LandingFit.ROW_MM[1];
         row.matchRadiusMm = LandingFit.MATCH_MM + LandingFit.RESIDUAL_MAX_MM;
         r2.blocks.add(row);
         r2.lookXy = looks(row.xy);
-        r2.purgeXy = shifted(l.purge, coarse);
+        r2.purgeXy = shifted(l.purge, landed);
         DoseBlocksResult res2 = engine(() -> engine.runDoseBlocks(r2), x -> x.run, x -> x.ok, x -> x.message);
         results.add(res2);
         List<Photo> stored = new ArrayList<>(photos);
@@ -3090,7 +3134,8 @@ final class PadCalibrationJob {
         }
         PadLadder.LandingLayout l = landingLayout;
         boolean fits = l != null && l.problem == null;
-        return Views.map("searchMm", searchMm, "wide", req.wide, "expected", expected == null ? null
+        return Views.map("searchMm", searchMm, "wide", req.wide, "expectedFrom", expectedFromRequest
+                ? "the request: " + req.expectedLanding.evidence : null, "expected", expected == null ? null
                 : new double[] {r3(expected[0]), r3(expected[1])}, "bandMm", l == null ? null : r1(l.reservedMm),
                 "band", fits ? Views.map("x0", r1(l.x0), "x1", r1(l.x1), "y0", r1(l.y0), "y1", r1(l.y1)) : null,
                 "frames", fits ? l.frames.size() : null, "problem", l == null ? null : l.problem);

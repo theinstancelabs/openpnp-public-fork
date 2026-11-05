@@ -174,6 +174,18 @@ public final class SimScene {
         public boolean newPhaseOnMotorOff;
         /** Only whole net turns lay paste; other contacts lay nothing, counted (sub-turns not modelled, INF-06). */
         public boolean wholeTurnsOnly;
+        /**
+         * INF-06 §2b (Process 11-05): a contact's mass by the contact history, not the angle ripple (SimPaste's
+         * ContactHistory), a sub-turn model: wholeTurnsOnly does not apply. The screw pushes mRevMg / 3 on each live
+         * quarter and nothing on the dead one from deadQuarterDeg (physical; the 25G at 13.7 psi: 226). Off: today's
+         * law.
+         */
+        public boolean perContact;
+        public double deadQuarterDeg = 226;
+        /** Screw rotation in the air (deg) that makes the next contact hold its first quarter (unverified: 0 vs 90). */
+        public double holdArmAirDeg = 45;
+        /** Time in the air (s) that does the same; null: off (R1's B and R2b's b, Process 11-05). */
+        public Double holdArmAirS;
         /** Whole turns a newly mounted tip takes before paste comes out (INF-06 §8); 0 = always full. */
         public double primeTurns;
         /** Contacts after a power cycle that come out empty (INF-06 §5: the 22G ~12). */
@@ -220,6 +232,10 @@ public final class SimScene {
             p.offsetSteps = offsetSteps;
             p.newPhaseOnMotorOff = newPhaseOnMotorOff;
             p.wholeTurnsOnly = wholeTurnsOnly;
+            p.perContact = perContact;
+            p.deadQuarterDeg = deadQuarterDeg;
+            p.holdArmAirDeg = holdArmAirDeg;
+            p.holdArmAirS = holdArmAirS;
             p.primeTurns = primeTurns;
             p.emptyDotsAfterPowerCycle = emptyDotsAfterPowerCycle;
             p.noiseSeed = noiseSeed;
@@ -608,6 +624,11 @@ public final class SimScene {
                     + "miss or landing sd, "
                     + "refillDip or threadShare above 1, or threadZeroMg below threadFullMg");
         }
+        if (!(p.deadQuarterDeg >= 0 && p.deadQuarterDeg < 360) || !(p.holdArmAirDeg >= 0 && p.holdArmAirDeg <= 360)
+                || (p.holdArmAirS != null && !(p.holdArmAirS >= 0))) {
+            throw new IllegalArgumentException(what + "deadQuarterDeg must be in [0, 360), holdArmAirDeg in [0, 360], "
+                    + "holdArmAirS >= 0 or null");
+        }
         if (p.landingBiasMm == null || p.landingBiasMm.length != 2 || p.n2OffsetMm == null
                 || p.n2OffsetMm.length != 2) {
             throw new IllegalArgumentException(what + "landingBiasMm and n2OffsetMm need 2 numbers");
@@ -749,6 +770,12 @@ public final class SimScene {
         p.reportCount = o.has("reportCount") ? o.get("reportCount").getAsBoolean() : p.reportCount;
         p.newPhaseOnMotorOff = flag(o, "newPhaseOnMotorOff", p.newPhaseOnMotorOff);
         p.wholeTurnsOnly = flag(o, "wholeTurnsOnly", p.wholeTurnsOnly);
+        p.perContact = flag(o, "perContact", p.perContact);
+        p.deadQuarterDeg = num(o, "deadQuarterDeg", p.deadQuarterDeg);
+        p.holdArmAirDeg = num(o, "holdArmAirDeg", p.holdArmAirDeg);
+        if (o.has("holdArmAirS")) {
+            p.holdArmAirS = o.get("holdArmAirS").isJsonNull() ? null : num(o, "holdArmAirS", 0);
+        }
         p.primeTurns = num(o, "primeTurns", p.primeTurns);
         p.emptyDotsAfterPowerCycle = integer(o, "emptyDotsAfterPowerCycle", p.emptyDotsAfterPowerCycle);
         if (o.has("noiseSeed")) {
