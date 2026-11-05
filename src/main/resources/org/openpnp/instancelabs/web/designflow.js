@@ -270,8 +270,12 @@
     PP().setSource({ boardFile: f.file, boardName: title(f) });
     IL.go('#profile/needs');
   }
+  /** Why Make a board waits, as Start's own design cards do (runflow.js choose()): Start under way, a task, the lock. */
+  const makeLock = (s) => (IL.runFlow && IL.runFlow.chaining() ? 'Start is under way' : IL.lockReason(s, { pressureOff: false }));
   /** Run › Start with this design chosen (its Load side 1 says where the board goes). */
   function make(f) {
+    const lock = makeLock(IL.S.status);
+    if (lock) { IL.toast(lock, 'need'); return; }
     IL.run.flow.selectBoard('file:' + f.file);
     IL.go('#run');
   }
@@ -339,6 +343,8 @@
     // pushed panel (the pad calibration's) covers this one, the steps' buttons keep the reason as their title
     IL.gate(n.pRest, canRest ? (cal.length ? PP().calIdle : PP().idle)(s) : null, n.pWhy);
     IL.show(n.pMake, ready);
+    // after Set up the rest's gate (the two never show together): the reason line is Make a board's while it shows
+    if (ready) IL.gate(n.pMake, makeLock(s), n.pWhy);
     // nothing to run here: the step that comes next, on its own page
     const next = !st || ready || canRest ? null : measure.length ? ['Measure the tip’s dots', () => IL.go('#tip/checks')]
       : hand.length ? ['Set the doses by hand', () => byHand(f)] : tipRefs.length ? ['Change the tip', () => IL.go('#tip/which')] : null;
