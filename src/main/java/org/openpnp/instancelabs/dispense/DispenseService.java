@@ -694,7 +694,10 @@ public final class DispenseService {
         }
     }
 
-    /** BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. */
+    /**
+     * BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. A
+     * home's start that cannot be written throws: that home must not start (BR-97, {@link ControllerReset#homeStarted}).
+     */
     private void journalReset(ControllerReset.Event e) {
         try {
             String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
@@ -705,6 +708,10 @@ public final class DispenseService {
         catch (SQLException ex) {
             Logger.error(ex, "dispense: the controller reset journal could not be written ({}): after a restart the "
                     + "engine will not know about it", e.code);
+            if (ControllerReset.EVENT_HOME_STARTED.equals(e.code)) {
+                throw new IllegalStateException("its start could not be journaled (" + ex.getMessage() + "), so its "
+                        + "G28 was not sent", ex);
+            }
         }
     }
 

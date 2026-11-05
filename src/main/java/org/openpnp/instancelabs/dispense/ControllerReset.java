@@ -672,16 +672,23 @@ public final class ControllerReset {
 
     /**
      * BR-97: a home starts (its G28 next): its G28 may move the controller's frame even if the home ends unhomed, so the
-     * next levelling takes its reference afresh, also after a restart (journaled).
+     * next levelling takes its reference afresh, also after a restart (journaled). Its row is written here, before the
+     * G28: when the journal throws, this throws and the home must not start (unrecorded, a restart would bring back the
+     * reset's boot Z), and the reference stays.
      */
     public void homeStarted() {
+        long now = clock.getAsLong();
+        Event e = new Event(EVENT_HOME_STARTED, now, "a home started at " + ZCheck.clock(now) + ": its G28 may move the "
+                + "controller's Z frame, so the see-saw's levelling takes its reference afresh");
+        writeOut(); // the rows before it first, in order
+        synchronized (writeLock) {
+            if (journal != null) {
+                journal.accept(e);
+            }
+        }
         synchronized (this) {
             levelRefZ = null;
-            long now = clock.getAsLong();
-            record(EVENT_HOME_STARTED, now, "a home started at " + ZCheck.clock(now) + ": its G28 may move the "
-                    + "controller's Z frame, so the see-saw's levelling takes its reference afresh");
         }
-        writeOut();
     }
 
     /** When the last home after a detected reset moved the Z frame (also before a restart), or null. */

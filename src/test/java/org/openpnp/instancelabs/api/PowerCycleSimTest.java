@@ -1469,6 +1469,32 @@ public class PowerCycleSimTest {
         assertEquals(0.0, sim.server.position('Z'), 1e-9);
     }
 
+    /**
+     * BR-97 re-review 3 (MINOR, safety; the review's probe): a home whose start cannot be journaled does not start. Its
+     * G28 would move the Z frame with nothing on record, so an OpenPnP restart would bring back the reset's boot Z 0
+     * (the probe then walked to Z -1 in G28's frame). No G28 goes out, and the levelling reference stays the boot Z.
+     */
+    @Test
+    public void aHomeWhoseStartCannotBeJournaledDoesNotStart() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        try (java.sql.Connection c = java.sql.DriverManager.getConnection(svc.getDb().getUrl());
+                java.sql.Statement st = c.createStatement()) {
+            st.execute("CREATE TRIGGER home_started_fails BEFORE INSERT ON events WHEN NEW.code = 'HOME_STARTED' "
+                    + "BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+        }
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("homing failed") && lastBody.contains("database is locked"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "no G28: nothing sent");
+        assertFalse(sim.machine.isHomed());
+        // the reference is still the boot Z 0, not the Z 3 the failed home left: 32 mm below 0 is the end
+        walk(3, -32);
+        refusedLevel(level("w", -33), "32 mm");
+    }
+
     /** BR-97: a levelling move counts for BR-02's idle clock: it keeps the screw's motor on, as any move does. */
     @Test
     public void aLevellingMoveKeepsTheScrewMotorOn() throws Exception {
