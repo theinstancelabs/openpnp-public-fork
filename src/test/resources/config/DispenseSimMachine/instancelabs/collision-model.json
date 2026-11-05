@@ -43,8 +43,8 @@
      "measured": {"xy": {"how": "camera-fiducials", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
                   "top": {"how": "n1-touch", "by": "fixture", "atMs": 0, "errMm": 0.025, "rawZ": 10.7, "homeAtMs": 0, "evidence": "event:1"}},
      "state": "measured", "invalidatedBy": ["moved", "touched"]},
-    {"id": "blank-black", "name": "the black blank", "kind": "movable", "role": "blank", "note": "put down, not measured (place a guess)",
-     "outline": {"box": [200, 220, 260, 300]}, "topZ": null, "marginMm": 1.0, "noPaste": false, "surface": null, "touchable": false,
+    {"id": "blank-black", "name": "the black blank", "kind": "movable", "role": "blank", "note": "put down, not measured (place a guess; its front at y 222 keeps the camera's r 20 + margin 1 clear at the homing fiducial (217.081, 200.223), which needs y0 >= 221.25)",
+     "outline": {"box": [200, 222, 260, 300]}, "topZ": null, "marginMm": 1.0, "noPaste": false, "surface": null, "touchable": false,
      "measured": {"xy": null, "top": null}, "state": "added", "invalidatedBy": ["moved", "touched"]}
   ],
   "tools": [

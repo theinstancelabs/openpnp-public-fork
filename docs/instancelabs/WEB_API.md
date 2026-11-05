@@ -621,7 +621,9 @@ max(r, k2)), rc the least-squares plane of `bed.plane.points` at the tool's own 
 a null knee puts that tip at its lowest end stop, a null K leaves the needle's height unknown (it meets everything
 under it). An object that is not measured (null top; added, moved, removed) blocks its outline at every height. The
 bed is the object `bed` (top 0, no margin). Only a tip layer (`at: tip-end`) is ever exempt (G-code: contact depth;
-a jog: its floor, at most the contact depth), and only over a measured `touchable` top whose outline holds it.
+a jog: its floor, at most the contact depth), and only over a measured `touchable` top whose outline holds it. The
+exempt depth is counted on the model's numbers with no error added: the tip may physically go deeper than
+`contactDepthMm` by its height error (the see-saw's, the plane's, the home repeat) and the top's `errMm`.
 
 **The needle's tip end** (`tools[moves: needle].tipEnd {dx, dy, setup, atMs}`) is where the mounted needle ends, and
 moves with each needle. In this build nothing rewrites it at a mount: while the engine's last needle change
@@ -788,12 +790,15 @@ Jargon is explained in tooltips (`title`/`abbr`).
 
 ## 6. Tests
 
-- BR-98 stage 1: `BedModelTest` (5: the loader's rules, the see-saw maps U2, the worst case, the tip errors) and
-  `CollisionCheckTest` (7: the sweep U1, the lowest point at a leg's end, the tip-only exemption U3, the jog floor,
-  unmeasured objects and the first leg, the everyday moves on the fixture, U4 5,000 legs < 100 ms), no machine;
-  `BedGuardSimTest` (6) and `BedApiSimTest` (5) on the SIM with the fixture model: jog, move-to and passthrough refused
-  with nothing sent and proven beside the objects, a batch cut short, no file, a file that fails validation, the dry
-  run, the reads, the writes and their rules.
+- BR-98 stage 1: `BedModelTest` (5: the loader's rules with one N1, one needle and the contact depth cap, the see-saw
+  maps U2, the worst case, the tip errors) and `CollisionCheckTest` (7: the sweep U1, the lowest point at a leg's end,
+  the tip-only exemption U3, the jog floor bounded by the model's top, unmeasured objects and the first leg, the
+  everyday moves on the fixture with the G28 corner to the fiducial, U4 5,000 legs < 100 ms), no machine;
+  `BedGuardSimTest` (11) and `BedApiSimTest` (7) on the SIM with the fixture model: jog, move-to and passthrough refused
+  with nothing sent and proven beside the objects, the passthrough's unknown place (a batch cut short, an interrupted
+  move, after an M410) and its proof on the machine thread, a needle tip end older than the needle change, no file, a
+  file that fails validation, the dry run and a stale position, the reads, the writes and their rules (no holder, two
+  at once, the evidence, the engine's threshold).
 
 - `mvn -T1 test -Dtest='ApiServerSimTest,ReviewSafetySimTest,RegistrationSimTest,BoardImportSimTest'` (part of `mvn
   test`): 23 + 11 + 11 + 12 tests on the engine's simulated machine (OpenPnP GcodeDriver over localhost TCP to
