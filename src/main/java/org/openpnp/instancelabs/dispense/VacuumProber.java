@@ -620,7 +620,8 @@ public final class VacuumProber {
     /**
      * Back to the last open coarse step until the seal lets go (|mean - baseline| < drop / 2 within
      * {@link Settings#releaseTimeoutMs}), then the fine pass below it: the first step whose mean and the
-     * next step's mean are both sealed. Null when the fine pass finds no such pair.
+     * next step's mean are both sealed, unless a step above it stays sealed when read again
+     * ({@link #settledAbove}). Null when the fine pass finds no such pair.
      *
      * <p>The last open coarse step can read a near touch (up to 34 k below open air on the real machine,
      * 20 k or more at 10 of 161 points) and then never comes back within drop / 2 there. So when it does
@@ -629,11 +630,11 @@ public final class VacuumProber {
      */
     private Double releaseAndFine(Point p, Window w, double zc) throws Exception {
         double zo = p.lastOpenZ;
-        if (!released(p, w, zo)) {
+        if (!released(p, w, zo, p.drop / 2)) {
             double up = round4(zo + s.coarseStepMm);
             p.notes.add(String.format(Locale.ROOT, "%s: still drawing at Z %.3f after %.1f s (a partial seal at the "
                     + "last open step): let go at Z %.3f", spotName(p), zo, s.releaseTimeoutMs / 1000.0, up));
-            if (!released(p, w, up)) {
+            if (!released(p, w, up, p.drop / 2)) {
                 throw refused(String.format(Locale.ROOT, "PROBE: N1 did not let go of the surface within %.1f s after "
                         + "the touch at X %.2f, Y %.2f: check the N1 tip and tubing, then try again",
                         s.releaseTimeoutMs / 1000.0, p.x, p.y));
@@ -653,7 +654,7 @@ public final class VacuumProber {
             boolean sealed = step(p, z, w) < p.threshold;
             if (sealed && prevSealed) {
                 p.fine = true;
-                return prevZ;
+                return settledAbove(p, w, prevZ);
             }
             if (confirming) {
                 return null;
@@ -663,8 +664,31 @@ public final class VacuumProber {
         }
     }
 
-    /** Moves to {@code z} and reads until the seal let go there, at most {@link Settings#releaseTimeoutMs}. */
-    private boolean released(Point p, Window w, double z) throws Exception {
+    /**
+     * BR-100: N1's line lags a seal by ~0.3-1 s (tools/tilesetup.py), so the quick reads of a fine step can
+     * show a touching step open. The steps above the contact are read again, each entered from one step
+     * higher as every fine step, with the line still drawing from the seal below: a step that does not let
+     * go by the touch threshold within {@link Settings#releaseTimeoutMs} is the contact, and the step above
+     * it is read next. An open step lets go at once; the release height let go already.
+     */
+    private double settledAbove(Point p, Window w, double contact) throws Exception {
+        double z = contact;
+        while (round4(z + s.fineStepMm) < p.releaseZ - 1e-9) {
+            double up = round4(z + s.fineStepMm);
+            moveZ(round4(up + s.fineStepMm), s.zProbeFeedMmMin, w);
+            if (released(p, w, up, p.drop)) {
+                return z;
+            }
+            z = up;
+        }
+        return z;
+    }
+
+    /**
+     * Moves to {@code z} and reads until the mean is within {@code within} of the baseline (the seal let go
+     * there), at most {@link Settings#releaseTimeoutMs}.
+     */
+    private boolean released(Point p, Window w, double z, double within) throws Exception {
         moveZ(z, s.zProbeFeedMmMin, w);
         sync();
         long t0 = s.clock.getAsLong();
@@ -672,7 +696,7 @@ public final class VacuumProber {
             double m = mean(reads(s.stepReads));
             p.readings.add(new double[] {z, m});
             report(p);
-            if (Math.abs(m - p.baseline) < p.drop / 2) {
+            if (Math.abs(m - p.baseline) < within) {
                 return true;
             }
             if (s.clock.getAsLong() - t0 >= s.releaseTimeoutMs) {

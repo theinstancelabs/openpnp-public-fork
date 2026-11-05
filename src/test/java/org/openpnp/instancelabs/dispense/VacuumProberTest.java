@@ -423,6 +423,8 @@ public class VacuumProberTest {
         assertFalse(p.retried);
         int releaseMeans = (int) p.readings.stream().filter(v -> Math.abs(v[0] - 4.75) < 1e-9).count() - 1;
         assertTrue(releaseMeans >= 1);
+        int againMeans = (int) p.readings.stream().filter(v -> Math.abs(v[0] - 4.525) < 1e-9).count() - 1;
+        assertTrue(againMeans >= 1, "the step above the contact read again");
         List<String> want = new ArrayList<>();
         want.add("M204 S2000");
         want.addAll(ControllerCommands.VAC1_INIT);
@@ -449,6 +451,11 @@ public class VacuumProberTest {
             for (int i = 0; i < 3; i++) {
                 want.addAll(read());
             }
+        }
+        // the step above the contact again, entered from above with the line still drawing, until it lets go
+        want.addAll(Arrays.asList(z(4.55, 300), z(4.525, 300), "M400"));
+        for (int i = 0; i < 3 * againMeans; i++) {
+            want.addAll(read());
         }
         want.addAll(END);
         assertEquals(want, rig.ch.sent);
@@ -1223,6 +1230,21 @@ public class VacuumProberTest {
         ZCheck.Reference ref = new ZCheck.Reference();
         ref.z = stored;
         assertTrue(ZCheck.verdict(ref, z), "touched " + z + " where it touched " + stored);
+    }
+
+    /**
+     * BR-100, Process's acceptance test: N1's line lags a seal by ~0.3-1 s (tools/tilesetup.py), so a quick read after
+     * a fine step can show a touching step open. A vacuum with a 0.5 s lag reads the same Z as an instant one.
+     */
+    @Test
+    public void aVacuumWithAHalfSecondLagReadsTheSameZAsAnInstantOne() throws Exception {
+        Rig instant = sprungSeal(1);
+        Rig lagging = sprungSeal(500);
+        double zi = instant.prober().probe(Arrays.asList(example()), window(instant, 4.50, 4.50)).get(0).z;
+        double zl = lagging.prober().probe(Arrays.asList(example()), window(lagging, 4.50, 4.50)).get(0).z;
+        assertEquals(4.50, zi, 1e-9, "the first fine step at or below the 4.52 surface: 75 k");
+        assertEquals(zi, zl, 0.025 + 1e-9, "Process: within one fine step");
+        assertEquals(zi, zl, 1e-9, "the same step");
     }
 
     /**
