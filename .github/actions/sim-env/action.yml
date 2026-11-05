@@ -88,7 +88,14 @@ runs:
         echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/pw-browsers" >> "$GITHUB_ENV"
         export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/pw-browsers"
         npm install --prefix "$PW" --no-audit --no-fund "playwright@$PLAYWRIGHT_VERSION" >/dev/null
-        "$PW/node_modules/.bin/playwright" install --with-deps chromium
+        # --with-deps runs apt-get, which hung on a stalled Ubuntu mirror for a leg's whole 100 min (run 42078968125):
+        # each try is cut after 10 min (with apt-get under it: timeout signals its process group), 3 tries
+        for try in 1 2 3; do
+          timeout -k 30 "${PW_INSTALL_TIMEOUT_S:-600}" "$PW/node_modules/.bin/playwright" install --with-deps chromium \
+            && break
+          [ "$try" -lt 3 ] || { echo "::error::playwright install --with-deps failed or stalled 3 times"; exit 1; }
+          echo "::warning::playwright install --with-deps failed or stalled (try $try of 3): trying again"
+        done
 
     - name: Fonts like the lab computer (system-ui and sans-serif = Noto Sans)
       # The UI's font stack starts with system-ui; on the lab computer fontconfig resolves it to Noto Sans. A wider
