@@ -413,9 +413,10 @@ public class BedGuardSimTest {
     }
 
     /**
-     * After a needle change the model's needle tip end is the old needle's (the 27G's and the bent 22G's ends were 5.9
-     * mm apart): every hooked move is refused, 409 measurement-needed naming it, nothing sent, until a tip end measured
-     * since the change is recorded with its measurement record (review MAJOR 3).
+     * After a needle change the model's needle tip end and K (the needle's length) are the old needle's (the 27G's and
+     * the bent 22G's ends were 5.9 mm apart; K has been 64.50, 64.875 and 65.59): every hooked move is refused, 409
+     * measurement-needed naming both in one answer, nothing sent, until each is recorded again with a measurement
+     * record since the change (review MAJOR 3; review 2 MAJOR 1).
      */
     @Test
     public void afterANeedleChangeMovesWaitForTheNeedlesTipEnd() throws Exception {
@@ -426,7 +427,9 @@ public class BedGuardSimTest {
         assertEquals(409, status, body);
         assertEquals("measurement-needed", r.get("error").getAsString(), body);
         assertTrue(r.get("why").getAsString().contains("needle's tip end"), body);
+        assertTrue(r.get("why").getAsString().contains("K, the needle's length"), body);
         assertTrue(r.get("next").getAsString().contains("PUT /api/bed/tools/needle"), body);
+        assertTrue(r.get("next").getAsString().contains("PUT /api/bed/seesaw"), body);
         assertEquals(r.get("why").getAsString() + ": " + r.get("next").getAsString(), r.get("reason").getAsString());
         call("POST", "/api/move-to", "{\"tool\":\"n1\",\"x\":100,\"y\":400}", UI);
         assertEquals(409, status, body);
@@ -448,6 +451,20 @@ public class BedGuardSimTest {
                 + System.currentTimeMillis() + ",\"errMm\":0.05,\"evidence\":\"event:" + svc.getDb().recentEvents(1)
                         .get(0).get("id") + "\"}"));
         ok("PUT", "/api/bed/tools/needle", needle.toString(), token);
+        // the tip end alone is not enough: K is still the old needle's
+        r = call("POST", "/api/gcode", "{\"lines\":[\"G1 X100 F3000\",\"M400\"]}", token);
+        assertEquals(409, status, body);
+        assertEquals("measurement-needed", r.get("error").getAsString(), body);
+        assertFalse(r.get("why").getAsString().contains("tip end"), body);
+        assertTrue(r.get("why").getAsString().contains("K, the needle's length"), body);
+        assertEquals(List.of(), motionSent(), "nothing sent");
+        JsonObject seesaw = BedFixture.json().getAsJsonObject("seesaw");
+        seesaw.getAsJsonObject("K").addProperty("raw", 65.2);
+        svc.getDb().event(null, "INFO", "PROBE", "N1 and the needle on the front blank (bench)");
+        seesaw.add("measured", new JsonParser().parse("{\"how\":\"n1 and needle touch\",\"by\":\"Process\",\"atMs\":"
+                + System.currentTimeMillis() + ",\"errMm\":0.05,\"evidence\":\"event:" + svc.getDb().recentEvents(1)
+                        .get(0).get("id") + "\"}"));
+        ok("PUT", "/api/bed/seesaw", seesaw.toString(), token);
         ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 F3000\",\"M400\"]}", token);
         assertEquals(100, sim.server.position('X'), 1e-9);
     }

@@ -31,8 +31,9 @@ import com.google.gson.JsonObject;
  * check is off and every route runs as before. A file that fails validation: every hooked motion is refused (fail
  * closed). A valid one: each path is proven before its first line; clear journals one {@value #PROOF} row, blocked
  * answers 409 {@code collision} (§6.3; a stable key the deployer maps) and journals a {@value #REFUSED} row with
- * that body. A needle tip end measured before the engine's last needle change cannot prove anything: every hooked
- * motion answers 409 {@code measurement-needed} until it is measured again (#66 review MAJOR 3).
+ * that body. A needle tip end or a K measured before the engine's last needle change cannot prove anything: every
+ * hooked motion answers 409 {@code measurement-needed} until both are measured again (#66 review MAJOR 3, review 2
+ * MAJOR 1).
  *
  * <p>The start in this stage is OpenPnP's raw position while the head's place is known (homed in this connection and
  * BR-02's position known): source {@code homed}, X/Y error 0. Otherwise it is unknown, and the routes already refuse
@@ -196,14 +197,25 @@ final class BedGuard {
         }
         BedModel m = st.model;
         Long changed = svc.getConfig().needleChangedAtMs;
+        List<String> old = new ArrayList<>(), steps = new ArrayList<>();
         for (BedModel.Tool t : m.tools()) {
             // the full fix: the engine derives the tip end from N2's head offset, the landing and the trim at a mount
             if ("needle".equals(t.moves) && changed != null && (t.tipEndAtMs == null || t.tipEndAtMs < changed)) {
-                throw refusal(BedEndpoints.MEASUREMENT_NEEDED, null, "the needle's tip end in the bed model (tools '"
-                        + t.id + "'.tipEnd) is from before the needle change at " + ZCheck.clock(changed),
-                        "measure the mounted needle's tip end, then send it with PUT /api/bed/tools/" + t.id
-                                + " (a later tipEnd.atMs and a measurement record)", legs, m.version, dry);
+                old.add("the needle's tip end (tools '" + t.id + "'.tipEnd)");
+                steps.add("measure the mounted needle's tip end, then send it with PUT /api/bed/tools/" + t.id
+                        + " (a later tipEnd.atMs and a measurement record)");
             }
+        }
+        // every needle height in a proof rests on K (review 2 MAJOR 1): its record is the see-saw's
+        if (changed != null && (m.seesawAtMs == null || m.seesawAtMs < changed)) {
+            old.add("K, the needle's length (seesaw.K, measured as seesaw.measured)");
+            steps.add("measure K with the mounted needle, then send it with PUT /api/bed/seesaw (a new seesaw.measured "
+                    + "record)");
+        }
+        if (!old.isEmpty()) {
+            throw refusal(BedEndpoints.MEASUREMENT_NEEDED, null, String.join(" and ", old) + (old.size() > 1 ? " are"
+                    : " is") + " from before the needle change at " + ZCheck.clock(changed), String.join("; ", steps),
+                    legs, m.version, dry);
         }
         if (!s.known) {
             throw refusal(COLLISION, null, "the head's place is not known (" + s.why + ")", s.next, legs, m.version,

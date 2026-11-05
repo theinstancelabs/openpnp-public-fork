@@ -42,6 +42,8 @@ public final class BedModel {
     final double rLo, rHi, g1, g2, homeRepeatMm, seesawErrMm;
     final Double k1, k2, kRaw;
     final Long kHomeAtMs, seesawHomeAtMs;
+    /** When the see-saw was measured ({@code seesaw.measured.atMs}), K with it; null when the file does not say. */
+    public final Long seesawAtMs;
     private final List<Obj> obstacles = new ArrayList<>();
     private final List<Tool> tools = new ArrayList<>();
 
@@ -411,6 +413,7 @@ public final class BedModel {
         how(measured, "seesaw.measured");
         seesawErrMm = atLeast0(measured, "errMm", "seesaw.measured");
         seesawHomeAtMs = optionalLong(measured, "homeAtMs", "seesaw.measured");
+        seesawAtMs = optionalLong(measured, "atMs", "seesaw.measured");
         Set<String> toolIds = new HashSet<>();
         JsonArray ts = array(j, "tools", "");
         for (int i = 0; i < ts.size(); i++) {
