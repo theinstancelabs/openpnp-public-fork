@@ -9,6 +9,7 @@ import math
 import os
 from collections import deque
 
+from . import collision
 from . import personality as personalities
 from .faults import OK_FAULTS, Faults, seconds
 from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, PA5_TOOLS, Machine, Pa5Switch
@@ -19,7 +20,7 @@ INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": '
 # is refused, not ignored. Ok faults check theirs in faults.KEYS; physical faults take their axes (PHYSICAL_FAULTS).
 REQUEST_KEYS = {"state": (), "clear": (), "stop": (), "power_cycle": ("link", "down_s"),
                 "set": ("kill_messages", "sim_cap", "vacuum", "rs485", "mcp3426", "surface_z", "surfaces", "seal_drop",
-                        "homing_move_delay_s", "pa5_switch")}
+                        "homing_move_delay_s", "pa5_switch", "collision_model")}
 FAULT_KEYS = {"inject": ("kind", "text", "after_s"), "inject_bytes": ("hex", "text", "after_s"),
               "partial": ("text", "after_s"), "halt": ("reason",), "disconnect": ("down_s",), "frozen": ("on",)}
 # Faults of the physical machine (INF-08): fault -> the axis keys it takes (mm, signed; at least one)
@@ -299,6 +300,7 @@ class Simulator:
         homing_delay = seconds(req["homing_move_delay_s"], "homing_move_delay_s") \
             if "homing_move_delay_s" in req else None
         pa5 = self._pa5_switch(req["pa5_switch"]) if "pa5_switch" in req else None
+        model = collision.Model(req["collision_model"]) if req.get("collision_model") is not None else None
         rs485 = req.get("rs485", {})
         if not isinstance(rs485, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in rs485.items()):
             raise ValueError("rs485 must map request hex to reply hex (strings), not %r" % (rs485,))
@@ -324,6 +326,8 @@ class Simulator:
         if "pa5_switch" in req:
             self.machine.pa5 = pa5
             self.fw.pa5(t)  # wired under the head: its state from where the head is
+        if "collision_model" in req:
+            self.machine.collision = model
         return {"ok": True}
 
     @staticmethod
@@ -400,6 +404,8 @@ class Simulator:
             "homing_move_delay_s": self.machine.homing_move_delay_s,
             "n1_sealed": self.machine.n1_sealed(fw),
             "pa5": None if self.machine.pa5 is None else self.machine.pa5.describe(),
+            "collision_model": None if self.machine.collision is None else self.machine.collision.describe(
+                *st.realtime_physical(t)[:3]),
             "stepper_timeout_s": fw.stepper_timeout_ms / 1000.0,
             "homed": {"X": fw.homed[0], "Y": fw.homed[1], "Z": fw.homed[2]},
             "homing_phase": fw.homing_phase,

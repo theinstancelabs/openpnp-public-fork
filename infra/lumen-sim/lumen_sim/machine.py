@@ -102,6 +102,7 @@ class Machine:
         # move); the cause is unknown (README, "Homing time"). A knob, not a fault: it outlives a power cycle and clear.
         self.homing_move_delay_s = 0.0
         self.pa5 = None               # the PA5 switch (Pa5Switch), or None: nothing wired, M43 P5 reads 0
+        self.collision = None         # the collision model (collision.Model), or None: no objects, no see-saw model
 
     def vacuum_counts(self, fw):
         if callable(self.vacuum):
@@ -121,6 +122,8 @@ class Machine:
         if callable(self.vacuum) or not (fw.fans[PUMP] and fw.fans[VALVE]):
             return False
         x, y, z = fw.stepper.realtime_physical(fw.now)[:3]
+        if self.collision is not None:  # the model's flat tops only, never the bare bed (Process 11-04 17:3x)
+            return self.collision.n1_sealed(x, y, z)
         surface = self.surface_at(x, y)
         return surface is not None and z <= surface + 1e-9
 
@@ -136,8 +139,14 @@ class Machine:
         return self.rs485.get(request_hex.upper())
 
     def release_z(self):
-        """The Z driver lets go: the head moves by z_drop and stays there (the controller does not know)."""
-        self.physical[2] += self.z_drop
+        """The Z driver lets go: the see-saw falls to its rest (the collision model's seesaw.restRaw), else the head
+        moves by z_drop; the end stops hold it, and it stays there (the controller does not know)."""
+        rest = None if self.collision is None else self.collision.rest
+        self.physical[2] = self.limit_z(self.physical[2] + self.z_drop if rest is None else rest)
+
+    def limit_z(self, z):
+        """Where the arm's end stops (the collision model's seesaw.endStopsRaw) hold a raw Z; without a model, z."""
+        return z if self.collision is None else min(max(z, self.collision.stops[0]), self.collision.stops[1])
 
     def clear_faults(self):
         """Switches back where they belong, no drop. Nothing moves: the next home finds the true switches."""

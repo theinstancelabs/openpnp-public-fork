@@ -138,9 +138,9 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
   move ends where the switch now triggers (at once if the head is already past it), and so does its wait.
 - A power cycle resets the belief and the counts; the head stays where it is (a released Z drops, below).
 - Releasing an energised Z (`M18`/`M84` with Z or no axis, the idle timeout, `M112` 0.85 s after the kill, a power
-  cycle) moves the head by the `z_drop` fault's distance (default 0). It stays there: the next block with Z steps
-  re-energises Z (at once when planned: `Z_LATE_ENABLE` is off, planner.cpp), as does `M17`. A move with no Z steps
-  leaves Z released.
+  cycle) moves the head by the `z_drop` fault's distance (default 0), or to the see-saw's rest with a collision
+  model (below). It stays there: the next block with Z steps re-energises Z (at once when planned: `Z_LATE_ENABLE`
+  is off, planner.cpp), as does `M17`. A move with no Z steps leaves Z released.
 - The control state's `head` gives X/Y/Z `physical`, `logical` (the step counts now, in G92 coordinates; M114 prints
   the planned end) and `offset` = physical - logical: what the controller does not know. At boot the offset is the
   park position; after a true home and no faults it is 0. Values are rounded to 1e-6 mm.
@@ -176,6 +176,7 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
   `surface_z: null` removes it. Surfaces are the machine's, so they outlive a power cycle and `clear`.
 - Because it follows the physical head, a `z_shift` or a `z_drop` moves the contact the backend's N1 touch reads.
 - The state shows `surface_z`, `surfaces`, `seal_drop` and `n1_sealed`. The I2C mux and register are not checked.
+- With a collision model loaded, its flat tops replace `surface_z` and `surfaces` ("The collision model", below).
 - A callable `vacuum=(firmware) -> int` passed to `Simulator` replaces all of this.
 
 **The PA5 switch (the user, 11-04).** A limit switch near the first feeder on PA5 (the HACK header); N1 and the needle
@@ -207,6 +208,51 @@ nothing.
 - The state's `pa5`: the settings, `level`, `pressed`, `tool`, `trip_z` and `depth_mm` (the deepest of this press),
   `overtravels`, as of the last observation (from its wiring on): the state request reads nothing. The switch is the
   machine's: it outlives a power cycle and `clear`.
+
+**The collision model (INF-12).** Backend's `<config>/instancelabs/collision-model.json` (schema 1; the design is
+`docs/instancelabs/collision-model-design.md`, sections 2 and 3): the bed plane, the objects on the bed and the tools'
+shapes. Load it with `--collision-model PATH` or `set {"collision_model": <the file's JSON object>}`; `null` removes
+it. lumen-sim is the physical truth: it reports a tool layer that really goes below an object's top, with no margin and
+no error term (the engine's proof adds those). So a clear proof never meets a collision here, and an engine bug, or a
+fault the engine cannot see, shows up in `sim_errors`.
+- Loading checks what lumen-sim uses: schema 1, an integer `version`, every outline (`box` [x0, y0, x1, y1] with
+  x0 < x1 and y0 < y1, `circle` [cx, cy, r] with r > 0, `polygon` [[x, y], ...] convex and counter-clockwise with no
+  point on a line between two others), the see-saw (knees, `mmPerRaw` > 0, `K.raw`, `endStopsRaw` [low, high],
+  `restRaw` or null), each object's `id`, `state` and `topZ` (or null) and each tool's `moves` (`n1`, `needle` or
+  `fixed`), `tipEnd` (needed on the see-saw) and layers (`at` `head` or `tip-end`, and one of `aboveTipMm` and
+  `bottomZ`; a fixed part takes only `bottomZ`). It ignores the measurement records, margins, `errMm`, `homeAtMs` and
+  `homeRepeatMm`: those are the proof's error terms. A bad model is refused whole (`ValueError: collision_model...`)
+  and the one loaded stays; the CLI exits 2.
+- The bed: rc(x, y), N1's contact raw with the bed, is the least-squares plane through `bed.plane.points`. lumen-sim
+  places every height on it, so it needs at least 3 points not on one line. The bed is an object too: top 0 inside
+  `bed.outline`, id `bed`.
+- Tip heights, each at its own tip's X/Y (the head + `tipEnd`), with r the head's physical Z: N1 h1 = g1 (min(r, k1) -
+  rc), the needle h2 = g2 ((K - rc) - max(r, k2)). A layer's bottom is its tool's tip + `aboveTipMm`; a part that does
+  not ride the see-saw has `bottomZ` above the bed at the head (+ its `tipEnd`, if it has one). Heights are compared in
+  the gantry's frame, where the bed is g1 rc(x, y) and an object's top is bed + `topZ`.
+- The sweep: at the end of each block (also one a quick stop or a kill cuts short) and at each fall of Z (below), each
+  layer's swept area, the convex hull of its outline where the leg starts and ends, is clipped against each object.
+  The layer collides when its lowest bottom on the leg (at an end: the see-saw maps are monotonic) is below the
+  object's highest top over the overlap. A circle is the 64-gon around it (at most 0.12 % of r outside it); sides
+  that only touch do not overlap. An object not measured (`topZ` null, or state added, moved or removed) blocks its
+  outline at every height (`overlapMm` null).
+- Contact: a tip (a layer at the tip end) up to 0.25 mm into a measured top is resting on it, as on what it probes or
+  dispenses on, and is no collision. 0.25 mm is a guess (one coarse probe step: a touch stops within a step past the
+  top) until Process measures the tips' give. Any other layer below a top, or a tip deeper, collides.
+- Each collision goes to `sim_errors` once, as `{"t", "line", "error": "collision: needle (hub) 0.400 mm below the top
+  of block", "object", "tool", "layer", "overlapMm"}` ("collision: camera (camera and light) over added, not measured"
+  for one not measured); `line` is the block's G-code line, null for a fall. It is not reported again while that
+  layer stays in that object, and again after a leg that ended clear of it. The head is not stopped.
+- The see-saw: when the Z driver lets go (a power cycle, `M18`/`M84` with Z, the idle timeout, `M112`: stock 0.85 s
+  after it, where its coast ended, il-safety at once, where the head stopped), Z goes to `seesaw.restRaw`, or by the
+  `z_drop` when the rest is null, as without a model. The fall is swept. `seesaw.endStopsRaw` hold Z, also before a
+  home: steps past a stop are lost (the counts go on, the head does not).
+- N1's vacuum: with a model, N1 seals only on the top of a measured object that names its `surface` (a board, a
+  blank: flat), at least 2 mm inside its outline (Process 11-04). Never on the bare bed (out of N1's reach) or a
+  fixture; `surface_z` and `surfaces` count for nothing then.
+- The state's `collision_model`: `version`, and `tips`, each see-saw tip's height above the bed under it now; null
+  without a model. The model is the machine's: it outlives a power cycle and `clear`. Not swept: a physical fault's
+  jump (`lost_steps`, `z_shift`).
 
 **Homing (`G28`).**
 - It waits for motion, then homes X, then Y, then Z. Z homes at the safe point (0,0), then moves to Z 31.5. A and B
@@ -307,7 +353,7 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 
 | Request | Effect |
 |---|---|
-| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, pa5, homing_move_delay_s, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, kill_messages, sim_cap, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
+| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, pa5, collision_model, homing_move_delay_s, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, kill_messages, sim_cap, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
 | `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now; with `"count": 2`, the 3rd and 4th. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. Keys: `nth`, `match`, `count`. Several rules may hit one line; each is used up. A power cycle ends every ok fault: they are the controller's, and the reboot clears them (the physical faults stay). |
 | `{"cmd": "fault", "fault": "delay_ok", "s": 0.5, ...}` | Extra delay before that `ok`; `"random": [lo, hi]` for a seeded random delay. Later output queues behind it, until `clear` or a power cycle. |
 | `{"cmd": "fault", "fault": "dup_ok", ...}` | The `ok` is sent twice. |
@@ -318,7 +364,7 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 | `{"cmd": "fault", "fault": "disconnect", "down_s": 1.0}` | Close the pty master (the host gets EIO) and remove the link, so the port is absent, as an unplugged one. After `down_s`, a new pty behind the link; the controller state is kept. `"down_s": null` stays down until a power cycle, and so does any `down_s` while the board is in DFU (its bootloader shows no serial port). |
 | `{"cmd": "fault", "fault": "frozen", "on": true}` | Stop reading the port (`on` is `true` or `false`, default `true`). The host's writes block once the pty buffer fills. Ends with `clear`, `"on": false` or a power cycle. |
 | `{"cmd": "power_cycle", "link": null, "down_s": 0}` | Close the master, boot state, new pty behind the link, not frozen; output the old board had not sent and pending injections are dropped. The head stays put (a stock kill's last 0.6 s of motion ends at power off). `"link"` publishes it at a new path instead and removes the old link (the board's ttyACM0 becoming ttyACM1; here e.g. ttyLUMEN0 to ttyLUMEN1). `"down_s": 2` keeps the port absent for 2 s first, as while the board resets and USB re-enumerates (the board is reset at once; default 0). The new `link` must be an absolute path; it is checked and its lock taken before the reset, and held through the down time. If the port still cannot be published after the reset (no pty left, the folder gone), the reply is `"ok": true` (the board was reset) with `link_error`, and `link` says where the port is (back at the old path if it could). Ok faults end (above). |
-| `{"cmd": "set", "kill_messages": true, "sim_cap": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000, "homing_move_delay_s": 0.142, "pa5_switch": {"presses": [...]}}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"; `pa5_switch`: "The PA5 switch"; `homing_move_delay_s`: "Homing time", default 0; `sim_cap`: "The simulator line"). |
+| `{"cmd": "set", "kill_messages": true, "sim_cap": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000, "homing_move_delay_s": 0.142, "pa5_switch": {"presses": [...]}, "collision_model": {"schema": 1, ...}}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"; `pa5_switch`: "The PA5 switch"; `collision_model`: "The collision model"; `homing_move_delay_s`: "Homing time", default 0; `sim_cap`: "The simulator line"). |
 | `{"cmd": "fault", "fault": "home_offset", "x": 0.5, "y": -0.2}` | The X/Y switches now trigger at these physical positions (mm), so every later home of that axis lands that far off while M114 says 0. Nothing moves until a home. A new value replaces the old one per axis. |
 | `{"cmd": "fault", "fault": "lost_steps", "x": 0.3, "y": 0}` | The head moves by this much now, with no command, also mid-move. M114 and the counts do not change. Calls add up; a home removes it. |
 | `{"cmd": "fault", "fault": "z_shift", "z": 0.1}` | The whole Z frame shifts: the head moves by z now and the Z switch moves with it, so later homes keep the shift. Calls add up. |
@@ -341,8 +387,8 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 - A line the model cannot run (for example `M203 X0` then `G1 X10`, a division by zero) is acked as the board would
   ack it. It is recorded in the state's `sim_errors` (`t`, `line`, `error`; the last 100, kept across power cycles),
   on stderr and as a `#` line in the I/O log (bytes outside ASCII escaped, so line noise cannot break the log).
-  Check `sim_errors` after a test: an entry is a gap in the model or a simulated physical event (a PA5 overtravel), not
-  a board reply.
+  Check `sim_errors` after a test: an entry is a gap in the model or a simulated physical event (a PA5 overtravel, a
+  collision), not a board reply.
 - `M92` with a zero value is acked and ignored for that axis (recorded): on the board the axis would stop moving.
 - An error outside any command halts the board with `halt_reason` `sim error: <error>`. The process, the port and the
   control channel stay up, and a power cycle recovers.
@@ -380,12 +426,14 @@ From the repository root:
 python3 -m unittest discover -s infra/lumen-sim/tests -t infra/lumen-sim
 ```
 
-- 266 tests, about 60 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 16 s left).
+- 333 tests, about 65 s; set `LUMEN_SIM_SKIP_REALTIME=1` to skip the 4 real-time reproductions (about 16 s left).
 - Most tests run on the fake clock and finish in milliseconds. The pty tests start a `lumen_sim` process each and
   take a few seconds.
 - `tests/golden/` holds excerpts of `runs/serial.log`; see its README.
 - `tests/test_physical.py` covers INF-08: the physical faults (also during a home), the Z release and drop, the idle
   timeout (also at non-round times, under a hang guard, `tests/hang.py`) and the N1 touch against surfaces.
+- `tests/test_collision_model.py` covers INF-12: loading, tip heights on a tilted bed, the sweep, the see-saw's rest
+  and end stops, N1's seal, and that nothing changes without a model.
 - `tests/test_docs.py` checks the README's USB-identity instructions, including that its `sed` line works.
 - The golden tests compare reply text exactly and timing within 3 %.
 - `--sim-cap` (BR-47): with it off, M115 equals the golden byte for byte; with it on, the line comes last before the
@@ -486,9 +534,11 @@ Results on 10-31 (before BR-43/47):
 - Not modelled:
   - stepper current;
   - TMC drivers (`M122` prints nothing);
-  - crashes at the far ends: the head goes where the steps say, and loses steps only through `lost_steps`;
-  - how a released Z moves: the `z_drop` is instant and fixed, with no slow sag and no snap to a full step when
-    re-energised;
+  - crashes at the far ends: the head goes where the steps say, and loses steps only through `lost_steps` (and Z at
+    a collision model's end stops);
+  - how a released Z moves: the `z_drop` (or the see-saw's rest) is instant and fixed, with no slow sag and no snap to
+    a full step when re-energised;
+  - a collision's force: the head is not stopped, and a tip pressing on a top has no give but the 0.25 mm;
   - USB identity: a pty has none;
   - the boot banner, which is lost on USB CDC anyway;
   - `N` line numbers and checksums;

@@ -154,7 +154,8 @@ class Firmware:
         self.ws = [0.0] * 5                         # position_shift (G92)
         self.position = [lround(f32(self.cur[i] * self.steps[i])) for i in range(5)]  # planner.position
         self.stepper = Stepper(self.position, machine.physical, self.steps, machine.switches)
-        self.stepper.on_move = self.pa5  # each move's end: a press, an overtravel
+        self.stepper.on_move = self._moved  # each move's end: a press, an overtravel, a collision
+        self.stepper.limit_z = machine.limit_z  # the see-saw's end stops (the collision model's)
         self.pa5_pull = 0  # PA5's input mode (M42 P53 T): what it reads with nothing wired
         self.homed = [False, False, False]
         self.enabled = {a: False for a in AXES}
@@ -267,10 +268,10 @@ class Firmware:
         """The MCU stops answering from now on (halt_time: the output it had not sent by then never goes)."""
         self.halted, self.halt_reason, self.halt_time = True, reason, self.now
 
-    def _model_error(self, line, error):
+    def _model_error(self, line, error, **fields):
         if self._on_error:
             text = error if isinstance(error, str) else "%s: %s" % (type(error).__name__, error)
-            self._on_error({"t": self.now, "line": line, "error": text})
+            self._on_error(dict({"t": self.now, "line": line, "error": text}, **fields))
 
     # ------------------------------------------------------------------ output
     def _emit(self, text, kind="line"):
@@ -574,10 +575,13 @@ class Firmware:
         raise Halted(reason)
 
     def release(self, axis):
-        """stepper.disable_axis(): the driver lets go. A released Z moves by the machine's z_drop."""
+        """stepper.disable_axis(): the driver lets go. A released Z falls (Machine.release_z): to the see-saw's rest,
+        else by the machine's z_drop."""
         if axis == "Z" and self.enabled["Z"]:
+            self.stepper.update(self.now)  # il-safety's kill freezes the stepper now: the head stops, then falls
+            start = self.machine.physical[:3]
             self.machine.release_z()
-            self.pa5(self.now)  # a drop under or off the switch, where the head is (a quick stop's move may run)
+            self._moved(start)  # a drop under or off the switch, and what the fall hits
         self.enabled[axis] = False
 
     # ------------------------------------------------------------------ positions
@@ -657,7 +661,7 @@ class Firmware:
                 self.enabled[AXES[i]] = True
         self.position = tgt
         return Block(tgt, delta, Trapezoid(n, rate, accel, r0, r0),
-                     extra_delay=self.machine.homing_move_delay_s if self.in_g28 else 0.0)
+                     extra_delay=self.machine.homing_move_delay_s if self.in_g28 else 0.0, line=self.ring[0][0])
 
     def _prepare_line_to(self, dest):
         if self.soft_endstops:
@@ -854,6 +858,14 @@ class Firmware:
         # when a route reads it
         if cmd.val("P") == 5:
             self._emit(PA5_LINE % self.pa5(self.now))
+
+    def _moved(self, start, line=None):
+        """The head moved from start (physical X/Y/Z) to where it is now (a block ended or was cut, or Z fell): the
+        PA5 switch there, and what the move hit (the collision model's sweep, each collision once in sim_errors)."""
+        self.pa5()
+        if self.machine.collision is not None:
+            for hit in self.machine.collision.sweep(start, self.machine.physical[:3]):
+                self._model_error(line, **hit)
 
     def pa5(self, at=None):
         """The PA5 switch with the head where it is at time `at` (default: where the last move ended): the pin's

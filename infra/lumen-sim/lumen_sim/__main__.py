@@ -3,7 +3,7 @@
 usage:
   python3 -m lumen_sim --link PATH [--personality stock|il-safety] [--control SOCK] [--io-log FILE]
                        [--time-scale 1.0] [--park X,Y,Z] [--kill-messages] [--vacuum N] [--surface-z Z]
-                       [--seed N] [--sim-cap]
+                       [--seed N] [--sim-cap] [--collision-model PATH]
   python3 -m lumen_sim ctl --control SOCK state
   python3 -m lumen_sim ctl --control SOCK fault '{"fault": "no_ok", "match": "^G4"}'
   python3 -m lumen_sim ctl --control SOCK set '{"vacuum": -1600000}'
@@ -20,7 +20,7 @@ import os
 import signal
 import sys
 
-from . import control
+from . import collision, control
 from .core import Simulator
 from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM
 from .pty_link import LinkGuard, check_link_path
@@ -59,6 +59,9 @@ def run(argv):
     ap.add_argument("--sim-cap", action="store_true",
                     help="M115 also sends 'Cap:SIMULATOR:lumen-sim', which OpenPnP's SimGuard takes as a simulator "
                          "(SIM-feature scenarios only; never for the bug reproductions: the board never sends it)")
+    ap.add_argument("--collision-model", metavar="PATH",
+                    help="the collision model, Backend's collision-model.json (schema 1): collisions in sim_errors, "
+                         "the see-saw's rest and end stops, N1's seal (README, 'The collision model')")
     args = ap.parse_args(argv)
     if args.time_scale <= 0:  # NaN and inf are refused by _finite: the loop would never sleep
         ap.error("--time-scale must be > 0")
@@ -70,6 +73,12 @@ def run(argv):
                     seed=args.seed, sim_cap=args.sim_cap)
     if args.surface_z is not None:
         sim.machine.surface_z = args.surface_z
+    if args.collision_model:
+        try:
+            with open(args.collision_model, encoding="utf-8") as f:
+                sim.machine.collision = collision.Model(json.load(f))
+        except (OSError, ValueError) as e:  # JSONDecodeError is a ValueError
+            ap.error("--collision-model: %s" % e)
     guard = LinkGuard()  # before anything is opened: it must hold none of it
     try:
         runner = Runner(sim, args.link, control=args.control, io_log=args.io_log, time_scale=args.time_scale,

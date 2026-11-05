@@ -68,7 +68,7 @@ def trapezoid(n, rate, accel, r0=MINIMAL_STEP_RATE, rf=MINIMAL_STEP_RATE):
 
 
 class Block:
-    def __init__(self, end, delta, profile, extra_delay=0.0):
+    def __init__(self, end, delta, profile, extra_delay=0.0, line=None):
         self.end = list(end)          # planner step position after the block
         self.delta = list(delta)      # signed steps per axis
         self.n = max(abs(d) for d in delta)
@@ -78,6 +78,7 @@ class Block:
         self.t_start = None
         self.t_end = None
         self.cut = None               # step events at which an endstop ended it
+        self.line = line              # the G-code line that queued it, when known
 
     def counts_after(self, events):
         events = max(0, min(self.n, events))
@@ -104,7 +105,9 @@ class Stepper:
         self.endstop_hit = False            # latched like Endstops::hit_state
         self.freeze_at = None               # kill(): the stepper ISR stops at this time
         self.frozen = False
-        self.on_move = None                 # called after the head moved (a block ended or was cut)
+        self.on_move = None                 # on_move(start, line) after the head moved (a block ended or was cut):
+        # start = physical X/Y/Z before, line = the block's G-code line
+        self.limit_z = None                 # limit_z(z): where the arm's end stops hold Z (None: nothing does)
 
     # --- queries ---
     def update(self, now):
@@ -164,7 +167,10 @@ class Stepper:
 
     def realtime_physical(self, now):
         counts = self.realtime_counts(now)
-        return [p + (c - k) / s for p, c, k, s in zip(self.physical, counts, self.counts, self.steps)]
+        out = [p + (c - k) / s for p, c, k, s in zip(self.physical, counts, self.counts, self.steps)]
+        if self.limit_z:  # a block is straight: Z goes one way, so the stop holds it from there to the block's end
+            out[2] = self.limit_z(out[2])
+        return out
 
     # --- changes ---
     def add(self, block, now):
@@ -191,7 +197,7 @@ class Stepper:
         """Abort the running block where it is and drop the queue."""
         if self.blocks and self.blocks[0].t_start is not None:
             b = self.blocks[0]
-            self._move_to(b.counts_after(int(b.profile.steps_at(now - b.t_start) + 1e-9)))
+            self._move_to(b.counts_after(int(b.profile.steps_at(now - b.t_start) + 1e-9)), b.line)
         if self.blocks:
             self.last_end = now
         self.blocks.clear()
@@ -231,14 +237,17 @@ class Stepper:
 
     def _finish(self, b):
         if b.cut is not None:
-            self._move_to(b.counts_after(b.cut))
+            self._move_to(b.counts_after(b.cut), b.line)
             self.endstop_hit = True
         else:
-            self._move_to(b.end)
+            self._move_to(b.end, b.line)
 
-    def _move_to(self, counts):
+    def _move_to(self, counts, line):
+        start = self.physical[:3]
         for i in range(NAXES):
             self.physical[i] += (counts[i] - self.counts[i]) / self.steps[i]
+        if self.limit_z:  # steps past an end stop are lost: the counts go on, the head does not
+            self.physical[2] = self.limit_z(self.physical[2])
         self.counts = list(counts)
         if self.on_move:
-            self.on_move()
+            self.on_move(start, line)
