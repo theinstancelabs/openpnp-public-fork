@@ -251,26 +251,40 @@ board outline: it gets no paste (its paste would land off the board). Move it on
 this board.`; plural `R2, R3 are not inside …: they get no paste (their paste …)`). A pad turned 180° gives one
 package signature at any footprint angle.
 
+**Centre pads (BR-91 (a), `centrePads` `copper` (the default) | `design`).** With `copper`, an SMD pad on F.Cu at a
+footprint's origin, at least 1 mm², without paste of its own, in a footprint with other paste (a QFN's exposed pad) is
+pasted on its copper: one opening named after the pad (`IC3.33`), with the pad's shape and paste margin (the Nano's 3.25
+mm pad: 3.10 mm), and the paste openings drawn on it are dropped (the Nano's 1.27 mm square `33~1`, mobo U2's nine
+windows). A lone pad (a test point) has no other paste and gets none. One `CENTRE_PAD_COPPER` warning per package (group
+3) gives the design's share: `IC3's centre pad 33 has no paste of its own: it is pasted on its copper as one opening
+(3.10 × 3.10 mm). The design pastes 1.61 mm² of its 10.38 mm² (16 %); centrePads=design keeps the design's paste.`
+`design` keeps the file's paste (the windows as pads of their own, `IC3.33~1`, and `QFN_WINDOWS`). Re-importing a board
+saved before BR-91 renames the pad (`IC3.33~1` → `IC3.33`); its package's footprint changed, so the package is saved
+as a new `…~2` (the old one is never changed): set `pastePartial` again on the new package id, and per-pad mappings
+again on the new pad name (a carried `…#33~1` mapping no longer matches a pad).
+
 | Method + path | Query | Does |
 |---|---|---|
-| `POST /api/boards/import` | `file` (the browser's file name), `pasteDnp?` (0 \| 1) | The preview: `{file: {name, bytes, sha256}, decisions, kicad: {version, generator, generatorVersion, major}, board: {widthMm, heightMm, outline, origin, originKicad}, suggestedName, slug, exists, pasteDnp, counts, placements, fiducials, skipped: {bottom, artOnly, dnp, pasteOnly}, packages, parts, warnings, attach, art}`. A package: `{baseId, variant, id, state (new \| reuse \| suffixed), why, usesPadTypesOf, lib, kicadName, refs, fiducial, bodyW, bodyH, pads, padTypes, untypedPads, outcome}`; a placement: `{id, ref, value, type, enabled, x, y, rotation, packageId, partId, pads, why, outcome}` with `outcome` `paste` \| `no-pad-type` \| `not-dispensed`. |
-| `POST /api/boards/import/save` | `file`, `name` (1 to 60 characters, a letter or digit), `replace` (0 \| 1), `sha256`, `decisions`, `pasteDnp?` | Writes the board file, the drawing and the upload under `<configDir>/instancelabs/boards/<slug>/`, and OpenPnP's parts, packages and board list, in one transaction that undoes every step on a failure. 201 `{file, name, slug, replaced, packages, parts, art: {id, kind}, counts, warnings, boards}` (`boards` = `GET /api/boards`). |
-| `POST /api/boards/import/attach` | `file`, `board` (a listed board file), `name?`, `replace`, `sha256`, `pasteDnp?` | Gives the KiCad drawing to an existing board file whose placements match (e.g. `ftp.board.xml`); the board file is not changed. 201 `{slug, name, board, art, maxOffsetMm, offsets, replaced, boards}`. |
+| `POST /api/boards/import` | `file` (the browser's file name), `pasteDnp?` (0 \| 1), `centrePads?` (`copper` \| `design`) | The preview: `{file: {name, bytes, sha256}, decisions, kicad: {version, generator, generatorVersion, major}, board: {widthMm, heightMm, outline, origin, originKicad}, suggestedName, slug, exists, pasteDnp, centrePads, counts, placements, fiducials, skipped: {bottom, artOnly, dnp, pasteOnly}, packages, parts, warnings, attach, art}`. A package: `{baseId, variant, id, state (new \| reuse \| suffixed), why, usesPadTypesOf, lib, kicadName, refs, fiducial, bodyW, bodyH, pads, padTypes, untypedPads, outcome}`; a placement: `{id, ref, value, type, enabled, x, y, rotation, packageId, partId, pads, why, outcome}` with `outcome` `paste` \| `no-pad-type` \| `not-dispensed`. |
+| `POST /api/boards/import/save` | `file`, `name` (1 to 60 characters, a letter or digit), `replace` (0 \| 1), `sha256`, `decisions`, `pasteDnp?`, `centrePads?` | Writes the board file, the drawing and the upload under `<configDir>/instancelabs/boards/<slug>/`, and OpenPnP's parts, packages and board list, in one transaction that undoes every step on a failure. 201 `{file, name, slug, replaced, packages, parts, art: {id, kind}, counts, warnings, boards}` (`boards` = `GET /api/boards`). |
+| `POST /api/boards/import/attach` | `file`, `board` (a listed board file), `name?`, `replace`, `sha256`, `pasteDnp?`, `centrePads?` | Gives the KiCad drawing to an existing board file whose placements match (e.g. `ftp.board.xml`); the board file is not changed. 201 `{slug, name, board, art, maxOffsetMm, offsets, replaced, boards}`. |
 | `GET /api/board-art/{id}` | | The drawing JSON of an art id (`BOARD_IMPORT_DESIGN.md` §4.1), `Cache-Control: private, max-age=31536000, immutable` (content addressed). 404 `art-gone`: `This board drawing is no longer known: plan the board again`. |
 
-Errors besides the common ones: 400 `bad-request` (`The upload is empty.`, `Send the file itself, not JSON.`, a bad
-name, `The file changed since the preview: upload it again.`), `not-kicad`, `kicad-syntax` (`Line 1203, column 17:
-…`), `too-complex`, `no-origin`; 409 `exists` (`A board named "ftp" exists (imported 13:02): replace it?`, with
-`exists`), `preview-stale` (OpenPnP's packages or parts changed since the preview; carries the new `preview`),
-`ids-exhausted`, `refused` (OpenPnP's window did not respond within 10 s; attach: not listed, or no longer matching);
-413 `too-large`; 500 `internal` (`Could not save the board: …. Nothing was changed.`).
+Errors besides the common ones: 400 `bad-request` (`The upload is empty.`, `Send the file itself, not JSON.`,
+`'centrePads' must be copper or design`, a bad name, `The file changed since the preview: upload it again.`),
+`not-kicad`, `kicad-syntax` (`Line 1203, column 17: …`), `too-complex`, `no-origin`; 409 `exists` (`A board named "ftp"
+exists (imported 13:02): replace it?`, with `exists`), `preview-stale` (OpenPnP's packages or parts changed since the
+preview; carries the new `preview`), `ids-exhausted`, `refused` (OpenPnP's window did not respond within 10 s; attach:
+not listed, or no longer matching); 413 `too-large`; 500 `internal` (`Could not save the board: …. Nothing was
+changed.`).
 
 **`GET /api/boards`** entries add `widthMm`, `heightMm`, `fiducials: [{id, bx, by}]`, `art: {id, kind (kicad |
 fallback), note}` (a note when the board changed since its KiCad drawing), `origin` and `imported: {slug, name, atMs,
-sourceName, kicadVersion, how, board, skipped, pasteDnp}` (BR-88: `skipped` = the footprints the upload does not
-place, as its preview listed them: `{bottom` (the other side, not read), `artOnly: [{ref, why}]` (drawn only), `dnp`
-(do-not-place: pasted only when `pasteDnp`), `pasteOnly` (pasted, nothing placed)`}`; `pasteDnp` = the upload's choice;
-both null for drawings saved before them). `imported` is the board's own upload (BR-88): the newest save of this board
+sourceName, kicadVersion, how, board, skipped, pasteDnp, centrePads}` (BR-88: `skipped` = the footprints the upload
+does not place, as its preview listed them: `{bottom` (the other side, not read), `artOnly: [{ref, why}]` (drawn
+only), `dnp` (do-not-place: pasted only when `pasteDnp`), `pasteOnly` (pasted, nothing placed)`}`; `pasteDnp` = the
+upload's choice; both null for drawings saved before them; BR-91: `centrePads` = the upload's `copper` | `design`,
+null before it). `imported` is the board's own upload (BR-88): the newest save of this board
 file (`<slug>/<slug>.board.xml`) or attach to it, while the board has that upload's geometry (an upload a replace
 moved to `history/` no longer counts); any other file (a byte copy, e.g. uinav's) gets the upload of its drawing. The
 drawing (`art`, `origin`) is found by geometry: boards saved from one file share the newest upload's. A board without

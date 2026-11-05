@@ -681,6 +681,9 @@ public class BoardImportSimTest {
         refused(upload("/api/boards/import?file=x.json", "{\"file\":\"ftp\"}".getBytes(StandardCharsets.UTF_8)), 400,
                 "bad-request");
         refused(upload("/api/boards/import?file=x", new byte[0]), 400, "bad-request");
+        JsonObject centre = refused(upload("/api/boards/import?file=ftp.kicad_pcb&centrePads=solid", ftp), 400,
+                "bad-request");
+        assertEquals("'centrePads' must be copper or design", centre.get("reason").getAsString());
         JsonObject mod = refused(upload("/api/boards/import?file=R.kicad_mod",
                 "(footprint \"R_0603\" (layer \"F.Cu\"))".getBytes(StandardCharsets.UTF_8)), 400, "not-kicad");
         assertTrue(mod.get("reason").getAsString().startsWith("This is a KiCad footprint"));
@@ -1209,17 +1212,19 @@ public class BoardImportSimTest {
 
     @Test
     public void nanoAndMoboFromUploadToPlan() throws Exception {
-        // nano (KiCad 6, CRLF): FD1/FD2 by the footprint name rule, IC3's paste polygon, connectors without a type
+        // nano (KiCad 6, CRLF): FD1/FD2 by the footprint name rule, IC3's centre pad, connectors without a type
         byte[] nano = fixture("NanoV3.3.kicad_pcb.gz");
         JsonObject pv = preview(nano, "NanoV3.3.kicad_pcb");
+        assertEquals("copper", pv.get("centrePads").getAsString(), "BR-91 (a): the default");
         assertEquals(6, pv.getAsJsonObject("kicad").get("major").getAsInt());
         assertEquals(8, pv.getAsJsonObject("counts").get("placements").getAsInt());
         assertEquals(2, pv.getAsJsonObject("counts").get("fiducials").getAsInt());
         assertEquals(20, pv.getAsJsonObject("skipped").getAsJsonArray("bottom").size());
         Set<String> codes = codes(pv);
         // with the engine the profile check's NEEDS_PROFILE replaces NO_PAD_TYPE (PROFILE_CALIBRATION_DESIGN.md §12.6)
-        assertTrue(codes.containsAll(Arrays.asList("PASTE_POLY", "PAD_NAME_EMPTY", "NEEDS_PROFILE", "BOTTOM_SKIPPED")),
+        assertTrue(codes.containsAll(Arrays.asList("CENTRE_PAD_COPPER", "NEEDS_PROFILE", "BOTTOM_SKIPPED")),
                 codes.toString());
+        assertFalse(codes.contains("PASTE_POLY") || codes.contains("PAD_NAME_EMPTY"), "IC3's square is gone: " + codes);
         assertFalse(codes.contains("NO_PAD_TYPE"), codes.toString());
         int blocked = 0;
         for (JsonElement w : pv.getAsJsonArray("warnings")) {
@@ -1237,31 +1242,36 @@ public class BoardImportSimTest {
         JsonObject listed = byId(ok(get("/api/boards")).getAsJsonArray("files"), "file", saved.get("file").getAsString());
         assertEquals(pv.getAsJsonObject("skipped"), listed.getAsJsonObject("imported").getAsJsonObject("skipped"));
         assertFalse(listed.getAsJsonObject("imported").get("pasteDnp").getAsBoolean());
+        assertEquals("copper", listed.getAsJsonObject("imported").get("centrePads").getAsString());
         JsonObject plan = plan(saved.get("file").getAsString());
         assertEquals(55, plan.getAsJsonArray("pads").size());
+        assertNotNull(byId(plan.getAsJsonArray("pads"), "padId", "IC3.33"), "one opening on the centre pad's copper");
+        assertNull(byId(plan.getAsJsonArray("pads"), "padId", "IC3.33~1"));
         assertEquals(saved.getAsJsonObject("art").get("id").getAsString(),
                 plan.getAsJsonObject("board").getAsJsonObject("art").get("id").getAsString());
         assertEquals(2, plan.getAsJsonObject("board").getAsJsonArray("fiducials").size());
 
-        // mobo (KiCad 9): U2 do-not-place (no paste by default), its windows, the DNP checkbox
+        // mobo (KiCad 9): U2 do-not-place (no paste by default), its windows as designed, the DNP checkbox
         byte[] mobo = fixture("mobo.kicad_pcb.gz");
         JsonObject mpv = preview(mobo, "mobo.kicad_pcb");
         assertEquals(54, mpv.getAsJsonObject("counts").get("placements").getAsInt());
         assertEquals(3, mpv.getAsJsonObject("counts").get("fiducials").getAsInt());
         assertTrue(codes(mpv).contains("DNP_SKIPPED"), codes(mpv).toString());
         assertFalse(mpv.get("pasteDnp").getAsBoolean());
-        JsonObject withDnp = ok(upload("/api/boards/import?file=mobo.kicad_pcb&pasteDnp=1", mobo));
+        JsonObject withDnp = ok(upload("/api/boards/import?file=mobo.kicad_pcb&pasteDnp=1&centrePads=design", mobo));
         assertTrue(withDnp.get("pasteDnp").getAsBoolean());
+        assertEquals("design", withDnp.get("centrePads").getAsString());
         assertEquals(55, withDnp.getAsJsonObject("counts").get("placements").getAsInt());
         assertTrue(codes(withDnp).containsAll(Arrays.asList("DNP_STILL_PASTED", "QFN_WINDOWS")));
         assertNotEquals(mpv.get("decisions").getAsString(), withDnp.get("decisions").getAsString());
-        Res mres = upload("/api/boards/import/save?file=mobo.kicad_pcb&name=mobo&pasteDnp=1&sha256="
+        Res mres = upload("/api/boards/import/save?file=mobo.kicad_pcb&name=mobo&pasteDnp=1&centrePads=design&sha256="
                 + withDnp.getAsJsonObject("file").get("sha256").getAsString() + "&decisions="
                 + withDnp.get("decisions").getAsString(), mobo);
         assertEquals(201, mres.status, mres.toString());
         JsonObject mlisted = byId(mres.json().getAsJsonObject("boards").getAsJsonArray("files"), "file",
                 mres.json().get("file").getAsString());
         assertTrue(mlisted.getAsJsonObject("imported").get("pasteDnp").getAsBoolean(), "U2 is pasted: " + mlisted);
+        assertEquals("design", mlisted.getAsJsonObject("imported").get("centrePads").getAsString());
         JsonObject mplan = plan(mres.json().get("file").getAsString());
         assertEquals(261, mplan.getAsJsonArray("pads").size());
         assertEquals(mres.json().getAsJsonObject("art").get("id").getAsString(),

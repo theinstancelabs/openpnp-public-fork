@@ -365,6 +365,69 @@ public class KicadSyntheticTest {
         assertTrue(codes(Fixtures.board(20240108, boardPaste).proposal).contains("BOARD_PASTE_GRAPHIC"));
     }
 
+    /**
+     * BR-91 (a): an SMD copper pad at the part's origin, at least 1 mm², without paste, in a part with other paste, is
+     * pasted on its copper (its name, shape and paste margin) and the windows drawn on it go; nothing else changes.
+     */
+    @Test
+    public void aBareCentrePadIsPastedOnItsCopper() throws Exception {
+        String pin1 = pad("1", "rect", -3, 0, 0.5, 1, "");
+        String pin2 = pad("2", "rect", 3, 0, 0.5, 1, "");
+        String pins = pin1 + pin2;
+        String bare = "(pad \"5\" smd rect (at %s 0) (size %s %s) (layers \"F.Cu\" \"F.Mask\") %s)\n";
+        String windows = "(pad \"\" smd rect (at 0.6 0.6) (size 0.4 0.4) (layers \"F.Paste\"))\n"
+                + "(fp_rect (start -0.5 -0.5) (end 0.5 0.5) (stroke (width 0)) (fill yes) (layer \"F.Paste\"))\n";
+        String board = OUTLINE
+                + fp("U1", "QFN", 10, 10, 0, "", pin1 + windows + String.format(Locale.ROOT, bare, 0, 2, 2,
+                        "(solder_paste_margin -0.05)") + pin2)
+                + fp("U2", "QFN_PASTED", 25, 10, 0, "", pins + pad("5", "rect", 0, 0, 2, 2, ""))
+                + fp("U3", "QFN_SMALL", 40, 10, 0, "", pins + String.format(Locale.ROOT, bare, 0, 0.9, 0.9, ""))
+                + fp("U4", "QFN_OFF", 10, 30, 0, "", pins + String.format(Locale.ROOT, bare, 1, 2, 2, ""))
+                + fp("J1", "PEG", 25, 30, 0, "", pins + "(pad \"\" np_thru_hole circle (at 0 0) (size 1.5 1.5) "
+                        + "(drill 1.5) (layers \"*.Cu\" \"*.Mask\"))\n")
+                + fp("TP1", "TestPoint", 40, 30, 0, "", String.format(Locale.ROOT, bare, 0, 2, 2, ""))
+                + fp("U5", "QFN_BACK", 10, 45, 0, "", pins + String.format(Locale.ROOT, bare, 0, 2, 2, "")
+                        .replace("\"F.Cu\" \"F.Mask\"", "\"B.Cu\" \"B.Mask\""))
+                + fp("U6", "QFN_GONE", 25, 45, 0, "", pins + String.format(Locale.ROOT, bare, 0, 2, 2,
+                        "(solder_paste_margin -1.1)") + windows);
+        ImportProposal p = Fixtures.board(20240108, board).proposal;
+        assertEquals(ImportRules.COPPER, p.centrePads);
+        assertEquals(List.of("1", "5", "2"), names(p, "U1"), "in its place among the pads; the windows on it are gone");
+        PadP c = pad(p, "U1", "5");
+        assertEquals(1.9, c.w, 1e-9, "the pad's paste margin");
+        assertEquals(1.9, c.h, 1e-9);
+        assertEquals(0, c.x, 1e-9);
+        assertEquals(0, c.y, 1e-9);
+        assertEquals(2, pad(p, "U2", "5").w, 1e-9, "paste of its own: its own opening");
+        assertEquals(List.of("1", "2"), names(p, "U3"), "below 1 mm²");
+        assertEquals(List.of("1", "2"), names(p, "U4"), "not at the origin");
+        assertEquals(List.of("1", "2"), names(p, "J1"), "a hole, not an SMD pad");
+        assertNull(p.placement("TP1"), "a test point: no other paste, so none");
+        assertEquals(List.of("1", "2"), names(p, "U5"), "not on the top copper");
+        assertEquals(List.of("1", "2", "5~1", "5~2"), names(p, "U6"), "its margin removes it: the design's paste");
+        List<ImportWarning> w = p.warnings("CENTRE_PAD_COPPER");
+        assertEquals(1, w.size());
+        assertEquals(3, w.get(0).group);
+        assertEquals(List.of("U1"), w.get(0).refs);
+        assertEquals("U1's centre pad 5 has no paste of its own: it is pasted on its copper as one opening "
+                + "(1.90 × 1.90 mm). The design pastes 1.16 mm² of its 4.00 mm² (29 %); centrePads=design keeps the "
+                + "design's paste.", w.get(0).text);
+
+        ImportProposal d = Fixtures.board(20240108, board, new ImportRules(true, false, ImportRules.DESIGN)).proposal;
+        assertEquals(ImportRules.DESIGN, d.centrePads);
+        assertEquals(List.of("1", "5~1", "2", "5~2"), names(d, "U1"), "the design's windows");
+        assertTrue(d.warnings("CENTRE_PAD_COPPER").isEmpty());
+        assertEquals(1, d.warnings("QFN_WINDOWS").size());
+    }
+
+    static List<String> names(ImportProposal p, String ref) {
+        List<String> l = new ArrayList<>();
+        for (PadP pad : p.packages.get(p.placement(ref).packageIndex).pads) {
+            l.add(pad.name);
+        }
+        return l;
+    }
+
     // ---- ids ------------------------------------------------------------------------------------------------------
 
     @Test

@@ -32,7 +32,8 @@ public class NanoPasteOracleTest {
         List<GerberApertures.Shape> shapes = new ArrayList<>(g.flashes);
         shapes.addAll(g.regions);
 
-        Fixtures.Loaded nano = Fixtures.load(Fixtures.NANO);
+        // the design's paste (BR-91: by default IC3's centre pad is pasted on its copper instead of KiCad's square)
+        Fixtures.Loaded nano = Fixtures.load(Fixtures.NANO, new ImportRules(true, false, ImportRules.DESIGN));
         ImportProposal p = nano.proposal;
         Set<GerberApertures.Shape> used = new HashSet<>();
         int apertures = 0;

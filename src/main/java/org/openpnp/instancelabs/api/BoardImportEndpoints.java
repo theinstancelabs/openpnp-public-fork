@@ -5,6 +5,7 @@ import java.util.Map;
 import org.openpnp.instancelabs.board.BoardArtStore;
 import org.openpnp.instancelabs.board.BoardImporter;
 import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.kicad.ImportRules;
 
 /**
  * KiCad board upload (BOARD_IMPORT_DESIGN.md §3.2): preview, save and attach take the raw file (up to 12 MB) and are
@@ -30,24 +31,27 @@ final class BoardImportEndpoints {
         s.route("GET", "/api/board-art/([^/]*)", this::art);
     }
 
-    /** ?file=<browser file name>[&pasteDnp=1]: what a save would make of the file. */
+    /** ?file=<browser file name>[&pasteDnp=1][&centrePads=copper|design]: what a save would make of the file. */
     Object preview(ApiServer.Request r) throws Exception {
         BoardImporter imp = importer();
         try {
-            return imp.preview(r.bytes(), r.query("file", ""), flag(r, "pasteDnp"));
+            return imp.preview(r.bytes(), r.query("file", ""), flag(r, "pasteDnp"), centrePads(r));
         }
         catch (BoardImporter.ImportException e) {
             throw api(e);
         }
     }
 
-    /** ?file=…&name=…&replace=0|1&sha256=…&decisions=…[&pasteDnp=1]: 201 with the saved board and the board list. */
+    /**
+     * ?file=…&name=…&replace=0|1&sha256=…&decisions=…[&pasteDnp=1][&centrePads=copper|design]: 201 with the saved
+     * board and the board list.
+     */
     Object save(ApiServer.Request r) throws Exception {
         BoardImporter imp = importer();
         Map<String, Object> out;
         try {
             out = imp.save(r.bytes(), r.query("file", ""), r.query("name", null), flag(r, "replace"),
-                    r.query("sha256", null), r.query("decisions", null), flag(r, "pasteDnp"));
+                    r.query("sha256", null), r.query("decisions", null), flag(r, "pasteDnp"), centrePads(r));
         }
         catch (BoardImporter.ImportException e) {
             throw api(e);
@@ -62,7 +66,7 @@ final class BoardImportEndpoints {
         Map<String, Object> out;
         try {
             out = imp.attach(r.bytes(), r.query("file", ""), r.query("board", null), r.query("name", null),
-                    flag(r, "replace"), r.query("sha256", null), flag(r, "pasteDnp"));
+                    flag(r, "replace"), r.query("sha256", null), flag(r, "pasteDnp"), centrePads(r));
         }
         catch (BoardImporter.ImportException e) {
             throw api(e);
@@ -103,6 +107,15 @@ final class BoardImportEndpoints {
             return false;
         }
         throw ApiException.badRequest("'" + name + "' must be 0 or 1");
+    }
+
+    /** BR-91 (a): copper (the default) or design. */
+    private static String centrePads(ApiServer.Request r) throws ApiException {
+        String v = r.query("centrePads", ImportRules.COPPER);
+        if (!v.equals(ImportRules.COPPER) && !v.equals(ImportRules.DESIGN)) {
+            throw ApiException.badRequest("'centrePads' must be copper or design");
+        }
+        return v;
     }
 
     private static ApiException api(BoardImporter.ImportException e) {

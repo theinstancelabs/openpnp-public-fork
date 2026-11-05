@@ -106,7 +106,7 @@ public final class PasteRules {
     /** The paste openings of a top-side footprint, named, with its notes (no time limit). */
     public static Result paste(KicadPcb pcb, Footprint fp) {
         try {
-            return paste(pcb, fp, Deadline.none());
+            return paste(pcb, fp, true, Deadline.none());
         }
         catch (SExprException e) {
             throw new IllegalStateException(e); // Deadline.none() never runs out
@@ -115,10 +115,14 @@ public final class PasteRules {
 
     /**
      * The paste openings of a top-side footprint, named, with its notes, under the import's deadline (one footprint
-     * of a hostile file can hold most of its 1.5 million items).
+     * of a hostile file can hold most of its 1.5 million items). {@code centresOnCopper} (BR-91 (a)): a centre pad
+     * without paste of its own is pasted on its copper ({@link #onCopper}).
      */
-    public static Result paste(KicadPcb pcb, Footprint fp, Deadline deadline) throws SExprException {
+    public static Result paste(KicadPcb pcb, Footprint fp, boolean centresOnCopper, Deadline deadline)
+            throws SExprException {
         Result res = new Result();
+        Pad centre = null;
+        int centreAt = 0;
         List<String> gone = new ArrayList<>();
         List<String> tht = new ArrayList<>();
         List<String> custom = new ArrayList<>();
@@ -127,6 +131,11 @@ public final class PasteRules {
         List<String> zeroNotes = new ArrayList<>();
         for (Pad p : fp.pads) {
             if (!p.onFrontPaste()) {
+                if (centresOnCopper && centre == null && "smd".equals(p.type) && p.onFrontCopper()
+                        && atCentre(fp, p)) {
+                    centre = p;
+                    centreAt = res.apertures.size();
+                }
                 continue;
             }
             if ("thru_hole".equals(p.type)) {
@@ -201,6 +210,9 @@ public final class PasteRules {
                 }
             }
         }
+        if (centre != null) {
+            onCopper(pcb, fp, centre, centreAt, res);
+        }
         name(fp, res, true, deadline);
         polygonNotes(res);
         if (!custom.isEmpty()) {
@@ -231,6 +243,46 @@ public final class PasteRules {
             res.notes.add(new Note("PASTE_ZERO_OVERRIDE", z));
         }
         return res;
+    }
+
+    /**
+     * BR-91 (a): the centre pad gets one opening on its copper (its name, shape and paste margin) at its place in the
+     * pad order, and the openings drawn on it go; unless the footprint has no other paste (a test point keeps none) or
+     * the pad's margin removes the opening (the design's paste stays).
+     */
+    private static void onCopper(KicadPcb pcb, Footprint fp, Pad centre, int at, Result res) {
+        Aperture copper = padShape(fp, centre, 0, 0);
+        double[] mm = pasteMargins(pcb, fp, centre);
+        Aperture opening = padShape(fp, centre, mm[0], mm[1]);
+        List<Aperture> kept = new ArrayList<>();
+        double design = 0;
+        int index = at;
+        for (int i = 0; i < res.apertures.size(); i++) {
+            Aperture a = res.apertures.get(i);
+            if (contains(copper, a.x, a.y)) {
+                design += a.areaMm2();
+                index -= i < at ? 1 : 0;
+            }
+            else {
+                kept.add(a);
+            }
+        }
+        if (kept.isEmpty() || opening.w <= GONE_MM || opening.h <= GONE_MM) {
+            return;
+        }
+        kept.add(index, opening);
+        res.apertures.clear();
+        res.apertures.addAll(kept);
+        res.notes.add(new Note("CENTRE_PAD_COPPER", String.format(Locale.ROOT, "'s centre pad %s has no paste of its "
+                + "own: it is pasted on its copper as one opening (%.2f × %.2f mm). The design pastes %.2f mm² of its "
+                + "%.2f mm² (%s); centrePads=design keeps the design's paste.", KText.clean(centre.name, 40),
+                opening.w, opening.h, design, copper.areaMm2(), pct(100 * design / copper.areaMm2()))));
+    }
+
+    /** A pad at the footprint's origin of at least 1 mm² (a QFN's exposed pad). */
+    private static boolean atCentre(Footprint fp, Pad p) {
+        Aperture c = padShape(fp, p, 0, 0);
+        return Math.hypot(c.x, c.y) < 0.05 && c.areaMm2() >= 1.0;
     }
 
     /** The copper pads of a fiducial as its package pads (no paste, margin 0; no time limit). */
@@ -631,8 +683,7 @@ public final class PasteRules {
         }
         for (Pad p : fp.pads) {
             if (p.onFrontCopper() && host.equals(KText.clean(p.name, 40))) {
-                Aperture c = padShape(fp, p, 0, 0);
-                return Math.hypot(c.x, c.y) < 0.05 && c.areaMm2() >= 1.0;
+                return atCentre(fp, p);
             }
         }
         return false;

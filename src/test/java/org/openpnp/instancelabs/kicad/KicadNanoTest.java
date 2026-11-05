@@ -71,8 +71,36 @@ public class KicadNanoTest {
     }
 
     @Test
-    public void ic3PastePolygon() {
+    public void ic3CentrePadIsPastedOnItsCopper() {
+        // BR-91 (a): pad 33 (F.Cu only) becomes one opening on its copper; the square drawn on F.Paste goes
         ImportProposal p = nano.proposal;
+        assertEquals(ImportRules.COPPER, p.centrePads);
+        PlacementP ic3 = p.placement("IC3");
+        PackageP pk = p.packages.get(ic3.packageIndex);
+        assertEquals(33, pk.pads.size());
+        assertTrue(pk.pads.stream().noneMatch(x -> x.name.contains("~")), "no 33~1");
+        PadP c = pk.pads.stream().filter(x -> x.name.equals("33")).findFirst().get();
+        assertEquals("IC3.33", ic3.id + "." + c.name);
+        assertEquals(0, c.x, 1e-9);
+        assertEquals(0, c.y, 1e-9);
+        assertEquals(3.254 - 2 * 0.0762, c.w, 1e-9, "3.10 mm: the pad's paste margin −0.0762");
+        assertEquals(3.254 - 2 * 0.0762, c.h, 1e-9);
+        assertEquals(200 * (0.15 * 3.254 - 0.0762) / (3.254 - 2 * 0.0762), c.roundness, 1e-6);
+        assertEquals(55, p.counts.pastePads);
+        assertTrue(p.warnings("PASTE_POLY").isEmpty());
+        assertTrue(p.warnings("PAD_NAME_EMPTY").isEmpty());
+        assertEquals(1, p.warnings("CENTRE_PAD_COPPER").size());
+        assertEquals(List.of("IC3"), p.warnings("CENTRE_PAD_COPPER").get(0).refs);
+        assertEquals("IC3's centre pad 33 has no paste of its own: it is pasted on its copper as one opening "
+                + "(3.10 × 3.10 mm). The design pastes 1.61 mm² of its 10.38 mm² (16 %); centrePads=design keeps "
+                + "the design's paste.", p.warnings("CENTRE_PAD_COPPER").get(0).text);
+    }
+
+    @Test
+    public void ic3PastePolygon() throws Exception {
+        ImportProposal p = Fixtures.load(Fixtures.NANO, new ImportRules(true, false, ImportRules.DESIGN)).proposal;
+        assertEquals(ImportRules.DESIGN, p.centrePads);
+        assertTrue(p.warnings("CENTRE_PAD_COPPER").isEmpty());
         PlacementP ic3 = p.placement("IC3");
         PackageP pk = p.packages.get(ic3.packageIndex);
         assertEquals(33, pk.pads.size());

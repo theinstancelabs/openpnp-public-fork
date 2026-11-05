@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -23,7 +25,7 @@ public class KicadMoboTest {
     @BeforeAll
     public static void load() throws Exception {
         mobo = Fixtures.load(Fixtures.MOBO);
-        moboPasteDnp = Fixtures.load(Fixtures.MOBO, new ImportRules(true, true));
+        moboPasteDnp = Fixtures.load(Fixtures.MOBO, new ImportRules(true, true, ImportRules.DESIGN));
     }
 
     @Test
@@ -42,7 +44,7 @@ public class KicadMoboTest {
         assertEquals(68, p.counts.footprints);
         assertEquals(54, p.counts.placements);
         assertEquals(3, p.counts.fiducials);
-        assertEquals(220, p.counts.pastePads);
+        assertEquals(220 - 2, p.counts.pastePads, "U7's and U8's two windows: one opening on each centre pad");
         assertEquals(1, p.counts.dnp);
         assertEquals(List.of("U2"), p.skipped.get("dnp"));
         assertNull(p.placement("U2"));
@@ -81,12 +83,33 @@ public class KicadMoboTest {
     }
 
     @Test
+    public void centrePadsOnTheirCopper() throws Exception {
+        // BR-91 (a), the default: U2's nine windows and U7's and U8's two give way to one opening on each centre pad
+        ImportProposal p = Fixtures.load(Fixtures.MOBO, new ImportRules(true, true)).proposal;
+        assertEquals(261 - 9 + 1 - 1 - 1, p.counts.pastePads, "U2: 9 windows → 1 opening; U7, U8: 2 → 1");
+        PadP c = p.packages.get(p.placement("U2").packageIndex).pads.stream().filter(x -> x.name.equals("33"))
+                .findFirst().get();
+        assertEquals(3.45, c.w, 1e-9, "no paste margin on this board");
+        assertEquals(3.45, c.h, 1e-9);
+        for (String ref : new String[] {"U2", "U7", "U8"}) {
+            assertTrue(names(p, ref).stream().noneMatch(n -> n.contains("~")), ref + ": " + names(p, ref));
+        }
+        assertTrue(names(p, "U7").contains("9"));
+        assertTrue(p.warnings("QFN_WINDOWS").isEmpty());
+        Set<String> refs = new TreeSet<>();
+        for (ImportWarning w : p.warnings("CENTRE_PAD_COPPER")) {
+            refs.addAll(w.refs);
+        }
+        assertEquals(Set.of("U2", "U7", "U8"), refs);
+    }
+
+    @Test
     public void repeatedAndEmptyPadNames() {
         ImportProposal p = mobo.proposal;
         assertEquals(List.of("1", "2", "2~2", "3"), names(p, "U4"));
         assertTrue(names(p, "J2").containsAll(List.of("MP", "MP~2")));
         assertTrue(names(p, "J3").containsAll(List.of("MP", "MP~2")));
-        assertEquals(List.of("9~1", "9~2"), names(p, "U7").subList(0, 2));
+        assertEquals(List.of("9~1", "9~2"), names(moboPasteDnp.proposal, "U7").subList(0, 2), "the design's windows");
         assertEquals(2, p.warnings("PAD_NAME_DUPLICATE").size(), "U4; J2 and J3 merged");
     }
 

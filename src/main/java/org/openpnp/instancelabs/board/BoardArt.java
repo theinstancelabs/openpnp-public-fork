@@ -94,6 +94,8 @@ public final class BoardArt {
         public Skipped skipped;
         /** BR-88: the upload's "paste do-not-place parts too" (its {@code dnp} parts then get paste); null before it. */
         public Boolean pasteDnp;
+        /** BR-91 (a): the upload's centrePads (copper | design); null before it. */
+        public String centrePads;
 
         /** The counts, warnings and skipped parts of a proposal; the caller sets the rest (ids come from the id allocator). */
         public static Import from(ImportProposal p, List<ImportWarning> artWarnings) {
@@ -101,6 +103,7 @@ public final class BoardArt {
             i.counts = p.counts;
             i.skipped = Skipped.of(p);
             i.pasteDnp = p.pasteDnp;
+            i.centrePads = p.centrePads;
             i.warnings.addAll(p.warnings);
             if (artWarnings != null) {
                 i.warnings.addAll(artWarnings);

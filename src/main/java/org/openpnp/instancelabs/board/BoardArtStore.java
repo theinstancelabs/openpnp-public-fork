@@ -72,6 +72,8 @@ public final class BoardArtStore {
         /** BR-88: the footprints the upload does not place and its pasteDnp; null for drawings saved before them. */
         public BoardArt.Skipped skipped;
         public Boolean pasteDnp;
+        /** BR-91 (a): copper | design; null for drawings saved before it. */
+        public String centrePads;
     }
 
     private static final class Fallback {
@@ -267,6 +269,7 @@ public final class BoardArtStore {
             i.board = r.imported.board;
             i.skipped = r.imported.skipped;
             i.pasteDnp = r.imported.pasteDnp;
+            i.centrePads = r.imported.centrePads;
         }
         if (r.source != null) {
             i.sourceName = r.source.name;

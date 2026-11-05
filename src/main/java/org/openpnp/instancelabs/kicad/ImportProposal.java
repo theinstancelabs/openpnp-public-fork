@@ -28,6 +28,8 @@ public final class ImportProposal {
     public String origin;                     // "outline" | "edges" | "estimated" (§2.6)
     /** Do-not-place footprints with paste became disabled placements (the preview's checkbox, §13 item 1). */
     public boolean pasteDnp;
+    /** BR-91 (a): {@link ImportRules#COPPER} or {@link ImportRules#DESIGN}, for centre pads without paste. */
+    public String centrePads;
     public final List<PlacementP> placements = new ArrayList<>();  // file order, fiducials included
     public final List<PackageP> packages = new ArrayList<>();      // one per distinct (name, signature) = variant
     /** bottom / artOnly / dnp / pasteOnly → cleaned references, file order (always all four keys). */

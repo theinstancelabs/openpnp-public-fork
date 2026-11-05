@@ -31,22 +31,32 @@ public final class ImportRules {
     private static final Pattern DNP_VALUE = Pattern.compile("(?i)^(DNP|DNF|NP|DO NOT PLACE)$");
     /** A paste opening may reach this far past the board's box (rounding) and still be on the board. */
     private static final double EDGE_TOL_MM = 0.001;
+    /** BR-91 (a): a centre pad without paste of its own is pasted on its copper (the default), or as designed. */
+    public static final String COPPER = "copper";
+    public static final String DESIGN = "design";
 
     private final boolean fiducialNameRule;
     private final boolean pasteDnp;
+    private final String centrePads;
 
     /** The defaults: footprint names starting with "Fiducial" are fiducials; do-not-place parts get no paste. */
     public ImportRules() {
         this(true, false);
     }
 
+    public ImportRules(boolean fiducialNameRule, boolean pasteDnp) {
+        this(fiducialNameRule, pasteDnp, COPPER);
+    }
+
     /**
      * @param fiducialNameRule footprint names starting with "Fiducial" are fiducials too (§13 item 2)
      * @param pasteDnp do-not-place footprints with paste become disabled placements (which the engine pastes)
+     * @param centrePads {@link #COPPER} or {@link #DESIGN} ({@link PasteRules#paste})
      */
-    public ImportRules(boolean fiducialNameRule, boolean pasteDnp) {
+    public ImportRules(boolean fiducialNameRule, boolean pasteDnp, String centrePads) {
         this.fiducialNameRule = fiducialNameRule;
         this.pasteDnp = pasteDnp;
+        this.centrePads = centrePads;
     }
 
     /** Notes of one code and text, merged over the footprints that share them. */
@@ -70,6 +80,7 @@ public final class ImportRules {
         out.outline = frame.outline;
         out.origin = frame.origin;
         out.pasteDnp = pasteDnp;
+        out.centrePads = centrePads;
         for (ImportWarning w : pcb.warnings) {
             out.warn(w);
         }
@@ -98,7 +109,8 @@ public final class ImportRules {
                 continue;
             }
             boolean fiducial = isFiducial(fp);
-            PasteRules.Result r = fiducial ? PasteRules.copper(pcb, fp, deadline) : PasteRules.paste(pcb, fp, deadline);
+            PasteRules.Result r = fiducial ? PasteRules.copper(pcb, fp, deadline)
+                    : PasteRules.paste(pcb, fp, COPPER.equals(centrePads), deadline);
             boolean dnp = fp.hasAttr("dnp") && !fiducial;
             if (r.apertures.isEmpty()) {
                 if (fiducial) {

@@ -505,7 +505,8 @@ what to do, in plain words with units; internal names (regexes, setting keys) st
 | 3 | `DNP_STILL_PASTED` | warn | U2 is marked Do not populate. It will not be placed, but its 41 pads still get paste (the engine pastes disabled parts). |
 | 3 | `VALUE_SAYS_DNP` | warn | U5's value says DNP but the part is not marked Do not populate in KiCad: it is imported as a normal part and gets paste. |
 | 3 | `THT_PASTE_SKIPPED` | warn | J3 pads 1–4 are through-hole pads with paste (pin in paste): they get no paste. |
-| 3 | `QFN_WINDOWS` | warn | U2's 9 paste windows (0.86 mm² each) inside its centre pad are dispensed as small edge pads, not as one centre pad. Check the dots in the pad inspector. |
+| 3 | `CENTRE_PAD_COPPER` | warn | IC3's centre pad 33 has no paste of its own: it is pasted on its copper as one opening (3.10 × 3.10 mm). The design pastes 1.61 mm² of its 10.38 mm² (16 %); centrePads=design keeps the design's paste. (BR-91 (a), the default `centrePads=copper`.) |
+| 3 | `QFN_WINDOWS` | warn | U2's 9 paste windows (0.86 mm² each) inside its centre pad are dispensed as small edge pads, not as one centre pad. Check the dots in the pad inspector. (`centrePads=design` only.) |
 | 3 | `PAD_SHAPE_APPROX` / `PASTE_POLY_APPROX` | warn | U5 pad 3 is a trapezoid: its paste opening is taken as the surrounding rectangle (12 % more area). |
 | 3 | `PACKAGE_MAPPING_LOST` | warn | R_0603_1608Metric is mapped to pad type "Chip 0603" by hand; the new copy R_0603_1608Metric~2 is not, and gets "Chip 0805" by name. Map it in Profile › Pad types after saving. |
 | 3 | `PACKAGE_VARIANT` | warn | Two different footprints are both called SOT-23 (U3 and U9 differ): the second is saved as its own package. |

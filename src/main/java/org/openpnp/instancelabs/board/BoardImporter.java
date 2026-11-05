@@ -140,21 +140,22 @@ public final class BoardImporter {
     // ==== the three requests =========================================================================================
 
     /** POST /api/boards/import: what a save would make of the file (§3.2). */
-    public Map<String, Object> preview(byte[] bytes, String fileName, boolean pasteDnp) throws Exception {
+    public Map<String, Object> preview(byte[] bytes, String fileName, boolean pasteDnp, String centrePads)
+            throws Exception {
         return pipeline(() -> {
-            Parsed parsed = parse(bytes, fileName, pasteDnp);
+            Parsed parsed = parse(bytes, fileName, pasteDnp, centrePads);
             return new Preview(parsed, EdtRunner.call(this::snapshot, EDT_START_MS)).map;
         });
     }
 
     /** POST /api/boards/import/save (§3.6). */
     public Map<String, Object> save(byte[] bytes, String fileName, String rawName, boolean replace, String sha256,
-            String decisions, boolean pasteDnp) throws Exception {
+            String decisions, boolean pasteDnp, String centrePads) throws Exception {
         return pipeline(() -> {
             checkBody(bytes);
             checkSha(bytes, sha256);
             String name = name(rawName);
-            Parsed parsed = parse(bytes, fileName, pasteDnp);
+            Parsed parsed = parse(bytes, fileName, pasteDnp, centrePads);
             ImportProposal p = parsed.proposal;
             if (BoardFrame.ORIGIN_ESTIMATED.equals(p.origin) && p.counts.fiducials < 2) {
                 throw new ImportException(400, "no-origin", "This board has no outline (Edge.Cuts) and fewer than "
@@ -171,7 +172,7 @@ public final class BoardImporter {
 
     /** POST /api/boards/import/attach: the drawing for a listed board file whose placements match (§3.10). */
     public Map<String, Object> attach(byte[] bytes, String fileName, String boardPath, String rawName,
-            boolean replace, String sha256, boolean pasteDnp) throws Exception {
+            boolean replace, String sha256, boolean pasteDnp, String centrePads) throws Exception {
         return pipeline(() -> {
             checkBody(bytes);
             checkSha(bytes, sha256);
@@ -182,7 +183,7 @@ public final class BoardImporter {
             File boardFile = new File(boardPath.trim());
             String name = name(rawName == null || rawName.trim().isEmpty()
                     ? boardFile.getName().replaceFirst("(?i)\\.board\\.xml$", "") : rawName);
-            Parsed parsed = parse(bytes, fileName, pasteDnp);
+            Parsed parsed = parse(bytes, fileName, pasteDnp, centrePads);
             return new Attach(parsed, boardFile, name, replace).run();
         });
     }
@@ -227,14 +228,15 @@ public final class BoardImporter {
         }
     }
 
-    static Parsed parse(byte[] bytes, String rawFileName, boolean pasteDnp) throws ImportException {
+    static Parsed parse(byte[] bytes, String rawFileName, boolean pasteDnp, String centrePads)
+            throws ImportException {
         checkBody(bytes);
         String fileName = KText.clean(rawFileName, 120);
         Deadline d = new Deadline(Deadline.DEFAULT_MS);
         try {
             KicadPcb pcb = KicadParser.read(bytes, d);
             BoardFrame frame = BoardFrame.of(pcb, d);
-            ImportProposal p = new ImportRules(true, pasteDnp).propose(pcb, frame, d);
+            ImportProposal p = new ImportRules(true, pasteDnp, centrePads).propose(pcb, frame, d);
             BoardArtBuilder.Result art = new BoardArtBuilder().build(pcb, frame, p, d);
             Parsed parsed = new Parsed(bytes, fileName, pcb, p, art);
             art.art.source.name = fileName.isEmpty() ? null : fileName;
@@ -374,6 +376,7 @@ public final class BoardImporter {
             map.put("slug", slug);
             map.put("exists", existsView(store.existing(slug)));
             map.put("pasteDnp", p.pasteDnp);
+            map.put("centrePads", p.centrePads);
             map.put("counts", p.counts);
             List<Map<String, Object>> placements = new ArrayList<>();
             List<Map<String, Object>> fiducials = new ArrayList<>();

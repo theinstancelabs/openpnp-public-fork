@@ -15,6 +15,7 @@ import java.util.Locale;
 
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.kicad.ImportProposal;
+import org.openpnp.instancelabs.kicad.ImportRules;
 import org.openpnp.instancelabs.kicad.ImportWarning;
 import org.openpnp.instancelabs.kicad.KicadPcb;
 import org.openpnp.model.Board;
@@ -157,7 +158,8 @@ public class BoardImporterTest {
 
     static void assertCode(String code, String start, String body) {
         BoardImporter.ImportException e = assertThrows(BoardImporter.ImportException.class,
-                () -> BoardImporter.parse(body.getBytes(StandardCharsets.UTF_8), "x.kicad_pcb", false));
+                () -> BoardImporter.parse(body.getBytes(StandardCharsets.UTF_8), "x.kicad_pcb", false,
+                        ImportRules.COPPER));
         assertEquals(400, e.status, e.getMessage());
         assertEquals(code, e.code, e.getMessage());
         assertTrue(e.getMessage().startsWith(start), e.getMessage());
@@ -166,7 +168,7 @@ public class BoardImporterTest {
     @Test
     public void theParsedFileKnowsItsSourceAndTheFileNameIsCleaned() throws Exception {
         byte[] b = board(outline(20, 10) + part2("Resistor_SMD", "R_0603_1608Metric", "R1", 5, 5, "10k", 0.8));
-        BoardImporter.Parsed p = BoardImporter.parse(b, "my\u0007board.kicad_pcb", false);
+        BoardImporter.Parsed p = BoardImporter.parse(b, "my\u0007board.kicad_pcb", false, ImportRules.COPPER);
         assertEquals("myboard.kicad_pcb", p.fileName);
         assertEquals("myboard.kicad_pcb", p.art.art.source.name);
         assertEquals(b.length, p.art.art.source.bytes.longValue());
@@ -182,7 +184,8 @@ public class BoardImporterTest {
     public void ftpMatchesTheBenchBoardFileExceptTheHandMovedFid1() throws Exception {
         try (org.openpnp.instancelabs.dispense.SimMachine sim = new org.openpnp.instancelabs.dispense.SimMachine(false)) {
             Board xml = ArtFixtures.ftpBoardXml(sim.configDir);
-            BoardImporter.Parsed p = BoardImporter.parse(ArtFixtures.bytes(ArtFixtures.FTP), "ftp.kicad_pcb", false);
+            BoardImporter.Parsed p = BoardImporter.parse(ArtFixtures.bytes(ArtFixtures.FTP), "ftp.kicad_pcb", false,
+                    ImportRules.COPPER);
             BoardImporter.Listed l = BoardImporter.listed(xml);
             assertEquals(83, l.placements.size());
             BoardImporter.Match m = BoardImporter.match(p.proposal, l);
@@ -259,7 +262,7 @@ public class BoardImporterTest {
                     + part2("Resistor_SMD", "R_0603_1608Metric", "R2", 10, 5, "10k", 0.8) + fid("FID1", 2, 2)
                     + fid("FID2", 18, 8));
             BoardImporter imp = new BoardImporter(Configuration.get(), null);
-            java.util.Map<String, Object> pv = imp.preview(b, "two.kicad_pcb", false);
+            java.util.Map<String, Object> pv = imp.preview(b, "two.kicad_pcb", false, ImportRules.COPPER);
             @SuppressWarnings("unchecked")
             List<java.util.Map<String, Object>> pk = (List<java.util.Map<String, Object>>) pv.get("packages");
             assertEquals(2, pk.size());

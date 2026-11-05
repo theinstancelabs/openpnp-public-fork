@@ -547,11 +547,12 @@ public class PadProfileApiSimTest {
             assertEquals(outcome.get(str(x, "packageId")), str(x, "outcome"), x.toString());
         }
 
-        // the openings of the upload are the fixture's (R/*.pads.json, top side) within 0.001 mm
-        assertEquals(55, sameOpenings(pv, pads("nano")));
+        // the openings of the upload as designed are the fixture's (R/*.pads.json, top side) within 0.001 mm
+        assertEquals(55, sameOpenings(ok(send("POST", "/api/boards/import?file=NanoV3.3.kicad_pcb&centrePads=design",
+                kicad(NANO), "application/octet-stream")), pads("nano")));
         assertEquals(160, sameOpenings(preview(kicad("ftp.kicad_pcb.gz"), "ftp.kicad_pcb"), pads("ftp")));
-        assertEquals(261, sameOpenings(ok(send("POST", "/api/boards/import?file=mobo.kicad_pcb&pasteDnp=1",
-                kicad("mobo.kicad_pcb.gz"), "application/octet-stream")), pads("mobo")));
+        assertEquals(261, sameOpenings(ok(send("POST", "/api/boards/import?file=mobo.kicad_pcb&pasteDnp=1"
+                + "&centrePads=design", kicad("mobo.kicad_pcb.gz"), "application/octet-stream")), pads("mobo")));
     }
 
     /** Every opening of the preview's placements equals the fixture's (board frame, size, roundness); their count. */

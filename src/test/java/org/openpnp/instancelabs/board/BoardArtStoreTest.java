@@ -170,6 +170,7 @@ public class BoardArtStoreTest {
         assertEquals(20211014, (int) i.kicadVersion);
         assertEquals("outline", i.origin);
         assertNull(i.board);
+        assertEquals("copper", i.centrePads, "BR-91 (a): the upload's centre pads");
     }
 
     /** BR-88: a board lists its own upload only while it has that upload's geometry (else its drawing's upload). */

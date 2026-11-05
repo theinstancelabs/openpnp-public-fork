@@ -32,7 +32,8 @@ public final class ImportWarning {
         for (String c : new String[] {"NO_EDGE_CUTS", "OUTLINE_OPEN", "KICAD5", "KICAD_NEWER", "DNP_STILL_PASTED",
                 "VALUE_SAYS_DNP", "THT_PASTE_SKIPPED", "QFN_WINDOWS", "PAD_SHAPE_APPROX", "PASTE_POLY_APPROX",
                 "PACKAGE_MAPPING_LOST", "PACKAGE_VARIANT", "DUPLICATE_REF", "PAD_ID_CLASH", "ID_CLEANED",
-                "BAD_NUMBER", "BOARD_PASTE_GRAPHIC", "PASTE_ZONE_IGNORED", "ART_REDUCED", "OFF_BOARD"}) {
+                "BAD_NUMBER", "BOARD_PASTE_GRAPHIC", "PASTE_ZONE_IGNORED", "ART_REDUCED", "OFF_BOARD",
+                "CENTRE_PAD_COPPER"}) {
             GROUPS.put(c, 3);
         }
         for (String c : new String[] {"BOTTOM_SKIPPED", "DNP_SKIPPED", "PACKAGE_SUFFIXED", "PART_SUFFIXED",
