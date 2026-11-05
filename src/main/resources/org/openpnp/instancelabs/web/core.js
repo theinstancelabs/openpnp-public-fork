@@ -1277,7 +1277,9 @@
     } else {
       add({ key: 'regulator', code: 'I6', title: 'Regulator', state: 'need', value: 'read gauge', short: 'read gauge',
         detail: 'Set the regulator to ' + psi + ' psi for profile ' + (prof.name || '') + ' (no sensor).',
-        fixes: [{ view: 'pressure', label: 'Pressure on to read the gauge' }, { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
+        // BR-03's pump only (I12): the valve stays closed and nothing moves; before it, the Pressure panel
+        fixes: [IL.hasPumpOnly(s) ? { fix: 'pressure-pump', label: 'Pump on to read the gauge' } : { view: 'pressure', label: 'Pressure on to read the gauge' },
+          { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
     }
 
     // 5 Pad types (PLAN); with the profile check, padprofile.js words it (PROFILE_CALIBRATION_DESIGN.md §13.2, H-P1)

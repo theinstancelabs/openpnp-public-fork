@@ -262,7 +262,8 @@
     const ri = it.regulator;
     add({ key: 'regulator', title: 'Regulator', state: ri.state, card: 'pressure', code: 'I6', you: !!reg,
       value: reg ? psi + ' psi · ' + IL.fmtTime(reg.atMs) : 'read the gauge', detail: ri.detail,
-      fixes: [{ fix: 'pressure-on', label: 'Pressure on', icon: 'i-gauge' }, { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
+      fixes: [IL.hasPumpOnly(s) ? { fix: 'pressure-pump', label: 'Pump on', icon: 'i-gauge' } : { fix: 'pressure-on', label: 'Pressure on', icon: 'i-gauge' },
+        { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
     // 4 Places
     const wn = d.wasteLocationName || 'waste', bn = d.blankLocationName || 'blank';
     const missing = [wn, bn].filter((n) => !locs[n]);
