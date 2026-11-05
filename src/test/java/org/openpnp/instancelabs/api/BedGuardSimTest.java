@@ -27,6 +27,8 @@ import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.model.Configuration;
 import org.openpnp.spi.Machine;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -107,6 +109,15 @@ public class BedGuardSimTest {
         assertTrue(!why.isEmpty() && !why.endsWith(".") && !next.endsWith("."), body);
         assertEquals(why + ": " + next, o.get("reason").getAsString());
         return o;
+    }
+
+    /** A proof's leg labels, as JSON. */
+    static String legNames(JsonObject proof) {
+        JsonArray names = new JsonArray();
+        for (JsonElement l : proof.getAsJsonArray("legs")) {
+            names.add(l.getAsJsonObject().get("leg"));
+        }
+        return names.toString();
     }
 
     /** The motion lines the controller received since the last mark. */
@@ -253,6 +264,8 @@ public class BedGuardSimTest {
         JsonObject proof = rows("MOTION_PROOF").get(0);
         assertEquals("move-to", proof.get("what").getAsString());
         assertEquals(3, proof.getAsJsonArray("legs").size());
+        // the legs named as OpenPnP drives them: the last one is no move, the target being N1's safe Z (#66 NIT)
+        assertEquals("[\"up to safe Z\",\"X/Y at safe Z\",\"N1 at the target (no move)\"]", legNames(proof));
         assertEquals(1, proof.get("modelVersion").getAsInt());
         assertEquals("homed", proof.getAsJsonObject("start").get("source").getAsString());
         assertTrue(proof.has("checkMs"));
@@ -379,6 +392,24 @@ public class BedGuardSimTest {
         ok("POST", "/api/gcode", "{\"lines\":[\"M400\"]}", token);
         ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\"]}", token);
         assertEquals(100, sim.server.position('X'), 1e-9);
+    }
+
+    /**
+     * The dry run proves from where the head is: while OpenPnP's position is not re-read after the passthrough's moves
+     * it refuses, as the real routes re-read it first (#66 review MINOR e).
+     */
+    @Test
+    public void theDryRunWaitsForTheHeadsPlaceToBeRead() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X120 F3000\"]}", token);
+        String dry = "{\"kind\":\"move-to\",\"tool\":\"n1\",\"x\":100,\"y\":400}";
+        JsonObject r = call("POST", "/api/motion/check", dry, UI);
+        assertEquals(409, status, body);
+        assertEquals("refused", r.get("error").getAsString(), body);
+        assertTrue(r.get("reason").getAsString().contains("not re-read"), body);
+        ok("POST", "/api/gcode", "{\"lines\":[\"M400\"]}", token);
+        assertTrue(ok("POST", "/api/motion/check", dry, UI).get("clear").getAsBoolean(), body);
     }
 
     /**

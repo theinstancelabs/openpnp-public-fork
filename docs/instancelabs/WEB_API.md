@@ -589,7 +589,8 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   offset nor its I4 floor, without one not below its safe zone; OpenPnP's soft limits. 404 for an unknown place.
 - BR-98 (§3.9): with a bed model in place each press and each move-to is proven against it after the checks above
   (which stay) and before anything moves: one leg for a jog (labelled `jog Z -2`), three for a move-to (`up to safe
-  Z`, `X/Y at safe Z`, `down to <tool>'s safe Z`, as OpenPnP drives them); 409 `collision` otherwise. A jog's tool tip
+  Z`, `X/Y at safe Z` with the tool going to its safe Z, `<tool> at the target (no move)`, as OpenPnP drives them);
+  409 `collision` otherwise. A jog's tool tip
   may go down to the floor above over the probed surface under it (a measured touchable object holding the tip), never
   deeper than `contactDepthMm` into that object's top in the model; every other layer and tool is held to the top +
   `zMarginMm` + the errors.
@@ -634,13 +635,13 @@ moves with each needle. In this build nothing rewrites it at a mount: while the 
   atMs, rawZ}, reach}`. Values come back as written. `stateLabel`: `measured`, `added, not measured`, `moved, not
   measured`, `removed, not checked`, `top not measured`. `lowestZNow`: the tool's lowest layer above the bed now (the
   head unknown: the worst case over the bed's corners). No file: `{version: null, valid: null, why, head}`.
-- `POST /api/motion/check {kind: jog|move-to, tool, dx?, dy?, dz?, place?, x?, y?}` (no lock, moves nothing,
-  journals nothing): the route's own refusals first (400s, unhomed, busy, travel height, floors), then 200 `{clear:
-  true, clearanceMm, closest: {id, name, tool, layer, leg, at, clearanceMm, vertical}, path: [{leg, from, to}],
-  modelVersion, start: {x, y, z, source, xyErrMm, seesaw, homeAtMs}}` or the route's 409 `collision`. No model:
-  `{clear: null, why}`. `kind: home|run`: 400 `not in this build yet`. `clearanceMm`: the room beyond the margins
-  (vertical: lowest − (top + `zMarginMm` + errors); `vertical: false` only when no layer is over anything: the gap
-  to the side beyond the margin).
+- `POST /api/motion/check {kind: jog|move-to, tool, dx?, dy?, dz?, place?, x?, y?}` (no lock, moves nothing, journals
+  nothing): the route's own refusals first (400s, unhomed, busy, travel height, floors; 409 `refused` while OpenPnP's
+  position is not re-read after the passthrough's moves, which the real route re-reads first), then 200 `{clear: true,
+  clearanceMm, closest: {id, name, tool, layer, leg, at, clearanceMm, vertical}, path: [{leg, from, to}], modelVersion,
+  start: {x, y, z, source, xyErrMm, seesaw, homeAtMs}}` or the route's 409 `collision`. No model: `{clear: null, why}`.
+  `kind: home|run`: 400 `not in this build yet`. `clearanceMm`: the room beyond the margins (vertical: lowest − (top +
+  `zMarginMm` + errors); `vertical: false` only when no layer is over anything: the gap to the side beyond the margin).
 - **Journal:** a clear path: one `MOTION_PROOF` row `{what: jog|move-to|gcode, tool, modelVersion, start, legs,
   closest, checkMs}`; a refused one: a `MOTION_REFUSED` row with the 409 body.
 - **Writes** (guarded: the lock holder's, 409 `no-lock` while nobody holds it; 409 `refused` while anything moves:

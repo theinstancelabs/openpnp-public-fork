@@ -10,7 +10,9 @@ import org.openpnp.instancelabs.dispense.BedModelStore;
 import org.openpnp.instancelabs.dispense.CollisionCheck;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeTracker;
+import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
 import org.openpnp.instancelabs.dispense.ZCheck;
+import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
 import org.openpnp.model.AxesLocation;
 import org.openpnp.model.LengthUnit;
@@ -95,8 +97,21 @@ final class BedGuard {
         return st != null ? st.exists : BedModelStore.fileFor(ctx.configuration.getConfigurationDirectory()).isFile();
     }
 
-    /** OpenPnP's raw X, Y and Z controller axes. */
-    static ReferenceControllerAxis[] xyz(Machine m) throws ApiException {
+    /**
+     * OpenPnP's raw X, Y and Z controller axes: N1's, as the engine's read-backs take them (#66 NIT); without the
+     * engine (nothing is proven then), the machine's first X, Y and Z controller axes.
+     */
+    ReferenceControllerAxis[] xyz(Machine m) throws ApiException {
+        DispenseService svc = ctx.svcOrNull();
+        if (svc != null && svc.getProbeNozzle() != null && m instanceof ReferenceMachine) {
+            try {
+                return OpenPnpRawMapper.forProbeNozzle((ReferenceMachine) m, svc.getProbeNozzle(), svc.getConfig()
+                        .bAxisName).xyzAxes();
+            }
+            catch (Exception e) {
+                throw ApiException.unavailable("N1's X, Y and Z axes cannot be read (" + e.getMessage() + ")");
+            }
+        }
         ReferenceControllerAxis[] a = new ReferenceControllerAxis[3];
         for (Axis x : m.getAxes()) {
             if (x instanceof ReferenceControllerAxis) {
@@ -128,7 +143,7 @@ final class BedGuard {
     }
 
     /** The raw X, Y, Z OpenPnP would drive to for {@code hm} at {@code to}, from {@code base} (null: where it is). */
-    static double[] rawTarget(Machine m, HeadMountable hm, Location to, AxesLocation base) throws Exception {
+    double[] rawTarget(Machine m, HeadMountable hm, Location to, AxesLocation base) throws Exception {
         ReferenceControllerAxis[] a = xyz(m);
         AxesLocation t = (base == null ? new AxesLocation(m) : base).put(((AbstractHeadMountable) hm).toRaw(
                 hm.toHeadLocation(to)));
@@ -138,9 +153,10 @@ final class BedGuard {
 
     /**
      * Move-to's three legs, as {@code MovableUtils.moveToLocationAtSafeZ} drives them: the head up into the Z axis's
-     * safe zone (every head-mountable to its safe Z: raw clamped to the zone), X/Y at the tool's safe Z, down to it.
+     * safe zone (every head-mountable to its safe Z: raw clamped to the zone), X/Y with the tool to its safe Z, then the
+     * move to the target, which is no move here (the route's target is the tool's safe Z).
      */
-    static List<CollisionCheck.Leg> moveToLegs(Machine m, HeadMountable hm, Location to, Start s, String tool)
+    List<CollisionCheck.Leg> moveToLegs(Machine m, HeadMountable hm, Location to, Start s, String tool)
             throws Exception {
         ReferenceControllerAxis z = xyz(m)[2];
         double zs = s.z;
@@ -154,7 +170,7 @@ final class BedGuard {
         List<CollisionCheck.Leg> l = new ArrayList<>();
         l.add(new CollisionCheck.Leg("up to safe Z", s.x, s.y, s.z, s.x, s.y, zs));
         l.add(new CollisionCheck.Leg("X/Y at safe Z", s.x, s.y, zs, t[0], t[1], t[2]));
-        l.add(new CollisionCheck.Leg("down to " + who(tool) + "'s safe Z", t[0], t[1], t[2], t[0], t[1], t[2]));
+        l.add(new CollisionCheck.Leg(who(tool) + " at the target (no move)", t[0], t[1], t[2], t[0], t[1], t[2]));
         return l;
     }
 
@@ -317,7 +333,13 @@ final class BedGuard {
         BedModelStore.State st = state();
         BedModel m = st == null ? null : st.model;
         Machine mach = ctx.configuration.getMachine();
-        Start s = mach == null ? null : start(mach);
+        Start s = null;
+        try {
+            s = mach == null ? null : start(mach);
+        }
+        catch (ApiException e) {
+            // N1's axes cannot be read: the head shows as unknown, the tools at their worst case
+        }
         Map<String, Object> out = Views.map("version", m == null ? null : m.version, "valid", st == null || !st.exists
                 ? null : m != null, "error", st == null ? null : st.error, "why", why(st), "digest", st == null ? null
                         : st.digest);

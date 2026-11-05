@@ -131,7 +131,7 @@ final class ControlEndpoints {
             return null;
         }
         BedGuard.Start s = ctx.bed.start(m);
-        double[] t = BedGuard.rawTarget(m, hm, to, null);
+        double[] t = ctx.bed.rawTarget(m, hm, to, null);
         StringBuilder label = new StringBuilder("jog");
         for (int i = 0; i < 3; i++) {
             if (d[i] != 0) {
@@ -154,7 +154,7 @@ final class ControlEndpoints {
         double floor = isNeedle(hm) ? needleFloor(hm, to.getX(), to.getY()) : n1Floor(to.getX(), to.getY());
         if (Double.isFinite(floor)) {
             o.jogTool = tool;
-            o.jogFloorRaw = BedGuard.rawTarget(m, hm, new Location(LengthUnit.Millimeters, to.getX(), to.getY(), floor,
+            o.jogFloorRaw = ctx.bed.rawTarget(m, hm, new Location(LengthUnit.Millimeters, to.getX(), to.getY(), floor,
                     to.getRotation()), null)[2];
         }
         return o;
@@ -171,7 +171,7 @@ final class ControlEndpoints {
             Location to = moveToTarget(hm, tool, from, xy);
             if (ctx.bed.active()) {
                 BedGuard.Start s = ctx.bed.start(m);
-                ctx.bed.prove("move-to", tool, s, BedGuard.moveToLegs(m, hm, to, s, tool), CollisionCheck.Options
+                ctx.bed.prove("move-to", tool, s, ctx.bed.moveToLegs(m, hm, to, s, tool), CollisionCheck.Options
                         .strict(null), false);
             }
             MovableUtils.moveToLocationAtSafeZ(hm, to);
@@ -225,6 +225,12 @@ final class ControlEndpoints {
         Machine m = ctx.machine();
         HeadMountable hm = tool(tool);
         requireFree(m);
+        if (ctx.passthrough.positionStale()) {
+            // the real routes re-read it first; a dry run sends nothing and holds no lock (#66 review MINOR e)
+            throw ApiException.refused("OpenPnP's position is not re-read after the G-code passthrough's moves yet, so "
+                    + "the path cannot be checked from where the head is: the move itself reads it first; for a dry run "
+                    + "the lock holder sends M400");
+        }
         Location from = mm(hm.getLocation());
         Map<String, Object> proof;
         if ("jog".equals(kind)) {
@@ -233,7 +239,7 @@ final class ControlEndpoints {
         else if (ctx.bed.active()) {
             Location to = moveToTarget(hm, tool, from, d);
             BedGuard.Start s = ctx.bed.start(m);
-            proof = ctx.bed.prove("move-to", tool, s, BedGuard.moveToLegs(m, hm, to, s, tool),
+            proof = ctx.bed.prove("move-to", tool, s, ctx.bed.moveToLegs(m, hm, to, s, tool),
                     CollisionCheck.Options.strict(null), true);
         }
         else {
