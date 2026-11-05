@@ -637,7 +637,10 @@ again with N1 touching.`, its link opens the first one's Z (the engine refuses t
 
 Banner `#cal-history-note`: `Records only: boards use the dispense profile.` Cards, each listing its
 prerequisites as readiness rows with fix-it links and showing progress and result in place:
-**Touch-off** (`#to-start` 0.125, `#to-step` 0.025, `#to-steps` 6, `#to-rot` empty = one profile dot,
+**Touch-off** (opens at the mounted tip's ladder: `#to-start` 0.125 + the recipe's `touchOffSkipDots` × the step, rounded
+up to 1 µm (the 25G: 0.200), `#to-step` 0.025, `#to-steps` skip + 10 for a tip that skips (the 25G: 13), else 6; a start
+whose counted dots begin below 0.125 mm and Steps below skip + 3 are refused at their fields, as the engine refuses them;
+`#to-rot` empty = one profile dot,
 `#to-place` blank, `#to-apply` ticked by default when it is the I4 step (on the real machine untick it, and use the
 contact only when it agrees with the after-photos and the needle's measured K, `REAL_MACHINE_TODO.md` item 7: no
 contact has been found on the machine yet), `#btn-to-run` two-press; result table

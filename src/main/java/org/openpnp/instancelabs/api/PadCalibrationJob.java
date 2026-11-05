@@ -20,6 +20,7 @@ import org.openpnp.instancelabs.dispense.CalibrationArea;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseDb;
 import org.openpnp.instancelabs.dispense.DispensePlan;
+import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DoseBlocks;
 import org.openpnp.instancelabs.dispense.DoseBlocksRequest;
@@ -29,9 +30,11 @@ import org.openpnp.instancelabs.dispense.DoseRecords;
 import org.openpnp.instancelabs.dispense.HomeTracker;
 import org.openpnp.instancelabs.dispense.EngineRefusal;
 import org.openpnp.instancelabs.dispense.InterlockReport;
+import org.openpnp.instancelabs.dispense.Interlocks;
 import org.openpnp.instancelabs.dispense.LandingResult;
 import org.openpnp.instancelabs.dispense.ManualBalance;
 import org.openpnp.instancelabs.dispense.NeedleChange;
+import org.openpnp.instancelabs.dispense.OutputZones;
 import org.openpnp.instancelabs.dispense.PadCalibrationRecord;
 import org.openpnp.instancelabs.dispense.PadInstances;
 import org.openpnp.instancelabs.dispense.PadLadder;
@@ -40,6 +43,7 @@ import org.openpnp.instancelabs.dispense.PadTypeStatus;
 import org.openpnp.instancelabs.dispense.Photo;
 import org.openpnp.instancelabs.dispense.ProbeTargets;
 import org.openpnp.instancelabs.dispense.RunResult;
+import org.openpnp.instancelabs.dispense.ScrewPhaseFit;
 import org.openpnp.instancelabs.dispense.SurfacePlane;
 import org.openpnp.instancelabs.dispense.SurfaceProbeRequest;
 import org.openpnp.instancelabs.dispense.SurfaceProbeResult;
@@ -103,6 +107,12 @@ final class PadCalibrationJob {
     static final String LADDER = "ladder", WEIGH = "weigh";
     /** The jobs of records only (tip setups design §22.3): Measure its dots, Check where it lands. */
     static final String MEASURE_TIP = "tip", MEASURE_LANDING = "landing";
+    /** BR-77: the start-angle measure (POST /api/screw/start-angle/measure) and its modes. */
+    static final String MEASURE_START_ANGLE = "start-angle", HALVES = "halves", QUARTERS = "quarters";
+    /** BR-77 (Process 11-04): a throwaway on wet paste is laid this much higher per layer (mm), as the bench start-ups. */
+    static final double THROWAWAY_LAYER_MM = 0.15;
+    /** BR-77: the most throwaways a measure step lays (the landing check purges 8). */
+    static final int MAX_THROWAWAYS = 8;
     /** The landing check's steps: the locator dot, then the purge and the row. */
     static final String LOCATOR = "locator", ROW = "row";
     /** The halt of a job whose engine saw a STOP it did not (§7.8). */
@@ -148,6 +158,25 @@ final class PadCalibrationJob {
         String measure;
         /** The landing check searches ±9 mm (offered after its locator found nothing). */
         boolean wide;
+        /** BR-77, {@link #MEASURE_START_ANGLE}: what the measure route asks for. */
+        StartAngle startAngle;
+    }
+
+    /** BR-77: POST /api/screw/start-angle/measure's request (plan §1). */
+    static final class StartAngle {
+        /** {@link #HALVES} | {@link #QUARTERS}. */
+        String mode;
+        /** N2 machine X/Y in dispense order: halves row 1 then row 2 (2·pairs each), quarters 4 per turn. */
+        List<double[]> targets = new ArrayList<>();
+        /**
+         * {x, y, layers}: the purge spots, layers 0 (a clean flat spot), 1 or 2 (wet paste); halves one set per row (the
+         * first half before row 1, the second before row 2), quarters one set.
+         */
+        List<double[]> throwaways = new ArrayList<>();
+        String surface;
+        Double startDeg;
+        Integer pairs, turns;
+        boolean apply;
     }
 
     /** One group of the job and the plan saved for it. */
@@ -264,6 +293,19 @@ final class PadCalibrationJob {
     PadLadder.LandingLayout landingLayout;
     double[] expected;
     double searchMm;
+    // the start-angle measure (BR-77)
+    /** Its mode, the candidate start P, the surface its dots lie on (null: none found, saProblem says why). */
+    String saMode;
+    double saStartDeg;
+    String saSurface;
+    String saProblem;
+    /** One block per engine step: halves row 1 at P and row 2 at P + 90, quarters one. */
+    final List<DoseBlocksRequest.Block> saBlocks = new ArrayList<>();
+    /** The fit, when the evidence was made (the first step's start), the angle it suggests and the set it applied. */
+    volatile ScrewPhaseFit.Fit saFit;
+    volatile Long saMeasuredAtMs;
+    volatile Double saSuggested;
+    volatile Map<String, Object> saApplied;
 
     // the run
     private final Object lock = new Object();
@@ -338,7 +380,8 @@ final class PadCalibrationJob {
         needleSinceMs = c.needleChangedAtMs;
         tip = svc.mountedTip();
         measure = req.measure;
-        if (measure != null && !MEASURE_TIP.equals(measure) && !MEASURE_LANDING.equals(measure)) {
+        boolean startAngle = MEASURE_START_ANGLE.equals(measure) && req.startAngle != null;
+        if (measure != null && !MEASURE_TIP.equals(measure) && !MEASURE_LANDING.equals(measure) && !startAngle) {
             throw ApiException.badRequest("'measure' must be \"tip\" (measure its dots) or \"landing\" (check where it "
                     + "lands), or left out (calibrate)");
         }
@@ -352,8 +395,13 @@ final class PadCalibrationJob {
             }
             manual = req.steps.get(0);
         }
-        if (MEASURE_LANDING.equals(measure)) {
-            planLanding(c);
+        if (MEASURE_LANDING.equals(measure) || startAngle) {
+            if (startAngle) {
+                planStartAngle(c);
+            }
+            else {
+                planLanding(c);
+            }
             steps();
             estimate(c);
             refusal = refusal(c);
@@ -567,6 +615,134 @@ final class PadCalibrationJob {
             entry = dispense.requirePlan(req.planId);
             boardName = entry.plan.boardName;
         }
+    }
+
+    /**
+     * BR-77, the start-angle measure (plan §1, §2): halves two rows of half-turn pairs from P and from P + 90, quarters 4
+     * quarter dots per turn from P, each row an engine step of its own after its own throwaways. P is the request's,
+     * else the stored angle (0 when it was never set: the fit works from any P); the dots lie on the request's surface,
+     * else on the one probed surface under every target.
+     */
+    private void planStartAngle(DispenseConfig c) throws ApiException {
+        StartAngle q = req.startAngle;
+        saMode = q.mode;
+        if ("dose".equals(q.mode)) {
+            throw ApiException.badRequest("mode 'dose' is not built yet (BR-77 PR C)");
+        }
+        boolean halves = HALVES.equals(q.mode);
+        if (!halves && !QUARTERS.equals(q.mode)) {
+            throw ApiException.badRequest("'mode' must be 'halves' (two rows of half-turn pairs) or 'quarters' (4 quarter "
+                    + "turns per turn)");
+        }
+        if (halves && q.pairs != null && q.pairs < MIN_PAIRS) {
+            throw ApiException.badRequest("lay at least " + MIN_PAIRS + " pairs (8 by default): with " + q.pairs
+                    + " the error at each half is too uncertain, so the measure would mostly find no angle");
+        }
+        int n = halves ? count(q.pairs, 8, MIN_PAIRS, 16, "pairs") : count(q.turns, 4, 2, 8, "turns");
+        if (q.targets.size() != 4 * n) {
+            throw ApiException.badRequest(halves ? String.format(Locale.ROOT, "halves of %d pairs take %d targets (2 rows "
+                    + "of %d pairs), not %d", n, 4 * n, n, q.targets.size()) : String.format(Locale.ROOT, "quarters of "
+                            + "%d turns take %d targets (4 per turn), not %d", n, 4 * n, q.targets.size()));
+        }
+        // halves: one set per row (Process 11-04 13:0x): a spot raised over row 1's wet dot may not reach it bare
+        int perRow = halves ? q.throwaways.size() / 2 : q.throwaways.size();
+        if (halves && (q.throwaways.size() % 2 != 0 || perRow < 2 || perRow > MAX_THROWAWAYS)) {
+            throw ApiException.badRequest("halves take one set of throwaways per row: an even count, 2 to "
+                    + MAX_THROWAWAYS + " per row (the first half before row 1, the second before row 2), 4 to "
+                    + 2 * MAX_THROWAWAYS + " in all, not " + q.throwaways.size());
+        }
+        if (perRow < 2 || perRow > MAX_THROWAWAYS) {
+            throw ApiException.badRequest("at least 2 throwaways, at most " + MAX_THROWAWAYS + ": the first sets the "
+                    + "screw's phase, the others flush it");
+        }
+        for (double[] t : q.throwaways) {
+            if (!(t[2] == 0 || t[2] == 1 || t[2] == 2)) {
+                throw ApiException.badRequest("a throwaway's layers must be 0 (a clean flat spot), 1 or 2 (wet paste, laid "
+                        + Texts.num(THROWAWAY_LAYER_MM, 2) + " mm higher per layer; never on a reflowed joint)");
+            }
+        }
+        if (q.startDeg != null && !(q.startDeg >= 0 && q.startDeg < 360)) {
+            throw ApiException.badRequest("'startDeg' must be 0 to < 360 (a count angle)");
+        }
+        // the closest dots, and a throwaway's blob nearer a target than that, would be taken for a target's dot
+        double pitch = Double.MAX_VALUE;
+        for (int i = 0; i < q.targets.size(); i++) {
+            for (int j = i + 1; j < q.targets.size(); j++) {
+                pitch = Math.min(pitch, dist(q.targets.get(i), q.targets.get(j)));
+            }
+        }
+        if (pitch < unknownSpacingMm()) {
+            throw ApiException.badRequest(String.format(Locale.ROOT, "two targets lie %.2f mm apart: at least %.1f mm, or "
+                    + "their dots touch", pitch, unknownSpacingMm()));
+        }
+        for (int i = 0; i < q.throwaways.size(); i++) {
+            for (int j = 0; j < q.targets.size(); j++) {
+                if (dist(q.throwaways.get(i), q.targets.get(j)) < pitch) {
+                    throw ApiException.badRequest(String.format(Locale.ROOT, "throwaway %d lies %.2f mm from target %d: "
+                            + "at least the targets' pitch, %.2f mm, or its paste is taken for that dot", i + 1, dist(
+                                    q.throwaways.get(i), q.targets.get(j)), j + 1, pitch));
+                }
+            }
+            for (int j = i + 1; j < q.throwaways.size(); j++) {
+                if (dist(q.throwaways.get(i), q.throwaways.get(j)) < pitch) {
+                    throw ApiException.badRequest(String.format(Locale.ROOT, "throwaways %d and %d lie %.2f mm apart: at "
+                            + "least the targets' pitch, %.2f mm, or one lands on the other's wet dot", i + 1, j + 1, dist(
+                                    q.throwaways.get(i), q.throwaways.get(j)), pitch));
+                }
+            }
+        }
+        saStartDeg = q.startDeg != null ? q.startDeg : c.profile.startAngleSetAtMs != null ? c.profile.startAngleDeg : 0;
+        saSurface = q.surface != null ? q.surface : surfaceUnder(c, q.targets);
+        int rows = halves ? 2 : 1, per = q.targets.size() / rows;
+        for (int k = 0; k < rows; k++) {
+            DoseBlocksRequest.Block b = new DoseBlocksRequest.Block(c.bStepsPerRev / (halves ? 2 : 4), halves ? "row"
+                    + (k + 1) : QUARTERS, saSurface);
+            b.xy.addAll(q.targets.subList(k * per, (k + 1) * per));
+            b.hopMm = pitch;
+            b.matchRadiusMm = pitch / 2;
+            saBlocks.add(b);
+        }
+    }
+
+    /**
+     * BR-77 (Process 11-04 16:4x): the fewest half-turn pairs a halves measure lays. With 4 the small-sample error
+     * (95 % coverage) leaves the measure answering "none" 70 % of the time at a 0.47 ripple (90 % at 0.3): dots and
+     * time for nothing.
+     */
+    static final int MIN_PAIRS = ScrewPhaseFit.MIN_PAIRS;
+
+    private static int count(Integer v, int dflt, int min, int max, String name) throws ApiException {
+        int n = v == null ? dflt : v;
+        if (n < min || n > max) {
+            throw ApiException.badRequest("'" + name + "' must be " + min + " to " + max);
+        }
+        return n;
+    }
+
+    private static double dist(double[] a, double[] b) {
+        return Math.hypot(a[0] - b[0], a[1] - b[1]);
+    }
+
+    /** BR-77: the one probed surface whose points' hull (+ surfaceMarginMm, I4's rule) holds every target, or null. */
+    private String surfaceUnder(DispenseConfig c, List<double[]> targets) {
+        List<String> under = new ArrayList<>();
+        for (String name : c.surfaces.keySet()) {
+            SurfacePlane pl = svc.surfacePlane(name);
+            boolean all = pl != null;
+            for (int i = 0; all && i < targets.size(); i++) {
+                all = Interlocks.onSurface(c, pl, targets.get(i)[0], targets.get(i)[1]);
+            }
+            if (all) {
+                under.add(name);
+            }
+        }
+        if (under.size() == 1) {
+            return under.get(0);
+        }
+        saProblem = under.isEmpty() ? "I4: no probed surface holds every target: probe the one they lie on, or name it "
+                + "with 'surface'" : "I4: the targets lie on the probed '" + String.join("' and '", under) + "' surfaces: "
+                        + "name one with 'surface'";
+        return null;
     }
 
     /** The top camera's frame (mm): the engine's, else the bench camera's for the estimate. */
@@ -810,6 +986,12 @@ final class PadCalibrationJob {
     }
 
     private void steps() {
+        if (MEASURE_START_ANGLE.equals(measure)) {
+            for (DoseBlocksRequest.Block b : saBlocks) {
+                step(b.label);
+            }
+            return;
+        }
         if (MEASURE_LANDING.equals(measure)) {
             step("blank");
             step(LOCATOR);
@@ -897,6 +1079,14 @@ final class PadCalibrationJob {
             find(ROW).estimateS = (PadLadder.LANDING_PURGE_DOTS + LandingFit.ROW_MM.length) * 1.2 + 2 * frames * CAPTURE_S;
             pasteMg = (1 + PadLadder.LANDING_PURGE_DOTS + LandingFit.ROW_MM.length) * profileMg;
         }
+        if (MEASURE_START_ANGLE.equals(measure)) {
+            for (DoseBlocksRequest.Block x : saBlocks) {
+                find(x.label).estimateS = blockSeconds(c, java.util.Collections.singletonList(x));
+                // the row's dots at the block's dose, its own throwaways at the profile's (bandPurge)
+                pasteMg += x.xy.size() * countMgPerDot(x.netSteps) + req.startAngle.throwaways.size() / saBlocks.size()
+                        * profileMg;
+            }
+        }
         if (l != null && layout != null) {
             l.estimateS = blockSeconds(c, layout.blocks);
             for (DoseBlocksRequest.Block x : layout.blocks) {
@@ -922,6 +1112,9 @@ final class PadCalibrationJob {
 
     /** The engine steps: the blank probe, each coupon's probe and look, the ladder, the weighing. */
     private int engineSteps() {
+        if (MEASURE_START_ANGLE.equals(measure)) {
+            return saBlocks.size();
+        }
         if (MEASURE_LANDING.equals(measure)) {
             return 2 + (blankNeeded ? 1 : 0);
         }
@@ -975,6 +1168,9 @@ final class PadCalibrationJob {
         }
         if (MEASURE_LANDING.equals(measure)) {
             return landingRefusal(c);
+        }
+        if (MEASURE_START_ANGLE.equals(measure)) {
+            return startAngleRefusal(c);
         }
         if (groups.isEmpty()) {
             return nothingToCalibrate(c);
@@ -1098,6 +1294,59 @@ final class PadCalibrationJob {
             return basic.toString();
         }
         return null;
+    }
+
+    /**
+     * BR-77, the measure's refusals before anything moves (plan §1): its surface, every target and throwaway on it and in
+     * a BR-03 zone, an apply's stored feature, then the interlocks (started, homed, I4: the needle frame, the landing;
+     * the step checks Z itself after a home).
+     */
+    private String startAngleRefusal(DispenseConfig c) {
+        if (saProblem != null) {
+            return saProblem;
+        }
+        if (!svc.hasTopCamera()) {
+            return "the measure needs the top camera: it looks at every spot before dispensing and measures every dot";
+        }
+        SurfacePlane plane = svc.surfacePlane(saSurface);
+        if (plane == null) {
+            return "I4: no '" + saSurface + "' surface: probe it first";
+        }
+        Interlocks.Scope scope = new Interlocks.Scope();
+        scope.surfaceName = saSurface;
+        List<String> names = new ArrayList<>();
+        for (int i = 0; i < req.startAngle.targets.size(); i++) {
+            names.add("target " + (i + 1));
+            scope.surfaceTargets.add(req.startAngle.targets.get(i));
+        }
+        for (int i = 0; i < req.startAngle.throwaways.size(); i++) {
+            names.add("throwaway " + (i + 1));
+            scope.surfaceTargets.add(req.startAngle.throwaways.get(i));
+        }
+        for (int i = 0; i < names.size(); i++) {
+            double[] p = scope.surfaceTargets.get(i);
+            if (!Interlocks.onSurface(c, plane, p[0], p[1])) {
+                return String.format(Locale.ROOT, "I4: %s (%.1f, %.1f) is off the '%s' surface", names.get(i), p[0], p[1],
+                        saSurface);
+            }
+        }
+        OutputZones zones = OutputZones.of(c, svc.bottomCameraXY(), scope);
+        for (int i = 0; i < names.size(); i++) {
+            double[] p = scope.surfaceTargets.get(i);
+            String why = zones.lineRefusal(names.get(i), p[0], p[1]);
+            if (why != null) {
+                return "I12: " + why;
+            }
+        }
+        DispenseProfile.StartAngleFeature f = c.profile.startAngleFeature;
+        if (req.startAngle.apply && (f == null || !saMode.equals(f.mode))) {
+            return (f == null ? "the start angle has no measured " + saMode + " feature: set it once from a measure"
+                    : "the start angle was set from a " + f.mode + " measure, not a " + saMode + " one: set it once "
+                            + "from a " + saMode + " measure") + " (POST /api/screw/start-angle {startAngleDeg, evidence: "
+                    + "{runId}})";
+        }
+        InterlockReport r = svc.checkInterlocks(scope, 0, true);
+        return r.ok() ? null : r.toString();
     }
 
     private String nothingToCalibrate(DispenseConfig c) {
@@ -1295,6 +1544,11 @@ final class PadCalibrationJob {
             }
             if (MEASURE_LANDING.equals(measure)) {
                 runLanding(c);
+                end(DONE, null);
+                return;
+            }
+            if (MEASURE_START_ANGLE.equals(measure)) {
+                runStartAngle(c);
                 end(DONE, null);
                 return;
             }
@@ -1596,6 +1850,97 @@ final class PadCalibrationJob {
         landing = lr;
         landingText = lr.text;
         done(ROW, lr.saved ? "saved" : "not saved: asked whether the " + setupName + " is on");
+    }
+
+    /**
+     * BR-77: the measure's steps (plan §2-§5): each block an engine step of its own at its start angle after its own
+     * throwaways (I11 waived, any quarter, half or whole turn), every dot's area by the before and after frames; then
+     * the fit, and with apply the new start = old start + (new feature - old feature), set as a measure's evidence sets
+     * it (BR-02's checks). A STOP or a failed step ends the job before the fit: nothing is set.
+     */
+    private void runStartAngle(DispenseConfig c) throws Exception {
+        StartAngle q = req.startAngle;
+        int rev = c.bStepsPerRev;
+        List<List<ScrewPhaseFit.Dot>> rows = new ArrayList<>();
+        for (int k = 0; k < saBlocks.size(); k++) {
+            DoseBlocksRequest.Block b = saBlocks.get(k);
+            begin(b.label);
+            DoseBlocksRequest r = new DoseBlocksRequest();
+            r.kind = DoseBlocksRequest.LADDER;
+            r.parkAfter = false;
+            r.startAngleDeg = ScrewPhaseFit.norm(saStartDeg + 90 * k);
+            r.measuresStartAngle = true;
+            r.purgeXy = new ArrayList<>();
+            int per = q.throwaways.size() / saBlocks.size();
+            for (double[] t : q.throwaways.subList(k * per, (k + 1) * per)) {
+                // this row's own spots, each at its own layers (Process's Q3: never on wet paste at the targets' Z)
+                r.purgeXy.add(new double[] {t[0], t[1], t[2] * THROWAWAY_LAYER_MM});
+            }
+            r.blocks.add(b);
+            stamp(r);
+            DoseBlocksResult res = engine(() -> engine.runDoseBlocks(r), x -> x.run, x -> x.ok, x -> x.message);
+            results.add(res);
+            storePhotos(res);
+            if (saMeasuredAtMs == null) {
+                saMeasuredAtMs = res.run.startedAtMs;
+            }
+            List<ScrewPhaseFit.Dot> row = new ArrayList<>();
+            List<DoseBlocksResult.DotOut> out = res.blocks.get(0).dots;
+            for (int i = 0; i < out.size(); i++) {
+                DoseBlocksResult.DotOut d = out.get(i);
+                // a thread or one blob joins a dot and the next: neither area is its own
+                boolean joined = d.threadToNext || i > 0 && out.get(i - 1).threadToNext;
+                row.add(new ScrewPhaseFit.Dot(DispenseProfile.angleOfCount(d.startCount, rev), d.found == null ? 0
+                        : d.found.areaMm2, d.found != null, joined));
+            }
+            rows.add(row);
+            done(b.label, String.format(Locale.ROOT, "%d dots from %s°: %d found", row.size(), Texts.num(
+                    row.get(0).startDeg, 1), res.blocks.get(0).found()));
+        }
+        DispenseProfile now = svc.getConfig().profile;
+        DispenseProfile.StartAngleFeature old = now.startAngleFeature;
+        // the planned starts as the builder rounds them to steps
+        double s1 = DispenseProfile.angleOfCount(Math.round(saStartDeg / 360 * rev), rev);
+        ScrewPhaseFit.Fit fit = HALVES.equals(saMode) ? ScrewPhaseFit.halves(rows.get(0), s1, rows.get(1),
+                ScrewPhaseFit.norm(s1 + 90)) : ScrewPhaseFit.quarters(rows.get(0), s1, old != null && QUARTERS.equals(
+                        old.mode));
+        Double feature = fit.featureDeg();
+        if (feature != null && old != null && saMode.equals(old.mode)) {
+            saSuggested = ScrewPhaseFit.norm(now.startAngleDeg + feature - old.deg);
+        }
+        if (q.apply && feature == null) {
+            fit.why.add("not applied: no start angle was found");
+        }
+        saFit = fit;
+        if (!q.apply || feature == null) {
+            return;
+        }
+        // a STOP, a cancel or OpenPnP's own Stop since the last step sets nothing; one now waits for the set
+        synchronized (lock) {
+            if (!stopRequested && engine.stopEpoch() != startEpoch) {
+                stopRequested = true;
+                stopReason = STOPPED_SINCE_START;
+            }
+            if (stopRequested) {
+                throw new Halt(stopReason);
+            }
+            double[] ft = svc.applyStartAngle(new DispenseProfile.StartAngleFeature(saMode, feature, saMeasuredAtMs,
+                    id));
+            saSuggested = ft[1];
+            saApplied = Views.map("fromDeg", round(ft[0], 2), "toDeg", round(ft[1], 2), "featureFrom",
+                    HALVES.equals(saMode) ? "peak" : "interpolated");
+        }
+    }
+
+    /**
+     * BR-77: the feature this measure found, the evidence POST /api/screw/start-angle {evidence: {runId}} takes; null
+     * unless it is a start-angle measure that ended done and found an angle (confidence not none).
+     */
+    DispenseProfile.StartAngleFeature measuredFeature() {
+        ScrewPhaseFit.Fit f = saFit;
+        Double deg = f == null ? null : f.featureDeg();
+        return MEASURE_START_ANGLE.equals(measure) && DONE.equals(state) && deg != null
+                ? new DispenseProfile.StartAngleFeature(saMode, deg, saMeasuredAtMs, id) : null;
     }
 
     /** A step of the landing check: every new blob kept, the job's setup and needle. */
@@ -2545,6 +2890,13 @@ final class PadCalibrationJob {
         }
     }
 
+    /** The result's sentence once the job ended, else null (under the lock: {@link #end} sets it with the state). */
+    String sentence() {
+        synchronized (lock) {
+            return result == null ? null : (String) result.get("sentence");
+        }
+    }
+
     boolean ended() {
         return DONE.equals(state) || STOPPED.equals(state) || CANCELLED.equals(state) || FAILED.equals(state);
     }
@@ -2782,6 +3134,18 @@ final class PadCalibrationJob {
         Step b = find("blank");
         if (b != null && blankNeeded) {
             s.add("Probes the blank with N1 (" + blankTargets.size() + " points, ≈ " + minSec(b.estimateS) + ").");
+        }
+        if (MEASURE_START_ANGLE.equals(measure)) {
+            boolean halves = HALVES.equals(saMode);
+            String from = halves ? "2 rows from " + Texts.num(saStartDeg, 1) + "° and " + Texts.num(ScrewPhaseFit.norm(
+                    saStartDeg + 90), 1) + "°" : "4 per turn from " + Texts.num(saStartDeg, 1) + "°";
+            String on = saSurface == null ? "" : " on the '" + saSurface + "' surface";
+            s.add(String.format(Locale.ROOT, "Lays %d %s dots%s (%s), each row after its %d throwaways, looks at them "
+                    + "with the top camera and fits %s (≈ %s).", req.startAngle.targets.size(), halves ? "half-turn"
+                            : "quarter-turn", on, from, req.startAngle.throwaways.size() / saBlocks.size(), halves
+                                    ? "the flow's peak"
+                                    : "the dead quarter's start", minSec(estimatedSeconds)));
+            return String.join(" ", s);
         }
         if (MEASURE_LANDING.equals(measure)) {
             PadLadder.LandingLayout l = landingLayout;
@@ -3040,6 +3404,10 @@ final class PadCalibrationJob {
             kind = "measured";
             sentence = tipSentence(clock);
         }
+        else if (DONE.equals(outcome) && MEASURE_START_ANGLE.equals(measure)) {
+            kind = "measured";
+            sentence = startAngleSentence(clock);
+        }
         else if (DONE.equals(outcome) && manual == null) {
             List<String> ok = new ArrayList<>();
             List<String> not = new ArrayList<>();
@@ -3115,7 +3483,78 @@ final class PadCalibrationJob {
         m.put("landing", landingView());
         m.put("tipDots", MEASURE_TIP.equals(measure) ? tipDots() : null);
         m.put("landingWarnings", landingWarnings());
+        m.put("startAngle", startAngleView());
         return m;
+    }
+
+    /** BR-77: "Measured 14:07: the flow's peak at 179.3° (high); the start angle set 359.1° → 269.2°." */
+    private String startAngleSentence(String clock) {
+        ScrewPhaseFit.Fit f = saFit;
+        Double deg = f == null ? null : f.featureDeg();
+        if (deg == null) {
+            return "Measured " + clock + ": no start angle found" + (f == null || f.why.isEmpty() ? "" : " (" + String.join(
+                    "; ", f.why) + ")") + ".";
+        }
+        Map<String, Object> a = saApplied;
+        return "Measured " + clock + ": " + (HALVES.equals(saMode) ? "the flow's peak" : "the dead quarter's start")
+                + " at " + Texts.num(deg, 1) + "° (" + f.confidence + ")" + (a == null ? "" : "; the start angle set "
+                        + Texts.num((Double) a.get("fromDeg"), 1) + "° → " + Texts.num((Double) a.get("toDeg"), 1)
+                        + "°") + ".";
+    }
+
+    /**
+     * BR-77: the start-angle measure's result (plan §1), the measure route's {@code result} and this job's
+     * result.startAngle; null for the other jobs. Angles are count angles (deg); fit and applied are null until then.
+     */
+    Map<String, Object> startAngleView() {
+        if (!MEASURE_START_ANGLE.equals(measure)) {
+            return null;
+        }
+        ScrewPhaseFit.Fit f = saFit;
+        int rev = svc.getConfig().bStepsPerRev;
+        List<Map<String, Object>> dots = new ArrayList<>();
+        for (DoseBlocksResult res : results) {
+            for (DoseBlocksResult.DotOut d : res.blocks.get(0).dots) {
+                dots.add(Views.map("i", dots.size(), "x", d.x, "y", d.y, "startDeg", d.startCount == null ? null
+                        : round(DispenseProfile.angleOfCount(d.startCount, rev), 2), "found", d.found != null,
+                        "areaMm2", d.found == null ? 0.0 : round(d.found.areaMm2, 3)));
+            }
+        }
+        Map<String, Object> fit = null;
+        if (f instanceof ScrewPhaseFit.Halves) {
+            ScrewPhaseFit.Halves h = (ScrewPhaseFit.Halves) f;
+            List<Map<String, Object>> rows = new ArrayList<>();
+            for (ScrewPhaseFit.Row r : h.rows) {
+                rows.add(Views.map("startDeg", round(r.startDeg, 2), "x", round(r.x, 4), "xSe", round(r.xSe, 4)));
+            }
+            fit = Views.map("rows", rows, "peakDeg", round(h.peakDeg, 2), "a", round(h.a, 3), "peakSeDeg",
+                    round(h.peakSeDeg, 2), "balancedStartDeg", round(h.balancedStartDeg, 2));
+        }
+        else if (f instanceof ScrewPhaseFit.Quarters) {
+            ScrewPhaseFit.Quarters q = (ScrewPhaseFit.Quarters) f;
+            fit = Views.map("deadQuarterStartDeg", round(q.deadQuarterStartDeg, 2), "gridDeadStartDeg", round(
+                    q.gridDeadStartDeg, 2), "regridStartDeg", round(q.regridStartDeg, 2), "liveQuarterAreas", byAngle(
+                            q.liveQuarterAreas), "cvPerAngle", byAngle(q.cvPerAngle));
+        }
+        return Views.map("job", id, "state", state, "mode", saMode, "startDeg", saStartDeg, "featureDeg", f == null
+                ? null : round(f.featureDeg(), 2), "confidence", f == null ? null : f.confidence, "why", f == null
+                        ? new ArrayList<String>() : new ArrayList<>(f.why), "measuredAtMs", saMeasuredAtMs, "fit", fit,
+                "evidence", Views.map("runId", id, "runIds", new ArrayList<>(runs), "dots", dots), "suggestedStartDeg",
+                round(saSuggested, 2), "applied", saApplied);
+    }
+
+    /** {"297.9": value} by start angle (deg, 0.1), values to 0.001 (null stays null). */
+    private static Map<String, Object> byAngle(Map<Double, Double> m) {
+        Map<String, Object> l = new LinkedHashMap<>();
+        for (Map.Entry<Double, Double> e : m.entrySet()) {
+            l.put(Texts.num(e.getKey(), 1), round(e.getValue(), 3));
+        }
+        return l;
+    }
+
+    private static Double round(Double x, int decimals) {
+        double p = Math.pow(10, decimals);
+        return x == null ? null : Math.round(x * p) / p;
     }
 
     /** The landing check's result (§22.6 result.landing), or null for the other jobs. */

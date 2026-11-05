@@ -115,6 +115,7 @@ lock
 lock-real
 tip-values
 clean-pads
+designs
 "
 ALL_SCRIPTS=$(echo $ALL_SCRIPTS)  # one line, one space apart: the " $ALL_SCRIPTS " matches need it
 WEBUI_SCRIPTS="${WEBUI_SCRIPTS:-$ALL_SCRIPTS}"

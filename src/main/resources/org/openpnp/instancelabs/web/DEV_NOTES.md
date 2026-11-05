@@ -99,6 +99,7 @@ browser keeps them. A value left in
 | `status` | `(status, prev)` | every good poll, before rendering |
 | `plan` | `(plan, prev)` | `setPlan`, `loadPlan`, `planRefresh`, 404 (plan null + `S.planForgotten`) |
 | `cleancheck` | `(report)` | a newer clean-pad report of the plan shown was adopted |
+| `boards` | `(saved)` | the upload dialog saved a board or gave a board file its drawing (Designs reads its list again) |
 | `taskend` | `(run)` | a task (board, clean-pad check, prime, test dot, touch-off, ladder, shots, board registration, blank probe, z check) ended; core already re-read the plan and runs |
 | `stop` | `(answer)` | our STOP was confirmed (`answer.actions`) |
 | `recovery` | `(rec or null)` | a recovery opened / cleared |
@@ -312,7 +313,9 @@ with §11 (the AR + BI integration slice, on `il/rc1`). Nothing here moves the m
   (H4), `onImported(saved)`, `preview()` (the hero's path preview). Keeps the newest 8 drawings;
   `localStorage['il.pv.picture']` (default Full; Records' map is Full too). Board pictures say `75 × 75 mm` and `80 parts`; the attach keeps the
   drawing under the board file's earlier name, else a free one (never another board's).
-- **`IL.boardImport.open({file, onSaved})`**, `isOpen()` (web-flow): `#dlg-board-import`, states choose → reading
+- **`IL.boardImport.open({file, onSaved, saveCloses})`**, `isOpen()` (web-flow; saveCloses: a save goes straight to onSaved, as
+  Designs does; a file dropped on the open dialog keeps the options it was opened with; every save or attach emits
+  `boards`): `#dlg-board-import`, states choose → reading
   (Cancel aborts, 60 s) → preview → saving (Esc and Cancel do nothing) → saved; 12 MB checked before sending; a refused
   read shows its reason and `Choose another file`. The drop guard: a file dropped outside the drop zone never replaces
   the page; a `.kicad_pcb` opens the dialog.
