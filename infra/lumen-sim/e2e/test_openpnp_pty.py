@@ -108,9 +108,9 @@ def stage(dest):
 
 
 class PtySession:
-    """One uinav session: OpenPnP + lumen-sim (stock personality)."""
+    """One uinav session: OpenPnP + lumen-sim (a personality: stock by default)."""
 
-    def __init__(self, name, tmp):
+    def __init__(self, name, tmp, personality="stock"):
         self.name = name
         self.port = free_api_port()
         env = dict(os.environ, OPENPNP_IL_API_PORT=str(self.port), LUMEN_SIM_DIR=LUMEN_SIM_DIR)
@@ -118,6 +118,7 @@ class PtySession:
         # The reproductions need the board's exact M115: never lumen-sim's simulator line (uinav's sim default)
         env.pop("UINAV_SIM_CONTROLLER_CAP", None)
         cmd = [UINAV, "--session", name, "launch", "--controller", "pty", "--controller-park", PARK,
+               "--controller-personality", personality,
                "--config", stage(os.path.join(tmp, "stage-" + name)), "--openpnp-jar", os.path.abspath(JAR)]
         for x in XML_SETS:
             cmd += ["--xml-set", x]
@@ -243,6 +244,7 @@ def lines_sent(io, text):
 
 class SessionTest(unittest.TestCase):
     NAME = None
+    PERSONALITY = "stock"
 
     @classmethod
     def setUpClass(cls):
@@ -251,7 +253,7 @@ class SessionTest(unittest.TestCase):
             raise unittest.SkipTest(reason)
         cls.tmp = tempfile.mkdtemp(prefix="lumen-e2e-")
         try:
-            cls.s = PtySession(cls.NAME, cls.tmp)
+            cls.s = PtySession(cls.NAME, cls.tmp, cls.PERSONALITY)
         except BaseException:
             shutil.rmtree(cls.tmp, ignore_errors=True)
             raise
@@ -274,6 +276,12 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(ports, [self.s.lumen["link"]])
         self.assertRegex(os.path.realpath(ports[0]), r"^/dev/pts/\d+$")
 
+    def screw_idle_cut(self):
+        """BR-92: what the engine read in M115 at the connect: does the controller's idle timeout cut the screw?"""
+        st = self.s.wait_status(lambda st: (st["machine"].get("screwIdleCut") or {}).get("readAtMs"), 30,
+                                "the engine read M115 at the connect")
+        return st["machine"]["screwIdleCut"]
+
     def enable(self):
         code, r = self.s.api("POST", "/api/machine/enable", timeout=120)
         self.assertEqual(code, 200, r)
@@ -294,6 +302,9 @@ class HomeAndPrimeTest(SessionTest):
         self.enable()
         # SimGuard asked at the connect (M115): the board's own answer, without lumen-sim's simulator line (BR-47)
         self.assertFalse(self.s.status()["server"]["simulatorConfirmed"])
+        cut = self.screw_idle_cut()  # the stock build: the idle timeout switches the screw's motor off
+        self.assertTrue(cut["cut"], cut)
+        self.assertNotIn("il-holdB", cut["firmware"] or "")
         n0 = self.s.io()[1]
         t0 = time.time()
         code, r = self.s.api("POST", "/api/machine/home", HOME, timeout=180)
@@ -412,6 +423,21 @@ class HomeAndPrimeTest(SessionTest):
         self.assertGreater(late_ok - t_g4, 10.0)  # the G4's own ok, credited to the M410
         for line in ("M107 P3", "M107 P2", "M18 B"):
             self.assertTrue(lines_sent(after, line), line)
+
+
+class HoldBConnectTest(SessionTest):
+    """INF-13, BR-92: on lumen-sim's il-holdB build the engine reads the marker in M115 at the connect: the controller's
+    idle timeout does not switch the screw's motor off (the stock session reads the opposite, HomeAndPrimeTest)."""
+    NAME = "lumen-e2e-holdb"
+    PERSONALITY = "il-holdB"
+
+    def test_the_engine_reads_the_holdb_marker_at_the_connect(self):
+        self.check_safe_copy()
+        self.enable()
+        cut = self.screw_idle_cut()
+        self.assertFalse(cut["cut"], cut)
+        self.assertIn("il-holdB", cut["firmware"], cut)
+        self.assertEqual(self.s.sim()["personality"], "il-holdB")
 
 
 class StopDuringHomingTest(SessionTest):
