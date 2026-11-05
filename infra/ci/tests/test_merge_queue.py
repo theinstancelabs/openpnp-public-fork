@@ -54,7 +54,7 @@ class MergeQueue(unittest.TestCase):
 
     def test_a_push_skips_a_test_job_only_if_the_commits_queue_run_passed_that_job(self):
         js = ci_wiring.jobs(self.ci)
-        self.assertEqual(set(TESTS), set(js) - {"build", "queued", "gate", "release"})  # a new job must decide too
+        self.assertEqual(set(TESTS), set(js) - {"build", "queued", "gate", "release", "prune-artifacts"})  # a new job must decide too
         for name in TESTS:
             needs = [n.strip() for n in (ci_wiring.job_value(js[name], "needs") or "").strip("[]").split(",")]
             self.assertIn("queued", needs, name)
@@ -179,7 +179,7 @@ class GateBehaviour(unittest.TestCase):
 
     def test_gate_needs_every_job_but_itself_and_the_release(self):
         names = {n.strip() for n in re.search(r"needs: \[([^\]]*)\]", self.needs).group(1).split(",")}
-        self.assertEqual(names, set(ci_wiring.jobs(self.ci)) - {"gate", "release"})
+        self.assertEqual(names, set(ci_wiring.jobs(self.ci)) - {"gate", "release", "prune-artifacts"})
 
     def test_the_fast_gate_only_on_an_unlabelled_pr_and_only_for_the_slow_jobs(self):
         fast = self.all_jobs(**{s: "skipped" for s in SLOW})
