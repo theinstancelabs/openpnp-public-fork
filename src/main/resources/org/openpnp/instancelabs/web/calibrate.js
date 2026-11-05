@@ -804,8 +804,11 @@
   }
   function renderShots(s) {
     const d = s.dispense || {}, prof = d.profile || {};
-    // only where paste may go with nothing under it (the engine refuses the others: "takes no paste"), a cup first
-    const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace), (nm) => IL.isSinkPlace(nm, d));
+    // the places the engine takes shots on (shotsRun): the sinks, the blank (a reference) and a coupon; its zones refuse the
+    // others ("takes no paste"); a cup first
+    const coupons = ((S.config || {}).padCalibration || {}).couponPlaces || ['coupon1', 'coupon2'];
+    const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace),
+      (nm) => IL.isSinkPlace(nm, d) || nm === (d.blankLocationName || 'blank') || coupons.includes(nm));
     IL.show($('shots-noplace'), !names.length);
     const place = $('shots-place').value;
     const p = shotsPlan();
