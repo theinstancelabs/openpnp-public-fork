@@ -215,12 +215,20 @@ public class TipSetupValuesSimTest {
     /**
      * BR-85 review (BR-89's item 1): without a number of steps a ladder that skips dots lays 8 after its reference
      * pair, down to -0.1 mm in the default steps of 0.025 mm; with a skip of 5 it was refused for too few dots. The
-     * answer names the steps and the start gap the server chose.
+     * answer names the steps and the start gap the server chose, and the dots laid (BR-89: + 2 check dots). The SIM
+     * scene has no paste: no contact, nothing kept, and the run message adds the check dots' problem to the reason.
      */
     @Test
     public void aLadderThatSkipsDotsLaysEightAfterItsReferencePair() throws Exception {
         layingWith(5);
+        int rows = t.svc.getDb().query("SELECT id FROM needle_touchoff").size();
         JsonObject res = laid("{\"wait\":true}");
+        assertEquals(17, res.get("dotsLaid").getAsInt(), res.toString());
+        assertEquals("no dot at gap 0.125 mm, the first after the 5 not counted: the needle is at or below the surface "
+                + "from there, or nothing dispensed; raise startGapMm; the 2nd check dot at gap 0.125 mm left no dot: "
+                + "the landing cannot be checked; look at the tip from below and run the touch-off again", TipSim.str(
+                        res.getAsJsonObject("result").getAsJsonObject("run"), "message"));
+        assertEquals(rows, t.svc.getDb().query("SELECT id FROM needle_touchoff").size(), "nothing kept");
         double[] g = gaps(res);
         assertEquals(15, g.length, "5 skipped, the reference pair and 8 after it");
         assertEquals(0.25, g[0], 1e-12);
