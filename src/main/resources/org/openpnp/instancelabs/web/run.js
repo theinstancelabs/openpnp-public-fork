@@ -396,7 +396,7 @@
     return r;
   }
   IL.fix('plan-again', { run: () => planAgain(), ok: (p) => (p ? 'Planned again: ' + p.summary.dots + ' dots on ' + p.summary.pads + ' pads' : 'Planned again'),
-    gate: (s) => IL.lockReason(s, { pressureOff: false, engine: true }) });
+    gate: (s) => boardLock(s, { pressureOff: false, engine: true }) });
   IL.fix('clean-check', {
     press2: 'check pads',
     gate: (s) => IL.lockReason(s, { connected: true, homed: true }) || (!plan() ? 'Plan a board first' : null),
@@ -426,7 +426,7 @@
   // Setup's Top camera card: its Snapshot moves nothing (after a refused fiducial check the head is still where it looked)
   IL.fix('look-camera', { run: async () => { IL.go('#setup/camera'); return null; } });
   IL.fix('plan-unregistered', {
-    gate: (s) => IL.lockReason(s, { pressureOff: false, engine: true }),
+    gate: (s) => boardLock(s, { pressureOff: false, engine: true }),
     run: async () => {
       const body = planBodyFrom((plan() && plan().source) || lsJson('il.run.source', null));
       if (!body) throw new Error('No board to plan: choose a design first.');
@@ -604,10 +604,13 @@
     const partial = !!dec0 && dec0.cause === 'partial';
     // another board chosen: Plan (the Board step's) is the one action; "Plan again" would plan the board before
     IL.show(n.actions, (mode !== 'stopped' || partial) && !R.pending);
-    // the lock note names what is locked during any task (board run, pad check, prime ...): greyed controls say why
+    // the lock note names what is locked during any task (board run, pad check, prime ...), or between Start's steps: greyed
+    // controls say why
     const taskLock = IL.taskRunning(s) ? IL.lockReason(s, { pressureOff: false }) : null;
-    IL.show(n.lock, !!taskLock);
+    const chain = !taskLock && IL.runFlow && IL.runFlow.chaining();
+    IL.show(n.lock, !!taskLock || chain);
     if (taskLock) IL.setText(n.lock.lastChild, 'Change board, Plan again, the board position, setup saves and Home: ' + taskLock.charAt(0).toLowerCase() + taskLock.slice(1) + '.');
+    else if (chain) IL.setText(n.lock.lastChild, 'Change board, Plan again and the board position wait: Start is under way.');
     let eb = '', ebCls = 'eyebrow', title = '', meta = [];
     if (mode === 'empty' && R.pending) {
       eb = 'Run · not planned yet';
@@ -1239,6 +1242,8 @@
   function onBoardSelect() { selectBoard($('board-select').value); }
   /** Chooses a board (the select, or a board-import thumbnail through H1): its position from the job or remembered. */
   function selectBoard(v) {
+    // Start's chain plans, finds and pastes its design: no other board under it (an upload's Use this design comes here too)
+    if (IL.runFlow && IL.runFlow.chaining()) { IL.toast('Start is under way: the board stays until it has started.', 'need'); return; }
     const sel = $('board-select');
     R.form.sel = v || null;
     if (sel && sel.value !== (v || '')) syncSelect(![...sel.options].some((o) => o.value === (v || '')));
@@ -1460,6 +1465,8 @@
       const i = $(id);
       if (i && i.disabled !== !!taskLock) i.disabled = !!taskLock;
     }
+    // the re-seat answer goes to the engine (new-seat flag), which the find reads: not between Start's steps either
+    for (const id of ['board-seat-new', 'board-seat-same']) IL.gate($(id), taskLock);
     IL.gate($('btn-board-refresh'), taskLock);
   }
 
