@@ -832,17 +832,17 @@
     const h = lk.holder;
     return IL.holderName(h) + ' has the machine' + (isNum(h.sinceMs) ? ' (since ' + IL.fmtTime(h.sinceMs - S.skewMs) + ')' : '') + ': Take control to use it.';
   };
-  /**
-   * Why a control is locked now, or null. need: {connected, homed, idle (default true), pressureOff (default true),
-   * engine, homes (the task homes by itself: it waits while N1 is low), held (default true: an agent's lock locks it)}.
-   * Texts are the spec's (§13 "Locked control").
-   */
   /** BR-93: the link to the controller is lost (its USB device gone, or a read or write failed): the engine's why (with its
    *  time) and its next step, as given; null while the link holds. */
   IL.linkLostReason = function (status) {
     const l = (((status || S.status) || {}).machine || {}).linkLost;
     return l ? cap(l.why || 'the link to the controller was lost') + '. ' + cap(l.next || 'once the board is back on USB: Stop, then Start, then Home as after a reset') + '.' : null;
   };
+  /**
+   * Why a control is locked now, or null. need: {connected, homed, idle (default true), pressureOff (default true),
+   * engine, homes (the task homes by itself: it waits while N1 is low), held (default true: an agent's lock locks it)}.
+   * Texts are the spec's (§13 "Locked control").
+   */
   IL.lockReason = function (status, need) {
     const s = status || S.status;
     const n = Object.assign({ idle: true, pressureOff: true }, need || {});
@@ -853,7 +853,8 @@
     const held = (n.connected || n.homed || n.engine || n.homes) && n.held !== false ? IL.heldReason(s) : null;
     if (held) return held;
     const m = s.machine || {}, d = s.dispense || {}, pr = s.pressure || {};
-    if ((n.connected || n.homed || n.engine || n.homes) && m.linkLost) return IL.linkLostReason(s);
+    // only what reaches the controller: saves that write data ({engine} alone) never touch it
+    if ((n.connected || n.homed || n.homes) && m.linkLost) return IL.linkLostReason(s);
     if (n.idle && IL.taskRunning(s)) {
       const lab = s.run && s.run.running ? s.run.label : 'task';
       return lab === 'board' ? 'Locked while the board runs' : 'Locked while the ' + (lab === 'z check' ? 'Z check' : lab) + ' runs';
