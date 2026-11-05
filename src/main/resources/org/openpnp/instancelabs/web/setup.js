@@ -263,7 +263,8 @@
     const ri = it.regulator;
     add({ key: 'regulator', title: 'Regulator', state: ri.state, card: 'pressure', code: 'I6', you: !!reg,
       value: reg ? psi + ' psi · ' + IL.fmtTime(reg.atMs) : 'read the gauge', detail: ri.detail,
-      fixes: [{ fix: 'pressure-on', label: 'Pressure on', icon: 'i-gauge' }, { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
+      fixes: [IL.hasPumpOnly(s) ? { fix: 'pressure-pump', label: 'Pump on', icon: 'i-gauge' } : { fix: 'pressure-on', label: 'Pressure on', icon: 'i-gauge' },
+        { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
     // 4 Places
     const wn = d.wasteLocationName || 'waste', bn = d.blankLocationName || 'blank';
     const missing = [wn, bn].filter((n) => !locs[n]);
@@ -454,7 +455,8 @@
       case 'regulator':
         q = 'Read the regulator gauge: ' + IL.fmtPsi(prof.pressurePsi) + ' psi';
         code = 'I6 · no sensor';
-        dd = 'Switch the pressure on with the needle over the waste, read the gauge, then tick it. Kept in this browser for 8 h.';
+        dd = (IL.hasPumpOnly(s) ? 'Switch the pump on (the valve stays closed, nothing moves), read the gauge'
+          : 'Switch the pressure on with the needle over the waste, read the gauge') + ', then tick it. Kept in this browser for 8 h.';
         acts = x.fixes.map((f) => IL.fixButton(f));
         break;
       case 'needle':

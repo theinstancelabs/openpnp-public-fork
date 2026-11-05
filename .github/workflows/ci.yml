@@ -119,6 +119,7 @@ jobs:
             python3 -m unittest discover -v -s "$t" -t "$d"
             echo "::endgroup::"
           done
+          echo "::group::src/test/web"; python3 -m unittest discover -v -s src/test/web -p 'test_*.py'; echo "::endgroup::"
 
   maven:
     name: Unit + simulated-machine integration (mvn test)
