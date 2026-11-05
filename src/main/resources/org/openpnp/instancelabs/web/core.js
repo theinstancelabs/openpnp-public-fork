@@ -526,7 +526,8 @@
   IL.listReadError = (reason, kept) => (kept ? 'These are the designs from before. Could not read them again: ' : 'Could not read the designs: ') + reason;
   /**
    * Retry under a failed read of a list (as Records' and Setup's): reads it again, nothing else. The page swaps the box
-   * for "Reading…" meanwhile, so a pressed Retry hands its focus to the Retry shown after the read (keyboard users).
+   * for "Reading…" meanwhile, so a pressed Retry hands its focus to the Retry shown after the read (keyboard users),
+   * unless the focus went elsewhere meanwhile (a field, a dialog).
    */
   IL.retryButton = function (read, key) {
     const fk = 'retry:' + key;
@@ -535,6 +536,7 @@
       const had = document.activeElement === b;
       await read();
       if (had) requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (document.activeElement && document.activeElement !== document.body) return;
         const n = document.querySelector('[data-focus-key="' + fk + '"]');
         if (n && !n.closest('[hidden]')) n.focus({ preventScroll: true });
       }));

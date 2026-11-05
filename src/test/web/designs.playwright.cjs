@@ -604,11 +604,19 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     tab.on('pageerror', (e) => jsErrors.push('tab 2: ' + String(e)));
     tab.on('dialog', (d) => { dialogs.push(d.type() + ': ' + d.message()); d.dismiss().catch(() => {}); });
     tab.on('request', (r) => { if (r.method() !== 'GET' && new URL(r.url()).pathname.startsWith('/api/')) writes.push(r.method() + ' ' + new URL(r.url()).pathname); });
-    let failing = true, reads6 = 0;
-    await tab.route('**/api/boards', (route) => { if (route.request().method() !== 'GET') return route.fallback(); reads6++; return failing ? route.abort('failed') : route.fallback(); });
-    // settled: no read of the list for 800 ms (an aborted or answered read ends within ms), so the page shows its outcome;
-    // at most ~10 s (a page that reads on every render never settles: its own check then fails, no hang)
-    const settle = async () => { for (let i = 0; i < 12; i++) { const n = reads6; await tab.waitForTimeout(800); if (n === reads6) return; } };
+    let failing = true, delay6 = 0, reads6 = 0, done6 = 0, unsettled6 = 0;
+    await tab.route('**/api/boards', async (route) => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      reads6++;
+      try {
+        if (!failing) return await route.fallback();
+        if (delay6) await new Promise((r) => setTimeout(r, delay6));   // a slow "no answer": the page shows "Reading…" meanwhile
+        return await route.abort('failed');
+      } finally { done6++; }
+    });
+    // settled: every read of the list ended and none for 800 ms, so the page shows its outcome; at most ~12 s (a page that
+    // reads on every render never settles: counted, and a check fails at the end, no hang)
+    const settle = async () => { for (let i = 0; i < 15; i++) { const n = reads6; await tab.waitForTimeout(800); if (n === reads6 && done6 === reads6) return; } unsettled6++; };
     const shown6 = (sel) => tab.evaluate((q) => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => { const b = document.querySelector(q);
       r(b && !b.closest('[hidden]') ? { text: (b.querySelector(':scope > span') || b).textContent, retry: !!b.querySelector('button.list-retry') } : null); }))), sel);
     await tab.goto(BASE + '#run');
@@ -622,13 +630,26 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     let before6 = reads6;
     await tab.waitForTimeout(2000);
     check('(6e) and nothing reads the list again by itself (Start once read it on every render)', reads6 === before6, { before: before6, after: reads6 });
+    // Retry from the keyboard, the read slow enough that the box shows "Reading…" meanwhile (the pressed button is gone)
+    delay6 = 300;
+    await tab.evaluate(() => { const b = document.querySelector('#rs-designs .notebox--block button.list-retry'); if (b) b.dataset.pressed = '1'; });
     before6 = reads6;
     if (e6 && e6.retry) { await tab.focus('#rs-designs .notebox--block button.list-retry'); await tab.keyboard.press('Enter'); }
     await settle();
     const e6b = await shown6('#rs-designs .notebox--block');
     check('(6e) Start\'s Retry reads the list again (no answer again: the same words)', reads6 > before6 && !!e6b && e6b.text === NONE + reason6, { reads: reads6 - before6, e6b });
-    const focus6 = await tab.evaluate(() => { const a = document.activeElement; return a && a !== document.body ? a.outerHTML.slice(0, 120) : null; });
-    check('(6e) and a Retry pressed from the keyboard leaves the focus on the Retry shown after the read', /list-retry/.test(focus6 || ''), focus6);
+    const focus6 = await tab.evaluate(() => { const a = document.activeElement;
+      return a && a !== document.body ? { retry: a.matches('#rs-designs .notebox--block button.list-retry'), same: a.dataset.pressed === '1' } : null; });
+    check('(6e) and a Retry pressed from the keyboard leaves the focus on the Retry shown after the read (a new one)', !!focus6 && focus6.retry && !focus6.same, focus6);
+    // but never takes the focus back from where the operator moved it during a slow read
+    delay6 = 1500;
+    if (e6b && e6b.retry) { await tab.focus('#rs-designs .notebox--block button.list-retry'); await tab.keyboard.press('Enter'); }
+    await tab.waitForTimeout(300);
+    await tab.focus('#tab-btn-designs');
+    await settle();
+    const moved6 = await tab.evaluate(() => (document.activeElement || {}).id || null);
+    check('(6e) a slow read: the focus stays where the operator moved it meanwhile (the menu), not back on Retry', moved6 === 'tab-btn-designs', moved6);
+    delay6 = 0;
     await tab.evaluate((k) => IL.go('#designs/setup/' + k), late ? encodeURIComponent(late.file) : 'none');
     await settle();
     const set6 = await shown6('#design-meta');
@@ -662,6 +683,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     const cards6 = await tab.evaluate(() => document.querySelectorAll('#rs-designs .design[data-board]').length);
     check('(6e) OpenPnP answering again (online) reads both lists again (Start\'s and Designs\'): Start\'s note goes, its cards stay', !!n6
       && reads6 - before6 >= 2 && !n6b && cards6 > 0, { note: n6, after: n6b, reads: reads6 - before6, cards6 });
+    check('(6e) every step settled: no read of the list in flight or repeating by itself', unsettled6 === 0, { unsettled6, reads6, done6 });
     await tab.close();
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------
