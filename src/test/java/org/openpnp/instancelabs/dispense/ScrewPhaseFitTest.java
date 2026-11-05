@@ -88,6 +88,15 @@ public class ScrewPhaseFitTest {
         assertEquals(ScrewPhaseFit.NONE, flat.confidence);
         assertEquals("no ripple: a whole-turn recipe needs no start angle", flat.why.get(0));
         assertNull(flat.featureDeg());
+        // 3 dots found at 118°: too few to tell a ripple from scatter, and said so
+        List<ScrewPhaseFit.Dot> three = row(298, 1, 1, 8);
+        for (int i = 7; i < three.size(); i += 2) {
+            three.set(i, new ScrewPhaseFit.Dot(118, 0));
+        }
+        ScrewPhaseFit.Halves blind = ScrewPhaseFit.halves(three, 298, row(28, 1, 1, 8), 28);
+        assertEquals(ScrewPhaseFit.NONE, blind.confidence);
+        assertEquals("too few dots per half to see a ripple: 3 dots at 118°", blind.why.get(0));
+        assertEquals("5 dots not found at 118° (a half turn always lays paste): left out", blind.why.get(1));
         // 2 of the 8 dots at 118 found
         List<ScrewPhaseFit.Dot> r1 = modelRow(298, 179.1, 0.47);
         for (int i = 1; i < r1.size(); i += 2) {

@@ -113,7 +113,8 @@ public final class ScrewPhaseFit {
     public static Halves halves(List<Dot> row1, double s1, List<Dot> row2, double s2) {
         Halves h = new Halves();
         List<String> notes = new ArrayList<>();
-        double maxSe = 0;
+        double maxSe = 0, fewestAt = 0;
+        int fewest = Integer.MAX_VALUE;
         double[] starts = {norm(s1), norm(s2)};
         List<List<Dot>> rows = java.util.Arrays.asList(row1, row2);
         for (int k = 0; k < 2; k++) {
@@ -140,6 +141,10 @@ public final class ScrewPhaseFit {
                     notes.add("two outliers in one half at " + deg(r.startDeg + 180 * j) + ": a dot at "
                             + DispenseProfile.plain(round1(top / m)) + "× the half's median is left after the trim");
                 }
+                if (half.get(j).size() < fewest) {
+                    fewest = half.get(j).size();
+                    fewestAt = r.startDeg + 180 * j;
+                }
             }
             double a = mean(trimmed(half.get(0))), b = mean(trimmed(half.get(1)));
             r.x = (a - b) / (a + b);
@@ -155,7 +160,9 @@ public final class ScrewPhaseFit {
         // the error of atan2(−x1, −x2) by x1 and x2
         h.peakSeDeg = k == 0 ? null : Math.toDegrees(Math.hypot(x2 * r1.xSe, x1 * r2.xSe) / (k * k));
         if (k == 0 || k < RIPPLE_SE * maxSe) {
-            h.why.add("no ripple: a whole-turn recipe needs no start angle");
+            // 3 dots in a half cannot tell a small ripple from none
+            h.why.add(fewest <= 3 ? "too few dots per half to see a ripple: " + dots(fewest) + " at " + deg(fewestAt)
+                    : "no ripple: a whole-turn recipe needs no start angle");
         }
         else if (h.peakSeDeg > LOW_SE_DEG) {
             h.why.add(String.format(Locale.ROOT, "the peak is uncertain: its standard error is %s° (at most %s° to set "
