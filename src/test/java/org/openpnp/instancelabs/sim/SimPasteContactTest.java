@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.List;
 import java.util.Locale;
@@ -202,7 +203,87 @@ public class SimPasteContactTest {
         double pushed = LIVE_MG / Q * (Q + 0 + Q + 133 + Q + 267 + 133); // live steps of each rotation above
         assertEquals(pushed, total(p), 1e-9, "everything pushed is laid: " + laid);
         assertEquals(4, laid.size(), "the dead contact after the live air quarter holds: " + laid);
-        assertEquals(0.975, laid.get(0), 1e-9, "" + laid);
+        // the drain keeps the rate set when the half turn opened; the air push goes with the first contact after it
+        double[] want = {0.975, 0.975, 0.65, LIVE_MG / Q * 133};
+        for (int i = 0; i < want.length; i++) {
+            assertEquals(want[i], laid.get(i), 1e-9, "contact " + i + ": " + laid);
+        }
+    }
+
+    @Test
+    public void aHoldCutByALiftGoesOnInTheNextContact() {
+        SimScene s = scene(226);
+        SimPaste p = paste(s);
+        SimNeedle n = SimPasteTest.needle(p, s);
+        n.pressurize();
+        air(n, FRONT_X, FRONT_Y, Q); // 226, dead: armed
+        n.dot(FRONT_X, FRONT_Y, Z, Q / 2); // the hold's first half: nothing laid
+        n.dot(FRONT_X + 2.5, FRONT_Y, Z, Q); // the hold's second half, then a half quarter of the drain
+        List<Double> laid = mg(p, FRONT_Y);
+        assertEquals(1, laid.size(), "" + laid);
+        assertEquals(LIVE_MG / 2 + LIVE_MG / 4, laid.get(0), 1e-9, "its own half quarter + the bead's 1/4");
+    }
+
+    @Test
+    public void aFreshTipsFillLaysNothing() {
+        SimScene s = scene(226);
+        s.paste.primeTurns = 0.5;
+        SimPaste p = paste(s);
+        SimNeedle n = SimPasteTest.needle(p, s);
+        n.pressurize();
+        n.dot(FRONT_X, FRONT_Y, Z, 2 * Q); // the fill takes the whole half turn
+        n.dot(FRONT_X + 2.5, FRONT_Y, Z, Q); // 46, live
+        List<Double> laid = mg(p, FRONT_Y);
+        assertEquals(1, laid.size(), "" + laid);
+        assertEquals(LIVE_MG, laid.get(0), 1e-9, "" + laid);
+    }
+
+    @Test
+    public void eachTipKeepsItsOwnHistory() {
+        SimScene s = scene(316);
+        s.physicalTip = "t1";
+        SimPaste p = paste(s);
+        SimNeedle n = SimPasteTest.needle(p, s);
+        n.pressurize();
+        air(n, FRONT_X, FRONT_Y, Q); // t1: 316, live, in the air: its bead, armed
+        s.physicalTip = "t2"; // another tip mounted: none of t1's bead or arming
+        n.dot(FRONT_X, FRONT_Y, Z, Q); // 46
+        n.dot(FRONT_X + 2.5, FRONT_Y, Z, Q); // 136
+        assertEquals(java.util.Arrays.asList(LIVE_MG, LIVE_MG), mg(p, FRONT_Y));
+    }
+
+    @Test
+    public void aStopInTheDwellJudgesTheTurnAtThePhaseItWasMadeAt() {
+        // with newPhaseOnMotorOff (the 25G preset) a motor-off settles the screw at a new angle; the first seed whose
+        // new angle would change this quarter's push tells the two phases apart
+        for (long seed = 1; seed <= 50; seed++) {
+            SimScene s = scene(316);
+            s.paste.newPhaseOnMotorOff = true;
+            s.paste.noiseSeed = seed;
+            SimPaste p = paste(s);
+            SimNeedle n = SimPasteTest.needle(p, s);
+            long at316 = Math.floorMod(Math.round(316 * SimPaste.STEPS_PER_REV / 360.0) - p.offsetSteps(),
+                    (long) SimPaste.STEPS_PER_REV);
+            n.travel(FRONT_X, FRONT_Y);
+            turn(n, at316); // the pressure off: the screw to physical 316, nothing pushed
+            n.pressurize();
+            n.x = FRONT_X - s.paste.n2OffsetMm[0];
+            n.y = FRONT_Y - s.paste.n2OffsetMm[1];
+            n.z = Z + n.gapMm;
+            n.send(String.format(Locale.ROOT, "G1 Z%.4f F3000", n.z));
+            turn(n, Q); // 316-46, live
+            n.send("M18 B"); // a STOP in the dwell: the motor off, the screw settles elsewhere
+            double atNewPhase = SimPaste.ContactHistory.push(s.paste, at316, at316 + Q, p.offsetSteps());
+            n.z = n.travelZ;
+            n.send(String.format(Locale.ROOT, "G1 Z%.4f F3000", n.z)); // the lift ends the dot
+            if (Math.abs(atNewPhase - LIVE_MG) < 0.05) {
+                continue;
+            }
+            assertEquals(java.util.Arrays.asList(LIVE_MG), mg(p, FRONT_Y), "seed " + seed + ", the new phase would "
+                    + "push " + atNewPhase);
+            return;
+        }
+        fail("no seed moved the dead quarter onto the turned quarter");
     }
 
     @Test

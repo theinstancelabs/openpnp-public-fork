@@ -370,7 +370,9 @@ public final class SimPaste {
     private long dotStartCount;
     private long dotPrimeSteps; // the steps of this dot a fresh tip's fill took (INF-06 §8)
     private double dotStartS;
-    private final ContactHistory contacts = new ContactHistory();
+    private int dotOffset; // the screw's phase when the dot began (a STOP in its dwell may jump it)
+    private String dotTip; // the tip fill the dot began under: its contact history
+    private final Map<String, ContactHistory> contacts = new HashMap<>(); // per tip fill: a needle change is fresh
     private double dotX, dotY, dotZ;
     /** Paste hanging on the tip (mg): what a dot did not take. */
     private double bead;
@@ -657,6 +659,7 @@ public final class SimPaste {
         logicalB += deg;
         long c1 = count(); // the motor turns whole steps
         idleCheck(p);
+        double t0 = store.timeS();
         store.advance(moveSeconds(Math.abs(deg), feedPerMin / 60, accel));
         lastMotionS = store.timeS();
         if (p == null || c1 == c0) {
@@ -669,7 +672,9 @@ public final class SimPaste {
             extruded = 0;
             dotStartCount = c0;
             dotPrimeSteps = 0;
-            dotStartS = store.timeS();
+            dotStartS = t0;
+            dotOffset = offset(p);
+            dotTip = fill(sc);
             dotX = posX;
             dotY = posY;
             dotZ = posZ;
@@ -712,8 +717,8 @@ public final class SimPaste {
         extruded = 0;
         pressured = false;
         if (p != null && p.perContact && pr) { // INF-06 §2b: the contact history decides, not the angle ripple
-            ex = contacts.dot(p, dotStartCount + dotPrimeSteps, count(), offset(p), inContact(sc, p), dotStartS,
-                    store.timeS());
+            ex = contacts.computeIfAbsent(dotTip, k -> new ContactHistory()).dot(p, dotStartCount + dotPrimeSteps,
+                    count(), dotOffset, inContact(sc, p), dotStartS, store.timeS());
         }
         if (p == null || !pr || ex <= 1e-9) {
             return; // net zero, or no pressure: no paste
@@ -787,7 +792,10 @@ public final class SimPaste {
         lastDotTouchZ = touchZ;
     }
 
-    /** The needle within the gap where this dot's paste lands, the landing scatter left out (air or contact). */
+    /**
+     * The needle within the gap where this dot's paste lands, the landing scatter left out (air or contact). At a
+     * region's edge closeDot's scattered landing may still find air and keep the paste on the bead: mass is conserved.
+     */
     private boolean inContact(SimScene sc, SimScene.Paste p) {
         double x = dotX + p.n2OffsetMm[0] + p.landingBiasMm[0], y = dotY + p.n2OffsetMm[1] + p.landingBiasMm[1];
         double touchZ = sc.contactZ(sc.regionAt(x, y), x, y)
