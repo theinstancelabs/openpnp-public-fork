@@ -534,8 +534,11 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     await page.evaluate(() => IL.go('#run'));
     await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
     const c6 = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
-      cards: document.querySelectorAll('#rs-designs .design[data-board]').length, box: /could not be read/.test((document.getElementById('rs-designs') || {}).textContent || '') })))));
+      cards: document.querySelectorAll('#rs-designs .design[data-board]').length, box: !!document.querySelector('#rs-designs .notebox--block'),
+      note: ((document.querySelector('#rs-designs .rf-note') || {}).textContent || '') })))));
     check('(6c) a failed read of the list on entering Run: Start keeps its design cards, no error box instead', !!c6.err && c6.cards > 0 && !c6.box, c6);
+    check('(6c) and says above them that the list could not be read again, with the reason (the re-check\'s MINOR)', /^Could not read the list again/.test(c6.note)
+      && c6.note.includes(c6.err || '\u0000'), c6);
     await page.unroute('**/api/boards', fail6);
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------
