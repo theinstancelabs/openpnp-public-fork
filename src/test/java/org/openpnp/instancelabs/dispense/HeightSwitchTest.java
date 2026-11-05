@@ -3,6 +3,7 @@ package org.openpnp.instancelabs.dispense;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -244,6 +245,98 @@ public class HeightSwitchTest {
         assertFalse(spread.accepted, "range " + spread.rangeMm);
         assertTrue(spread.rangeMm > 0.05, String.valueOf(spread.rangeMm));
         assertTrue(spread.why.contains("spread"), spread.why);
+    }
+
+    /**
+     * Review MAJOR 1: a reply with no level to trust mid-descent is read once more after the pull-up (the PA5 notes); a
+     * second one ends the measure with the tool sent up to travel Z, Z only, and the failure thrown.
+     */
+    @Test
+    public void aBadReplyMidDescentIsReadOnceMoreThenTheToolGoesUpAndTheFailureIsThrown() throws Exception {
+        HeightSwitch.Result once = HeightSwitch.measure(new BadReplies(1), plan("n1", -1, 13.0, 11.0, 5));
+        assertTrue(once.accepted, "one bad reply, read once more: " + once.why);
+        BadReplies twice = new BadReplies(2);
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> HeightSwitch.measure(twice, plan("n1", -1, 13.0, 11.0, 5)));
+        assertTrue(e.getMessage().contains("Analog in"), e.getMessage());
+        List<String> l = twice.lines;
+        assertEquals(Arrays.asList("G1 Z12.500 F300", "M400", "G4 P50", "M42 P53 T2", "M43 P5", "M42 P53 T2", "M43 P5",
+                "G1 Z31.500 F600", "M400"), l.subList(l.size() - 9, l.size()), "read once more, then up: " + l);
+        assertEquals(31.5, twice.z, 1e-9);
+    }
+
+    /** A switch whose M43 replies say analog mode {@code bad} times, from its first read at or below Z 12.5. */
+    static final class BadReplies extends FakeSwitch {
+        int left;
+
+        BadReplies(int bad) {
+            super(12.0, -1);
+            left = bad;
+        }
+
+        @Override
+        public List<String> query(String line) {
+            List<String> reply = super.query(line);
+            if (z > 12.5 + 1e-9 || left == 0) {
+                return reply;
+            }
+            left--;
+            return Arrays.asList("PIN: PA5  (A9)   M42 P53          <unused/unknown>  Analog in =     0   Input  = 0",
+                    "ok");
+        }
+    }
+
+    /** Review MAJOR 1: a line that times out mid-descent ends the measure with the tool at travel Z, the failure thrown. */
+    @Test
+    public void aTimeoutMidDescentSendsTheToolUpAndThrowsTheFailure() throws Exception {
+        FakeSwitch sw = new FakeSwitch(12.0, -1);
+        Exception timeout = new Exception("timeout waiting for response to M400");
+        HeightSwitch.Io io = new HeightSwitch.Io() {
+            boolean failed;
+
+            @Override
+            public void send(String line) throws Exception {
+                sw.send(line);
+                if (!failed && line.equals("M400") && sw.z <= 12.5 + 1e-9) {
+                    failed = true;
+                    throw timeout;
+                }
+            }
+
+            @Override
+            public List<String> query(String line) {
+                return sw.query(line);
+            }
+        };
+        Exception e = assertThrows(Exception.class, () -> HeightSwitch.measure(io, plan("n1", -1, 13.0, 11.0, 5)));
+        assertSame(timeout, e);
+        List<String> l = sw.lines;
+        assertEquals(Arrays.asList("G1 Z12.500 F300", "M400", "G1 Z31.500 F600", "M400"), l.subList(l.size() - 4,
+                l.size()), l.toString());
+        assertEquals(31.5, sw.z, 1e-9);
+    }
+
+    /** A STOP mid-descent (the executor's abort) ends the measure where it is: no line after it, not even the lift. */
+    @Test
+    public void aStopMidDescentSendsNothingMore() throws Exception {
+        FakeSwitch sw = new FakeSwitch(12.0, -1);
+        HeightSwitch.Io io = new HeightSwitch.Io() {
+            @Override
+            public void send(String line) throws Exception {
+                if (line.equals("M400") && sw.z <= 12.5 + 1e-9) {
+                    throw new DispenseExecutor.AbortedException("STOP pressed in the web UI");
+                }
+                sw.send(line);
+            }
+
+            @Override
+            public List<String> query(String line) {
+                return sw.query(line);
+            }
+        };
+        assertThrows(DispenseExecutor.AbortedException.class, () -> HeightSwitch.measure(io, plan("n1", -1, 13.0, 11.0,
+                5)));
+        assertEquals("G1 Z12.500 F300", sw.lines.get(sw.lines.size() - 1), "nothing after the STOP: " + sw.lines);
     }
 
     /** A switch that trips 0.07 mm lower at every other press (a press ends with the 1 mm lift above 12.5). */

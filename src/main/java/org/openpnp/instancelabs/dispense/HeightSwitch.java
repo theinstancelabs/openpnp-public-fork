@@ -18,8 +18,9 @@ import java.util.regex.Pattern;
  * from 0.30 above that step to one fine step past it: the trip is the first fine step that reads pressed, so the tool
  * goes at most one coarse and one fine step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. Every step is
  * a move, M400 and 50 ms before its read. Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's other side) as
- * it rises ({@link Plan#down}). Travel Z at the end, also after a refusal; an exception from the link (a STOP's abort,
- * a lost link) ends it as it is.</p>
+ * it rises ({@link Plan#down}). Travel Z at the end, also after a refusal and after a failure (a reply with no level
+ * twice, a line that timed out: the tool goes up, Z only, before the failure is thrown); a STOP's abort ends it where
+ * it is.</p>
  */
 public final class HeightSwitch {
     /** The named location of the switch's top centre ({@code PUT /api/locations/height-switch {x, y}}). */
@@ -104,9 +105,24 @@ public final class HeightSwitch {
             r.why = bad;
             return r;
         }
-        presses(io, p, r);
-        io.send(move(p.travelZ, 600));
-        io.send("M400");
+        try {
+            presses(io, p, r);
+        }
+        catch (DispenseExecutor.AbortedException e) {
+            throw e; // a STOP: nothing moves after its abort
+        }
+        catch (Exception e) {
+            // a reply with no level, a line that timed out: the tool goes up first (the executor's gate refuses the
+            // lift too once a STOP came in), then the failure is thrown
+            try {
+                lift(io, p);
+            }
+            catch (Exception x) {
+                e.addSuppressed(x);
+            }
+            throw e;
+        }
+        lift(io, p);
         if (!r.trips.isEmpty()) {
             double sum = 0, min = Double.MAX_VALUE, max = -Double.MAX_VALUE;
             for (double t : r.trips) {
@@ -213,10 +229,23 @@ public final class HeightSwitch {
         return null;
     }
 
-    /** The pin's level, the pull-up set again first. */
+    /** Travel Z, Z only: the end of every measure. */
+    private static void lift(Io io, Plan p) throws Exception {
+        io.send(move(p.travelZ, 600));
+        io.send("M400");
+    }
+
+    /** The pin's level, the pull-up set again first; a reply with no level is read once more (the PA5 notes). */
     private static int read(Io io) throws Exception {
         io.send("M42 P" + M42_PIN + " T2");
-        return level(io.query("M43 P" + M43_PIN));
+        List<String> reply = io.query("M43 P" + M43_PIN);
+        try {
+            return level(reply);
+        }
+        catch (IllegalStateException e) {
+            io.send("M42 P" + M42_PIN + " T2");
+            return level(io.query("M43 P" + M43_PIN));
+        }
     }
 
     /**

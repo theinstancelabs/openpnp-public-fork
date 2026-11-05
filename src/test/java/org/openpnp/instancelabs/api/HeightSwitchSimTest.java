@@ -222,6 +222,27 @@ public class HeightSwitchSimTest {
         assertTrue(heightSwitchStatus().get("n1").isJsonNull());
     }
 
+    /**
+     * Review MAJOR 1: a line that times out mid-descent ends the measure with N1 lifted to travel Z (Z only) before the
+     * engine's recovery, and the route answers 409 with the failure.
+     */
+    @Test
+    public void aTimeoutMidDescentLiftsTheToolAndAnswers409() throws Exception {
+        ok("PUT", "/api/config", "{\"commandTimeoutMs\":400}");
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        sim.server.mute.add("G1 Z20.650 F300"); // a coarse step's ok never comes
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("timeout waiting for response to G1 Z20.650 F300"), lastBody);
+        List<String> l = moves();
+        int at = l.indexOf("G1 Z20.650 F300");
+        assertTrue(at >= 0 && at + 1 < l.size(), l.toString());
+        assertEquals("G1 Z31.500 F600", l.get(at + 1), "lifted right after the line that timed out: " + l);
+        assertEquals(31.5, sim.server.position('Z'), 1e-9);
+        assertTrue(heightSwitchStatus().get("n1").isJsonNull());
+    }
+
     @Test
     public void aBadToolOrPressesIs400AndTheRoutesAreTheLockHolders() throws Exception {
         ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
