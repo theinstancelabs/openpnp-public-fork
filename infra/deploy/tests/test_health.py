@@ -169,7 +169,7 @@ class Health(HealthLab, unittest.TestCase):
         self.fake.enabled = enabled
         rep = self.check()
         self.assertFalse(rep["ok"])
-        self.assertEqual((rep["kind"], rep["failure"][:8]), ("machine", "enable: "), rep)
+        self.assertEqual((rep["kind"], rep["failure"][:8]), ("link-lost", "enable: "), rep)
         self.assertIn("the controller left USB", rep["failure"])
         self.assertIn("Stop, then Start", rep["failure"])
         self.assertEqual(self.posts(), [], "no stop, no enable, no home")
@@ -180,13 +180,34 @@ class Health(HealthLab, unittest.TestCase):
     def test_a_lost_link_of_an_enabled_machine_is_not_stopped_started_or_homed(self):
         self.lost_link_check(enabled=True)
 
-    def test_a_link_lost_after_the_enable_is_not_homed(self):
+    def after(self, path):
+        """The POSTs after the first POST to path."""
+        posts = self.posts()
+        return posts[posts.index(("POST", path)) + 1:]
+
+    def test_a_link_lost_after_the_enable_is_not_homed_or_stopped(self):
+        """Nothing reaches a lost link, and a stop or the recovery's restart would clear linkLost: OpenPnP is left as
+        it is, for a person (kind link-lost, handled like a home that never ends)."""
         self.start(jar_fail=["link-lost-after-enable"])
         rep = self.check()
         self.assertFalse(rep["ok"])
-        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("machine", "axes"), rep)
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "axes"), rep)
         self.assertIn("the controller left USB", rep["failure"])
-        self.assertNotIn(("POST", "/api/machine/home"), self.posts())
+        self.assertEqual(self.after("/api/machine/enable"), [], "no home, no stop")
+
+    def test_a_link_lost_after_the_home_is_not_stopped(self):
+        self.start(jar_fail=["link-lost-after-home"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "homed"), rep)
+        self.assertEqual(self.after("/api/machine/home"), [], "no stop")
+
+    def test_a_link_lost_at_the_last_stop_is_the_link_s(self):
+        """#53's planned stop answers 200 on a lost link: the link is read again after it."""
+        self.start(jar_fail=["link-lost-at-planned-stop"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "stop"), rep)
 
     def test_a_locked_answer_is_proof_enough(self):
         """409 locked is someone else's session even if the status read after it fails."""

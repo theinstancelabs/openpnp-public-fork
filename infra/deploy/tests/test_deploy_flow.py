@@ -486,6 +486,27 @@ class Flow(unittest.TestCase):
         self.assertIn(f"{b} installed but NOT verified", self.deployed_line())
         self.assertNotEqual(self.lab.link("current"), a)
 
+    def test_a_link_lost_in_the_health_check_leaves_openpnp_alone(self):
+        """BR-93: the new build loses the controller link after its Start. No STOP to the lost link, no config put back
+        and no restart (both would clear linkLost, and the old config lacks the engine's journal rows of the loss):
+        OpenPnP left running with the loss showing, the build installed but not verified, held, not marked bad."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c, fail=["link-lost-after-enable"])
+        rc = self.lab.main("deploy")
+        self.assertEqual(rc, 5, self.lab.last_out)
+        health = [r for r in self.lab.journal() if r["event"] == "health"][-1]
+        self.assertEqual(health["kind"], "link-lost", health)
+        posts = [r.get("path") for r in self.lab.requests() if r.get("method") == "POST"]
+        last_enable = len(posts) - 1 - posts[::-1].index("/api/machine/enable")
+        self.assertEqual(posts[last_enable + 1:], [], "nothing after the Start: no home, no STOP")
+        self.assertTrue(self.lab.service().is_active())
+        self.assertNotIn(b, self.bad())
+        self.assert_held()
+        self.assertEqual(self.lab.link("current"), b)
+        self.assertIn(f"{b} installed but NOT verified", self.deployed_line())
+        self.assertNotEqual(self.lab.link("current"), a)
+
     def test_slow_home_the_server_gives_up_on_still_deploys(self):
         self.release(4, self.lab.b)
         self.deploy()

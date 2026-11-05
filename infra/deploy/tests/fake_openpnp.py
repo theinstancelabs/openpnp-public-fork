@@ -50,7 +50,8 @@ dispense.startError, and an enable on a kept-alive link that died fails on the d
 BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the lock just before the planned stop),
 planned-lines-failed (the planned stop's M107 P3 gets no ok: linesFailed), planned-slow (the first planned stop
 of an enabled machine switches it off but answers 409 refused: its task outlived the API's 20 s wait),
-link-lost-after-enable (the controller's link is lost right after the enable).
+link-lost-after-enable (the controller's link is lost right after the enable), link-lost-after-home (right after
+the home), link-lost-at-planned-stop (as the planned stop runs; it still answers 200, as #53's does).
 BR-93's machine.linkLost {atMs, why, next} (fake-machine.json "link_lost", null while the link is fine): while set
 connected and homed read false and a home answers 409 refused "MACHINE: <why>: <next>"; a Start clears it (a connect).
 As #53, the planned stop does not look at it (it answers 200 on a lost link).
@@ -315,9 +316,7 @@ class FakeOpenPnP:
             self.enabled = self.connected = True
             self.link_lost = None  # a connect opens the link again
             if "link-lost-after-enable" in self.fail:
-                self.link_lost = {"atMs": int(time.time() * 1000), "next": "once the board is back on USB: Stop, then "
-                                  "Start (or restart il-openpnp), then Home as after a reset",
-                                  "why": "the link to the controller was lost at 15:07 (the controller left USB)"}
+                self.lose_link()
             if connect and self.connected_at_ms is None:
                 self.connected_at_ms = int(time.time() * 1000)
             if "reset" in self.fail or self.booted:
@@ -370,6 +369,8 @@ class FakeOpenPnP:
                     self.homed, self.booted = True, False
                     self.home_at_ms = int(time.time() * 1000)  # HomeTracker.machineHomed(true)
                     self.journal("POSITION_KNOWN", "the controller's position is known: homed")
+                    if "link-lost-after-home" in self.fail:
+                        self.lose_link()
 
         t = threading.Thread(target=work, daemon=True)
         t.start()
@@ -444,9 +445,17 @@ class FakeOpenPnP:
             return 200, {"stopped": True, "machineEnabled": self.enabled,
                          "actions": ["OpenPnP Stop"] if sends else ["machine was already stopped"]}
 
+    def lose_link(self):
+        """BR-93: the controller's link is lost unasked (GcodeDriver's reader ended on an IO error)."""
+        self.link_lost = {"atMs": int(time.time() * 1000), "next": "once the board is back on USB: Stop, then "
+                          "Start (or restart il-openpnp), then Home as after a reset",
+                          "why": "the link to the controller was lost at 15:07 (the controller left USB)"}
+
     def planned_stop(self):
         """BR-75 (MachineEndpoints.plannedStop): a guarded write; refused with nothing sent while anything works; else
         OpenPnP's Stop with the DISABLE_COMMAND minus its M18 B (no SCREW_MOTOR_OFF), and the link closed."""
+        if "link-lost-at-planned-stop" in self.fail:
+            self.lose_link()  # and the planned stop answers 200 all the same (#53)
         if "lock-at-planned-stop" in self.fail:
             self.machine["lock"] = {"holder": {"kind": "user", "who": "user", "label": "User",
                                                "what": "using the web UI"}, "takenFrom": None}

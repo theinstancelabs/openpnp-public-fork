@@ -2542,6 +2542,19 @@ class Deployer:
             return fail(name, f"OpenPnP's API went away after the enable ({why}{'; ' + more if more else ''}); a person "
                               "must check the machine", "machine")
 
+        def link_lost(name, what, m=None):
+            """BR-93: machine.linkLost set: nothing reaches the controller, and a stop (#53's planned stop answers
+            200) or the recovery's restart would clear it and the journal rows of the loss: OpenPnP is left as it is
+            for a person, handled like a home that never ends (kind link-lost). m: /api/machine already read."""
+            if m is None:
+                try:
+                    code, m = self.api.get("/api/machine", timeout=10)
+                except ApiDown:
+                    return None  # the step after it finds out
+                m = m if code == 200 else {}
+            lost = api_link_lost_reasons(m)
+            return fail(name, f"{lost[0]}: {what}", "link-lost", stop=False) if lost else None
+
         def claim_lost(name, enabled):
             why = self._claim_lost()
             if why:
@@ -2581,9 +2594,9 @@ class Deployer:
 
         try:
             code, m = self.api.get("/api/machine", timeout=10)
-            lost = api_link_lost_reasons(m) if code == 200 else []
-            if lost:  # before its stop, its Start and its home (BR-93)
-                return fail("enable", f"{lost[0]}: not stopping, starting or homing it", "machine", stop=False)
+            lost = link_lost("enable", "not stopping, starting or homing it", m if code == 200 else {})
+            if lost:  # before its stop, its Start and its home
+                return lost
             if code == 200 and m.get("enabled"):
                 if m.get("busy") is not False or machine_homing(m):
                     return fail("enable", "the machine is already enabled and busy; not touching it", "machine", False)
@@ -2626,9 +2639,9 @@ class Deployer:
             code, m = self.api.get("/api/machine", timeout=10)
         except ApiDown as e:
             return gone("axes", e)
-        lost = api_link_lost_reasons(m) if code == 200 else []
-        if lost:  # lost after the enable: no home (BR-93)
-            return fail("axes", f"{lost[0]}: not homing", "machine")
+        lost = link_lost("axes", "not homing or stopping it", m if code == 200 else {})
+        if lost:
+            return lost
         axes = m.get("axes") or []
         coords = {str(a.get("letter")).upper(): a.get("driverCoordinate") for a in axes if a.get("letter")}
         # all four: reset_signature needs B too, and a controller whose position is not known is never homed
@@ -2677,13 +2690,22 @@ class Deployer:
             code, m = self.api.get("/api/machine", timeout=10)
         except ApiDown as e:
             return gone("homed", e)
+        lost = link_lost("homed", "not stopping it", m)
+        if lost:  # homed reads false while it is set: never the build's
+            return lost
         if m.get("homed") is not True or m.get("busy") is not False:
             return fail("home" if late else "homed", f"homed {m.get('homed')}, busy {m.get('busy')}",
                         "machine" if late else "build")
         step("home", "homed" + (f" (ended after the request: {answer})" if late else ""))
         step("homed", {"homed": True, "busy": False, "positions": m.get("positions")})
 
+        lost = link_lost("stop", "not stopping it")
+        if lost:
+            return lost
         ok, d = self.planned_stop(lambda: api_stop_and_wait(self.api, cfg.stop_timeout, cfg.poll_interval, self.clock))
+        lost = link_lost("stop", f"its planned stop ({d}) reached nothing")
+        if lost:  # #53's planned stop answers 200 on a lost link (until Backend's follow-up)
+            return lost
         if not ok:
             if self._gone(watch_service):
                 return gone("stop", d)
@@ -3080,8 +3102,9 @@ class Deployer:
         failure, kind = rep["failure"], rep["kind"]
         prev = os.path.basename(before["current"]) if before["current"] else None
         back = f"; `il_deploy.py rollback` returns to {prev} with its config" if prev else ""
-        if kind in ("home-stuck", "claim-lost"):
-            # a home that may still run, or someone else's Holder: nothing more is done to OpenPnP
+        if kind in ("home-stuck", "claim-lost", "link-lost"):
+            # a home that may still run, someone else's Holder, or a lost link (a restart would clear it): nothing more
+            # is done to OpenPnP
             note = f"{tag} health check: {failure}"
             self.set_hold(note)
             self.state_line(f"{tag} installed but NOT verified: its health check did not finish ({failure}); "
@@ -3232,6 +3255,8 @@ class Deployer:
             return "OpenPnP left alone mid-home"
         if rep["kind"] == "claim-lost":
             return "OpenPnP left running (the Holder is no longer il_deploy's)"
+        if rep["kind"] == "link-lost":
+            return "OpenPnP left running with its lost controller link showing (BR-93)"
         return "OpenPnP stopped" if self.stop_after_failure() else "OpenPnP could not be stopped safely, left alone"
 
     # --- state snapshots -------------------------------------------------------------------------
@@ -3435,7 +3460,7 @@ class Deployer:
             if rep["ok"]:
                 self._settle_pending(rep)
                 return 0, None
-            if rep["kind"] in ("machine", "home-stuck", "claim-lost"):
+            if rep["kind"] in ("machine", "home-stuck", "claim-lost", "link-lost"):
                 self.set_hold(f"health check: {rep['failure']}")
             return 1, f"health check failed: {rep['failure']}"
 

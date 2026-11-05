@@ -278,9 +278,12 @@ Exit codes:
   - OpenPnP not answering at all (connection refused): nothing to stop.
 - Never stops, starts or homes a machine whose controller link is lost (BR-93: `machine.linkLost` in `/api/status`
   and `/api/machine`, absent before BR-93, null while the link is fine, anything else counts as lost): the idle
-  check is not idle, so no deploy (its restart would clear it); the health check fails as a machine problem before
-  its stop of an enabled machine, its Start and, if the link goes after the Start, its home. #41's planned stop
-  answers 200 on a lost link (nothing reaches the controller), so it is never asked then.
+  check is not idle, so no deploy (its restart would clear it). The health check reads it before its stop of an
+  enabled machine and its Start, before its home, after the home, and before and after its last stop (#53's planned
+  stop answers 200 on a lost link: nothing reaches the controller). Set at any of them, the check fails with kind
+  `link-lost`, handled like a home that never ends: no STOP, no config put back, no restart (each would clear
+  linkLost, and the config from before the deploy lacks the engine's journal rows of the loss); OpenPnP is left
+  running with the loss showing, the build installed but not verified, the hold set, the build not marked bad.
 - Never homes a controller that shows the power-cycle signature. It reports `controller was reset; a person
   must check the machine` and sets the hold.
 - **The deployer's own stops are planned (BR-75):** the health check's last stop, its stop of a machine left enabled
