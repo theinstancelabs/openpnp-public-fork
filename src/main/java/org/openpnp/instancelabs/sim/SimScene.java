@@ -14,6 +14,7 @@ import java.util.Collections;
 import java.util.ConcurrentModificationException;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -23,6 +24,7 @@ import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.DoubleStream;
 
 import org.openpnp.model.Abstract2DLocatable.Side;
 import org.openpnp.model.Board;
@@ -41,11 +43,12 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 /**
- * The simulated world of the SIM vacuum sensor, the SIM top camera, the SIM paste and the SIM
- * balance: where the board truly sits, the heights N1 touches, holes, paste, the needle's paste
- * model, the weigh coupons and the balance. Read from {@code <configDir>/instancelabs/sim-scene.json},
- * which only the sim scripts write, into a config copy (src/test/sim/il_sim_scene.py). Missing keys
- * take the bench defaults below. Public fields, so tests can build and change a scene in code.
+ * The simulated world of the SIM vacuum sensor, the SIM top camera, the SIM paste, the SIM
+ * balance and the PA5 switch: where the board truly sits, the heights N1 touches, holes, paste,
+ * the needle's paste model, the weigh coupons, the balance and where the switch trips. Read from
+ * {@code <configDir>/instancelabs/sim-scene.json}, which only the sim scripts write, into a config
+ * copy (src/test/sim/il_sim_scene.py). Missing keys take the bench defaults below. Public fields,
+ * so tests can build and change a scene in code.
  *
  * <p>Frames: board mm (the board file's placements, origin at the board's bottom-left corner) and
  * machine mm (OpenPnP's frame, the X/Y the head is sent to). {@link #seat} maps the first to the
@@ -248,6 +251,45 @@ public final class SimScene {
     }
 
     public static final String[] BALANCE_MODES = {"display", "connected"};
+
+    /**
+     * The limit switch on PA5 (the user, 11-04; lumen-sim's {@code pa5_switch}): N1 and the needle press it to measure
+     * the needle's Z, {@code M43 P5} reads it (SimPa5Switch).
+     */
+    public static final class Pa5Switch {
+        /** Where a tool presses it; the first window that holds the head wins. */
+        public List<Pa5Press> presses;
+        /** A press deeper than this past its trip point is reported once (nothing stops the head). */
+        public double overtravelMm = 0.5;
+        /** Each press trips at its window's tripZ + N(0, repeatSdMm), drawn from {@code seed}. */
+        public double repeatSdMm;
+        /** The pin's level while pressed (M43 P5's Input): 1, or 0 for a switch that pulls it low. */
+        public int pressedLevel = 1;
+        public long seed;
+
+        public Pa5Switch(Pa5Press... presses) {
+            this.presses = new ArrayList<>(Arrays.asList(presses));
+        }
+    }
+
+    /** A window of the raw head X/Y (mm, edges included) where {@code tool} presses the switch at raw Z tripZ. */
+    public static final class Pa5Press {
+        /** n1 (presses it as Z falls to tripZ) or needle (as Z rises to it: the see-saw). */
+        public String tool;
+        public double x0, y0, x1, y1, tripZ;
+
+        public Pa5Press(String tool, double x0, double y0, double x1, double y1, double tripZ) {
+            this.tool = tool;
+            this.x0 = x0;
+            this.y0 = y0;
+            this.x1 = x1;
+            this.y1 = y1;
+            this.tripZ = tripZ;
+        }
+    }
+
+    public static final String[] PA5_TOOLS = {"n1", "needle"};
+
     /** Today's blank colour (BGR, the board mask's); padcal scenes use the bench blank (206, 25, 0). */
     public static final int[] DEFAULT_BLANK_BGR = {142, 59, 0};
 
@@ -298,6 +340,8 @@ public final class SimScene {
     public List<Coupon> coupons = new ArrayList<>();
     /** Null: no SIM balance (the readings are typed). */
     public Balance balance;
+    /** The PA5 switch; null: nothing wired (M43 P5 reads M42 P53's pull: 0 at boot, as the board did). */
+    public Pa5Switch pa5Switch;
     /** The file this scene was read from; null for a scene built in code (SimPaste keys its deposits by it). */
     public File file;
 
@@ -461,8 +505,92 @@ public final class SimScene {
             d.seed = bal.has("seed") ? bal.get("seed").getAsLong() : d.seed;
             s.balance = d;
         }
+        if (o.has("pa5Switch") && !o.get("pa5Switch").isJsonNull()) {
+            s.pa5Switch = pa5SwitchOf(o.get("pa5Switch"));
+        }
         s.validate();
         return s;
+    }
+
+    static final Set<String> PA5_KEYS = new LinkedHashSet<>(
+            Arrays.asList("presses", "overtravelMm", "repeatSdMm", "pressedLevel", "seed"));
+    static final Set<String> PA5_PRESS_KEYS = new LinkedHashSet<>(
+            Arrays.asList("tool", "x0", "y0", "x1", "y1", "tripZ"));
+
+    /**
+     * The "pa5Switch" block: {presses: [{tool, x0, y0, x1, y1, tripZ}], overtravelMm, repeatSdMm, pressedLevel, seed},
+     * lumen-sim's pa5_switch in the scene's names. An unknown key, a number given as text, a null, or a level or seed
+     * written as no integer is refused, as lumen-sim refuses it: a typo would wire another switch than the test meant.
+     */
+    static Pa5Switch pa5SwitchOf(JsonElement e) {
+        JsonObject o = e.isJsonObject() ? e.getAsJsonObject() : null;
+        if (o == null || !o.has("presses") || !o.get("presses").isJsonArray()) {
+            throw new IllegalArgumentException("pa5Switch takes presses (a list) and " + PA5_KEYS + ", not " + e);
+        }
+        only(o, PA5_KEYS, "pa5Switch");
+        Pa5Switch w = new Pa5Switch();
+        for (JsonElement pe : o.getAsJsonArray("presses")) {
+            JsonObject p = pe.isJsonObject() ? pe.getAsJsonObject() : null;
+            JsonElement tool = p == null ? null : p.get("tool");
+            if (tool == null || !tool.isJsonPrimitive() || !tool.getAsJsonPrimitive().isString()) {
+                throw new IllegalArgumentException("a pa5Switch press takes a tool (text) and x0, y0, x1, y1, tripZ, "
+                        + "not " + pe);
+            }
+            only(p, PA5_PRESS_KEYS, "a pa5Switch press");
+            w.presses.add(new Pa5Press(tool.getAsString(), finite(p, "x0", null), finite(p, "y0", null),
+                    finite(p, "x1", null), finite(p, "y1", null), finite(p, "tripZ", null)));
+        }
+        w.overtravelMm = finite(o, "overtravelMm", w.overtravelMm);
+        w.repeatSdMm = finite(o, "repeatSdMm", w.repeatSdMm);
+        long level = whole(o, "pressedLevel", w.pressedLevel);
+        if (level != 0 && level != 1) {
+            throw new IllegalArgumentException("pressedLevel must be 0 or 1, not " + level);
+        }
+        w.pressedLevel = (int) level;
+        w.seed = whole(o, "seed", 0);
+        return w;
+    }
+
+    /** Refuses a key of {@code o} outside {@code keys}. */
+    private static void only(JsonObject o, Set<String> keys, String what) {
+        for (Map.Entry<String, JsonElement> e : o.entrySet()) {
+            if (!keys.contains(e.getKey())) {
+                throw new IllegalArgumentException(what + " takes " + keys + ", not " + e.getKey());
+            }
+        }
+    }
+
+    /**
+     * A finite JSON number, not text (Gson would read "12" as 12) or null, as lumen-sim; missing: {@code dflt} (null:
+     * required).
+     */
+    private static double finite(JsonObject o, String key, Double dflt) {
+        JsonElement e = o.get(key);
+        if (e == null && dflt != null) {
+            return dflt;
+        }
+        double v = e != null && e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber() ? e.getAsDouble() : Double.NaN;
+        if (!Double.isFinite(v)) {
+            throw new IllegalArgumentException(key + " must be a finite number, not " + e);
+        }
+        return v;
+    }
+
+    /** A JSON integer, written without a fraction or exponent as lumen-sim's int; missing: {@code dflt}. */
+    private static long whole(JsonObject o, String key, long dflt) {
+        JsonElement e = o.get(key);
+        if (e == null) {
+            return dflt;
+        }
+        String v = e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber() ? e.getAsString() : "";
+        try {
+            if (v.matches("-?\\d+")) {
+                return Long.parseLong(v);
+            }
+        }
+        catch (NumberFormatException x) { // beyond a long: lumen-sim takes it, java.util.Random could not
+        }
+        throw new IllegalArgumentException(key + " must be an integer, not " + e);
     }
 
     /** Throws IllegalArgumentException (the message starting with {@code what}) for a paste the model cannot use. */
@@ -532,6 +660,24 @@ public final class SimScene {
             }
             if (!(balance.resolutionMg > 0) || balance.noiseMg < 0 || balance.settleS < 0) {
                 throw new IllegalArgumentException("balance: resolutionMg must be > 0, noiseMg and settleS >= 0");
+            }
+        }
+        if (pa5Switch != null) {
+            if (pa5Switch.presses == null || pa5Switch.presses.isEmpty()) {
+                throw new IllegalArgumentException("pa5Switch needs a press");
+            }
+            for (Pa5Press p : pa5Switch.presses) {
+                if (p == null || !Arrays.asList(PA5_TOOLS).contains(p.tool)
+                        || !DoubleStream.of(p.x0, p.y0, p.x1, p.y1, p.tripZ).allMatch(Double::isFinite)
+                        || p.x0 > p.x1 || p.y0 > p.y1) {
+                    throw new IllegalArgumentException("pa5Switch: a press needs a tool (" + String.join(" or ",
+                            PA5_TOOLS) + "), finite x0 <= x1, y0 <= y1 and tripZ");
+                }
+            }
+            if (!(pa5Switch.overtravelMm >= 0 && pa5Switch.overtravelMm <= 10 && pa5Switch.repeatSdMm >= 0
+                    && pa5Switch.repeatSdMm <= 1) || pa5Switch.pressedLevel != 0 && pa5Switch.pressedLevel != 1) {
+                throw new IllegalArgumentException("pa5Switch: overtravelMm must be 0-10 and repeatSdMm 0-1 (mm), "
+                        + "pressedLevel 0 or 1");
             }
         }
     }
