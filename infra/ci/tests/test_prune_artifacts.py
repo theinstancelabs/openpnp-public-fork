@@ -5,6 +5,8 @@ import importlib.util
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import unittest
 
@@ -28,7 +30,7 @@ def art(i, run, expired=False, name="openpnp-build"):
 
 class Plan(unittest.TestCase):
     STATE = {1: ("completed", "success"), 2: ("in_progress",), 3: ("queued",), 4: ("completed", "cancelled"),
-             5: None, 6: ("completed", "failure"), 7: ("completed", "timed_out")}
+             5: None, 6: ("completed", "failure"), 7: ("completed", "timed_out"), 9: ("completed", "success")}
 
     def doomed(self, arts, keep=9):
         return [a["id"] for a in prune_artifacts.plan(arts, keep, self.STATE.get)]
@@ -74,7 +76,8 @@ class Main(unittest.TestCase):
 
     def test_pages_until_a_short_one_and_deletes_completed_runs_builds(self):
         full = [art(1000 + i, 1) for i in range(100)]
-        rc, calls = self.run_main([full, [art(7, 2), art(8, 9)]], {1: "completed success", 2: "in_progress "})
+        rc, calls = self.run_main([full, [art(7, 2), art(8, 9)]],
+                                  {1: "completed success", 2: "in_progress ", 9: "completed success"})
         self.assertEqual(rc, 0)
         deletes = [c for c in calls if "-X" in c]
         self.assertEqual(len(deletes), 100)
@@ -88,6 +91,16 @@ class Main(unittest.TestCase):
         rc, calls = self.run_main([[art(1, 1), art(2, 1)]], {1: "completed success"}, fail_delete=(1,))
         self.assertEqual(rc, 1)
         self.assertEqual(len([c for c in calls if "-X" in c]), 2)
+
+    def test_the_state_jq_gives_the_status_and_the_conclusion(self):
+        """What state_of splits: 'completed success', or the status alone while the run goes (gh's --jq is jq)."""
+        jq = shutil.which("jq")
+        self.assertIsNotNone(jq, "no jq: every CI runner has it")
+        for run, want in (({"status": "completed", "conclusion": "success"}, ("completed", "success")),
+                          ({"status": "in_progress", "conclusion": None}, ("in_progress",))):
+            out = subprocess.run([jq, "-r", prune_artifacts.STATE_JQ], input=json.dumps(run), capture_output=True,
+                                 text=True, check=True).stdout
+            self.assertEqual(tuple(out.split()), want, run)
 
     def test_a_failed_listing_deletes_nothing(self):
         def gh(*args):
@@ -113,6 +126,8 @@ class Wiring(unittest.TestCase):
         block = m.group(1)
         self.assertRegex(block, r"\n    needs: \[release\]\n")
         cond = ci_wiring.job_value(ci_wiring.jobs(self.ci)["prune-artifacts"], "if")
+        self.assertRegex(cond, r"!\s*cancelled\(\)|\balways\(\)", "without it GitHub adds success() over every job "
+                         "before it: a push that skipped a test job (job queued) never prunes")
         for result, runs in (("success", True), ("failure", False), ("skipped", False), ("cancelled", False)):
             self.assertIs(ci_wiring.condition(cond, {"needs.release.result": result}), runs, result)
         self.assertRegex(block, r"\n    continue-on-error: true\n", "a failed or timed-out job never turns the run red")
