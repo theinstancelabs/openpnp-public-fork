@@ -572,8 +572,9 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
         }));
       ST.task = 'needle touch-off';
       const mTask = await make(true);
-      await page.evaluate(() => document.getElementById('btn-design-make').click());
-      const kept = await page.evaluate(() => ({ hash: location.hash, chosen: IL.run.form.sel }));
+      // a press in the frame before the render locks it (a status that starts a task): make() refuses by itself, with a toast
+      await page.evaluate(() => { const b = document.getElementById('btn-design-make'); b.disabled = false; b.click(); });
+      const kept = await page.evaluate(() => ({ hash: location.hash, chosen: IL.run.form.sel, toast: (document.getElementById('toast') || {}).textContent || '' }));
       ST.task = null;
       await page.evaluate((h) => { if (location.hash !== h) IL.go(h); }, routeOf(rd));   // a Make a board that went to Run: back
       const mFree = await make(false);
@@ -581,11 +582,11 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       await page.evaluate(() => { window.__chaining = IL.runFlow.chaining; IL.runFlow.chaining = () => true; IL.render(); });
       const chaining = await make(true);
       await page.evaluate(() => { IL.runFlow.chaining = window.__chaining; IL.render(); });
-      await make(false);
+      const mEnd = await make(false);
       check('(6b2) Make a board waits as Start\'s design cards: locked while a task runs (the panel says why), Start keeps its design; free after; locked while Start is under way',
         mTask.dis && mTask.why === 'Locked while the needle touch-off runs' && kept.hash === routeOf(rd) && kept.chosen === 'file:' + late.file
-          && !mFree.dis && mFree.why === null && chaining.dis && chaining.why === 'Start is under way',
-        { mTask, kept, mFree, chaining });
+          && /Locked while the needle touch-off runs/.test(kept.toast) && !mFree.dis && mFree.why === null && chaining.dis && chaining.why === 'Start is under way'
+          && !mEnd.dis && mEnd.why === null, { mTask, kept, mFree, chaining, mEnd });
     }
 
     // one wording for a failed read of the list (#48's re-checks): kept cards, or none
