@@ -164,7 +164,8 @@ class Load(unittest.TestCase):
         [(("seesaw", "K"), DELETE)],
         [(("seesaw", "restRaw"), "60")],
         # round 5, as the engine's loader (BedModelTest.BAD_FILES): null nowhere, a key is given a value or left out
-        [(("objects", 0, "topZ"), None)], [(("seesaw", "restRaw"), None)], [(("tools", 1, "layers", 1, "bottomZ"), None)],
+        [(("objects", 0, "topZ"), None)], [(("seesaw", "restRaw"), None)],
+        [(("tools", 1, "layers", 1, "bottomZ"), None)],
         [(("tools", 2, "tipEnd"), None)], [(("contactDepthMm",), None)], [(("objects", 1, "touchable"), None)],
         [(("objects", 0, "name"), None)], [(("bed", "plane", "points", 0, 2), None)],
         # N1 and the needle each have their tip: a tip-end layer with aboveTipMm 0
@@ -854,7 +855,7 @@ class NoModel(unittest.TestCase):
 
 
 SHARED = os.path.join(PKG_ROOT, "..", "..", "src", "test", "resources", "config", "DispenseSimMachine",
-                      "instancelabs", "collision-model.json")  # Backend's fixture, the one the engine's BedModelTest reads
+                      "instancelabs", "collision-model.json")  # Backend's fixture: the engine's BedModelTest reads it
 
 
 def tree(change):

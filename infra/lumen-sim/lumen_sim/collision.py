@@ -214,10 +214,12 @@ class Model:
         bed_pts = _outline(bed.get("outline"), w + ".bed.outline")
         ss = _get(raw, "seesaw", w)
         n1, needle = _get(ss, "n1", w + ".seesaw"), _get(ss, "needle", w + ".seesaw")
-        # the engine's proof takes no K or knee as the worst case; the truth cannot place a tip without them (design §2)
+        # the engine's proof takes no K or knee as the worst case; the truth cannot place a tip without them
+        # (design §2)
         for side, key in (("n1", "kneeRaw"), ("needle", "kneeRaw"), ("K", "raw")):
             if key not in _get(ss, side, w + ".seesaw"):
-                raise ValueError("%s.seesaw.%s.%s is required: lumen-sim cannot place a tip without it" % (w, side, key))
+                raise ValueError("%s.seesaw.%s.%s is required: lumen-sim cannot place a tip without it"
+                                 % (w, side, key))
         self.k1, self.k2 = _num(n1["kneeRaw"], w + ".seesaw.n1.kneeRaw"), \
             _num(needle["kneeRaw"], w + ".seesaw.needle.kneeRaw")
         self.g1, self.g2 = _num(n1.get("mmPerRaw"), w + ".seesaw.n1.mmPerRaw"), \
@@ -289,8 +291,8 @@ class Model:
             self.tools.append(Tool(t["id"], t["moves"], dx, dy, layers))
         n1s, needles = (sum(t.moves == m for t in self.tools) for m in ("n1", "needle"))
         if (n1s, needles) != (1, 1):  # the engine's words; tip() and n1_sealed() read one of each
-            raise ValueError("%s.tools: exactly one with moves n1 and one with moves needle (here %d and %d): every leg "
-                             "sweeps both tips" % (w, n1s, needles))
+            raise ValueError("%s.tools: exactly one with moves n1 and one with moves needle (here %d and %d): every "
+                             "leg sweeps both tips" % (w, n1s, needles))
         self.colliding = set()  # (object, tool, layer) in collision where the last leg ended
 
     def rc(self, x, y):
