@@ -519,9 +519,11 @@ public class HeightSwitchTest {
     /**
      * BR-94 needle aim: the engine derives the needle's window from its records only, with Process's pair on the
      * lever's straight part (11-04 NP-5: N1 23.875 + the needle 41.200 = K 65.075). A first press after a change: K by
-     * parallax − N1's trip of this home ± 1 mm, the floor capped at heightSwitchMaxPastTripMm; a later one: its last
-     * trip's K_switch − N1's trip now (a new home moved N1's by +0.1), 1.0 above and 0.5 past. Without the setting, N1's
-     * trip of this home, or an end: no window, and why.
+     * parallax − N1's trip of this home ± 1 mm, the floor capped at heightSwitchMaxPastTripMm; in the home of its own
+     * trip, that trip 1.0 above and 0.5 past (review MINOR 3: N1 pressed again there does not move it), refused when a
+     * fresh K by parallax is more than 0.5 mm from its K_switch (review MINOR 2); in another home its K_switch − N1's
+     * trip there (a new home moved N1's by +0.1) ± 1 mm (Process 11-05 04:3x). Without the setting, N1's trip of this
+     * home, or an end: no window, and why.
      */
     @Test
     public void theEngineDerivesTheNeedlesWindowFromItsRecords() {
@@ -546,15 +548,35 @@ public class HeightSwitchTest {
         assertEquals(41.5, HeightSwitch.needleWindow(c, end, 100L, 1).zFloor, 1e-9);
         assertTrue(HeightSwitch.needleWindow(c, null, 100L, 1).why.contains("its end measured from below"),
                 "a first press needs the end");
-        // its own trip with K_switch, a home later: N1's trip there moved +0.1, the needle's expected trip −0.1
-        c.heightSwitchMaxPastTripMm = 0.5;
+        // in the home of its own trip, from that trip: N1 pressed again there 0.05 lower moves nothing
+        c.heightSwitchMaxPastTripMm = 2.0;
         c.heightSwitch.needle = trip(41.2, 100, 2, 65.075);
-        c.heightSwitch.n1 = trip(23.975, 200, 3, null);
-        HeightSwitch.Window later = HeightSwitch.needleWindow(c, null, 200L, 1);
+        c.heightSwitch.n1 = trip(23.825, 100, 3, null);
+        HeightSwitch.Window same = HeightSwitch.needleWindow(c, null, 100L, 1);
+        assertNull(same.why, same.why);
+        assertEquals("trip", same.from);
+        assertEquals(41.2, same.expectedRawZ, 1e-9, "its own trip, not K_switch − N1's trip (41.25)");
+        assertEquals(40.2, same.zStart, 1e-9);
+        assertEquals(41.7, same.zFloor, 1e-9, "0.5 past");
+        // a fresh K by parallax within 0.5 mm of its K_switch; further off (a slipped tip): no window
+        end.kParallax = 65.5;
+        assertNull(HeightSwitch.needleWindow(c, end, 100L, 1).why);
+        end.kParallax = 65.7;
+        HeightSwitch.Window slipped = HeightSwitch.needleWindow(c, end, 100L, 1);
+        assertTrue(slipped.why.contains("K by parallax (65.700) is 0.625 mm from this needle's K_switch (65.075)"),
+                slipped.why);
+        assertNull(slipped.zFloor);
+        // a home later: K_switch − N1's trip there ± 1 mm (N1's moved +0.1, the needle's expected trip −0.1); K by
+        // parallax is not what it comes from there
+        c.heightSwitch.n1 = trip(23.975, 200, 4, null);
+        HeightSwitch.Window later = HeightSwitch.needleWindow(c, end, 200L, 1);
+        assertNull(later.why, later.why);
         assertEquals("kSwitch", later.from);
         assertEquals(41.1, later.expectedRawZ, 1e-9);
         assertEquals(40.1, later.zStart, 1e-9);
-        assertEquals(41.6, later.zFloor, 1e-9);
+        assertEquals(42.1, later.zFloor, 1e-9, "1 mm past under a wide cap");
+        c.heightSwitchMaxPastTripMm = 0.5;
+        assertEquals(41.6, HeightSwitch.needleWindow(c, null, 200L, 1).zFloor, 1e-9, "capped");
         c.heightSwitchMaxPastTripMm = 0.3;
         assertEquals(41.4, HeightSwitch.needleWindow(c, null, 200L, 1).zFloor, 1e-9, "capped");
         // a needle change voids its trip: the first window again; a trip recorded before K_switch was kept: the same

@@ -5119,10 +5119,12 @@ public final class DispenseService {
         p.coarseMm = needle ? 0.10 : 0.25;
         double x = place.x, y = place.y;
         if (needle) {
-            // its end from below, right before the press in this task: nothing else runs between them
+            // its end from below, right before the press in this task: nothing else runs between them; N1's frames only
+            // where the window needs K by parallax (review Risk 3: not from a K_switch of another home)
+            boolean n1Frames = !"kSwitch".equals(HeightSwitch.needleWindow(c, null, home, p.down).from);
             NeedleEndMeasure.Result er = new NeedleEndMeasure.Result();
             try {
-                res.needleEnd = needleEnd(s, t, er, cam, probeNozzle, res.presses);
+                res.needleEnd = needleEnd(s, t, er, cam, probeNozzle, res.presses, n1Frames);
             }
             catch (RunRefusedException e) {
                 res.code = er.code;
@@ -5318,7 +5320,7 @@ public final class DispenseService {
                 throw refused("MACHINE: the machine is not homed: Home first");
             }
             Session s = t.start(c);
-            needleEnd(s, t, res, cam, getProbeNozzle(), 0);
+            needleEnd(s, t, res, cam, getProbeNozzle(), 0, true);
             s.ok();
         }), () -> {
             if (r.status != RunResult.Status.OK) {
@@ -5336,10 +5338,11 @@ public final class DispenseService {
      * tip setup puts the end over it: its head offset + landing + trim), every point inside the soft limits, travel Z
      * inside Z's safe zone. Every picture is kept (result photos of the run). Recorded at once when every check passes
      * (the needle's {@code needleEnd}, unless the needle was changed meanwhile), marked for review; a failed check is a
-     * RunRefusedException with the result's code, next and photo. {@code extraSteps}: the task's steps after it.
+     * RunRefusedException with the result's code, next and photo. {@code extraSteps}: the task's steps after it;
+     * {@code withN1}: N1's heights too (K by parallax).
      */
     private DispenseConfig.NeedleEnd needleEnd(Session s, Task t, NeedleEndMeasure.Result res, TipCamera cam,
-            Nozzle probeNozzle, int extraSteps) throws Exception {
+            Nozzle probeNozzle, int extraSteps, boolean withN1) throws Exception {
         DispenseConfig c = s.c;
         ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
         double[] at = cam.locationMm(), ho = headOffsetNow(), lt = landingAndTrim(c);
@@ -5350,6 +5353,7 @@ public final class DispenseService {
         p.s = c.needleEndMeasure;
         p.clean = TipClean.Limits.of(c.needleEndMeasure.clean.get(c.tip.key));
         p.setupKey = c.tip.key;
+        p.n1 = withN1;
         p.nominalDx = ho[0] + lt[0];
         p.nominalDy = ho[1] + lt[1];
         OpenPnpRawMapper n1 = OpenPnpRawMapper.forProbeNozzle(m, probeNozzle, c.bAxisName);

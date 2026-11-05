@@ -254,7 +254,7 @@ public class HeightSwitchSimTest {
         assertEquals(a + b, hs.get("kSwitch").getAsDouble(), 1e-9);
         assertEquals(N1_TRIP + NEEDLE_TRIP, hs.get("kSwitch").getAsDouble(), 0.05);
         assertEquals(a + b, hs.getAsJsonObject("needle").get("kSwitch").getAsDouble(), 1e-9, "kept with the trip");
-        assertEquals("kSwitch", hs.getAsJsonObject("needleWindow").get("from").getAsString(), hs.toString());
+        assertEquals("trip", hs.getAsJsonObject("needleWindow").get("from").getAsString(), hs.toString());
         // engine-stamped: the settings editor cannot change them
         call("PUT", "/api/config", "{\"heightSwitch\":{\"n1\":null,\"needle\":null}}");
         assertEquals(400, lastStatus, lastBody);
@@ -705,6 +705,40 @@ public class HeightSwitchSimTest {
         assertTrue(lastBody.contains("'spredMax' is no limit"), lastBody);
         assertEquals(0.35, ok("GET", "/api/config", null).getAsJsonObject("needleEndMeasure").getAsJsonObject("clean")
                 .getAsJsonObject("plastic-25g-taper").get("spreadMax").getAsDouble(), 1e-9, "nothing changed");
+    }
+
+    /**
+     * Review MINOR 3, Risk 3 and Process 11-05 04:3x: a second press in the same home takes its window from its own
+     * trip, and measures K by parallax (N1's frames) against its K_switch; a press in another home takes it from that
+     * K_switch − N1's trip in this home, ± 1 mm (capped 0.5 past), without N1's frames (K by parallax is not needed).
+     */
+    @Test
+    public void laterWindowsComeFromTheNeedlesOwnTripOrItsKSwitch() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        double trip = ok("POST", "/api/height-switch/measure", "{\"tool\":\"needle\"}").get("tripRawZ").getAsDouble();
+        double kSwitch = heightSwitchStatus().get("kSwitch").getAsDouble();
+        JsonObject same = ok("POST", "/api/height-switch/measure", "{\"tool\":\"needle\"}");
+        assertEquals("trip", same.getAsJsonObject("window").get("from").getAsString(), same.toString());
+        assertEquals(trip, same.getAsJsonObject("window").get("expectedRawZ").getAsDouble(), 1e-3);
+        assertEquals(kSwitch, same.getAsJsonObject("needleEnd").get("kParallax").getAsDouble(), 0.5,
+                "measured against its K_switch");
+        sim.machine.home(); // another home
+        double n1 = ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}")
+                .get("tripRawZ").getAsDouble();
+        kSwitch = svc.getConfig().heightSwitch.needle.kSwitch;
+        JsonObject r = ok("POST", "/api/height-switch/measure", "{\"tool\":\"needle\"}");
+        assertTrue(r.get("accepted").getAsBoolean(), r.toString());
+        JsonObject w = r.getAsJsonObject("window");
+        assertEquals("kSwitch", w.get("from").getAsString(), w.toString());
+        double expected = w.get("expectedRawZ").getAsDouble();
+        assertEquals(kSwitch - n1, expected, 1e-3);
+        assertEquals(expected - 1, w.get("zStart").getAsDouble(), 1e-9);
+        assertEquals(expected + 0.5, w.get("zFloor").getAsDouble(), 1e-9, "1 mm past, capped 0.5 past");
+        JsonObject end = r.getAsJsonObject("needleEnd");
+        assertTrue(end.get("kParallax").isJsonNull() && end.getAsJsonArray("n1").size() == 0, end.toString());
+        String phases = ok("GET", "/api/status", null).getAsJsonObject("run").getAsJsonArray("phases").toString();
+        assertFalse(phases.contains("needle end: N1 at raw Z"), phases);
     }
 
     /** Without N1's trip in this home, or without clean-check limits for the tip kind: refused, nothing sent. */

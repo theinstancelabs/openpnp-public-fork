@@ -58,9 +58,12 @@ public final class HeightSwitch {
     /** The needle's measure without N1's trip of this home (the needle's window is K − N1's trip). */
     public static final String PRESS_N1_FIRST = "press N1 on the switch first: N1 has no accepted trip on the height "
             + "switch in this home";
-    /** A needle's first window: this far above and past the trip K by parallax expects (mm). */
-    public static final double FIRST_WINDOW_MM = 1.0;
-    /** A later window: 1.0 above ({@link #LIFT_MM}) and this far past the trip its K_switch expects (mm). */
+    /**
+     * A window from K: this far above and past the trip it expects (mm): kParallax on a needle's first press since a
+     * change, its K_switch on a press in another home (Process 11-05 04:3x).
+     */
+    public static final double K_WINDOW_MM = 1.0;
+    /** A window from the needle's own trip in this home: 1.0 above ({@link #LIFT_MM}) and this far past it (mm). */
     public static final double PAST_MM = 0.5;
     /**
      * The needle's accepted trip, or null when it was measured before the needle now on was put on: another tip's trip
@@ -160,16 +163,19 @@ public final class HeightSwitch {
     /** The needle's window (raw Z) as the engine derives it, or why there is none. */
     public static final class Window {
         public Double zStart, zFloor, expectedRawZ;
-        /** kParallax (its first press since a change) or kSwitch (from its last trip). */
+        /** trip (its own trip in this home), kSwitch (its last trip's, of another home) or kParallax (a first press). */
         public String from;
         public String why;
     }
 
     /**
-     * BR-94: the needle's window, from the engine's records only. Its first press since a change (no trip of its own):
-     * (kParallax − N1's trip in this home) ± 1 mm; a later one 1.0 above to 0.5 past (the K_switch of its last trip's
-     * home − N1's trip now). The floor is never more than {@code heightSwitchMaxPastTripMm} past the expected trip.
-     * {@code end}: the needle's end on record now, or null; {@code down}: +1 when the needle goes down as raw Z rises.
+     * BR-94: the needle's window, from the engine's records only (review MINOR 3, Process 11-05 04:3x). In this home
+     * from its own trip there, 1.0 above and 0.5 past; with a trip of another home its K_switch − N1's trip in this home,
+     * ± 1 mm; its first press since a change (kParallax − N1's trip in this home) ± 1 mm. The floor is never more than
+     * {@code heightSwitchMaxPastTripMm} past the expected trip. In this home a fresh kParallax more than
+     * {@code needleEndMeasure.maxKFromSwitchMm} from its K_switch gives none (review MINOR 2: a constant K error, N1's
+     * template on its holder or a slipped tip, never sets a window). {@code end}: the needle's end measured now, or null;
+     * {@code down}: +1 when the needle goes down as raw Z rises. {@code from} is set also when there is no window.
      */
     public static Window needleWindow(DispenseConfig c, DispenseConfig.NeedleEnd end, Long home, int down) {
         Window w = new Window();
@@ -182,23 +188,33 @@ public final class HeightSwitch {
             w.why = PRESS_N1_FIRST;
             return w;
         }
-        double above, past;
-        if (own != null && own.kSwitch != null) {
-            w.expectedRawZ = round(own.kSwitch - n1.tripRawZ);
-            w.from = "kSwitch";
-            above = LIFT_MM;
+        Double k = end == null ? null : end.kParallax;
+        double past = K_WINDOW_MM;
+        if (own != null && home.equals(own.homeAtMs)) {
+            w.from = "trip";
+            w.expectedRawZ = round(own.tripRawZ);
             past = PAST_MM;
+            double max = c.needleEndMeasure.maxKFromSwitchMm;
+            if (k != null && own.kSwitch != null && !(Math.abs(k - own.kSwitch) <= max)) {
+                w.why = String.format(Locale.ROOT, "K by parallax (%.3f) is %.3f mm from this needle's K_switch (%.3f) "
+                        + "in this home, at most %.2f (needleEndMeasure.maxKFromSwitchMm): a slipped tip, or N1 not "
+                        + "found at its end; the needle does not press", k, Math.abs(k - own.kSwitch), own.kSwitch, max);
+                return w;
+            }
         }
-        else if (end != null) {
-            w.expectedRawZ = round(end.kParallax - n1.tripRawZ);
-            w.from = "kParallax";
-            above = past = FIRST_WINDOW_MM;
+        else if (own != null && own.kSwitch != null) {
+            w.from = "kSwitch";
+            w.expectedRawZ = round(own.kSwitch - n1.tripRawZ);
         }
         else {
-            w.why = "the needle's first window comes from its end measured from below: the press measures it first";
-            return w;
+            w.from = "kParallax";
+            if (k == null) {
+                w.why = "the needle's first window comes from its end measured from below: the press measures it first";
+                return w;
+            }
+            w.expectedRawZ = round(k - n1.tripRawZ);
         }
-        w.zStart = round(w.expectedRawZ - down * above);
+        w.zStart = round(w.expectedRawZ - down * LIFT_MM);
         w.zFloor = round(w.expectedRawZ + down * Math.min(past, c.heightSwitchMaxPastTripMm));
         return w;
     }

@@ -71,6 +71,8 @@ public final class NeedleEndMeasure {
         /** The mounted tip kind's clean-check limits and its key. */
         public TipClean.Limits clean;
         public String setupKey;
+        /** N1's heights too, for K by parallax (false: a press whose window comes from K_switch, review Risk 3). */
+        public boolean n1 = true;
     }
 
     /** A frame to keep: what was found drawn on it, its caption and scale (mm per px at the camera's plane). */
@@ -154,14 +156,15 @@ public final class NeedleEndMeasure {
         Result r = new Result();
         DispenseConfig.NeedleEndSettings s = p.s;
         int[] done = {0};
-        int planned = STEPS.length * (s.n1RawZ.size() + s.needleRawZ.size()) + 1;
+        List<Double> n1Z = p.n1 ? s.n1RawZ : new ArrayList<>();
+        int planned = STEPS.length * (n1Z.size() + s.needleRawZ.size()) + 1;
         List<Look> n1 = new ArrayList<>(), nd = new ArrayList<>();
         Picture cleanPicture;
         try {
             // the passthrough may have left them on: valve, then pump, as STOP orders them, before anything moves
             io.send(ControllerCommands.VALVE_OFF);
             io.send(ControllerCommands.PUMP_OFF);
-            for (int i = 0; i < s.n1RawZ.size(); i++) {
+            for (int i = 0; i < n1Z.size(); i++) {
                 n1.add(look(io, p, r, false, i, done, planned));
             }
             for (int i = 0; i < s.needleRawZ.size(); i++) {
@@ -435,14 +438,16 @@ public final class NeedleEndMeasure {
             e.heights.add(height(l, l.end));
             e.errXyMm = Math.max(e.errXyMm, l.fit.residualPx / k[i]);
         }
-        EndFromBelow.Parallax par = EndFromBelow.parallaxK(n1z, n1k, z, k);
-        if (!(par.spread <= s.maxKSpreadMm)) {
-            throw new Refused(r, NOT_FOUND, String.format(Locale.ROOT, "K by parallax spreads %.3f mm over N1's heights "
-                    + "(at most %.2f): the scales do not agree", par.spread, s.maxKSpreadMm), nd.get(0).picture,
-                    "K spread: the needle at raw Z " + nd.get(0).rawZ, nd.get(0).mmPerPx);
+        if (!n1.isEmpty()) {
+            EndFromBelow.Parallax par = EndFromBelow.parallaxK(n1z, n1k, z, k);
+            if (!(par.spread <= s.maxKSpreadMm)) {
+                throw new Refused(r, NOT_FOUND, String.format(Locale.ROOT, "K by parallax spreads %.3f mm over N1's "
+                        + "heights (at most %.2f): the scales do not agree", par.spread, s.maxKSpreadMm),
+                        nd.get(0).picture, "K spread: the needle at raw Z " + nd.get(0).rawZ, nd.get(0).mmPerPx);
+            }
+            e.kParallax = par.k;
+            e.errKMm = par.spread;
         }
-        e.kParallax = par.k;
-        e.errKMm = par.spread;
         e.tiltXMmPerRawMm = EndFromBelow.line(z, dx)[0];
         e.tiltYMmPerRawMm = EndFromBelow.line(z, dy)[0];
         for (Look l : n1) {

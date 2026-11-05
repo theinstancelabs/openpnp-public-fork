@@ -474,6 +474,11 @@ public class DispenseConfig {
         /** Check (e): the end at most this far from where the tip setup puts it (mm). */
         public double maxFromNominalMm = 2.0;
         /**
+         * A press in the home of the needle's own trip: a fresh kParallax at most this far from that trip's K_switch
+         * (mm), else no window (review MINOR 2: a slipped tip, N1's template on its holder). Process's, to tune.
+         */
+        public double maxKFromSwitchMm = 0.5;
+        /**
          * The clean check reads one more frame with the needle at this raw Z over B, the measure's last (tipclean.md:
          * np1.py's pose), at that height's scale: one of needleRawZ.
          */
@@ -510,7 +515,7 @@ public class DispenseConfig {
                 p.add("needleEndMeasure.centrePx must be [x, y] (px)");
             }
             if (!(minPeakToSd > 0 && maxResidualPx > 0 && maxDriftPx > 0 && maxKSpreadMm > 0
-                    && maxFromNominalMm > 0)) {
+                    && maxFromNominalMm > 0 && maxKFromSwitchMm > 0)) {
                 p.add("needleEndMeasure: the checks' limits must be above 0");
             }
             if (needleRawZ != null && !needleRawZ.contains(cleanRawZ)) {
@@ -553,14 +558,18 @@ public class DispenseConfig {
         public java.util.List<EndHeight> heights = new java.util.ArrayList<>();
         /** How the end moves per raw mm (the line through the heights; Process's 25G on p34: +0.019, −0.076). */
         public double tiltXMmPerRawMm, tiltYMmPerRawMm;
-        /** K by parallax (mm): the needle's raw Z + N1's where both tips are the same distance from the camera. */
-        public double kParallax;
+        /**
+         * K by parallax (mm): the needle's raw Z + N1's where both tips are the same distance from the camera; null when
+         * N1 was not measured (a press whose window comes from its K_switch, review Risk 3).
+         */
+        public Double kParallax;
         /** N1 at its heights. */
         public java.util.List<EndHeight> n1 = new java.util.ArrayList<>();
         /** The worst of every height's fit residual and centre-frame drift (px). */
         public double residualPx, driftPx;
         /** The worst height's residual in mm (the end's scatter about its fit); K's spread over N1's heights (mm). */
-        public double errXyMm, errKMm;
+        public double errXyMm;
+        public Double errKMm;
         public java.util.List<Long> photoIds = new java.util.ArrayList<>();
         /**
          * Every frame as taken (nothing drawn; review MINOR 4: Process re-runs its tools on them), in the order taken:
