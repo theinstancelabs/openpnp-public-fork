@@ -309,11 +309,11 @@ panel only; the board stays in view. This replaces the ~5 tab switches per board
   surface probed for it or the needle frame (`#board-z-note` says from where); Register board measures it. The plan's
   frame check shows under it. The re-seat answer is the engine's new-seat flag (`POST /api/board/new-seat`), shared by
   every browser: `New seat: after planning, Register board checks the fiducials and probes this seat.`
-- **As built (board import, `boardflow.js`):** `Upload KiCad board…` (`#btn-board-upload`) opens the upload dialog
+- **As built (board import, `boardflow.js`):** `Upload a design…` (`#btn-board-upload`) opens the upload dialog
   (§11); `#board-thumbs`, one row of board pictures (a click chooses that board); `#board-imported` says where the
   drawing comes from; **`Camera is on FID1`** (`#btn-board-use-fid`, next to `Use camera X/Y`) sets the origin from
   the top camera centred on the board's first fiducial: origin = camera − R(rotation)·(FID1's board X/Y). After a save,
-  `Use this board` chooses it here.
+  `Use this design` chooses it here (opened from Designs, the button after an attach is `Open its Set up`).
 
 #### 8.1.3 Register step (`data-view=probe`; was "Probe")
 

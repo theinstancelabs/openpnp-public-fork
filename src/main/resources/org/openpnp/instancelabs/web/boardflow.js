@@ -16,7 +16,7 @@
          form's seat, Full, with the live top camera and a 5 mm scale bar (shown: true while it is drawn).
      onPad(padId, ev), onPart(ref, ev)    H2: a click on a pad or a part opens the pad inspector (padinspect.js)
      recordsMap(bv, plan)                 H4: the plan's drawing under Records' done-dot map, Full
-     onImported(saved)                    "Use this board" in the upload dialog: the board list again, the board chosen
+     onImported(saved)                    "Use this design" in the upload dialog: the board list again, the board chosen
      preview() → the hero's path preview (IL.pathPreview: play, pause, seek, state), null before the hero is drawn
    Board drawings come from IL.boardart.get (the browser's HTTP cache keeps them: the server marks them immutable). */
 'use strict';
@@ -117,8 +117,8 @@
     const row = body.querySelector('.board-sel-row');
     if (!row) return;
     const upload = el('button', { type: 'button', class: 'btn bf-upload', id: 'btn-board-upload',
-      title: 'Read a KiCad board file (.kicad_pcb) and save it as a board here. Nothing moves.' },
-    IL.icon('i-plus'), el('span', { text: 'Upload KiCad board…' }));
+      title: 'Read a KiCad board file (.kicad_pcb) and save it as a design here. Nothing moves.' },
+    IL.icon('i-plus'), el('span', { text: 'Upload a design…' }));   // the dialog's own title (Designs' button says it too)
     upload.addEventListener('click', () => IL.boardImport.open({ onSaved: onImported }));
     const thumbs = el('div', { class: 'board-thumbs', id: 'board-thumbs', role: 'group', 'aria-label': 'Boards with a drawing: press one to choose it', hidden: true });
     const imported = el('div', { class: 'reason bf-imported', id: 'board-imported', hidden: true });
@@ -261,7 +261,7 @@
     st.o.setXY(x, y);
     IL.toast('Board origin X ' + IL.fmt(x, 2) + ' · Y ' + IL.fmt(y, 2) + ' mm: ' + f.id + ' under the top camera, rotation ' + IL.fmtDeg(Number(form.rot) || 0) + '.', 'ok');
   }
-  /** "Use this board" after an upload: the Board step, the list read again, the board chosen. */
+  /** "Use this design" after an upload: the Board step, the list read again, the board chosen. */
   async function onImported(saved) {
     if (!saved || !saved.file) return;
     M.just = { file: saved.file, fiducial: saved.fiducial || null };

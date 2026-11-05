@@ -5,14 +5,15 @@
    existing board file whose placements match (attach).
 
    States: choose (drop zone, file picker) → reading (Cancel aborts) → preview (board, found, warnings, packages, name)
-   → saving (Esc and Cancel do nothing) → saved (pad types to add, Use this board, Upload another). A refused or failed
+   → saving (Esc and Cancel do nothing) → saved (pad types to add, Use this design, Upload another). A refused or failed
    read shows its reason with "Choose another file".
 
    API (IL.boardImport):
      IL.boardImport.open({file, onSaved(result), saveCloses})   file: a File to read at once (a drop); onSaved: after
-         "Use this board" (and before the dialog's pad-type links leave the page), with {file, name, slug, how: 'import' |
+         "Use this design" (and before the dialog's pad-type links leave the page), with {file, name, slug, how: 'import' |
          'attach', fiducial} (the board file to select in the Board step); saveCloses: a save goes straight to onSaved
-         (Designs). A file dropped on the open dialog keeps the options it was opened with.
+         (Designs: the button after an attach is "Open its Set up"). A file dropped on the open dialog keeps the options
+         it was opened with.
      IL.boardImport.isOpen()
    Event: 'boards' (the saved result) after every save or attach (Designs reads its list again).
    The drop guard (at load): a file dropped outside the drop zone never replaces the app (and its STOP button); a
@@ -206,7 +207,8 @@
     IL.press2(n.save, () => (M && M.replace ? 'replace the design' : null), () => save(), { refusalIn: null });
     n.again = el('button', { type: 'button', class: 'btn', id: 'btn-board-import-again', hidden: true }, 'Upload another');
     n.again.addEventListener('click', () => reset());
-    n.use = el('button', { type: 'button', class: 'btn btn--primary btn--lg', id: 'btn-board-import-use', hidden: true }, 'Use this board');
+    // Designs' onSaved opens the design's Set up; Run's chooses it in the Board step
+    n.use = el('button', { type: 'button', class: 'btn btn--primary btn--lg', id: 'btn-board-import-use', hidden: true }, M.saveCloses ? 'Open its Set up' : 'Use this design');
     n.use.addEventListener('click', () => use());
     n.refusals = el('div', { class: 'bi-refusals', 'data-refusals': '' });
     n.why = el('div', { class: 'reason bi-why', hidden: true });
@@ -735,7 +737,7 @@
       IL.pollNow();
     }
   }
-  /** State 6: what was saved, the pad types still to add (actions now), Use this board. */
+  /** State 6: what was saved, the pad types still to add (actions now), Use this design (Designs: Open its Set up). */
   function saved(r, how, name) {
     const n = M.n;
     const pv = M.pv;
@@ -783,9 +785,9 @@
       !pp && crows.length ? el('div', { class: 'bi-todo' },
         el('h3', { text: crows.length === 1 ? 'Characterize this pad type before its parts get paste' : 'Characterize these pad types before their parts get paste' }),
         el('ul', {}, crows)) : null,
-      el('p', { class: 'bi-saved__next', text: how === 'attach'
-        ? 'Use this board, then plan it: the drawing shows under its dots.'
-        : 'Use this board: put the top camera on ' + (M.saved.fiducial || 'the first fiducial') + ' and press "Camera is on ' + (M.saved.fiducial || 'FID1')
+      el('p', { class: 'bi-saved__next', text: M.saveCloses ? 'Its Set up says what the design still needs.'
+        : how === 'attach' ? 'Use this design, then plan it: the drawing shows under its dots.'
+        : 'Use this design: put the top camera on ' + (M.saved.fiducial || 'the first fiducial') + ' and press "Camera is on ' + (M.saved.fiducial || 'FID1')
           + '" (or type the origin), then Plan. Register board then finds the fiducials.' })].filter(Boolean));
     paint();
     IL.toast(how === 'attach' ? 'The KiCad drawing is now used for ' + base + '.' : 'Saved ' + M.saved.name + ': ' + IL.plural(parts, 'part') + ', ' + IL.plural(fids, 'fiducial') + '.', 'ok');
@@ -800,7 +802,7 @@
     M.h.close('use');
     if (cb) IL.safe(() => cb(s), 'board import');
   }
-  /** A pad-type action after the save: the board is chosen in the Board step first (as Use this board), then hash opens. */
+  /** A pad-type action after the save: the board is chosen in the Board step first (as Use this design), then hash opens. */
   async function leaveTo(hash) {
     const s = M && M.saved;
     const cb = M && M.onSaved;
