@@ -73,11 +73,23 @@ public final class HeightSwitch {
         public Integer idleLevel;
         public boolean accepted, refused;
         public String why;
+        /** The engine's: the presses asked for, the home it was measured under, when it ended. */
+        public Integer presses;
+        public Long homeAtMs, atMs;
+    }
+
+    /** −1 when the tool goes down as raw Z falls (N1), +1 as it rises (the needle): its mapper 1 mm lower at (x, y, z). */
+    public static int down(RawMapper m, double x, double y, double z) throws Exception {
+        return (int) Math.signum(m.toRaw(x, y, z - 1).z - m.toRaw(x, y, z).z);
     }
 
     /** Measures, then sends the tool back to travel Z (also after a refusal or a trip not found). */
     public static Result measure(Io io, Plan p) throws Exception {
-        Result r = new Result();
+        return measure(io, p, new Result());
+    }
+
+    /** As above, into {@code r} (the engine's task result). */
+    public static Result measure(Io io, Plan p, Result r) throws Exception {
         r.tool = p.tool;
         String bad = windowProblem(p);
         if (bad != null) {
@@ -111,7 +123,8 @@ public final class HeightSwitch {
         return r;
     }
 
-    private static String windowProblem(Plan p) {
+    /** Why the plan's window is refused before any line (the order is wrong, wider than 2 mm, above travel), or null. */
+    static String windowProblem(Plan p) {
         double span = p.down * (p.zFloor - p.zStart);
         if (!(span > 0)) {
             return String.format(Locale.ROOT, "the floor (Z %.3f) must lie below the start (Z %.3f) for %s", p.zFloor,

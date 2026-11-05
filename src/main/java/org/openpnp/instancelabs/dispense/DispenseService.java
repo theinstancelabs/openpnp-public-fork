@@ -4948,6 +4948,149 @@ public final class DispenseService {
     }
 
     /**
+     * BR-94: N1 or the needle presses the bed's height switch {@code presses} times ({@link HeightSwitch}) in the raw Z
+     * window from {@code zStart} to {@code zFloor} (each null: 1.0 above and 0.5 past the tool's accepted trip of this
+     * home). An accepted measure is the tool's trip at once, no Use step; the needle presses only with
+     * {@code tipClean}. The Future never throws for task failures: a refused, stopped or failed task is a refused
+     * result with its reason.
+     */
+    public Future<HeightSwitch.Result> measureHeightSwitch(String tool, int presses, Double zStart, Double zFloor,
+            boolean tipClean) throws Exception {
+        if (!"n1".equals(tool) && !"needle".equals(tool)) {
+            throw new IllegalArgumentException("'tool' must be n1 or needle");
+        }
+        if (presses < 1 || presses > 20) {
+            throw new IllegalArgumentException("'presses' must be 1..20");
+        }
+        requireAvailable();
+        RunResult r = newRun("height-switch", null, "height switch", 0, 0);
+        HeightSwitch.Result res = new HeightSwitch.Result();
+        res.tool = tool;
+        res.presses = presses;
+        Task t = new Task(r, "measure");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> heightSwitchBody(zStart, zFloor, tipClean, res, t)), () -> {
+            if (r.status != RunResult.Status.OK) {
+                res.accepted = false;
+                res.refused = true;
+                res.why = r.message;
+            }
+        });
+    }
+
+    private void heightSwitchBody(Double zStart, Double zFloor, boolean tipClean, HeightSwitch.Result res, Task t)
+            throws Exception {
+        boolean needle = "needle".equals(res.tool);
+        DispenseConfig c = cfg;
+        DispenseConfig.NamedLocation place = c.location(HeightSwitch.PLACE);
+        if (place == null) {
+            throw refused("the height switch's place is not set: PUT /api/locations/" + HeightSwitch.PLACE
+                    + " {x, y}, the switch's top centre");
+        }
+        if (needle && !tipClean) {
+            throw refused("the needle presses the height switch only with a clean tip: paste must never touch it");
+        }
+        String unknown = positionUnknownWhy();
+        if (unknown != null) {
+            throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
+        }
+        if (!configuration.getMachine().isHomed()) {
+            throw refused("MACHINE: the machine is not homed: Home first");
+        }
+        Long home = homeTracker.getLastHomeAtMs();
+        res.homeAtMs = home;
+        DispenseConfig.HeightSwitchTrip last = needle ? c.heightSwitch.needle : c.heightSwitch.n1;
+        if ((zStart == null || zFloor == null) && (last == null || home == null || !home.equals(last.homeAtMs))) {
+            throw refused("zStart and zFloor (raw Z) are needed: " + (needle ? "the needle" : "N1")
+                    + " has no accepted trip on the height switch in this home");
+        }
+        Nozzle probeNozzle = getProbeNozzle();
+        if (!needle && probeNozzle == null) {
+            throw refused("nozzle '" + PROBE_NOZZLE + "' is not in the machine");
+        }
+        Session s = t.start(c);
+        ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
+        OpenPnpRawMapper mapper = needle ? s.mapper : OpenPnpRawMapper.forProbeNozzle(m, probeNozzle, c.bAxisName);
+        // the needle is aimed as programs aim it: its tip lands at N2 + the landing and the trim
+        double[] aim = needle ? landingAndTrim(c) : new double[] {0, 0};
+        double x = place.x - aim[0], y = place.y - aim[1];
+        HeightSwitch.Plan p = new HeightSwitch.Plan();
+        p.tool = res.tool;
+        RawPoint xy = mapper.toRaw(x, y, c.travelSafeZMm);
+        p.rawX = xy.x;
+        p.rawY = xy.y;
+        double[] here = s.mapper.currentNozzleLocation();
+        p.travelZ = s.mapper.toRaw(here[0], here[1], c.travelSafeZMm).z;
+        p.down = HeightSwitch.down(mapper, x, y, c.travelSafeZMm);
+        p.zStart = zStart != null ? zStart : last.tripRawZ - p.down * 1.0;
+        p.zFloor = zFloor != null ? zFloor : last.tripRawZ + p.down * 0.5;
+        p.coarseMm = needle ? 0.10 : 0.25;
+        p.presses = res.presses;
+        // refused here, a measure that returns has sent its lines and ended at travel height over the switch
+        String bad = HeightSwitch.windowProblem(p);
+        if (bad != null) {
+            throw refused(bad);
+        }
+        HeightSwitch.Io io = new HeightSwitch.Io() {
+            @Override
+            public void send(String line) throws Exception {
+                s.exec.sendGated(DispenseExecutor.Scope.PROBE, line, c.commandTimeoutMs, s.r);
+            }
+
+            @Override
+            public List<String> query(String line) throws Exception {
+                return s.exec.queryGated(DispenseExecutor.Scope.PROBE, line, c.commandTimeoutMs, s.r);
+            }
+        };
+        // everything OpenPnP queued must be done before the raw lines start
+        m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+        try {
+            HeightSwitch.measure(io, p, res);
+        }
+        catch (Exception e) {
+            boolean stop = t.aborted();
+            s.recover();
+            if (stop && !(e instanceof DispenseExecutor.AbortedException)) {
+                DispenseExecutor.AbortedException a = new DispenseExecutor.AbortedException(abortReason(s.exec,
+                        "stopped during the height-switch measure"));
+                a.addSuppressed(e);
+                throw a;
+            }
+            throw e;
+        }
+        double[] end = {p.rawX, p.rawY, p.travelZ};
+        mapper.resync(end, end, mapper.currentB());
+        res.atMs = System.currentTimeMillis();
+        db.event(s.r.runId, res.accepted ? "INFO" : "WARN", "HEIGHT_SWITCH", new Gson().toJson(res));
+        if (res.refused) {
+            throw refused(res.why);
+        }
+        if (res.accepted) {
+            recordHeightSwitch(needle, res);
+        }
+        s.ok();
+    }
+
+    /** BR-94: an accepted measure is the tool's trip from now on (the clean-tip word is the only human step). */
+    private synchronized void recordHeightSwitch(boolean needle, HeightSwitch.Result res) throws IOException {
+        DispenseConfig.HeightSwitchTrip trip = new DispenseConfig.HeightSwitchTrip();
+        trip.tripRawZ = res.tripRawZ;
+        trip.rangeMm = res.rangeMm;
+        trip.sdMm = res.sdMm;
+        trip.presses = res.trips.size();
+        trip.atMs = res.atMs;
+        trip.homeAtMs = res.homeAtMs;
+        DispenseConfig c = cfg.copy();
+        if (needle) {
+            c.heightSwitch.needle = trip;
+        }
+        else {
+            c.heightSwitch.n1 = trip;
+        }
+        updateConfig(c);
+    }
+
+    /**
      * Check Z (§5.8): the Z check alone, behind the I4 "Z not checked" refusal of prime, the test dot,
      * the touch-off, the dot ladder and shots. It never homes.
      */

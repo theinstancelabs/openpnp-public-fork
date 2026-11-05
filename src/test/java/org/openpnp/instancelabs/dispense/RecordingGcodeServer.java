@@ -35,6 +35,10 @@ import org.openpnp.instancelabs.sim.SimVacuum;
  *
  * <p>A reconnect keeps every position and count, as a powered controller does; {@link #powerCycle} is
  * the controller losing power (BR-02): it boots believing X 0, Y 0, Z 0 and A/B 720.</p>
+ *
+ * <p>BR-94: the bed's height switch on PA5 answers {@code M43 P5} with the board's line: pressed when the tracked raw
+ * Z is at or below {@link #heightSwitchN1TripZ} (N1 goes down as raw Z falls) or at or above
+ * {@link #heightSwitchNeedleTripZ} (the needle, the see-saw's other side).</p>
  */
 public class RecordingGcodeServer implements AutoCloseable {
     private final ServerSocket server;
@@ -86,6 +90,12 @@ public class RecordingGcodeServer implements AutoCloseable {
      * watchdog: off tripped"); null = "ok" alone.
      */
     public volatile String watchdogReport;
+    /** BR-94: N1 presses the height switch at raw Z at or below this; null = never. */
+    public volatile Double heightSwitchN1TripZ;
+    /** BR-94: the needle presses the height switch at raw Z at or above this; null = never. */
+    public volatile Double heightSwitchNeedleTripZ;
+    /** BR-94: the switch's PA5 level unpressed (1: pulled up, a normally open switch closes to GND). */
+    public volatile int heightSwitchIdle = 1;
 
     public RecordingGcodeServer() throws Exception {
         server = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
@@ -174,6 +184,10 @@ public class RecordingGcodeServer implements AutoCloseable {
                     else if (line.equals("M990") && watchdogReport != null) {
                         reply.append(watchdogReport).append('\n');
                     }
+                    else if (line.equals("M43 P5")) {
+                        reply.append(String.format(Locale.ROOT, "PIN: PA5  (A9)   M42 P53          <unused/unknown>"
+                                + "                       Input  = %d\n", heightSwitchLevel(z)));
+                    }
                     else if (line.startsWith("M114")) {
                         synchronized (this) {
                             boolean model = p != null && p.isActive();
@@ -231,6 +245,13 @@ public class RecordingGcodeServer implements AutoCloseable {
             pos.put('Y', 0.0);
             pos.put('Z', 31.5);
         }
+    }
+
+    /** PA5's level at raw Z {@code z}. */
+    private int heightSwitchLevel(double z) {
+        Double n1 = heightSwitchN1TripZ, needle = heightSwitchNeedleTripZ;
+        boolean pressed = n1 != null && z <= n1 + 1e-9 || needle != null && z >= needle - 1e-9;
+        return pressed ? 1 - heightSwitchIdle : heightSwitchIdle;
     }
 
     public synchronized void mark() {
