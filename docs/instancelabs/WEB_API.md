@@ -562,11 +562,15 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before the next
   guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
 - BR-98 (§3.9): with a bed model in place the batch's G0/G1 moves are walked from where the head is (OpenPnP's raw
-  position, or where the last batch's acknowledged moves left it while that is not re-read yet) and proven before any
-  line is sent: a blocked batch answers 409 `collision` (its `leg` is `line <n>: <the line>`) and nothing is sent.
-  Raw G-code has no semantics: a tip may go the model's `contactDepthMm` into the measured top of a `touchable`
-  object that holds it (N1's touches, the needle's touch-offs), no deeper. After a batch cut short (an error, a STOP
-  or take-over mid-line, `M410`) the next batch with moves is refused until an `M400` alone re-reads the position.
+  position, or where the last batch's acknowledged moves left it while that is not re-read yet) and proven on
+  OpenPnP's machine thread right before the first line: a blocked batch answers 409 `collision` (its `leg` is `line
+  <n>: <the line>`) and nothing is sent. Raw G-code has no semantics: a tip may go the model's `contactDepthMm` into
+  the measured top of a `touchable` object that holds it (N1's touches, the needle's touch-offs), no deeper. Where
+  the head is may be unknown; then no line with X, Y or Z is sent, whatever its target (409 `collision`, `why` the
+  head's place is not known): after a batch cut short (a controller error, or a STOP, a take-over or the route's time
+  bound with a move in flight) until an `M400` alone re-reads the position; after an `M410` for the rest of its batch
+  (a batch that ends with it re-reads the position at its end). A batch sent while not homed whose moves are Z alone
+  (BR-97's see-saw levelling) is not walked (design §4).
 
 ### 3.8 Jog, move-to and the cameras (BR-49, BR-53)
 

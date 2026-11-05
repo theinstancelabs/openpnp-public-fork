@@ -60,6 +60,9 @@ final class GcodePassthrough {
     private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS",
             Locale.ROOT);
 
+    /** Tests only (BR-97 review): runs between a batch's checks and its submit. */
+    static volatile Runnable submitHook;
+
     private final ApiContext ctx;
     private volatile Batch running;
     /** A G0/G1 sent since the last M400's ok: the head may still move. */
@@ -76,11 +79,14 @@ final class GcodePassthrough {
     /** One running batch. */
     static final class Batch {
         final MachineLock.Holder holder;
+        /** OpenPnP's homed state its lines were checked under (BR-97: unhomed, Z moves are levelling moves). */
+        final boolean homed;
         /** The web STOP's reason once pressed. */
         volatile String stoppedBy;
 
-        Batch(MachineLock.Holder holder) {
+        Batch(MachineLock.Holder holder, boolean homed) {
             this.holder = holder;
+            this.homed = homed;
         }
     }
 
@@ -153,7 +159,7 @@ final class GcodePassthrough {
         }
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
-        Batch b = new Batch(holder);
+        Batch b = new Batch(holder, homed);
         synchronized (this) {
             if (running != null) {
                 throw ApiException.refused("a G-code batch is already running: wait for it");
@@ -161,17 +167,25 @@ final class GcodePassthrough {
             running = b;
         }
         try {
-            prove(m, lines);
+            Runnable hook = submitHook;
+            if (hook != null) {
+                hook.run();
+            }
             Future<Outcome> f = m.submit(() -> execute(m, d, b, lines, timeoutMs), null, true);
             long bound = lines.size() * (timeoutMs + 1000L) + 30000L;
+            Outcome o;
             try {
-                return f.get(bound, TimeUnit.MILLISECONDS);
+                o = f.get(bound, TimeUnit.MILLISECONDS);
             }
             catch (TimeoutException e) {
                 b.stoppedBy = "the batch did not end within " + bound / 1000 + " s";
                 throw new ApiException(504, "controller-timeout", "the batch did not end within " + bound / 1000
                         + " s: it stops before its next line; press STOP if the machine may still move");
             }
+            if (o.refusal != null) {
+                throw o.refusal;
+            }
+            return o;
         }
         finally {
             synchronized (this) {
@@ -186,11 +200,15 @@ final class GcodePassthrough {
      * BR-98: the batch's G0/G1 moves walked from where the head is (OpenPnP's raw position, or where the last batch
      * left it while that is not re-read yet) and proven before any line is sent; a blocked batch is refused whole. Raw
      * G-code has no semantics: a tip may go the model's contact depth into a measured touchable top, as in lumen-sim.
+     * Where the head is may be unknown (the last batch cut short, or a quick stop earlier in this batch): then no line
+     * moves X, Y or Z, whatever its legs (review MAJOR 1). On the machine thread before the first line (review MINOR b),
+     * as jog and move-to prove theirs.
      */
-    private void prove(Machine m, List<PassthroughLines.Line> lines) throws ApiException {
-        if (!ctx.bed.active()) {
+    private void prove(Machine m, Batch b, List<PassthroughLines.Line> lines) throws ApiException {
+        // BR-97's see-saw levelling (Z alone while not homed) stays outside the check (design §3, §4): its own walk
+        if (!ctx.bed.active() || !b.homed && levelling(lines)) {
             synchronized (this) {
-                commanded = null; // no model, no walk: a model put in place later starts from a re-read position
+                commanded = null; // no walk: the next one starts from a re-read position (a model put in place, a home)
             }
             return;
         }
@@ -199,17 +217,26 @@ final class GcodePassthrough {
         synchronized (this) {
             at = !positionStale ? new double[] {s.x, s.y, s.z} : commanded == null ? null : commanded.clone();
         }
+        BedGuard.Start unknown = at == null ? s.at(null) : null;
         List<CollisionCheck.Leg> legs = new ArrayList<>();
-        double[] p = at == null ? new double[] {s.x, s.y, s.z} : at;
+        double[] p = at;
         for (int i = 0; i < lines.size(); i++) {
             PassthroughLines.Line l = lines.get(i);
-            if (l.motion) {
+            if (l.movesHead() && unknown != null) {
+                ctx.bed.prove("gcode", null, unknown, legs, CollisionCheck.Options.contact(null), false); // refuses
+            }
+            else if (l.motion && unknown == null) {
                 double[] q = l.applyTo(p);
                 if (!Arrays.equals(p, q)) {
                     legs.add(new CollisionCheck.Leg("line " + (i + 1) + ": " + l.text, p[0], p[1], p[2], q[0], q[1],
                             q[2]));
                 }
                 p = q;
+            }
+            if ("M410".equals(l.text)) {
+                unknown = s.unknown("line " + (i + 1) + "'s M410 may stop the head short of its target", "send the "
+                        + "lines after the M410 in a batch of their own: OpenPnP reads where the head is when this one "
+                        + "ends");
             }
         }
         if (!legs.isEmpty()) {
@@ -222,7 +249,20 @@ final class GcodePassthrough {
         }
     }
 
-    /** How a batch ended: {@link #status} "ok", "lock-lost", "stopped", "controller-error" or "controller-timeout". */
+    /** BR-97's levelling batch, sent while not homed: no line moves X or Y (PassthroughLines refuses them unhomed). */
+    private static boolean levelling(List<PassthroughLines.Line> lines) {
+        for (PassthroughLines.Line l : lines) {
+            if (!Double.isNaN(l.x) || !Double.isNaN(l.y)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * How a batch ended: {@link #status} "ok", "lock-lost", "stopped", "controller-error", "controller-timeout", or
+     * "refused" before its first line ({@link #refusal}, which {@link #run} throws).
+     */
     static final class Outcome {
         final String status;
         final List<Map<String, Object>> results;
@@ -231,9 +271,20 @@ final class GcodePassthrough {
         final String line;
         final List<String> replies;
         final String message;
+        final ApiException refusal;
 
         Outcome(String status, List<Map<String, Object>> results, long ms, Integer index, String line,
                 List<String> replies, String message) {
+            this(status, results, ms, index, line, replies, message, null);
+        }
+
+        /** Refused before its first line: nothing was sent. */
+        Outcome(ApiException refusal) {
+            this("refused", new ArrayList<>(), 0, null, null, null, refusal.getMessage(), refusal);
+        }
+
+        private Outcome(String status, List<Map<String, Object>> results, long ms, Integer index, String line,
+                List<String> replies, String message, ApiException refusal) {
             this.status = status;
             this.results = results;
             this.ms = ms;
@@ -241,6 +292,7 @@ final class GcodePassthrough {
             this.line = line;
             this.replies = replies;
             this.message = message;
+            this.refusal = refusal;
         }
 
         boolean lockLost() {
@@ -253,6 +305,17 @@ final class GcodePassthrough {
         long t0 = System.currentTimeMillis();
         List<Map<String, Object>> results = new ArrayList<>();
         String who = b.holder == null ? "?" : b.holder.who;
+        try {
+            prove(m, b, lines);
+        }
+        catch (ApiException e) {
+            return new Outcome(e);
+        }
+        catch (Exception e) {
+            Logger.warn(e, "G-code passthrough: the collision check failed");
+            return new Outcome(ApiException.refused("the collision check failed (" + e.getMessage() + "): nothing was "
+                    + "sent"));
+        }
         String confirm = d.getCommand(null, GcodeDriver.CommandType.COMMAND_CONFIRM_REGEX);
         confirm = confirm == null ? "^ok.*" : confirm;
         String error = d.getCommand(null, GcodeDriver.CommandType.COMMAND_ERROR_REGEX);

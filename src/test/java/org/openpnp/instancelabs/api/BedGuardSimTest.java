@@ -15,6 +15,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -23,6 +25,7 @@ import org.openpnp.instancelabs.dispense.BedModelStore;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.model.Configuration;
+import org.openpnp.spi.Machine;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -292,22 +295,115 @@ public class BedGuardSimTest {
 
     /**
      * A batch cut short (the controller answered a move with an error) leaves where the head went unknown: the next
-     * batch with moves is refused until an M400 alone has OpenPnP re-read the position.
+     * batch with moves is refused until an M400 alone has OpenPnP re-read the position, also a move onto the spot
+     * OpenPnP still believes in, which makes no leg from there (review MAJOR 1: the head is really elsewhere).
      */
     @Test
     public void afterABatchCutShortMovesWaitForAnM400() throws Exception {
         start(BedFixture.text());
         String token = acquire();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\",\"M400\"]}", token);
         sim.server.mark();
         sim.server.failAtLine = 0;
         call("POST", "/api/gcode", "{\"lines\":[\"G1 X10 F3000\"]}", token);
         assertEquals(502, status, body);
         sim.server.failAtLine = -1;
+        int proofs = rows("MOTION_PROOF").size(), refused = rows("MOTION_REFUSED").size();
+        sim.server.mark();
         JsonObject r = collision(null, call("POST", "/api/gcode", "{\"lines\":[\"G1 X20 F3000\"]}", token));
         assertTrue(r.get("why").getAsString().contains("cut short"), body);
         assertTrue(r.get("next").getAsString().contains("M400"), body);
+        r = collision(null, call("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\"]}", token));
+        assertTrue(r.get("why").getAsString().contains("cut short"), body);
+        assertEquals(List.of(), motionSent(), "nothing sent");
+        assertEquals(proofs, rows("MOTION_PROOF").size(), "nothing proven");
+        assertEquals(refused + 2, rows("MOTION_REFUSED").size(), "each refusal on record");
         ok("POST", "/api/gcode", "{\"lines\":[\"M400\"]}", token);
         ok("POST", "/api/gcode", "{\"lines\":[\"G1 X20 F3000\"]}", token);
         assertEquals(20, sim.server.position('X'), 1e-9);
+    }
+
+    /**
+     * An M410 may stop the head short of its target: no later line of the same batch moves X, Y or Z (review MAJOR 1).
+     * A batch that ends with it runs, and OpenPnP re-reads where the head is at its end.
+     */
+    @Test
+    public void noLineAfterAnM410MovesTheHead() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\",\"M400\"]}", token);
+        sim.server.mark();
+        JsonObject r = collision(null, call("POST", "/api/gcode", "{\"lines\":[\"G1 Y150 F3000\",\"G1 X350 F3000\","
+                + "\"M410\",\"G1 Y350 F3000\"]}", token));
+        assertTrue(r.get("why").getAsString().contains("line 3's M410"), body);
+        assertTrue(r.get("next").getAsString().contains("batch of their own"), body);
+        assertEquals(List.of(), sim.server.sinceMark(), "nothing sent");
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Y150 F3000\",\"G1 X350 F3000\",\"M410\"]}", token);
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Y350 F3000\"]}", token);
+        assertEquals(350, sim.server.position('Y'), 1e-9);
+    }
+
+    /**
+     * A batch stopped with its move in flight (a STOP, a take-over, the route's time bound) leaves where the head went
+     * unknown, with the machine still on after the time bound: no move until an M400 alone re-reads it (review MAJOR 1).
+     */
+    @Test
+    public void afterAnInterruptedMoveNoLineMovesTheHead() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\",\"M400\"]}", token);
+        CountDownLatch held = new CountDownLatch(1);
+        sim.server.holdOkUntil.put("G1 X150", held);
+        sim.server.mark();
+        CompletableFuture<Integer> batch = CompletableFuture.supplyAsync(() -> {
+            try {
+                call("POST", "/api/gcode", "{\"lines\":[\"G1 X150 Y300 F3000\",\"M400\"]}", token);
+                return status;
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        long t0 = System.currentTimeMillis();
+        while (!sim.server.sinceMark().contains("G1 X150 Y300 F3000") && System.currentTimeMillis() - t0 < 10000) {
+            Thread.sleep(10);
+        }
+        assertTrue(api.getContext().passthrough.abort("the batch did not end in time"), "the batch runs");
+        held.countDown();
+        assertEquals(409, (int) batch.get(), "stopped");
+        assertTrue(Configuration.get().getMachine().isEnabled(), "the machine stays on");
+        sim.server.mark();
+        JsonObject r = collision(null, call("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\"]}", token));
+        assertTrue(r.get("why").getAsString().contains("cut short"), body);
+        assertEquals(List.of(), motionSent(), "nothing sent");
+        ok("POST", "/api/gcode", "{\"lines\":[\"M400\"]}", token);
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\"]}", token);
+        assertEquals(100, sim.server.position('X'), 1e-9);
+    }
+
+    /**
+     * The proof is made on OpenPnP's machine thread right before the first line, as jog and move-to make theirs: a move
+     * queued there after the batch's checks is proven from where it leaves the head (review MINOR b).
+     */
+    @Test
+    public void aBatchIsProvenFromWhereItsFirstLineStarts() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        Machine m = Configuration.get().getMachine();
+        // as an OpenPnP window jog would: the head (N1 at its offset) to where the needle's tip is over the switch,
+        // queued before the batch's task
+        GcodePassthrough.submitHook = () -> m.submit(() -> {
+            sim.n1.moveTo(sim.n1.getLocation().derive(SWITCH_HX - 24.178, SWITCH_HY - 63.91, null, null));
+            return null;
+        });
+        try {
+            sim.server.mark();
+            collision("height-switch", call("POST", "/api/gcode", "{\"lines\":[\"G1 Z60 F600\"]}", token));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z60 F600"), "nothing of the batch sent");
+        assertEquals(SWITCH_HX, sim.server.position('X'), 1e-3);
     }
 }

@@ -69,9 +69,14 @@ final class BedGuard {
 
         /** The same start at another raw position (where the passthrough's last lines left the head; null: unknown). */
         Start at(double[] xyz) {
-            return xyz == null ? new Start("the last G-code batch was cut short, so where it left the head is not known",
-                    "send M400 alone first: OpenPnP then reads where the head is", x, y, z, homeAtMs)
+            return xyz == null ? unknown("the last G-code batch was cut short, so where it left the head is not known",
+                    "send M400 alone first: OpenPnP then reads where the head is")
                     : new Start(why, next, xyz[0], xyz[1], xyz[2], homeAtMs);
+        }
+
+        /** The same start, not known: why, and what makes it known again. */
+        Start unknown(String why, String next) {
+            return new Start(why, next, x, y, z, homeAtMs);
         }
     }
 

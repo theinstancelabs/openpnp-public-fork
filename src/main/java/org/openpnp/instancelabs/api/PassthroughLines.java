@@ -68,6 +68,11 @@ final class PassthroughLines {
             this.z = z;
         }
 
+        /** A G0/G1 with X, Y or Z: it moves the head or the see-saw (A or B alone moves neither). */
+        boolean movesHead() {
+            return !Double.isNaN(x) || !Double.isNaN(y) || !Double.isNaN(z);
+        }
+
         /** Raw X, Y, Z after this line from {@code p} (moves are absolute: G91 is refused). */
         double[] applyTo(double[] p) {
             return new double[] {Double.isNaN(x) ? p[0] : x, Double.isNaN(y) ? p[1] : y, Double.isNaN(z) ? p[2] : z};
