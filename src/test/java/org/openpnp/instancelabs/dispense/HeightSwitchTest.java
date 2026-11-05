@@ -245,6 +245,39 @@ public class HeightSwitchTest {
         assertTrue(sw.lines.isEmpty(), "nothing sent: " + sw.lines);
     }
 
+    /**
+     * The config keeps each tool's accepted trip and the forbidden circle's radius (Gson-saved): a file from before
+     * them loads with none and the default radius, a null is put right, a copy keeps them, the radius is bounded.
+     */
+    @Test
+    public void theConfigKeepsEachToolsTripAndAnOldFileLoads() {
+        DispenseConfig old = DispenseConfig.fromJson("{\"schemaVersion\": 4, \"outputZones\": {\"forbidRadiusMm\": 15}}");
+        assertNull(old.heightSwitch.n1);
+        assertNull(old.heightSwitch.needle);
+        assertEquals(10, old.outputZones.heightSwitchRadiusMm, 0);
+        assertEquals(new ArrayList<>(), old.validate());
+        assertNull(DispenseConfig.fromJson("{\"heightSwitch\": null}").heightSwitch.n1);
+        DispenseConfig c = new DispenseConfig();
+        DispenseConfig.HeightSwitchTrip t = new DispenseConfig.HeightSwitchTrip();
+        t.tripRawZ = 12.0125;
+        t.rangeMm = 0.025;
+        t.sdMm = 0.01;
+        t.presses = 5;
+        t.atMs = 1000;
+        t.homeAtMs = 900L;
+        c.heightSwitch.n1 = t;
+        DispenseConfig copy = c.copy();
+        assertEquals(12.0125, copy.heightSwitch.n1.tripRawZ, 0);
+        assertEquals(5, copy.heightSwitch.n1.presses);
+        assertEquals(Long.valueOf(900), copy.heightSwitch.n1.homeAtMs);
+        assertNull(copy.heightSwitch.needle);
+        c.outputZones.heightSwitchRadiusMm = 0;
+        assertTrue(c.validate().stream().anyMatch(x -> x.contains("heightSwitchRadiusMm")), c.validate().toString());
+        c.outputZones.heightSwitchRadiusMm = 40;
+        assertTrue(c.validate().stream().anyMatch(x -> x.contains("heightSwitchRadiusMm")), c.validate().toString());
+        assertEquals("height-switch", HeightSwitch.PLACE);
+    }
+
     @Test
     public void readsTheBoardsM43Reply() {
         assertEquals(Integer.valueOf(0), HeightSwitch.level(Arrays.asList(

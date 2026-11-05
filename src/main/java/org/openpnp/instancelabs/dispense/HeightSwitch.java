@@ -22,6 +22,8 @@ import java.util.regex.Pattern;
  * a lost link) ends it as it is.</p>
  */
 public final class HeightSwitch {
+    /** The named location of the switch's top centre ({@code PUT /api/locations/height-switch {x, y}}). */
+    public static final String PLACE = "height-switch";
     /** PA5 for M42 (the MARLIN_F407VE variant's Arduino pin) and for M43 (its entry in the firmware's pin table). */
     public static final int M42_PIN = 53;
     public static final int M43_PIN = 5;
