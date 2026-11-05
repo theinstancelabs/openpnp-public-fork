@@ -540,7 +540,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
     const c6 = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
       cards: document.querySelectorAll('#rs-designs .design[data-board]').length, box: !!document.querySelector('#rs-designs .notebox--block'),
-      note: ((document.querySelector('#rs-designs .rf-note') || {}).textContent || ''), first: !!document.querySelector('#rs-designs > .rf-note:first-child') })))));
+      note: ((n) => (n ? (n.querySelector(':scope > span') || n).textContent : ''))(document.querySelector('#rs-designs .rf-note')), first: !!document.querySelector('#rs-designs > .rf-note:first-child') })))));
     check('(6c) a failed read of the list on entering Run: Start keeps its design cards, no error box instead', !!c6.err && c6.cards > 0 && !c6.box, c6);
     check('(6c) and says above them that the list could not be read again, then the reason (the re-checks\' MINORs)', c6.first
       && c6.note === KEPT + c6.err, c6);
@@ -561,58 +561,101 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     await page.evaluate(() => IL.go('#run'));
     await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
     const d6 = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
-      cards: document.querySelectorAll('#rs-designs .design[data-board]').length, note: ((document.querySelector('#rs-designs .rf-note') || {}).textContent || '') })))));
-    check('(6d) no answer: Start keeps its cards under "' + KEPT + '<reason>", and no "look at the machine"', d6.cards > 0 && d6.note === KEPT + d6.err && noAdvice(d6.note), d6);
+      cards: document.querySelectorAll('#rs-designs .design[data-board]').length, note: ((n) => (n ? (n.querySelector(':scope > span') || n).textContent : ''))(document.querySelector('#rs-designs .rf-note')),
+      retry: !!document.querySelector('#rs-designs .rf-note button.list-retry') })))));
+    check('(6d) no answer: Start keeps its cards under "' + KEPT + '<reason>" with Retry, and no "look at the machine"', d6.cards > 0 && d6.note === KEPT + d6.err
+      && noAdvice(d6.note) && d6.retry, d6);
     await page.evaluate(() => IL.go('#run/board'));
     const hint6 = await page.waitForFunction(() => { const h = document.getElementById('board-hint'); return h && !h.closest('[hidden]') && IL.run.boardsErr ? h.textContent : null; },
       null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
     check('(6d) and Run\'s Board step says the same', hint6 === KEPT + d6.err, { hint6, err: d6.err });
     await page.evaluate(() => IL.go('#designs'));
     const des6 = await page.waitForFunction(() => { const n = document.querySelector('#designs-list .designs-note, #designs-list .notebox--block');
-      return n ? { note: n.textContent, box: n.classList.contains('notebox--block'), first: n === document.getElementById('designs-list').firstElementChild,
+      return n ? { note: (n.querySelector(':scope > span') || n).textContent, retry: !!n.querySelector('button.list-retry'), box: n.classList.contains('notebox--block'),
+        first: n === document.getElementById('designs-list').firstElementChild,
         cards: document.querySelectorAll('#designs-list a.design').length } : null; }, null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
-    check('(6d) and Designs keeps its cards under the same words, first (no error box instead of them)', !!des6 && !des6.box && des6.first && des6.cards > 0
-      && des6.note === KEPT + d6.err, des6);
+    check('(6d) and Designs keeps its cards under the same words with Retry, first (no error box instead of them)', !!des6 && !des6.box && des6.first
+      && des6.cards > 0 && des6.note === KEPT + d6.err && des6.retry, des6);
     await page.unroute('**/api/boards', lost);
     await page.evaluate(() => IL.go('#machine'));
     await page.evaluate(() => IL.go('#designs'));
     const des6b = await page.waitForFunction(() => !document.querySelector('#designs-list .designs-note, #designs-list .notebox--block')
       && document.querySelectorAll('#designs-list a.design').length > 0, null, { timeout: 15000 }).then(() => true, () => false);
     check('(6d) the next good read on Designs: its cards without the note', des6b, null);
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !!IL.run.boards && !IL.run.boardsLoading && !IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+    // a bare HTTP error (no reason in its body) is named: "HTTP 502 Bad Gateway." (HTTP/2 brings "502 " alone)
+    const bare = (route) => (route.request().method() === 'GET' ? route.fulfill({ status: 502, body: '' }) : route.fallback());
+    await page.evaluate(() => IL.go('#machine'));
+    await page.route('**/api/boards', bare);
+    await page.evaluate(() => IL.go('#run'));
+    const err502 = await page.waitForFunction(() => !IL.run.boardsLoading && IL.run.boardsErr, null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
+    check('(6d) a bare HTTP 502 is named "HTTP 502 …."', /^HTTP 502\b.*\.$/.test(err502 || '') && noAdvice(err502), err502);
+    await page.unroute('**/api/boards', bare);
+    await page.evaluate(() => IL.go('#machine'));
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !!IL.run.boards && !IL.run.boardsLoading && !IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
 
-    // ---- (6e) a tab whose first read of the list gets no answer: Start and Designs say "Could not read the designs:
-    // <reason>" with Try again; Start does not read again on every render meanwhile (it once looped on a failing read)
+    // ---- (6e) a tab whose reads of the list get no answer: Start, Set up and Designs say "Could not read the designs:
+    // <reason>" with Retry; nothing reads the list again by itself meanwhile (Start once read it on every render); Retry
+    // reads it; OpenPnP answering again (online) reads a list whose last read failed
     const tab = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     tab.on('pageerror', (e) => jsErrors.push('tab 2: ' + String(e)));
     tab.on('dialog', (d) => { dialogs.push(d.type() + ': ' + d.message()); d.dismiss().catch(() => {}); });
+    tab.on('request', (r) => { if (r.method() !== 'GET' && new URL(r.url()).pathname.startsWith('/api/')) writes.push(r.method() + ' ' + new URL(r.url()).pathname); });
     let failing = true, reads6 = 0;
     await tab.route('**/api/boards', (route) => { if (route.request().method() !== 'GET') return route.fallback(); reads6++; return failing ? route.abort('failed') : route.fallback(); });
-    const boxOf = (sel) => tab.waitForFunction((q) => { const b = document.querySelector(q); return b && !b.closest('[hidden]')
-      ? { text: (b.querySelector(':scope > span') || b).textContent, retry: !!b.querySelector('button.list-retry'), err: (window.IL && IL.run && IL.run.boardsErr) || null } : null; }, sel, { timeout: 20000 })
-      .then((h) => h.jsonValue(), () => null);
+    // settled: no read of the list for 800 ms (an aborted or answered read ends within ms), so the page shows its outcome
+    const settle = async () => { let n; do { n = reads6; await tab.waitForTimeout(800); } while (n !== reads6); };
+    const shown6 = (sel) => tab.evaluate((q) => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => { const b = document.querySelector(q);
+      r(b && !b.closest('[hidden]') ? { text: (b.querySelector(':scope > span') || b).textContent, retry: !!b.querySelector('button.list-retry') } : null); }))), sel);
     await tab.goto(BASE + '#run');
-    const e6 = await boxOf('#rs-designs .notebox--block');
-    check('(6e) a first read with no answer: Start says "' + NONE + '<reason>", no "look at the machine", and offers Try again', !!e6 && !!e6.err
-      && e6.text === NONE + e6.err && noAdvice(e6.text) && e6.retry, e6);
-    const before6 = reads6;
+    await tab.waitForFunction(() => !!(window.IL && IL.run && IL.run.boardsErr), null, { timeout: 20000 }).catch(() => null);
+    await settle();
+    const reason6 = await tab.evaluate(() => IL.run.boardsErr);
+    const e6 = await shown6('#rs-designs .notebox--block');
+    check('(6e) a first read with no answer: Start says "' + NONE + '<reason>", no "look at the machine", with Retry', !!reason6 && !!e6
+      && e6.text === NONE + reason6 && noAdvice(e6.text) && e6.retry, { e6, reason6 });
+    let before6 = reads6;
     await tab.waitForTimeout(2000);
-    check('(6e) and Start reads the list no more by itself (no read on every render)', reads6 - before6 <= 1, { before: before6, after: reads6 });
+    check('(6e) and nothing reads the list again by itself (Start once read it on every render)', reads6 === before6, { before: before6, after: reads6 });
+    before6 = reads6;
+    if (e6 && e6.retry) await tab.click('#rs-designs .notebox--block button.list-retry');
+    await settle();
+    const e6b = await shown6('#rs-designs .notebox--block');
+    check('(6e) Start\'s Retry reads the list again (no answer again: the same words)', reads6 > before6 && !!e6b && e6b.text === NONE + reason6, { reads: reads6 - before6, e6b });
+    await tab.evaluate((k) => IL.go('#designs/setup/' + k), late ? encodeURIComponent(late.file) : 'none');
+    await settle();
+    const set6 = await shown6('#design-meta');
+    check('(6e) Set up of a design with no list read says the same, with Retry', !!set6 && set6.text === NONE + reason6 && set6.retry, set6);
+    before6 = reads6;
+    if (set6 && set6.retry) await tab.click('#design-meta button.list-retry');
+    await settle();
+    check('(6e) Set up\'s Retry reads the list again', reads6 > before6, { reads: reads6 - before6 });
     await tab.evaluate(() => IL.go('#designs'));
-    const e6d = await boxOf('#designs-list .notebox--block');
-    check('(6e) Designs says the same, with Try again', !!e6d && !!e6 && e6d.text === NONE + e6.err && e6d.retry, { e6d, err: e6 && e6.err });
+    await settle();
+    const e6d = await shown6('#designs-list .notebox--block');
+    check('(6e) Designs says the same, with Retry', !!e6d && e6d.text === NONE + reason6 && e6d.retry, e6d);
     failing = false;
     if (e6d && e6d.retry) await tab.click('#designs-list .notebox--block button.list-retry');
     const ok6d = await tab.waitForFunction(() => !document.querySelector('#designs-list .notebox--block') && document.querySelectorAll('#designs-list a.design').length > 0,
       null, { timeout: 15000 }).then(() => true, () => false);
-    check('(6e) Designs\' Try again reads the list: its cards', ok6d, null);
-    failing = true;
+    check('(6e) Designs\' Retry reads the list: its cards', !!e6d && e6d.retry && ok6d, null);
     await tab.evaluate(() => IL.go('#run'));
-    const e6r = await boxOf('#rs-designs .notebox--block');
+    await tab.waitForFunction(() => !!IL.run.boards && !IL.run.boardsLoading && !IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+    failing = true;
+    await tab.evaluate(() => IL.go('#designs'));   // its visit reads again: no answer, its note over the cards
+    await settle();
+    await tab.evaluate(() => IL.go('#run'));       // and Start's
+    await settle();
+    const n6 = await shown6('#rs-designs .rf-note');
     failing = false;
-    if (e6r && e6r.retry) await tab.click('#rs-designs .notebox--block button.list-retry');
-    const ok6r = await tab.waitForFunction(() => !document.querySelector('#rs-designs .notebox--block') && document.querySelectorAll('#rs-designs .design[data-board]').length > 0,
-      null, { timeout: 15000 }).then(() => true, () => false);
-    check('(6e) Start\'s Try again reads the list: its cards', !!e6r && e6r.retry && ok6r, { e6r, ok6r });
+    before6 = reads6;
+    await tab.evaluate(() => IL.emit('online', true));
+    await settle();
+    const n6b = await shown6('#rs-designs .rf-note');
+    check('(6e) OpenPnP answering again (online) reads both lists again (Start\'s and Designs\'): Start\'s note goes', !!n6 && reads6 - before6 >= 2 && !n6b,
+      { note: n6, after: n6b, reads: reads6 - before6 });
     await tab.close();
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------

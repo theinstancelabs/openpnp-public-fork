@@ -519,14 +519,14 @@
   IL.readErrorText = function (e) {
     if (!e) return '';
     let t = String(e.message || e).trim();
-    if (/^\d{3}\b/.test(t)) t = 'HTTP ' + t;   // "502 " when HTTP/2 brings no status text
+    if (e.status > 0 && !(e.data && (e.data.reason || e.data.message))) t = 'HTTP ' + t;   // "502 Bad Gateway", or "502 " over HTTP/2
     return /[.!?]$/.test(t) ? t : t + '.';
   };
   /** A failed read of the designs list, in the same words everywhere: over the designs read before (kept), or none. */
   IL.listReadError = (reason, kept) => (kept ? 'These are the designs from before. Could not read them again: ' : 'Could not read the designs: ') + reason;
-  /** Try again under a failed read of a list: reads it again, nothing else. */
-  IL.retryButton = function (read) {
-    const b = el('button', { type: 'button', class: 'btn btn--sm list-retry', text: 'Try again' });
+  /** Retry under a failed read of a list (as Records' and Setup's): reads it again, nothing else. */
+  IL.retryButton = function (read, key) {
+    const b = el('button', { type: 'button', class: 'btn btn--sm list-retry', 'data-focus-key': 'retry:' + key }, IL.icon('i-refresh'), 'Retry');
     b.addEventListener('click', () => read());
     return b;
   };

@@ -3067,7 +3067,7 @@
     if (FLOW_VIEWS.includes(step)) { IL.runFlow.panel(parts, s, true, step); return; }
     renderSteps(parts.top, s, step);
     if (step === 'board') {
-      if (!R.boards && !R.boardsLoading && !R.boardsErr) loadBoards();   // after a failed read: its refresh button
+      if (!R.boards && !R.boardsLoading) loadBoards();
       parts.body.append(buildBoard(plan()));
       parts.foot.append(buildBoardFoot());
       syncSelect(true);
@@ -3127,6 +3127,8 @@
   // STOP makes an open run confirm moot: close it (Recovery takes over)
   IL.on('stop', () => { if (R.dlg) R.dlg.close('stop'); });
   IL.on('online', () => { if (R.dlg) IL.safe(() => updateDialog(S.status), 'run confirm'); });
+  // a list read that failed (OpenPnP away, the page loaded during its restart): read again once it answers
+  IL.on('online', (on) => { if (on && R.boardsErr) loadBoards(); });
   IL.on('taskend', (run) => {
     // Register board ended: the new plan (the same physical board), and its result card on the Register step
     if (run && run.label === 'board registration' && IL.planMatches(run.planId)) {

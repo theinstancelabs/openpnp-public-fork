@@ -29,6 +29,7 @@
   /** GET /api/boards, then each board file's check (10-20 ms each). */
   function load() {
     if (D.loading) return D.loading;
+    if (D.err) { D.err = null; IL.render(); }   // "Reading…" while it reads again (Retry shows it worked on)
     D.loading = (async () => {
       try { D.boards = await IL.api('GET', '/api/boards'); D.err = null; } catch (e) { D.err = IL.readErrorText(e); return; }
       await Promise.all(files().map((f) => readCheck(f.file)));
@@ -75,6 +76,7 @@
 
   IL.on('padtypes', () => { if (D.boards) reload(); });
   IL.on('boards', () => { if (D.boards) D.fresh = reload(); });   // a save or attach in this tab (Run's Board step too)
+  IL.on('online', (on) => { if (on && D.err) reload(); });   // a read that failed while OpenPnP was away
 
   // ================================================================================== Designs (d0)
   /** A board's picture from its drawing (once per drawing and size); its frame while it loads. */
@@ -98,10 +100,11 @@
     const list = files();
     const key = [!!D.boards, D.err, list.map((f) => [f.name, f.file, stateOf(f).text, !!D.thumbs.get((f.art && f.art.id) + '|300')])];
     IL.keyed(n.list, JSON.stringify(key), () => {
-      if (D.err && !D.boards) return el('p', { class: 'notebox notebox--block' }, el('span', { text: IL.listReadError(D.err) }), ' ', IL.retryButton(reload));
+      if (D.err && !D.boards) return el('p', { class: 'notebox notebox--block' }, el('span', { text: IL.listReadError(D.err) }), ' ', IL.retryButton(reload, 'designs'));
       if (!D.boards) return el('p', { class: 'muted', text: 'Reading the designs…' });
       // a read again that fails keeps the cards it has, under a note (the next visit reads them again)
-      const note = D.err ? [el('p', { class: 'reason reason--need designs-note', text: IL.listReadError(D.err, true) })] : [];
+      const note = D.err ? [el('p', { class: 'reason reason--need designs-note' }, el('span', { text: IL.listReadError(D.err, list.length > 0) }), ' ',
+        IL.retryButton(reload, 'designs-note'))] : [];
       if (!list.length) return note.concat(el('p', { class: 'notebox', text: 'No designs yet: upload one.' }));
       return note.concat(list.map((f) => {
         const st = stateOf(f);
@@ -191,8 +194,8 @@
     const f = byKey(D.sel);
     IL.setText(n.name, f ? title(f) : '');
     const im = f && f.imported;
-    IL.keyed(n.meta, JSON.stringify([!!D.boards, D.err, f && f.file, im && im.atMs]), () => (!f ? el('span', { text: D.err ? IL.listReadError(D.err)
-      : D.boards ? 'No such design: pick one in Designs.' : 'Reading the design…' })
+    IL.keyed(n.meta, JSON.stringify([!!D.boards, D.err, f && f.file, im && im.atMs]), () => (!f ? (D.err ? [el('span', { text: IL.listReadError(D.err) }), ' ', IL.retryButton(reload, 'setup')]
+      : el('span', { text: D.boards ? 'No such design: pick one in Designs.' : 'Reading the design…' }))
       : [el('span', { text: im && im.atMs ? 'Uploaded ' + IL.fmtDateTime(IL.toClient(im.atMs)) + (im.sourceName ? ' from ' + im.sourceName : '') : 'Board file ' + String(f.file).split('/').pop() }),
         el('span', { text: 'top side' })]));
     const st = f ? stateOf(f) : { state: 'reading', text: '' };
