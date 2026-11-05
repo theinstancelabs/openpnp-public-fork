@@ -54,7 +54,7 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
      may be at the machine: `run`, `deploy` and `rollback` set the hold and exit **5** (`health` and `resume` set it
      too). Once per exit (`<root>/openpnp-exit.json`); a start the serial lock refused (75) is not one.
    - **Idle check.** All of these must hold:
-     - STATE.md has exactly one `- **Holder:**` line, its value starts with `nobody`, nobody `wants` the
+     - STATE.md has exactly one `- **Holder:**` line, its value starts with `nobody` (`**nobody**` or `_nobody_` too), nobody `wants` the
        machine, and there are no notes (sub-bullets) under it: a note is for the next taker to read first;
      - no hold latch is set;
      - the serial flock can be taken, or only the OpenPnP service holds it;
@@ -255,7 +255,8 @@ Exit codes:
 - Never deploys a build that is not green, or whose sha is not on `il/integration`. It re-checks GitHub at
   deploy time too. `--version TAG` overrides only the bad list, never eligibility.
 - Never while someone holds the machine. Any doubt counts as held: a missing or doubled Holder line, `none`,
-  `free`, `Nobody?`, bold markers, a `wants` note.
+  `free`, `Nobody?`, `~~nobody~~`, a `wants` note. Emphasis around `nobody` is not doubt (11-04: a bold release
+  refused a deploy).
 - Never STOPs during a home: a STOP inside G28 hangs the controller until a power cycle. One rule for every real
   STOP (failures, the exception path, the unit's ExecStop, the test service manager, a stop where no planned stop can be
   used); a planned stop is refused by OpenPnP itself while anything works, a home included:

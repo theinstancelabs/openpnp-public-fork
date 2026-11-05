@@ -27,6 +27,12 @@ class HolderParsing(unittest.TestCase):
         "-   **Holder:**   nobody   ",
         "- **Holder:**\n  nobody (released by Process at 18:00)",
         "- **Holder:** nobody (released by Process at 18:00,\n  valve off, needle parked)",
+        # emphasis around nobody changes nothing (11-04 20:18: a bold release refused a deploy)
+        "- **Holder:** **nobody since 11-04 20:12** (released after the weighing)",
+        "- **Holder:** **nobody**",
+        "- **Holder:** _nobody_",
+        "- **Holder:** __nobody__ (released by Process at 18:00)",
+        "- **Holder:** *nobody*, since 20:12",
     ]
     HELD = [
         "- **Holder:** Process role, since 10-31 19:00 (bench tools)",
@@ -38,9 +44,13 @@ class HolderParsing(unittest.TestCase):
         "- **Holder:** nobody-ish",
         "- **Holder:** no body",
         "- **Holder:**",
-        "- **Holder:** **nobody**",
         "- **Holder:** ~~Process~~ nobody",
-        "- **Holder:** _nobody_",
+        "- **Holder:** ~~nobody~~ Process",
+        "- **Holder:** **nobody**?",
+        "- **Holder:** *nobody*? (check with Process)",
+        "- **Holder:** **nobody**else",
+        "- **Holder:** **no**body",
+        "- **Holder:** **nobody** (Backend wants the machine at 20:00)",
         "- Holder: nobody",
         "- **Holder**: nobody",
         "* **Holder:** nobody",
@@ -59,7 +69,7 @@ class HolderParsing(unittest.TestCase):
             with self.subTest(body=body):
                 h = holder(body)
                 self.assertTrue(h.idle, h.reason)
-                self.assertTrue(h.value.lower().startswith("nobody"))
+                self.assertTrue(h.value.lower().lstrip("*_").startswith("nobody"))
 
     def test_held_variants(self):
         for body in self.HELD:

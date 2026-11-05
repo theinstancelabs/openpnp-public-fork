@@ -161,7 +161,8 @@ class Terminated(BaseException):
 # STATE.md: '- **Label:** value' bullets, continued on lines indented deeper than the bullet
 # ------------------------------------------------------------------------------------------------
 Holder = namedtuple("Holder", "value idle reason")
-_NOBODY = re.compile(r"(?i)^nobody(?![\w?!-])")
+# emphasis around it (**nobody**, _nobody_) is still nobody; struck through (~~) or 'nobody?' is not
+_NOBODY = re.compile(r"(?i)^[*_]*nobody[*_]*(?![\w?!*-])")
 _WANTS = re.compile(r"(?i)\bwants?\b")
 
 
