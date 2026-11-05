@@ -1245,6 +1245,9 @@ public class PowerCycleSimTest {
         assertEquals(31.0, believedZ(), 1e-6);
         refusedLevel(level("w", 32, 33), "32 mm");
         assertEquals(7, events("Z_LEVEL").size());
+        // a Stop and Start (the controller powered) keeps where it began (the BR-96/97 review's surviving mutant)
+        reconnect();
+        refusedLevel(level("w", 32, 33), "32 mm");
 
         // the home clears the reference: unhomed again at Z 30 (a Stop and Start, powered), 33 is 3 mm from it
         ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
@@ -1254,6 +1257,31 @@ public class PowerCycleSimTest {
         assertEquals(30.0, believedZ(), 1e-6);
         ok("POST", "/api/gcode", level("w", 31, 32, 33));
         assertEquals(33.0, believedZ(), 1e-6);
+    }
+
+    /** BR-97: a levelling move counts for BR-02's idle clock: it keeps the screw's motor on, as any move does. */
+    @Test
+    public void aLevellingMoveKeepsTheScrewMotorOn() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+        long idle = Math.round(svc.getConfig().screwIdleOffS * 1000);
+        long t0 = System.currentTimeMillis() + 1000;
+        long[] now = {t0};
+        PlannedStopSimTest.engineClock(() -> now[0]);
+        try {
+            ok("POST", "/api/gcode", "{\"lines\":[\"G1 B30 F600\",\"M400\"]}"); // the screw turns: its motor is on
+            now[0] = t0 + idle - 1000;
+            ok("POST", "/api/gcode", level("w", 1));
+            now[0] = t0 + idle + 1000;
+            assertEquals(null, svc.getControllerReset().lastScrewMotorOff(), "the levelling move restarted the clock");
+            now[0] = t0 + 2 * idle;
+            assertEquals(t0 + 2 * idle - 1000, svc.getControllerReset().lastScrewMotorOff().atMs, "off an idle "
+                    + "timeout after the levelling move");
+        }
+        finally {
+            PlannedStopSimTest.engineClock(null);
+        }
     }
 
     /** BR-97: a levelling call after one that left its moves unwaited reads the controller's Z first. */
