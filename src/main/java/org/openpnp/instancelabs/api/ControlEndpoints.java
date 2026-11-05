@@ -267,7 +267,8 @@ final class ControlEndpoints {
             }
             double low = safeLow(n);
             // the needle where its tip lands (N2 + its landing and trim), as the measure and I12 aim
-            double[] tip = isNeedle(n) ? ctx.svcOrNull().needleXY(at.getX(), at.getY())
+            DispenseService svc = ctx.svcOrNull();
+            double[] tip = isNeedle(n) && svc != null ? svc.needleXY(at.getX(), at.getY())
                     : new double[] {at.getX(), at.getY()};
             if (Double.isFinite(low) && at.getZ() < low - 1e-6 && overHeightSwitch(tip[0], tip[1])) {
                 throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over the height "
