@@ -1838,7 +1838,7 @@ the board in a running session.
  "blank": {"rect": [280, 225, 365, 250], "surface": {"z0": 5.62, "slopeX": -0.0012, "slopeY": 0.0}, "dots": []},
  "bedZ": 2.5, "n1OffsetMm": [-24.178, -63.91], "tipRadiusMm": 0.35,
  "vacuum": {"openAir": -1550000, "sealDrops": [257000, 271000, 290000, 303000, 316000, 329000, 350000, 370000, 404000],
-            "partialBandMm": 0.03, "leakDrop": 15000, "offValue": 0,
+            "partialBandMm": 0, "leakDrop": 15000, "offValue": 0,
             "tauS": 0.3, "sealTauS": 0.03, "releaseTauS": 0.4, "noise": 1500, "seed": 7, "tip": "normal"},
  "camera": {"uppError": [0.0, 0.0], "noise": 4, "blurPx": 1}}
 ```
@@ -1874,8 +1874,10 @@ the board in a running session.
 
 - **Target value.**
   - Pump and valve on → `openAir`.
-  - Sealed → `openAir − sealDrop(spot)`, with the drop drawn per spot (seeded) from `sealDrops`.
-  - Within `partialBandMm` above contact → a partial seal: half the drop.
+  - Open air down to the contact; at depth d below it (INF-15) → `openAir − min(sealDrop(spot), 55 k + 25 k per
+    0.025 mm of d)`: the first touch at the contact Z, the seal building to the spot's drop, drawn per spot (seeded)
+    from `sealDrops`.
+  - Within `partialBandMm` above contact (default 0, old scenes) → half the first touch.
   - Sealed at a leaky spot → `openAir − leakDrop`.
   - Otherwise, or on a channel ≠ 1 → `offValue`.
 - **Moving to the target.** The value moves toward it with a time constant on the wall clock (an injectable

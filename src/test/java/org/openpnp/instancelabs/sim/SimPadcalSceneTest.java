@@ -148,7 +148,7 @@ public class SimPadcalSceneTest {
         double hx = 350 - s.n1OffsetX, hy = 55 - s.n1OffsetY;
         v.onLine("M106", hx, hy, 10);
         v.onLine("M106 P1 S180", hx, hy, 10);
-        assertEquals(-1_550_000 - 300_000, SimVacuumTest.read(v, new double[] {hx, hy}, 5.80), "sealed at the coupon's z");
+        assertEquals(-1_550_000 - 55_000, SimVacuumTest.read(v, new double[] {hx, hy}, 5.80), "touches at the coupon's z");
         assertEquals(-1_550_000, SimVacuumTest.read(v, new double[] {hx, hy}, 5.84), "open above it");
         double ex = 330.1 - s.n1OffsetX; // the tip disc over the coupon's edge
         assertEquals(-1_550_000 - s.vacuum.leakDrop, SimVacuumTest.read(v, new double[] {ex, hy}, 5.80),

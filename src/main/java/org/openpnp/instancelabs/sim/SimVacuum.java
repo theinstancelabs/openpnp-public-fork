@@ -30,9 +30,10 @@ import org.openpnp.spi.Driver;
  * <p>The reading moves toward its target with a time constant on the wall clock: {@code tauS} after a
  * pump or valve change, {@code sealTauS} when a seal forms, {@code releaseTauS} when it breaks. So a
  * baseline read too early is wrong, and a step right after a seal still reads sealed, as on the bench.
- * Sealed: N1's raw Z at or below the contact Z under the tip (board, weigh coupon, blank or bed: SimScene's
- * regions), with the whole tip disc on that surface;
- * within {@code partialBandMm} above it, half the drop; at a leaky spot or an edge, only {@code leakDrop}.</p>
+ * Open air down to the contact Z under the tip (board, weigh coupon, blank or bed: SimScene's regions); at it
+ * the first touch, the seal building below it up to the spot's seal drop, with the whole tip disc on that
+ * surface; at a leaky spot or an edge, only {@code leakDrop}; within {@code partialBandMm} above the contact
+ * (old scenes), half of that.</p>
  */
 public final class SimVacuum {
     /** I2C address of the multiplexer and of the VAC1 sensor; N1's channel byte; the sensor's data register. */
@@ -41,13 +42,11 @@ public final class SimVacuum {
     static final double MISSING_TIP_OPEN_AIR = -400_000, BLOCKED_TIP_OPEN_AIR = -2_100_000;
     /** A held 0603 reads >= 80 k below open air (tools/place.py); it seals 0.45 mm high. */
     static final double PART_EXTRA_COUNTS = -100_000, PART_HEIGHT_MM = 0.45;
+    /** N1's seal as it presses (11-05 00:34:48 PROBE, run b252aad9): 55 k at the first touch, +25 k per 0.025 mm. */
+    static final double FIRST_TOUCH_DROP = 55_000, DROP_PER_MM = 1_000_000;
     /** A controller's M400 may return this much before the planned arrival (GcodeServer waits whole milliseconds). */
     static final long ARRIVAL_SLACK_NS = 2_000_000;
     private static final Pattern WORD = Pattern.compile("([A-Z])\\s*([-+]?(?:\\d+\\.?\\d*|\\.\\d+))");
-
-    private enum Seal {
-        OPEN, PARTIAL, SEALED
-    }
 
     private final Supplier<SimScene> scenes;
     private final LongSupplier clockNs;
@@ -308,12 +307,13 @@ public final class SimVacuum {
                 }
             }
         }
-        Seal seal = zTip <= contact ? Seal.SEALED : zTip <= contact + v.partialBandMm ? Seal.PARTIAL : Seal.OPEN;
-        if (seal == Seal.OPEN) {
+        double depth = contact - zTip;
+        if (depth < -v.partialBandMm) {
             return openAir;
         }
-        double drop = leaky ? v.leakDrop : sealDrop(v, tx, ty);
-        return openAir - (seal == Seal.SEALED ? drop : drop / 2);
+        double drop = Math.min(leaky ? v.leakDrop : sealDrop(v, tx, ty),
+                FIRST_TOUCH_DROP + DROP_PER_MM * Math.max(0, depth));
+        return openAir - (depth < 0 ? drop / 2 : drop);
     }
 
     /** The seal drop of a spot (1 mm cells of the tip XY), drawn with the scene seed from the deciles. */
