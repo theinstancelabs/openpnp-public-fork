@@ -48,9 +48,14 @@ public class DispenseProfile {
     /** When the start angle was set or confirmed (epoch ms); null = never. */
     public Long startAngleSetAtMs = null;
     /**
-     * BR-75: when the start angle's value was last set (a set, or a settings change of it; a confirm keeps it): the
-     * partial-turn records made before it are stale. Null in settings from before it: {@link #startAngleSetAtMs} counts,
-     * and the first confirm takes it from there.
+     * BR-77: what the measure the start angle was set from found, or null (never measured, or set without one): the
+     * recipe's own offset from it is {@link #startAngleDeg} - its {@code deg}, which an apply keeps. Changes no dot.
+     */
+    public StartAngleFeature startAngleFeature = null;
+    /**
+     * BR-75: when the start angle's value was last set (a set or a measure's apply; PUT cannot change it, BR-77; a
+     * confirm keeps it): the partial-turn records made before it are stale. Null in settings from before it:
+     * {@link #startAngleSetAtMs} counts, and the first confirm takes it from there.
      */
     public Long startAngleChangedAtMs = null;
     /** Screw speed: G1 B feed = rpm x 360 deg/min (the bench's 180 rpm = F64800). */
@@ -95,6 +100,24 @@ public class DispenseProfile {
     public double sustainedFeedMgS = 2.6;
     public String notes = "Window is narrow: 16 psi starved the screw, 20 psi drooled. Never run the screw "
             + "faster than the paste feeds it (it pulls in air; 30-50 turns to recover).";
+
+    /** BR-77: a feature of the screw's flow ripple a start-angle measure found (count angles); immutable (shared). */
+    public static final class StartAngleFeature {
+        /** "halves": the flow's peak; "quarters": the start of the dead quarter. */
+        public final String mode;
+        public final double deg;
+        /** When its evidence was made (the measure's first dot step started), epoch ms. */
+        public final Long measuredAtMs;
+        /** The measure's job id (its evidence; the job itself is kept only while it is among the last few). */
+        public final String runId;
+
+        public StartAngleFeature(String mode, double deg, Long measuredAtMs, String runId) {
+            this.mode = mode;
+            this.deg = deg;
+            this.measuredAtMs = measuredAtMs;
+            this.runId = runId;
+        }
+    }
 
     /** True if a dot is not a whole number of revolutions (the start angle then matters). */
     public boolean isPartialTurn(DispenseConfig c) {
@@ -272,12 +295,14 @@ public class DispenseProfile {
     }
 
     /**
-     * The start angle and its set and change times from {@code from}: they belong to the controller's power-up and the
-     * screw, not to a tip's recipe (§22.3), so a mount and its undo keep the live ones (BR-75 review). Returns this.
+     * The start angle, the feature it was measured from (BR-77) and its set and change times from {@code from}: they
+     * belong to the controller's power-up and the screw, not to a tip's recipe (§22.3), so a mount and its undo keep the
+     * live ones (BR-75 review). Returns this.
      */
     public DispenseProfile withStartAngleOf(DispenseProfile from) {
         startAngleDeg = from.startAngleDeg;
         startAngleSetAtMs = from.startAngleSetAtMs;
+        startAngleFeature = from.startAngleFeature;
         startAngleChangedAtMs = from.startAngleChangedAtMs;
         return this;
     }
@@ -290,6 +315,7 @@ public class DispenseProfile {
         x.suckBackDeg = suckBackDeg;
         x.startAngleDeg = startAngleDeg;
         x.startAngleSetAtMs = startAngleSetAtMs;
+        x.startAngleFeature = startAngleFeature;
         x.startAngleChangedAtMs = startAngleChangedAtMs;
         x.screwRpm = screwRpm;
         x.screwAccelDegS2 = screwAccelDegS2;

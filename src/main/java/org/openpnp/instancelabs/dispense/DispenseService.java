@@ -1337,6 +1337,15 @@ public final class DispenseService {
      */
     public synchronized DispenseProfile setStartAngle(Double angleDeg, String note, Long measuredAtMs)
             throws IOException {
+        return setStartAngle(angleDeg, note, measuredAtMs, null);
+    }
+
+    /**
+     * As above; BR-77: a set from a measure stores the feature it found ({@code feature}), a set without one drops the
+     * stored feature, a confirm keeps it.
+     */
+    public synchronized DispenseProfile setStartAngle(Double angleDeg, String note, Long measuredAtMs,
+            DispenseProfile.StartAngleFeature feature) throws IOException {
         Long reset = controllerReset.detectedAtMs();
         ControllerReset.Event off = controllerReset.lastScrewMotorOff();
         Long setAt = cfg.profile.startAngleSetAtMs;
@@ -1362,6 +1371,7 @@ public final class DispenseService {
         long now = System.currentTimeMillis();
         if (angleDeg != null) {
             c.profile.startAngleDeg = angleDeg;
+            c.profile.startAngleFeature = feature; // null: set without a measure, the recipe's offset from it is unknown
             c.profile.startAngleChangedAtMs = now; // BR-75: a measure; a confirm keeps the records made at the angle
         }
         else if (c.profile.startAngleChangedAtMs == null) {
@@ -1372,6 +1382,25 @@ public final class DispenseService {
         db.event(null, "INFO", "I11", String.format(java.util.Locale.ROOT, "screw start angle %s %.1f deg%s",
                 angleDeg == null ? "confirmed" : "set to", c.profile.startAngleDeg, note == null ? "" : ": " + note));
         return c.profile.copy();
+    }
+
+    /**
+     * BR-77: a measure's apply under this lock (a set between a read and the write would be lost): new start = start +
+     * (measured feature - stored feature), set with the measured feature as {@link #setStartAngle} sets it (BR-02's
+     * checks). Refused when the stored feature is gone or of the other mode. Returns {from, to} (deg).
+     */
+    public synchronized double[] applyStartAngle(DispenseProfile.StartAngleFeature measured) throws IOException {
+        DispenseProfile p = cfg.profile;
+        DispenseProfile.StartAngleFeature old = p.startAngleFeature;
+        if (old == null || !old.mode.equals(measured.mode)) {
+            throw new EngineRefusal(409, "refused", "the start angle has no measured " + measured.mode + " feature (it "
+                    + "was set " + (old == null ? "without a measure" : "from a " + old.mode + " measure") + " since): "
+                    + "nothing was set");
+        }
+        double from = p.startAngleDeg, to = ScrewPhaseFit.norm(from + measured.deg - old.deg);
+        setStartAngle(to, String.format(java.util.Locale.ROOT, "measure %s: %s %.1f→%.1f", measured.runId,
+                measured.mode, from, to), measured.measuredAtMs, measured);
+        return new double[] {from, to};
     }
 
     /** The purge row was wiped: all its spots are free again. */
@@ -3046,6 +3075,13 @@ public final class DispenseService {
     /** Pre-flight interlocks for a calibration / shots / hold scope (no plan rules, no I9-I11). */
     public InterlockReport checkInterlocks(Interlocks.Scope scope, double estimatedPressurisedSeconds) {
         return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope, false, false));
+    }
+
+    /** As above for a task that checks Z itself after its home (BR-77's measure): Z data older than the home are a note. */
+    public InterlockReport checkInterlocks(Interlocks.Scope scope, double estimatedPressurisedSeconds,
+            boolean zCheckFirst) {
+        return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope, false,
+                zCheckFirst));
     }
 
     /** CONFIG and MACHINE only (Register board, the surface probe, the Z check): they never dispense. */
@@ -5406,7 +5442,7 @@ public final class DispenseService {
     private void doseBlocks(DoseBlocksRequest req, DoseBlocksResult res, Task t) throws Exception {
         RunResult r = t.r;
         hook("dose-blocks");
-        DispenseConfig c = cfg;
+        DispenseConfig c = stepConfig(cfg, req);
         if (stopEpoch.get() != req.stopEpoch) {
             throw refused(STOPPED_SINCE_QUEUED);
         }
@@ -5423,6 +5459,11 @@ public final class DispenseService {
             }
         }
         Session s = t.start(c);
+        if (req.measuresStartAngle && s.readBCount(false) == null) {
+            // BR-77: asked before the home, the Z check and the camera tour
+            throw refused("I11: the controller did not report the B step count (M114 Count): the start angle cannot be "
+                    + "measured. Nothing was sent.");
+        }
         HomeTracker.Plan hp = homePlan();
         t.detail.put("home", homeDetail(hp));
         t.detail.put("blocks", req.blocks.size());
@@ -5512,6 +5553,7 @@ public final class DispenseService {
         if (req.landingCheck) {
             scope.landingWaiver = Interlocks.Scope.LANDING_CHECK;
         }
+        scope.startAngleWaiver = req.measuresStartAngle;
         t.stage = "z check";
         res.zCheck = zCheckIfNeeded(s, null, scope, t::aborted);
         for (DoseBlocksRequest.Block b : req.blocks) {
@@ -5699,6 +5741,26 @@ public final class DispenseService {
                 bZeroed.get(), false, 0L, null, tipXy(c));
     }
 
+    /**
+     * The configuration a dose-blocks step runs on, its builder and its stream validator alike: the live one, or BR-77 a
+     * copy with the request's start angle and, for a measure, the tip's smallest dose lowered to the request's (never
+     * saved).
+     */
+    static DispenseConfig stepConfig(DispenseConfig live, DoseBlocksRequest req) {
+        if (req.startAngleDeg == null && !req.measuresStartAngle) {
+            return live;
+        }
+        DispenseConfig c = live.copy();
+        if (req.startAngleDeg != null) {
+            c.profile.startAngleDeg = req.startAngleDeg;
+        }
+        for (int k = 0; req.measuresStartAngle && k < req.blocks.size(); k++) {
+            // R1 is about a dose's reliability: a phase map is no production dose
+            c.tip.minDotSteps = Math.min(c.tip.minDotSteps, req.blocks.get(k).netSteps);
+        }
+        return c;
+    }
+
     /** The Interlocks of a block program: I4 by the scope, I9 for its purge spots, I11 for a partial turn, I6-feed. */
     private Interlocks.Inputs blockInputs(DispenseConfig c, Interlocks.Scope scope, double est, int purge,
             boolean partial, List<GcodeProgram.BlockInfo> blocks) {
@@ -5881,13 +5943,16 @@ public final class DispenseService {
         }
     }
 
-    /** The landing check's purge dots (§22.3): at the request's spots in its band, on the first block's surface. */
+    /**
+     * The landing check's purge dots (§22.3), BR-77 the measure's throwaways: at the request's spots, on the first block's
+     * surface, each raised by its own height (never below the gap).
+     */
     private static List<GcodeStreamBuilder.DotSpec> bandPurge(DispenseConfig c, DoseBlocksRequest req) {
         List<GcodeStreamBuilder.DotSpec> l = new ArrayList<>();
         SurfacePlane plane = planeOf(c, req.blocks.get(0).surfaceName);
         for (int i = 0; plane != null && i < req.purgeXy.size(); i++) {
             double[] xy = req.purgeXy.get(i);
-            double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
+            double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm() + (xy.length > 2 ? Math.max(0, xy[2]) : 0);
             l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.liftMm(), c.profile.netDeg(c),
                     GcodeStreamBuilder.PURGE_INDEX, "purge#band" + i));
         }
