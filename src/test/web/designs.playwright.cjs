@@ -105,15 +105,18 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
   });
   // states the SIM does not hold on demand: a check whose groups wait for the tip's dots or a by-hand dose (one board
   // file), an apply refused once
-  const ST = { checkFile: null, refuseApply: false, attachOffer: null, attachDnp: true, attachUrl: null, importHeld: null, holdPreview: null, holdAttach: null, okTipFile: null };
+  const ST = { checkFile: null, refuseApply: false, attachOffer: null, attachDnp: true, attachUrl: null, importHeld: null, holdPreview: null, holdAttach: null, okTipFile: null,
+    task: null };
   // the status's boardImport held ((2), (5d): "an upload is being read" off and savedAtMs as before the save, so only the
-  // save's own 'boards' event may make Designs read its list; (2c): only `reading` off, savedAtMs passes)
+  // save's own 'boards' event may make Designs read its list; (2c): only `reading` off, savedAtMs passes); (3c): a task
+  // running (ST.task: its label)
   await page.route((u) => u.pathname === '/api/status', async (route) => {
-    if (!ST.importHeld) return route.continue();
+    if (!ST.importHeld && !ST.task) return route.continue();
     try {
       const res = await route.fetch();
       const body = await res.json();
-      if (body.boardImport) Object.assign(body.boardImport, ST.importHeld);
+      if (ST.importHeld && body.boardImport) Object.assign(body.boardImport, ST.importHeld);
+      if (ST.task) body.run = Object.assign({}, body.run, { running: true, label: ST.task });
       await route.fulfill({ response: res, json: body });
     } catch (e) { /* unrouted while it was being answered */ }
   });
@@ -366,6 +369,23 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     check('(3b) a refusal shows on its design, and not on the next one opened', refused && carried === '', { refused, carried });
     await page.evaluate((h) => IL.go(h), routeOf(pc));
     await page.waitForFunction(() => !!document.getElementById('btn-design-use'), null, { timeout: 10000 }).catch(() => null);
+
+    // ---- (3c) while a task runs, the doses found, Calibrate… and Set up the rest wait and say why, as Pad types' Needs
+    // does (#48's review MINOR); they are free again when it ends ----------------------------------------------------
+    const ACTS = ['btn-design-use', 'btn-design-doses', 'btn-design-rest'];
+    const acts = (dis) => page.waitForFunction(([ids, d]) => ids.every((id) => (document.getElementById(id) || {}).disabled === d), [ACTS, dis], { timeout: 10000 })
+      .catch(() => null).then(() => page.evaluate((ids) => {
+        const w = document.getElementById('design-rest-why');
+        return { btns: ids.map((id) => { const b = document.getElementById(id); return b ? [id, b.disabled, b.title] : [id, 'missing']; }),
+          why: w && !w.hidden ? w.textContent : null };
+      }, ACTS));
+    ST.task = 'needle touch-off';   // the engine's label (core.js TASK_WORD)
+    const busy = await acts(true);
+    check('(3c) while a task runs: Use the doses found, Calibrate… and Set up the rest are locked, and the panel says why',
+      busy.btns.every(([, dis, t]) => dis === true && t === 'Locked while the needle touch-off runs') && busy.why === 'Locked while the needle touch-off runs', busy);
+    ST.task = null;
+    const free = await acts(false);
+    check('(3c) once the task ends they are free again, the reason gone', free.btns.every(([, dis, t]) => dis === false && !t) && free.why === null, free);
 
     // ---- (4) Use the doses found ---------------------------------------------------------------------------------
     await page.click('#btn-design-use');
