@@ -68,7 +68,15 @@ final class MachineLock {
             this.lastActiveMs = now;
             this.ttlMs = ttlMs;
         }
+
+        /** How the journal names it (a reset home's attestation, BR-97's Z_LEVEL rows): its label, or the UI's user. */
+        String name() {
+            return kind == Kind.USER ? USER_NAME : label;
+        }
     }
+
+    /** The user's name in the journal (and an attestation's without a lock holder). */
+    static final String USER_NAME = "the web UI's user";
 
     /** One guarded call of the holder, counted until {@link MachineLock#end}. */
     static final class Activity {

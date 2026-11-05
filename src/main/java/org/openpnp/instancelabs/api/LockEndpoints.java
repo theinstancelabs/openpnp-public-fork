@@ -180,7 +180,7 @@ final class LockEndpoints {
 
     Object acquire(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
-        return ctx.lock.acquire(Json.str(b, "who", null), Json.str(b, "label", null), Json.str(b, "what", null),
+        return ctx.lock.acquire(Json.str(b, "who", null), Json.line(b, "label", null), Json.str(b, "what", null),
                 Json.str(b, "thread", null), Json.integer(b, "ttlS", null), token(r));
     }
 
@@ -469,7 +469,7 @@ final class LockEndpoints {
             lines.add(e.getAsString());
         }
         Integer t = Json.integer(b, "timeoutMs", (int) GcodePassthrough.DEFAULT_TIMEOUT_MS);
-        String what = Json.str(b, "what", null);
+        String what = Json.line(b, "what", null); // BR-97: a levelling call's what goes in its Z_LEVEL row
         if (what != null && a.holder.token != null) {
             ctx.lock.keepalive(a.holder.token, what);
         }

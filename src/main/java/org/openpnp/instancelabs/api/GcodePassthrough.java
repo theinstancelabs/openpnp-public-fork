@@ -237,7 +237,7 @@ final class GcodePassthrough {
             }
         }
         svc.getDb().event(null, "INFO", "Z_LEVEL", "Z levelling while not homed, by " + (holder == null ? "?"
-                : holder.who) + " (" + what + "): " + sent);
+                : holder.name()) + " (" + what + "): " + sent);
     }
 
     /** The controller axis Z's coordinate as OpenPnP knows it (raw mm): the controller's own once re-read. */

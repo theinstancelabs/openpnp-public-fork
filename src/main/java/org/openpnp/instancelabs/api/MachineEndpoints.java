@@ -391,13 +391,15 @@ final class MachineEndpoints {
         // BR-02: after a controller reset the home is G28 straight away, only on the word of whoever checked that
         // nothing is under either tool (the engine checks again on the machine thread)
         boolean attested = Json.bool(r.json(), "clearBelowAttested", false);
-        // BR-96: who attests it (the lock holder unless named) and their evidence, opaque, kept as its JSON text
+        // BR-96: who attests it (the lock holder unless named; then the holder too) and their evidence, opaque, kept as
+        // its JSON text
         MachineLock.Holder holder = r.lockActivity == null ? null : r.lockActivity.holder;
-        String by = Json.str(r.json(), "attestedBy", holder == null || holder.kind == MachineLock.Kind.USER
-                ? "the web UI's user" : holder.label);
-        if (by.length() > MAX_ATTESTED_BY) {
+        String lockName = holder == null ? MachineLock.USER_NAME : holder.name();
+        String named = Json.line(r.json(), "attestedBy", lockName);
+        if (named.length() > MAX_ATTESTED_BY) {
             throw ApiException.badRequest("'attestedBy' is at most " + MAX_ATTESTED_BY + " characters");
         }
+        String by = holder == null || named.equals(lockName) ? named : named + " (lock: " + lockName + ")";
         JsonElement ev = r.json().get("evidence");
         String evidence = ev == null || ev.isJsonNull() ? null : ev.toString();
         int evidenceBytes = evidence == null ? 0 : evidence.getBytes(StandardCharsets.UTF_8).length;

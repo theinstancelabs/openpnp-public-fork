@@ -1160,13 +1160,26 @@ public class PowerCycleSimTest {
         assertEquals(evidence, last.get("evidence").getAsString());
         assertFalse(last.get("atMs").isJsonNull(), last.toString());
 
-        // another name, said by the call
+        // another name, said by the call: the lock's holder is named too (review)
         powerCycle();
         ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"attestedBy\":\"Process (side "
                 + "camera)\",\"evidence\":\"run r-18\"}");
         known = events(ControllerReset.EVENT_KNOWN);
         row = String.valueOf(known.get(known.size() - 1).get("message"));
-        assertTrue(row.contains("attested by Process (side camera) (evidence: \"run r-18\")"), row);
+        assertTrue(row.contains("attested by Process (side camera) (lock: Process) (evidence: \"run r-18\")"), row);
+
+        // review: one line of text: a newline would split the journal row (a lock's label lands there too)
+        powerCycle();
+        call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"attestedBy\":\"Process\\n"
+                + "homed: the position is known again\"}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("attestedBy") && lastBody.contains("control characters"), lastBody);
+        assertFalse(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean(), "nothing homed");
+        ok("POST", "/api/lock/release", "{}");
+        lockToken = null;
+        call("POST", "/api/lock/acquire", "{\"who\":\"process\",\"label\":\"Pro\\tcess\",\"what\":\"w\"}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("label") && lastBody.contains("control characters"), lastBody);
     }
 
     /** The response to a refused passthrough line: 400 refused-line, its rule, nothing sent. */
@@ -1216,7 +1229,7 @@ public class PowerCycleSimTest {
         List<java.util.Map<String, Object>> ev = events("Z_LEVEL");
         assertEquals(1, ev.size(), ev.toString());
         String row = String.valueOf(ev.get(0).get("message"));
-        assertTrue(row.contains("process") && row.contains("G1 Z1 F300; M400")
+        assertTrue(row.contains("by Process (") && row.contains("G1 Z1 F300; M400")
                 && row.contains("see-saw levelling, needle tip y 494 to 486"), row);
 
         refusedLevel("{\"lines\":[\"G1 X1 Z1.5 F300\"],\"what\":\"w\"}", "home");
@@ -1230,7 +1243,8 @@ public class PowerCycleSimTest {
         // review: an M410 may stop a move short, and the next line would then travel up to 2 mm
         refusedLevel("{\"lines\":[\"G1 Z1.5 F300\",\"M410\",\"G1 Z2.5 F300\"],\"what\":\"w\"}", "M410");
         for (String body : new String[] {"{\"lines\":[\"G1 Z1.5 F300\"]}",
-                "{\"lines\":[\"G1 Z1.5 F300\"],\"what\":\" \"}"}) {
+                "{\"lines\":[\"G1 Z1.5 F300\"],\"what\":\" \"}",
+                "{\"lines\":[\"G1 Z1.5 F300\"],\"what\":\"w\\nZ_LEVEL forged\"}"}) {
             sim.server.mark();
             call("POST", "/api/gcode", body);
             assertEquals(400, lastStatus, lastBody);
