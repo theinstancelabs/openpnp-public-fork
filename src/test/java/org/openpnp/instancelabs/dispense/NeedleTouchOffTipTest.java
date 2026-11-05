@@ -1,6 +1,7 @@
 package org.openpnp.instancelabs.dispense;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -92,6 +93,40 @@ public class NeedleTouchOffTipTest {
             assertEquals(2, svc.getConfig().parkedTips.get(MountTest.K25).profile.touchOffSkipDots);
             f.mount(MountTest.K25);
             assertEquals(2, svc.getConfig().profile.touchOffSkipDots);
+        }
+    }
+
+    /**
+     * BR-85 review: the engine keeps the reference pair at the reference gap as the API does, under the task's own
+     * skip. With a skip of 3 the default Request (0.125 mm in steps of 0.025) would lay it at 0.050 and 0.025 mm and
+     * apply the contact found after it; it is refused before anything moves.
+     */
+    @Test
+    public void theEngineRefusesAReferencePairBelowTheReferenceGap() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            f.mount(MountTest.K25);
+            f.frame(-2.59);
+            f.land(0, 0);
+            svc.updateConfigAtomically(live -> {
+                live.profile.touchOffSkipDots = 3;
+                return live;
+            });
+            // steady dots, then one squashed: a contact the ladder would apply
+            svc.setDotImager(spots(1.0, 1.0, 1.0, 1.0, 1.0, 1.5));
+            f.sim.server.mark();
+            DispenseService.TouchOffResult t = svc.runNeedleTouchOff(new NeedleTouchOff.Request(), true)
+                    .get(60, TimeUnit.SECONDS);
+            assertEquals(RunResult.Status.REFUSED, t.run.status, t.run + " " + t.newOffsetMm);
+            assertEquals("the 25G straight's recipe skips the first 3 dots after the prime (touchOffSkipDots): with a "
+                    + "start gap of 0.125 mm its reference dots would sit at 0.050 mm and 0.025 mm, possibly at "
+                    + "contact; start at 0.200 mm or more, so they sit at 0.125 mm and 0.100 mm as without a skip",
+                    t.run.message);
+            assertEquals(-2.59, svc.getConfig().needleZOffsetMm, 0, "nothing applied");
+            for (String l : f.sim.server.sinceMark()) {
+                assertFalse(l.startsWith("M106") || l.startsWith("G1") || l.startsWith("G0"), "nothing sent: " + l);
+            }
         }
     }
 

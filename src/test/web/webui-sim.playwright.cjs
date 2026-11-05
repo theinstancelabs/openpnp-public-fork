@@ -123,6 +123,9 @@ async function nav(page, ws) {
     return;
   }
   await page.click('.tabs [role=tab][data-tab=' + ws + ']');
+  // Run opens Run › Start while nothing runs (runflow.js; run-flow.playwright.cjs tests it): these steps are today's
+  // pages, reached as the operator does, by Step by step (not shown while a run runs or the recovery leads)
+  if (ws === 'run') await page.waitForSelector('#rs-step-by-step', { state: 'visible', timeout: 3000 }).then((a) => a.click(), () => null);
 }
 
 /**
@@ -853,6 +856,13 @@ async function runFirstDots(page, n) {
       await page.waitForFunction(() => document.getElementById('to-pitch-err').hidden && !document.getElementById('btn-to-run').disabled, null, { timeout: 10000 }).catch(() => {});
       check('touch-off: the pitch changed, its error goes and Run unlocks', await page.evaluate(() => document.getElementById('to-pitch-err').hidden
         && !document.getElementById('btn-to-run').disabled), await textOf(page, 'to-reason'));
+      // a ladder too short (BR-85: skip + the pair that sets the normal dot + one): refused at its field, the line under Run points there
+      await page.fill('#to-steps', '2');
+      await page.waitForFunction(() => !document.getElementById('to-steps-err').hidden && document.getElementById('btn-to-run').disabled, null, { timeout: 10000 }).catch(() => {});
+      check('touch-off steps 2: refused at the Steps field, Run locked, pointing there', await page.evaluate(() => !document.getElementById('to-steps-err').hidden
+        && document.getElementById('btn-to-run').disabled) && (await textOf(page, 'to-reason')) === 'Too few steps: see the Steps field.', await textOf(page, 'to-reason'));
+      await page.fill('#to-steps', '6');
+      await page.waitForFunction(() => document.getElementById('to-steps-err').hidden && !document.getElementById('btn-to-run').disabled, null, { timeout: 10000 }).catch(() => {});
       // a run that records nothing: this SIM scene draws no paste, so no dot forms; the run's message word for word
       const touchOffs = async () => (await (await page.request.get(BASE + 'api/calibrations')).json()).touchOffs;
       const rows0 = (await touchOffs()).length;
