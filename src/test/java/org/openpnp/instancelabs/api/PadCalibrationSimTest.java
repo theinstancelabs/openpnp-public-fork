@@ -1018,14 +1018,15 @@ public class PadCalibrationSimTest {
         assertEquals(K25, str(handRow, "setupKey"));
         assertTrue(handRow.get("versionFrom").isJsonNull(), "a stand-in was calibrated from nothing: " + handRow);
 
-        // a reconnect: the camera results go stale (the dot table and the weighings stay), so the calibration lays its
-        // own ladder: chip-0603 calibrated for the 25G, the 22G's version untouched
+        // a reconnect and the start angle measured again (a set: a confirm keeps them, BR-75): the camera results go
+        // stale (the dot table and the weighings stay), so the calibration lays its own ladder: chip-0603 calibrated for
+        // the 25G, the 22G's version untouched
         int v22 = typeOf("chip-0603").get("version").getAsInt(); // the 25G's stand-in: version 0
         assertEquals(0, v22);
         int own22 = svc.getDb().newestOwnVersion("chip-0603", Tip22.KEY).version;
         sim.machine.setEnabled(false);
         sim.enableAndHome();
-        ok(call("POST", "/api/screw/start-angle", "{}"));
+        ok(call("POST", "/api/screw/start-angle", "{\"startAngleDeg\":" + svc.getConfig().profile.startAngleDeg + "}"));
         wipeBlank();
         JsonObject plan = plan();
         Map<String, List<JsonObject>> g = groups(plan.getAsJsonObject("profileCheck"));
