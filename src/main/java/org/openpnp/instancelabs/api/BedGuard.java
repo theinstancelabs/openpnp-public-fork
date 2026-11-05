@@ -1,6 +1,5 @@
 package org.openpnp.instancelabs.api;
 
-import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -80,6 +79,12 @@ final class BedGuard {
         return s == null ? null : s.getBedModel().state();
     }
 
+    /** Whether the check is on: a model file is there (valid or not), so the hooked routes build and prove paths. */
+    boolean active() {
+        BedModelStore.State st = state();
+        return st != null ? st.exists : BedModelStore.fileFor(ctx.configuration.getConfigurationDirectory()).isFile();
+    }
+
     /** OpenPnP's raw X, Y and Z controller axes. */
     static ReferenceControllerAxis[] xyz(Machine m) throws ApiException {
         ReferenceControllerAxis[] a = new ReferenceControllerAxis[3];
@@ -149,17 +154,13 @@ final class BedGuard {
      */
     Map<String, Object> prove(String what, String tool, Start s, List<CollisionCheck.Leg> legs,
             CollisionCheck.Options o, boolean dry) throws ApiException {
-        BedModelStore.State st = state();
-        if (st == null) {
-            File f = BedModelStore.fileFor(ctx.configuration.getConfigurationDirectory());
-            if (f.isFile()) {
-                throw refusal(null, "the dispense engine is not running, so the bed model cannot be checked",
-                        "restart OpenPnP (il-openpnp) so its engine starts", legs, null, dry);
-            }
+        if (!active()) {
             return null;
         }
-        if (!st.exists) {
-            return null;
+        BedModelStore.State st = state();
+        if (st == null) {
+            throw refusal(null, "the dispense engine is not running, so the bed model cannot be checked",
+                    "restart OpenPnP (il-openpnp) so its engine starts", legs, null, dry);
         }
         if (st.model == null) {
             throw refusal(null, "the bed model is not valid (" + st.error + ")", "send a valid model with PUT /api/bed",

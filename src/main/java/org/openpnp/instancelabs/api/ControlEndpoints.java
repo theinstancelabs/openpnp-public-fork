@@ -127,6 +127,9 @@ final class ControlEndpoints {
         if (d[2] != 0) {
             requireFloors(m, hm, to);
         }
+        if (!ctx.bed.active()) {
+            return null;
+        }
         BedGuard.Start s = ctx.bed.start(m);
         double[] t = BedGuard.rawTarget(m, hm, to, null);
         StringBuilder label = new StringBuilder("jog");
@@ -166,9 +169,11 @@ final class ControlEndpoints {
         return motion(m, "move-to", () -> {
             Location from = mm(hm.getLocation());
             Location to = moveToTarget(hm, tool, from, xy);
-            BedGuard.Start s = ctx.bed.start(m);
-            ctx.bed.prove("move-to", tool, s, BedGuard.moveToLegs(m, hm, to, s, tool), CollisionCheck.Options.strict(
-                    null), false);
+            if (ctx.bed.active()) {
+                BedGuard.Start s = ctx.bed.start(m);
+                ctx.bed.prove("move-to", tool, s, BedGuard.moveToLegs(m, hm, to, s, tool), CollisionCheck.Options
+                        .strict(null), false);
+            }
             MovableUtils.moveToLocationAtSafeZ(hm, to);
             m.getMotionPlanner().waitForCompletion(hm, MotionPlanner.CompletionType.WaitForStillstand);
             return answer(tool, hm, from);
@@ -225,11 +230,14 @@ final class ControlEndpoints {
         if ("jog".equals(kind)) {
             proof = proveJog(m, hm, tool, from.add(new Location(LengthUnit.Millimeters, d[0], d[1], d[2], 0)), d, true);
         }
-        else {
+        else if (ctx.bed.active()) {
             Location to = moveToTarget(hm, tool, from, d);
             BedGuard.Start s = ctx.bed.start(m);
             proof = ctx.bed.prove("move-to", tool, s, BedGuard.moveToLegs(m, hm, to, s, tool),
                     CollisionCheck.Options.strict(null), true);
+        }
+        else {
+            proof = null;
         }
         if (proof == null) {
             return Views.map("clear", null, "why", BedGuard.NO_MODEL);

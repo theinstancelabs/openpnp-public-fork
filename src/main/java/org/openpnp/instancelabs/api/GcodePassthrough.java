@@ -188,6 +188,12 @@ final class GcodePassthrough {
      * G-code has no semantics: a tip may go the model's contact depth into a measured touchable top, as in lumen-sim.
      */
     private void prove(Machine m, List<PassthroughLines.Line> lines) throws ApiException {
+        if (!ctx.bed.active()) {
+            synchronized (this) {
+                commanded = null; // no model, no walk: a model put in place later starts from a re-read position
+            }
+            return;
+        }
         BedGuard.Start s = ctx.bed.start(m);
         double[] at;
         synchronized (this) {
