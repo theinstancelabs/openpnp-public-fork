@@ -27,7 +27,11 @@ Layer = namedtuple("Layer", "name pts above bottom tip")  # pts from the head; a
 
 
 def _num(v, what):
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+    try:
+        ok = not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+    except OverflowError:  # an int too big for a double
+        ok = False
+    if not ok:
         raise ValueError("%s must be a finite number, not %r" % (what, v))
     return float(v)
 
@@ -44,29 +48,31 @@ TOO_DEEP = "%s: nested too deep to read (a bed model is a few levels deep)"  # t
 
 def _scan(v, path, latest):
     """The whole file before any field is read, as the engine's BedModel.scan: null nowhere (a key is given a value or
-    left out), no NaN or Infinity (strict JSON has none), and every atMs a time, ms since 1970, no later than latest
-    (now + 1 min: not microseconds)."""
+    left out) and every atMs a time, ms since 1970, no later than latest (now + 1 min: not microseconds)."""
     if v is None:
         raise ValueError("%s is null: give the key a value or leave it out" % path)
-    if isinstance(v, float) and not math.isfinite(v):
-        raise ValueError("%s is %r: strict JSON has no NaN or Infinity" % (path, v))
     for k, x in v.items() if isinstance(v, dict) else enumerate(v) if isinstance(v, list) else ():
         p = "%s.%s" % (path, k) if isinstance(v, dict) else "%s[%d]" % (path, k)
         _scan(x, p, latest)
         if k == "atMs" and isinstance(v, dict):
-            if isinstance(x, bool) or not isinstance(x, (int, float)):
+            if isinstance(x, bool) or not isinstance(x, (int, float)) or isinstance(x, float) and not math.isfinite(x):
                 raise ValueError("%s must be a time (ms since 1970, a number), not %r" % (p, x))
             if x > latest:
                 raise ValueError("%s is later than now + 1 min: a time is ms since 1970, not %r" % (p, x))
 
 
+def _strict(constant):
+    raise ValueError("%s: strict JSON has no NaN or Infinity" % constant)
+
+
 def parse(text):
-    """The model in a file's text (--collision-model), read as strictly as the engine's BedModel.parse."""
+    """The model in a file's text (--collision-model), read as the engine's BedModel.parse reads it (Gson, strict):
+    no NaN or Infinity, but control characters inside a string."""
     try:
-        raw = json.loads(text)
-    except RecursionError:
+        raw = json.loads(text, strict=False, parse_constant=_strict)
+    except RecursionError:  # the engine's stack goes deeper (a few thousand), a bed model is a few levels deep
         raise ValueError(TOO_DEEP % "collision_model") from None
-    except json.JSONDecodeError as e:
+    except ValueError as e:  # a JSONDecodeError, or _strict's
         raise ValueError("collision_model: not JSON: %s" % e) from None
     return Model(raw)
 
@@ -109,10 +115,11 @@ def _hull(points):
 def _outline(raw, what):
     """A box [x0, y0, x1, y1], circle [cx, cy, r] or convex counter-clockwise polygon [[x, y], ...], as the
     counter-clockwise points of a convex polygon (machine mm)."""
-    if not isinstance(raw, dict) or len(raw) != 1 or not set(raw) <= {"box", "circle", "polygon"}:
-        raise ValueError("%s must be one of {box: [x0, y0, x1, y1]}, {circle: [cx, cy, r]} or {polygon: [[x, y], "
-                         "...]}, not %r" % (what, raw))
-    (kind, v), = raw.items()
+    kinds = [k for k in ("box", "circle", "polygon") if k in raw] if isinstance(raw, dict) else []
+    if len(kinds) != 1:  # other keys are notes, as for the engine
+        raise ValueError("%s: one of box, circle or polygon: {box: [x0, y0, x1, y1]}, {circle: [cx, cy, r]} or "
+                         "{polygon: [[x, y], ...]}, not %r" % (what, raw))
+    kind, v = kinds[0], raw[kinds[0]]
     size = {"box": 4, "circle": 3}.get(kind)
     if size and not (isinstance(v, list) and len(v) == size):
         raise ValueError("%s: a %s is a list of %d numbers, not %r" % (what, kind, size, v))
@@ -132,7 +139,8 @@ def _outline(raw, what):
         raise ValueError("%s: a polygon is at least 3 points [x, y], not %r" % (what, v))
     pts = [(_num(x, what), _num(y, what)) for x, y in v]
     # the engine's rule, op for op (BedModel.outline): no turn both ways and one whole turn in all (a star winding
-    # twice turns 4 pi; a point on a straight edge, or repeated there, turns by 0), then a positive area
+    # twice turns 4 pi; a point on a straight edge turns by 0, a repeated one maybe not: atan2(0, -0) is pi), then a
+    # positive area
     left = right = False
     turn = area = 0.0
     for (x0, y0), (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1], pts[2:] + pts[:2]):
@@ -155,15 +163,17 @@ def _plane(points, what):
         raise ValueError("%s must be a list of [x, y, rawN1], not %r" % (what, points))
     pts = [[_num(v, what) for v in p] for p in points]
     n = len(pts)
-    if n >= 3:
+    hull = _hull([(p[0], p[1]) for p in pts])
+    if n >= 3 and len(hull) >= 3 and abs(_area(hull)) >= 1.0:  # the engine's SurfacePlane.fit: 1 mm^2 at least
         mx, my, mz = (sum(p[i] for p in pts) / n for i in range(3))
-        sxx, syy = sum((p[0] - mx) ** 2 for p in pts), sum((p[1] - my) ** 2 for p in pts)
+        sxx, syy = sum((p[0] - mx) * (p[0] - mx) for p in pts), sum((p[1] - my) * (p[1] - my) for p in pts)
         sxy = sum((p[0] - mx) * (p[1] - my) for p in pts)
         sxz, syz = sum((p[0] - mx) * (p[2] - mz) for p in pts), sum((p[1] - my) * (p[2] - mz) for p in pts)
         det = sxx * syy - sxy * sxy
-        if det > 1e-9 * sxx * syy:
+        if det > 1e-9:
             a, b = (sxz * syy - syz * sxy) / det, (syz * sxx - sxz * sxy) / det
-            return a, b, mz - a * mx - b * my
+            if all(map(math.isfinite, (a, b, mz - a * mx - b * my))):  # else coordinates past a double's range
+                return a, b, mz - a * mx - b * my
     raise ValueError("%s: lumen-sim places every height on the bed plane, so it needs at least 3 points not on one "
                      "line, not %r" % (what, points))
 
@@ -202,9 +212,12 @@ class Model:
             _scan(raw, w, time.time() * 1000 + 60000)
         except RecursionError:
             raise ValueError(TOO_DEEP % w) from None
-        self.version = raw.get("version")
-        if isinstance(self.version, bool) or not isinstance(self.version, int):
-            raise ValueError("%s.version must be an integer, not %r" % (w, self.version))
+        version = _num(raw.get("version"), w + ".version")
+        if version != int(version) or abs(version) > 2 ** 31 - 1:  # the engine's: a Java int, 7.0 too
+            raise ValueError("%s.version must be a whole number, not %r" % (w, raw["version"]))
+        if version < 0:
+            raise ValueError("%s.version must be 0 or more, not %r" % (w, raw["version"]))
+        self.version = int(version)
         depth = raw.get("contactDepthMm")
         self.contact = TIP_CONTACT_MM if depth is None else _num(depth, w + ".contactDepthMm")
         if not 0 <= self.contact <= 1.0:  # Backend's cap (23:1x)
@@ -248,11 +261,11 @@ class Model:
                 if not isinstance(rec, dict):
                     raise ValueError("%s (%s): a measured object with a topZ needs measured.top {how, errMm, ...}"
                                      % (what, o["id"]))
-                if not (isinstance(rec.get("how"), str) and rec["how"].strip()):
+                if not (isinstance(rec.get("how"), str) and rec["how"].strip("".join(map(chr, range(33))))):  # trim()
                     raise ValueError("%s (%s).measured.top.how must say how it was measured, not %r"
                                      % (what, o["id"], rec.get("how")))
                 if _num(rec.get("errMm"), what + ".measured.top.errMm") < 0:
-                    raise ValueError("%s.measured.top.errMm must be >= 0, not %r" % (what, rec["errMm"]))
+                    raise ValueError("%s.measured.top.errMm: a number >= 0 is required, not %r" % (what, rec["errMm"]))
             if o["state"] != "measured":
                 top = None  # added, moved or removed: it blocks its outline at every height
             touchable = o.get("touchable", False)  # absent: not touchable
@@ -266,25 +279,35 @@ class Model:
             if not isinstance(t, dict) or t.get("moves") not in MOVES:
                 raise ValueError("%s needs moves (%s), not %r" % (what, ", ".join(MOVES), t))
             _id(t, ids, what)
-            if t.get("tipEnd") is None and t["moves"] != "fixed":
+            end = t.get("tipEnd") if isinstance(t.get("tipEnd"), dict) else None  # read only as an object (engine)
+            if end is None and t["moves"] != "fixed":
                 raise ValueError("%s: a tool on the see-saw needs its tipEnd" % what)
-            # a fixed part's tip end: the head, unless it has one
-            end = {"dx": 0, "dy": 0} if t.get("tipEnd") is None else _get(t, "tipEnd", what)
-            dx, dy = (_num(end.get(k), what + ".tipEnd." + k) for k in ("dx", "dy"))
-            layers = []
+            # a fixed part without one: its tip end is the head (tip() reads it), and it has no tip-end layer
+            dx, dy = (0.0, 0.0) if end is None else (_num(end.get(k), what + ".tipEnd." + k) for k in ("dx", "dy"))
+            layers, names = [], set()
             for j, la in enumerate(_get(t, "layers", what, list)):
                 lw = "%s.layers[%d]" % (what, j)
-                if not isinstance(la, dict) or not isinstance(la.get("name"), str) \
-                        or la.get("at") not in ("head", "tip-end") or ("aboveTipMm" in la) == ("bottomZ" in la):
-                    raise ValueError("%s needs a name, at (head or tip-end) and one of aboveTipMm and bottomZ, not %r"
+                if not isinstance(la, dict) or not (isinstance(la.get("name"), str) and la["name"]):
+                    raise ValueError("%s.name is required (text), not %r" % (lw, la))
+                if la["name"] in names:  # collisions are reported per (object, tool, layer name)
+                    raise ValueError("%s: the layer '%s' is there twice" % (what, la["name"]))
+                names.add(la["name"])
+                if la.get("at") not in ("head", "tip-end") or ("aboveTipMm" in la) == ("bottomZ" in la):
+                    raise ValueError("%s needs at (head or tip-end) and one of aboveTipMm and bottomZ, not %r"
                                      % (lw, la))
+                if la["at"] == "tip-end" and end is None:
+                    raise ValueError("%s: a tip-end layer needs the tool's tipEnd" % lw)
                 if "aboveTipMm" in la and t["moves"] == "fixed":
                     raise ValueError("%s: a fixed part has no tip to be above: give it a bottomZ" % lw)
                 ox, oy = (dx, dy) if la["at"] == "tip-end" else (0.0, 0.0)
                 pts = [(x + ox, y + oy) for x, y in _outline(la.get("outline"), lw + ".outline")]
                 above = _num(la["aboveTipMm"], lw + ".aboveTipMm") if "aboveTipMm" in la else None
                 bottom = _num(la["bottomZ"], lw + ".bottomZ") if "bottomZ" in la else None
+                if above is not None and above < 0:
+                    raise ValueError("%s: aboveTipMm must be 0 or more, not %r" % (lw, la["aboveTipMm"]))
                 layers.append(Layer(la["name"], pts, above, bottom, la["at"] == "tip-end"))
+            if not layers:
+                raise ValueError("%s (%s): at least one layer" % (what, t["id"]))
             if t["moves"] != "fixed" and not any(la.tip and la.above == 0 for la in layers):
                 raise ValueError("%s (%s): a tool on the see-saw needs its tip: a tip-end layer with aboveTipMm 0"
                                  % (what, t["id"]))

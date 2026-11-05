@@ -216,30 +216,34 @@ it. lumen-sim is the physical truth: it reports a tool layer that really goes be
 no error term (the engine's proof adds those). So a clear proof never meets a collision here, and an engine bug, or a
 fault the engine cannot see, shows up in `sim_errors`.
 - Loading checks the whole file first, as the engine's loader (design §2, "Strings and null"): null nowhere (a key is
-  given a value or left out: absent means the default below), no NaN or Infinity, every `atMs` a time in ms since
-  1970 no later than now + 1 min (the host's clock), and not nested deeper than it can read; the CLI reads strict JSON
-  ("not JSON" otherwise). Then what lumen-sim uses: schema 1, an integer `version`, every outline (`box` [x0, y0, x1,
-  y1] with x0 < x1 and y0 < y1, `circle` [cx, cy, r] with r > 0, `polygon` [[x, y], ...] of at least 3 points,
-  convex and counter-clockwise by the engine's rule: a point on a straight edge, or repeated there, is no turn), the
-  see-saw (knees, `mmPerRaw` > 0, `K.raw`, `endStopsRaw` [low, high], `restRaw`: absent, no rest model),
-  `contactDepthMm` (0 to 1.0; absent: 0.25), each object's `id`, `kind` (`fixed` or `movable`), `state`, `name` (text,
-  when given), `topZ` (absent: not measured) and `touchable` (true or false; absent: false), a measured top's record
-  (`measured.top` with a `how` that says how and an `errMm` >= 0), and each tool's `id` and `moves` (`n1`, `needle` or
-  `fixed`; exactly one N1 and one needle), `tipEnd` (an object with `dx` and `dy`; needed on the see-saw, while a fixed
-  part without one has it at the head) and layers (`at` `head` or `tip-end`, and one of `aboveTipMm` and `bottomZ`; a
-  fixed part takes only `bottomZ`; N1 and the needle each need a `tip-end` layer with `aboveTipMm` 0, their tip). It
-  ignores the margins (`marginMm`, `zMarginMm`), the other records' `errMm`, `homeAtMs` and `homeRepeatMm`: those are
-  the proof's error terms; and any other key (notes). Backend's rules (11-04 23:1x), as the engine's loader: an id is 1
-  to 64 of A-Z a-z 0-9 . _ -, each object's differs from every other object's and from `bed` (the bed's), each tool's
-  from every other tool's (a tool and an object may share one). Deliberate differences: lumen-sim refuses a file
-  without `K.raw` or a knee, which the engine's proof takes as the worst case (the truth cannot place a tip without
-  them), and loads one without the margins it does not use. `tests/test_collision_model.py` runs the engine's list of
-  bad files (BedModelTest.BAD_FILES) on Backend's shared fixture. A bad model is refused whole
-  (`ValueError: collision_model...`) and the one loaded stays; the CLI exits 2.
+  given a value or left out: absent means the default below), every `atMs` a time in ms since 1970 no later than now
+  + 1 min (the host's clock), and not nested deeper than it can read. The CLI reads the text as the engine's strict
+  reader does: "not JSON" for comments, single quotes, unquoted text or NaN/Infinity, while a UTF-8 BOM and a raw TAB
+  inside a string are fine. Then what lumen-sim uses: schema 1, `version` a whole number 0 or more, every outline
+  (one of `box` [x0, y0, x1, y1] with x0 < x1 and y0 < y1, `circle` [cx, cy, r] with r > 0, `polygon` [[x, y], ...]
+  of at least 3 points, convex and counter-clockwise by the engine's rule (a point on a straight edge is no turn); any
+  other key is a note), the see-saw (knees, `mmPerRaw` > 0, `K.raw`, `endStopsRaw` [low, high], `restRaw`: absent, no
+  rest model), `contactDepthMm` (0 to 1.0; absent: 0.25), each object's `id`, `kind` (`fixed` or `movable`),
+  `state`, `name` (text, when given), `topZ` (absent: not measured) and `touchable` (true or false; absent: false), a
+  measured top's record (`measured.top` with a `how` that says how and an `errMm` >= 0), and each tool's `id` and
+  `moves` (`n1`, `needle` or `fixed`; exactly one N1 and one needle), `tipEnd` (an object with `dx` and `dy`; needed
+  on the see-saw; a fixed part's is read only as an object, and without one it is the head) and layers (at least one;
+  a name, once per tool; `at` `head` or `tip-end`, a tip-end layer only with a `tipEnd`; one of `aboveTipMm` >= 0 and
+  `bottomZ`; a fixed part takes only `bottomZ`; N1 and the needle each need a `tip-end` layer with `aboveTipMm` 0,
+  their tip). Backend's rules (11-04 23:1x), as the engine's loader: an id is 1 to 64 of A-Z a-z 0-9 . _ -, each
+  object's differs from every other object's and from `bed` (the bed's), each tool's from every other tool's (a tool
+  and an object may share one). A bad model is refused whole (`ValueError: collision_model...`) and the one loaded
+  stays; the CLI exits 2. `tests/test_collision_model.py` runs the engine's list of bad files (BedModelTest.BAD_FILES)
+  on Backend's shared fixture.
+- Deliberate differences from the engine's loader: lumen-sim refuses a file without `K.raw` or a knee, which the
+  engine's proof takes as the worst case (the truth cannot place a tip without them); it does not check what it does
+  not read, so it loads a file the engine refuses for those keys alone (no `frame`, `seesaw.measured`,
+  `homeRepeatMm` or `bed.plane.errMm`, a margin below 0, a `homeAtMs` that is text) and one without the margins; and it
+  reads nesting only ~1000 deep, the engine a few thousand (a bed model is a few levels deep).
 - The bed: rc(x, y), N1's contact raw with the bed, is the least-squares plane through `bed.plane.points`. lumen-sim
-  places every height on it, so it needs at least 3 points not on one line and refuses fewer, as the engine's loader
-  does (its writer never writes such a file): a "plane unmeasured" fixture is for the in-process SIM only. The bed is
-  an object too: top 0 inside `bed.outline`, id `bed`, not touchable.
+  places every height on it, so it needs at least 3 points that span 1 mm^2 or more and are not on one line, as the
+  engine's loader does (its writer never writes such a file): a "plane unmeasured" fixture is for the in-process SIM
+  only. The bed is an object too: top 0 inside `bed.outline`, id `bed`, not touchable.
 - Tip heights, each at its own tip's X/Y (the head + `tipEnd`), with r the head's physical Z: N1 h1 = g1 (min(r, k1) -
   rc), the needle h2 = g2 ((K - rc) - max(r, k2)). A layer's bottom is its tool's tip + `aboveTipMm`; a part that does
   not ride the see-saw has `bottomZ` above the bed at the head (+ its `tipEnd`, if it has one). Heights are compared in
@@ -267,15 +271,15 @@ fault the engine cannot see, shows up in `sim_errors`.
   far as the head went (its line), and at its end on from where the head landed. After the jump a collision stays
   reported only while its layer is still in that object there, so the next leg reports one the jump carried it out of
   and back into, or landed it in.
-- The see-saw: when the Z driver lets go (a power cycle, `M18`/`M84` with Z, the idle timeout, `M112` 0.85 s after
-  the kill: stock where its coast ended, il-safety where the head stopped at once), Z goes to `seesaw.restRaw`, or by
-  the `z_drop` without a rest, as without a model. The fall is swept. A model set while Z is not powered
-  (since the boot, as `--collision-model` always is, or since a release) has Z at its `restRaw` at once (the arm
-  has been resting there), the PA5 switch too. `seesaw.endStopsRaw` hold Z, also before a home and at a set (where the
-  head is then, mid-move too): steps past a stop are lost (the counts go on, the head does not). A set sweeps
-  nothing (the head did not move); it checks where the leg under way began (the head, when no move runs): a
-  collision the old model reported stays reported while its layer is still in that object there, and any other
-  is reported then (`line` null).
+- The see-saw: when the Z driver lets go (a power cycle, `M18`/`M84` with Z, the idle timeout, `M112` 0.85 s after the
+  kill: stock where its coast ended, il-safety where the head stopped at once), Z goes to `seesaw.restRaw`, or by the
+  `z_drop` without a rest, as without a model. The fall is swept. A model set while Z is not powered (since the boot, as
+  `--collision-model` always is, or since a release) has Z at its `restRaw` at once (the arm has been resting there),
+  the PA5 switch too. `seesaw.endStopsRaw` hold Z, also before a home and at a set: steps past a stop are lost (the
+  counts go on, the head does not). A set mid-move leaves the leg as it is (its start, a virtual one too after a
+  `z_shift`); the new stops hold the head from then on. A set sweeps nothing (the head did not move); it checks where
+  the leg under way began (the head, when no move runs): a collision the old model reported stays reported while its
+  layer is still in that object there, and any other is reported then (`line` null).
 - N1's vacuum: with a model, N1 seals only on the top of a measured object marked `touchable: true` (Process's flag,
   not inferred from `surface`), at least 2 mm inside its outline (Process 11-04). Never on the bare bed (out of N1's
   reach) or an object not touchable; `surface_z` and `surfaces` count for nothing then.

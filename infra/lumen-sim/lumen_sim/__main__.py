@@ -75,7 +75,7 @@ def run(argv):
         sim.machine.surface_z = args.surface_z
     if args.collision_model:
         try:
-            with open(args.collision_model, encoding="utf-8") as f:
+            with open(args.collision_model, encoding="utf-8-sig") as f:  # a BOM too, as the engine reads it
                 sim.fw.set_collision(collision.parse(f.read()))  # at boot: Z unpowered, at its rest
         except (OSError, ValueError) as e:
             ap.error("--collision-model: %s" % e)

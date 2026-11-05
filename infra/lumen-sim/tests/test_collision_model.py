@@ -172,7 +172,7 @@ class Load(unittest.TestCase):
         [(("tools", 1, "layers"), MODEL["tools"][1]["layers"][1:])], [(("tools", 0, "layers", 0, "aboveTipMm"), 0.5)],
         [(("tools", 1, "layers", 0, "at"), "head")],
         # every atMs a time in ms, no later than now + 1 min (microseconds are not ms)
-        [(("tools", 1, "tipEnd", "atMs"), time.time() * 1000 + 120000)],
+        [(("tools", 1, "tipEnd", "atMs"), time.time() * 1000 + 86400000)],  # a day ahead: still ahead at run time
         [(("objects", 0, "measured", "top", "atMs"), time.time() * 1e6)], [(("bed", "plane", "atMs"), "0")],
         [(("seesaw", "measured", "atMs"), True)],
         # a measured top's record: how it was measured and its error
@@ -182,8 +182,9 @@ class Load(unittest.TestCase):
         [(("objects", 0, "name"), 3)], [(("objects", 0, "name"), "")],
         # exactly one N1 and one needle: every leg sweeps both tips
         [(("tools",), [MODEL["tools"][0], MODEL["tools"][2]])], [(("tools", 1, "moves"), "n1")],
-        # strict JSON has no NaN or Infinity, not even in a key lumen-sim does not read
-        [(("zMarginMm",), float("nan"))], [(("objects", 0, "note"), [float("inf")])],
+        # numbers too big for a double: refused, never an OverflowError
+        [(("objects", 0, "topZ"), 10 ** 400)], [(("contactDepthMm",), 10 ** 400)],
+        [(("bed", "plane", "points", 1, 0), 1e200)],
         # a star winding twice, every turn left: not one whole turn, not convex in the engine's rule (a point on a
         # straight edge loads, below)
         [(("objects", 0, "outline"), {"polygon": [[180, 90], [174.12, 71.91], [189.51, 83.09], [170.49, 83.09],
@@ -217,9 +218,15 @@ class Load(unittest.TestCase):
     def test_what_the_engine_loads_loads(self):
         """A tip end stamped 30 s ahead (another host's clock); a how with a '+'; a measured object with no topZ, or a
         moved one with no record (neither measured: each blocks its outline at every height); the block as a polygon
-        with a point on a straight edge, repeated (the engine's rule: no turn), the box it outlines."""
+        with a point on a straight edge, repeated there (the engine loads it: no turn on a side running right or
+        down), the box it outlines; a few rules of the engine's that lumen-sim follows."""
         for edits in ([(("tools", 1, "tipEnd", "atMs"), time.time() * 1000 + 30000)],
-                      [(("objects", 0, "measured", "top", "how"), "caliper height + margin")]):
+                      [(("objects", 0, "measured", "top", "how"), "caliper height + margin")],
+                      # the engine's rules too: a whole-number version, only the outline's own keys counted, a fixed
+                      # part's tipEnd read only as an object, Java's trim (NBSP is text), a key it does not read
+                      [(("version",), 7.0)], [(("objects", 0, "outline"), {"box": [170, 70, 190, 90], "note": "x"})],
+                      [(("tools", 2, "tipEnd"), 5)], [(("objects", 0, "measured", "top", "how"), " ")],
+                      [(("objects", 0, "note"), [float("inf"), float("nan")])]):
             with self.subTest(edits):
                 self.assertEqual(cm(loaded(model(*edits)))["version"], 7)
         for edits in ([(("objects", 0, "topZ"), DELETE)], [(("objects", 0, "state"), "moved"),
@@ -250,6 +257,39 @@ class Load(unittest.TestCase):
                                           "levels deep)")
         self.assertEqual(cm(b)["version"], 7)
 
+    def test_the_engines_rules_on_what_lumen_sim_reads_in_its_words(self):
+        """Refused as the engine refuses them (BedModel, SurfacePlane), the engine's words in the message."""
+        b = loaded()
+        for edits, says in (
+                ([(("version",), 1.5)], "version must be a whole number"),
+                ([(("version",), -1)], "version must be 0 or more"),
+                ([(("version",), 3000000000)], "version must be a whole number"),
+                ([(("objects", 0, "outline"), {"polygon": [[0, 0], [10, 0]]})], "a polygon is at least 3 points"),
+                ([(("objects", 0, "outline"), {"note": "x"})], "one of box, circle or polygon"),
+                ([(("objects", 0, "measured", "top", "errMm"), -0.01)], "errMm: a number >= 0 is required"),
+                ([(("objects", 0, "measured", "top", "how"), "\u0001")], "how must say how"),  # Java's trim
+                ([(("bed", "plane", "points"), [[60, 120, 4], [60.5, 120, 4], [60, 120.5, 4]])], "on one line"),
+                ([(("tools", 2, "layers"), [])], "at least one layer"),
+                ([(("tools", 2, "layers", 0, "name"), "")], "name is required (text)"),
+                ([(("tools", 1, "layers", 1, "name"), "tip")], "the layer 'tip' is there twice"),
+                ([(("tools", 1, "layers", 1, "aboveTipMm"), -1)], "aboveTipMm must be 0 or more"),
+                ([(("tools", 2, "layers", 0, "at"), "tip-end")], "a tip-end layer needs the tool's tipEnd")):
+            with self.subTest(says):
+                reply = b.sim.control({"cmd": "set", "collision_model": model(*edits)}, b.t)
+                self.assertRegex(reply.get("error", ""), r"^ValueError: collision_model")
+                self.assertIn(says, reply["error"])
+        self.assertEqual(cm(b)["version"], 7)
+
+    def test_the_cli_reads_the_text_as_the_engine_does(self):
+        """parse(), the CLI's: the engine's strict reader refuses NaN and Infinity as not JSON, but takes a raw TAB
+        in a string and a number too big for a double in a key neither reads (its value is never used)."""
+        text = json.dumps(MODEL)
+        self.assertEqual(collision.parse(text.replace('"version": 7', '"version": 7, "_n": 1e999, "_t": "a\tb"'))
+                         .version, 7)
+        for bad in ("NaN", "-Infinity"):
+            with self.assertRaisesRegex(ValueError, "^collision_model: not JSON"):
+                collision.parse(text.replace('"version": 7', '"version": 7, "zMarginMm": ' + bad))
+
     def test_the_ids_and_depths_backend_allows_load(self):
         """contactDepthMm 0 and 1.0; a 64-character id of every allowed kind of character; an object with a tool's id
         (only objects among themselves and tools among themselves must differ); a tool called bed (only an object's id
@@ -266,11 +306,11 @@ class Load(unittest.TestCase):
 
     def test_the_cli_flag_loads_the_file(self):
         """At boot Z is not powered: the head starts at restRaw, checked there (the hub's edge over the block, as in
-        SeeSaw's fall test)."""
+        SeeSaw's fall test). The file starts with a UTF-8 BOM, as an editor may save it (the engine reads it)."""
         tmp = tempfile.mkdtemp(prefix="lumen-sim-test-")
         self.addCleanup(shutil.rmtree, tmp, True)
         path = os.path.join(tmp, "collision-model.json")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8-sig") as f:
             json.dump(model((("seesaw", "restRaw"), 60.0)), f)
         sim = SimProcess("--park", "145,150,31.5", "--collision-model", path)
         try:
@@ -781,16 +821,18 @@ class SeeSaw(unittest.TestCase):
         b.send("M400")
         self.assertEqual((z(b), hits(b)), (38.0, []))
 
-    def test_a_model_set_mid_move_after_a_z_shift_leaves_the_head_where_it_is(self):
-        """A set holds the head where the new stops hold it now, not the leg's start: after a z_shift mid-move that
-        start is virtual (the head less the counts so far) and may lie past a stop (round 4's re-check NIT). Each case
-        sets the same file again right after the shift. From raw 5, G1 Z60 at (145, 150), -20 at count 40: 20, ends at
-        40 with the hub's bottom (69 - 40) clear of the block's top (19.4); from 60, G1 Z40, +8 at count 50: 58, ends
-        at 48; stops [-1, 46], from 10 G1 Z63, -10 at count 60: 36 (the stop held it at 46), ends at 39."""
+    def test_a_model_set_mid_move_leaves_the_leg_alone(self):
+        """A set mid-move moves neither the head nor where the leg began (round 4's re-check NIT): after a z_shift that
+        start is virtual (the head less the counts so far) and may lie past a stop, and a stop holding the head has
+        not moved the start either. Each case sets the same file again at the count. From raw 5, G1 Z60 at (145, 150),
+        -20 at count 40: 20, ends at 40 with the hub's bottom (69 - 40) clear of the block's top (19.4); from 60, G1
+        Z40, +8 at count 50: 58, ends at 48; stops [-1, 46], from 10 G1 Z63, -10 at count 60: 36 (the stop held it at
+        46), ends at 39; the same with no shift: held at 46 to the end, N1's tip never below raw 10."""
         for stops, xy, start, line, count, shift, after, end in (
                 ([-1, 66], (145, 150), 5, "G1 Z60 F60", 40, -20.0, 20.0, 40.0),
                 ([-1, 66], (100, 300), 60, "G1 Z40 F60", 50, 8.0, 58.0, 48.0),
-                ([-1, 46], (100, 300), 10, "G1 Z63 F60", 60, -10.0, 36.0, 39.0)):
+                ([-1, 46], (100, 300), 10, "G1 Z63 F60", 60, -10.0, 36.0, 39.0),
+                ([-1, 46], (100, 300), 10, "G1 Z63 F60", 60, None, 46.0, 46.0)):
             with self.subTest(line=line, shift=shift):
                 m = model((("seesaw", "endStopsRaw"), stops))
                 b = loaded(m)
@@ -800,7 +842,8 @@ class SeeSaw(unittest.TestCase):
                 while (state(b)["head"]["logical"]["Z"] - count) * (count - start) < 0:
                     b.run(0.005)
                 self.assertEqual(state(b)["head"]["logical"]["Z"], count)
-                self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": shift}, b.t)["ok"])
+                if shift is not None:
+                    self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": shift}, b.t)["ok"])
                 put(b, m)
                 self.assertEqual(z(b), after)
                 b.send("M400")
@@ -972,17 +1015,15 @@ class SameAsTheEngine(unittest.TestCase):
         self.assertEqual(len(self.BAD) + 2, 47, "the engine's list, all but the two margins")
         for what, file, says in self.BAD:
             with self.subTest(what):
-                text = file(self.text)
-                self.assertNotEqual(text, self.text, "the edit found its text")
-                with self.assertRaises(ValueError) as e:
-                    collision.parse(text)
+                with self.assertRaises(ValueError) as e:  # an edit that misses its text loads: it fails here
+                    collision.parse(file(self.text))
                 self.assertIn(says, str(e.exception))
 
     def test_the_rest_loads(self):
         for what, file in self.LOADS:
             with self.subTest(what):
                 text = file(self.text)
-                self.assertNotEqual(text, self.text)
+                self.assertNotEqual(json.loads(text), json.loads(self.text), "the edit changed the tree")
                 self.assertEqual(collision.parse(text).version, 1)
 
 
