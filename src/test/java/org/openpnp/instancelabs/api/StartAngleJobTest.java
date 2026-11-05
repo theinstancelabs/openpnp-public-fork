@@ -148,7 +148,8 @@ public class StartAngleJobTest {
         t.svc.setStartAngle(359.1, "seeded", t0, new DispenseProfile.StartAngleFeature("halves", 179.1, t0, "pc-0"));
         steps.holdAt = 2;
         PadCalibrationJobTest.Res r = t.call("POST", "/api/screw/start-angle/measure", "{\"mode\":\"halves\","
-                + "\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16) + "],\"throwaways\":[[285,262],"
+                + "\"pairs\":8,\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16) + "],"
+                + "\"throwaways\":[[285,262],"
                 + "[287.5,262],[290,262],[292.5,262]],\"apply\":true}");
         assertEquals(202, r.status, r.toString());
         String job = r.json().get("job").getAsString();
@@ -175,7 +176,8 @@ public class StartAngleJobTest {
      */
     @Test
     public void halvesLayEachRowsOwnThrowawaysAtTheirOwnLayers() throws Exception {
-        String halves = "{\"mode\":\"halves\",\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16) + "],";
+        String halves = "{\"mode\":\"halves\",\"pairs\":8,\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16)
+                + "],";
         PadCalibrationJobTest.Res r = t.call("POST", "/api/screw/start-angle/measure", halves + "\"throwaways\":[[285,262],"
                 + "[287.5,262,1],[290,262,0],[292.5,262,2]],\"wait\":true}");
         assertEquals(200, r.status, r.toString());
@@ -230,7 +232,7 @@ public class StartAngleJobTest {
         String throwaways = "\"throwaways\":[[285,262],[287.5,262],[290,262],[292.5,262]]";
         for (int n : new int[] {4, 5}) {
             assertBad("{\"mode\":\"halves\",\"pairs\":" + n + ",\"targets\":[" + spots(285, 245, 2 * n) + ","
-                    + spots(285, 253, 2 * n) + "]," + throwaways + "}", "lay at least 6 pairs (8 by default)");
+                    + spots(285, 253, 2 * n) + "]," + throwaways + "}", "lay at least 6 pairs (12 by default)");
         }
         assertEquals(0, steps.reqs.size(), "nothing ran");
         PadCalibrationJobTest.Res six = t.call("POST", "/api/screw/start-angle/measure", "{\"mode\":\"halves\",\"pairs\":6,"

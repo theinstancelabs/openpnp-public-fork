@@ -65,6 +65,8 @@ public class DispenseConfig {
     public CleanPadCheck cleanPadCheck = new CleanPadCheck();
     /** BR-03: where the valve and the screw may switch on ({@link OutputZones}). */
     public OutputZoneSettings outputZones = new OutputZoneSettings();
+    /** BR-94: each tool's last accepted trip on the bed's height switch ({@link HeightSwitch}); the measure sets it. */
+    public HeightSwitchTrips heightSwitch = new HeightSwitchTrips();
 
     // --- named locations (x, y: N2 nozzle coordinates; z: surface Z in OpenPnP's frame, i.e. the
     // N1 nozzle Z touching that surface, the frame of OpenPnP's board Z) -------------------------
@@ -386,6 +388,22 @@ public class DispenseConfig {
         public double marginMm = 2;
         /** More forbidden circles (e.g. a feeder, a nozzle tip holder). */
         public java.util.List<ForbidZone> forbid = new java.util.ArrayList<>();
+        /** BR-94: radius of the forbidden circle around the height switch's place (mm; the process engineer's). */
+        public double heightSwitchRadiusMm = 10;
+    }
+
+    /** BR-94: N1's and the needle's accepted trips on the height switch, each null until measured. */
+    public static class HeightSwitchTrips {
+        public HeightSwitchTrip n1, needle;
+    }
+
+    /** An accepted height-switch measure: the mean trip (raw Z), its spread, and the home it holds for. */
+    public static class HeightSwitchTrip {
+        public double tripRawZ, rangeMm, sdMm;
+        public int presses;
+        public long atMs;
+        /** The home it was measured under ({@link HomeTracker#getLastHomeAtMs()}); null: a home of unknown time. */
+        public Long homeAtMs;
     }
 
     /** A forbidden circle of {@link OutputZoneSettings#forbid}. */
@@ -763,6 +781,9 @@ public class DispenseConfig {
             c.outputZones.forbid = new java.util.ArrayList<>();
         }
         c.outputZones.forbid.removeIf(java.util.Objects::isNull);
+        if (c.heightSwitch == null) {
+            c.heightSwitch = new HeightSwitchTrips();
+        }
         if (c.padCalibration == null) {
             c.padCalibration = new PadCalibrationSettings();
         }
@@ -999,6 +1020,9 @@ public class DispenseConfig {
             }
             if (!(outputZones.marginMm >= 0 && outputZones.marginMm <= 10)) {
                 p.add("outputZones.marginMm must be 0..10 mm");
+            }
+            if (!(outputZones.heightSwitchRadiusMm >= 2 && outputZones.heightSwitchRadiusMm <= 30)) {
+                p.add("outputZones.heightSwitchRadiusMm must be 2..30 mm (the height switch's forbidden circle)");
             }
             if (outputZones.forbid == null) {
                 p.add("outputZones.forbid must be a list (empty for none)");

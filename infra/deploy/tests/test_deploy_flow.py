@@ -486,6 +486,101 @@ class Flow(unittest.TestCase):
         self.assertIn(f"{b} installed but NOT verified", self.deployed_line())
         self.assertNotEqual(self.lab.link("current"), a)
 
+    def test_a_link_lost_in_the_health_check_leaves_openpnp_alone(self):
+        """BR-93: the new build loses the controller link after its Start. No STOP to the lost link, no config put back
+        and no restart (the restart would clear linkLost, and the old config lacks the engine's journal rows of the
+        loss): OpenPnP left running with the loss showing, the build installed but not verified, held, not bad."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c, fail=["link-lost-after-enable"])
+        rc = self.lab.main("deploy")
+        self.assertEqual(rc, 5, self.lab.last_out)
+        health = [r for r in self.lab.journal() if r["event"] == "health"][-1]
+        self.assertEqual(health["kind"], "link-lost", health)
+        posts = [r.get("path") for r in self.lab.requests() if r.get("method") == "POST"]
+        last_enable = len(posts) - 1 - posts[::-1].index("/api/machine/enable")
+        self.assertEqual(posts[last_enable + 1:], [], "nothing after the Start: no home, no STOP")
+        self.assertTrue(self.lab.service().is_active())
+        self.assertNotIn(b, self.bad())
+        self.assert_held()
+        self.assertEqual(self.lab.link("current"), b)
+        self.assertIn(f"{b} installed but NOT verified", self.deployed_line())
+        self.assertNotEqual(self.lab.link("current"), a)
+
+    def test_a_link_lost_in_the_rollbacks_check_leaves_openpnp_alone(self):
+        """The new build fails as the build's; the previous build, put back and checked, loses the link after its Start:
+        OpenPnP left running with the loss showing (_left_after), no STOP."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.machine(fail_for={self.lab.b[:7]: ["link-lost-after-enable"]})  # a's check, in b's pre-deploy config
+        self.release(5, self.lab.c, fail=["home-404"])
+        self.deploy(rc=5)
+        self.assertEqual([r["kind"] for r in self.lab.journal() if r["event"] == "health"][-2:], ["build", "link-lost"])
+        posts = [r.get("path") for r in self.lab.requests() if r.get("method") == "POST"]
+        last_enable = len(posts) - 1 - posts[::-1].index("/api/machine/enable")
+        self.assertEqual(posts[last_enable + 1:], [], "nothing after a's Start: no home, no STOP")
+        self.assertTrue(self.lab.service().is_active())
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertIn("lost controller link showing", self.deployed_line())
+        self.assert_held()
+
+    def test_a_link_lost_at_the_planned_stop_before_the_switch_changes_nothing(self):
+        """BR-93: the running build loses the controller link as the deployer's planned stop runs (#53's planned stop
+        answers 200 all the same). Stopping the service would clear machine.linkLost: not idle, OpenPnP left running
+        with the loss showing, nothing switched, nothing started or homed."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.machine(fail_for={self.lab.b[:7]: ["link-lost-at-planned-stop"]})
+        self.lab.start_service()
+        b = self.release(5, self.lab.c)
+        self.deploy(rc=3)
+        self.assertIn("machine.linkLost", self.lab.last_out)
+        self.assertTrue(self.lab.service().is_active())
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertNotIn(b, self.bad())
+        self.assertFalse(self.hold())
+        posts = [r.get("path") for r in self.lab.requests() if r.get("method") == "POST"]
+        after = posts[len(posts) - 1 - posts[::-1].index("/api/stop/planned") + 1:]
+        self.assertNotIn("/api/machine/enable", after)
+        self.assertNotIn("/api/machine/home", after)
+
+    def test_no_answer_after_the_planned_stop_before_the_switch_changes_nothing(self):
+        """Fail closed: nothing reads machine.linkLost again before the service stop would clear it."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.start_service()
+        self.release(5, self.lab.c)
+        get = il_deploy.Api.get
+        seen = len(self.lab.requests())
+
+        def no_answer_after_the_stop(api, path, timeout=10):
+            if path == "/api/machine" and any(r.get("path") == "/api/stop/planned" for r in self.lab.requests()[seen:]):
+                raise il_deploy.ApiTimeout(f"GET {path}: no answer within {timeout:g} s")
+            return get(api, path, timeout)
+        with mock.patch.object(il_deploy.Api, "get", no_answer_after_the_stop):
+            self.deploy(rc=3)
+        self.assertIn("machine.linkLost not read", self.lab.last_out)
+        self.assertTrue(self.lab.service().is_active())
+        self.assertEqual(self.lab.link("current"), a)
+
+    def test_a_link_lost_at_the_stop_after_a_failed_check_is_left_alone(self):
+        """BR-93: the new build fails as the build's and its link goes as the STOP after it runs. Stopping the service
+        would clear machine.linkLost, and the recovery would put the previous build back, Start it and home it: OpenPnP
+        left running with the loss showing, held, the new build not bad."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        b = self.release(5, self.lab.c, fail=["home-404", "link-lost-at-stop"])
+        self.deploy(rc=5)
+        self.assertTrue(self.lab.service().is_active())
+        self.assertEqual(self.lab.link("current"), b)
+        self.assertNotEqual(self.lab.link("current"), a)
+        self.assertNotIn(b, self.bad())
+        self.assert_held()
+        posts = [r.get("path") for r in self.lab.requests() if r.get("method") == "POST"]
+        after = posts[len(posts) - 1 - posts[::-1].index("/api/machine/home") + 1:]
+        self.assertNotIn("/api/machine/enable", after, "the previous build not started")
+        self.assertNotIn("/api/machine/home", after)
+
     def test_slow_home_the_server_gives_up_on_still_deploys(self):
         self.release(4, self.lab.b)
         self.deploy()

@@ -600,6 +600,25 @@ public class BedGuardSimTest {
         }
     }
 
+    /**
+     * BR-97's see-saw levelling (Z alone while not homed, after a reset) stays outside the check (design §4): with the
+     * model in place the call runs and is not walked, so no proof is made or journaled (from an unhomed start a walk
+     * could only refuse).
+     */
+    @Test
+    public void aLevellingCallIsNotWalked() throws Exception {
+        start(BedFixture.text());
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.machine.setEnabled(true);
+        assertFalse(sim.machine.isHomed(), "a reset leaves it unhomed");
+        String token = acquire();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z1 F300\",\"M400\"],\"what\":\"see-saw levelling\"}", token);
+        assertEquals(1.0, sim.server.position('Z'), 1e-9);
+        assertEquals(List.of(), rows("MOTION_PROOF"));
+        assertEquals(List.of(), rows("MOTION_REFUSED"));
+    }
+
     /** A new measurement record stamped {@code atMs}, naming a new journal row as its evidence. */
     JsonObject record(long atMs) throws Exception {
         svc.getDb().event(null, "INFO", "PROBE", "a bench measurement");

@@ -54,6 +54,25 @@ public class ProbeCommandsTest {
         }
     }
 
+    /**
+     * BR-94: the height switch's two lines on PA5 (the pull-up and the read) pass only the probe's gate, exactly; a
+     * dispense stream still sends no M42 or M43 at all.
+     */
+    @Test
+    public void probeGateAllowsExactlyTheHeightSwitchsTwoLines() {
+        assertEquals("M42 P53 T2", ControllerCommands.HEIGHT_SWITCH_PULL_UP);
+        assertEquals("M43 P5", ControllerCommands.HEIGHT_SWITCH_READ);
+        for (String l : Arrays.asList("M42 P53 T2", "M43 P5", "m42  p53 t2 ; pull-up")) {
+            assertNull(ControllerCommands.checkProbe(l), l);
+            assertNotNull(ControllerCommands.check(l), "check() must still refuse " + l);
+        }
+        for (String l : Arrays.asList("M42 P54 T2", "M42 P53 S255", "M42 P53 T1", "M42 P53", "M42 I P53 T2",
+                "M42 P53 T2 S0", "M43 P6", "M43", "M43 I P5", "M43 P5 T", "M43 P53", "M42 P5 T2")) {
+            assertNotNull(ControllerCommands.checkProbe(l), l);
+            assertNotNull(ControllerCommands.check(l), l);
+        }
+    }
+
     @Test
     public void dispenseValidatorNamesTheProbeLines() {
         DispenseConfig c = GcodeStreamTest.toyConfig();

@@ -635,10 +635,10 @@ final class PadCalibrationJob {
                     + "turns per turn)");
         }
         if (halves && q.pairs != null && q.pairs < MIN_PAIRS) {
-            throw ApiException.badRequest("lay at least " + MIN_PAIRS + " pairs (8 by default): with " + q.pairs
-                    + " the error at each half is too uncertain, so the measure would mostly find no angle");
+            throw ApiException.badRequest("lay at least " + MIN_PAIRS + " pairs (" + DEFAULT_PAIRS + " by default): with "
+                    + q.pairs + " the error at each half is too uncertain, so the measure would mostly find no angle");
         }
-        int n = halves ? count(q.pairs, 8, MIN_PAIRS, 16, "pairs") : count(q.turns, 4, 2, 8, "turns");
+        int n = halves ? count(q.pairs, DEFAULT_PAIRS, MIN_PAIRS, 16, "pairs") : count(q.turns, 4, 2, 8, "turns");
         if (q.targets.size() != 4 * n) {
             throw ApiException.badRequest(halves ? String.format(Locale.ROOT, "halves of %d pairs take %d targets (2 rows "
                     + "of %d pairs), not %d", n, 4 * n, n, q.targets.size()) : String.format(Locale.ROOT, "quarters of "
@@ -710,6 +710,8 @@ final class PadCalibrationJob {
      * time for nothing.
      */
     static final int MIN_PAIRS = ScrewPhaseFit.MIN_PAIRS;
+    /** Process 11-04 22:1x: 12 pairs decide ≥ 90 % of measures up to a half-turn cv ≈ 0.11, 8 only to ≈ 0.08. */
+    static final int DEFAULT_PAIRS = 12;
 
     private static int count(Integer v, int dflt, int min, int max, String name) throws ApiException {
         int n = v == null ? dflt : v;

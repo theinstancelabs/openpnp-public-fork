@@ -14,6 +14,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.FlatVacuum;
 import org.openpnp.instancelabs.dispense.SimMachine;
@@ -245,6 +246,107 @@ public class ControlApiSimTest {
                     && z <= zone[1].convertToUnits(LengthUnit.Millimeters).getValue() + 1e-6,
                     n.getName() + " inside its safe zone after the move-to: " + z);
         }
+    }
+
+    /**
+     * BR-94: over the height switch (its place's circle) neither tool goes below its safe zone, also through the
+     * see-saw, whatever its floor would allow (only the measure presses the switch); up is allowed; below its zone a
+     * tool moves no X/Y at all, so never into the circle.
+     */
+    @Test
+    public void overTheHeightSwitchNeitherToolGoesBelowItsSafeZone() throws Exception {
+        needleFrameAndBlank(); // the needle's floor is its frame's then (1.81), far below its safe zone
+        ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"n1\",\"place\":\"height-switch\"}", UI));
+        double z = loc(sim.n1).getZ();
+        refused(409, "over the height switch", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-1}", UI));
+        Res seeSaw = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":1}", UI);
+        refused(409, "over the height switch", seeSaw);
+        assertTrue(seeSaw.body.contains("N1 at Z") && seeSaw.body.contains("share one Z"), seeSaw.toString());
+        assertEquals(z, loc(sim.n1).getZ(), 1e-6, "nothing moved");
+        ok(call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"place\":\"height-switch\"}", UI));
+        refused(409, "over the height switch", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI));
+        // 30 mm away the needle goes below its zone to its frame's floor as before, and then moves no X/Y
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":130,\"y\":100}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        refused(409, "travel height", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dx\":-10}", UI));
+    }
+
+    /**
+     * BR-94 review MINOR 6: over the height switch the needle is checked where its tip lands (N2 + the landing + trim,
+     * as the measure and I12 aim), not at N2. With an 11 mm landing, N2 11 mm from the place puts the tip on it: a jog
+     * down is refused; N2 on the place puts the tip 11 mm away: it may go down to its floor.
+     */
+    @Test
+    public void overTheHeightSwitchTheNeedleIsCheckedWhereItsTipLands() throws Exception {
+        needleFrameAndBlank();
+        ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        landing(11);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":89,\"y\":100}", UI));
+        refused(409, "over the height switch (100.0, 100.0)", call("POST", "/api/jog",
+                "{\"tool\":\"needle\",\"dz\":-1}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"place\":\"height-switch\"}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI));
+    }
+
+    /**
+     * BR-49's needle floor is taken where its tip lands too (N2 + the landing + trim), not at N2: N2 over the blank
+     * (its floor 2.91), the tip 11 mm on over a raised surface (8.5): the floor is that surface's, 8.5 - 2.59 = 5.91,
+     * and a press to Z 4.5, which the floor under N2 let through, is refused naming it and where the tip lands.
+     */
+    @Test
+    public void theNeedlesFloorIsTheSurfaceWhereItsTipLands() throws Exception {
+        needleFrameAndBlank();
+        ok(call("PUT", "/api/surfaces/raised", "{\"points\":[[108,30,8.5],[120,30,8.5],[108,50,8.5],[120,50,8.5]]}",
+                UI));
+        landing(11);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        for (int i = 0; i < 30 && loc(sim.n2).getZ() > 6.0 + 1e-6; i++) {
+            ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":" + Math.max(-2, 6.0 - loc(sim.n2).getZ()) + "}",
+                    UI));
+        }
+        assertEquals(6.0, loc(sim.n2).getZ(), 1e-6);
+        Res r = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1.5}", UI);
+        refused(409, "below its floor 5.91", r);
+        assertTrue(r.body.contains("over (111.0, 40.0)"), "where its tip lands: " + r);
+        assertEquals(6.0, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-0.05}", UI));
+    }
+
+    /**
+     * The other way round (Backend, round 2's note 3): N2 over a raised surface, its tip 11 mm on over the blank. The
+     * floor under N2 still holds: the higher of the two floors, as the rule before round 2 held N2's.
+     */
+    @Test
+    public void theNeedlesFloorUnderN2StillHoldsWhereItIsHigherThanTheTips() throws Exception {
+        needleFrameAndBlank();
+        ok(call("PUT", "/api/surfaces/raised", "{\"points\":[[95,30,8.5],[105,30,8.5],[95,50,8.5],[105,50,8.5]]}",
+                UI));
+        landing(11);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        for (int i = 0; i < 30 && loc(sim.n2).getZ() > 6.0 + 1e-6; i++) {
+            ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":" + Math.max(-2, 6.0 - loc(sim.n2).getZ()) + "}",
+                    UI));
+        }
+        assertEquals(6.0, loc(sim.n2).getZ(), 1e-6);
+        Res r = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1.5}", UI);
+        refused(409, "below its floor 5.91", r);
+        assertTrue(r.body.contains("over (100.0, 40.0)"), "under N2: " + r);
+        assertEquals(6.0, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+    }
+
+    /** The mounted tip lands {@code dx} mm from N2 in X: a landing set under N2's head offset now. */
+    void landing(double dx) throws Exception {
+        DispenseConfig c = svc.getConfig();
+        DispenseConfig.NeedleLanding l = new DispenseConfig.NeedleLanding();
+        l.dxMm = dx;
+        double[] ho = svc.headOffsetNow();
+        l.headOffsetXMm = ho[0];
+        l.headOffsetYMm = ho[1];
+        l.setAtMs = System.currentTimeMillis();
+        c.needleLanding = l;
+        svc.updateConfig(c);
     }
 
     /** #19 review of BR-49, MINOR 7: a real unhomed state (STOP, then Start), not a faked flag. */

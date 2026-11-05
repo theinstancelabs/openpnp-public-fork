@@ -87,7 +87,7 @@ public class StartAngleMeasureSimTest {
      * from (x0, 253) after its own at (x0 + 5, 262), clean, and (x0 + 7.5, 262) on two wet layers.
      */
     static String halves(double x0, String more) {
-        return "{\"mode\":\"halves\",\"targets\":[" + spots(x0, 245, 16) + "," + spots(x0, 253, 16) + "],"
+        return "{\"mode\":\"halves\",\"pairs\":8,\"targets\":[" + spots(x0, 245, 16) + "," + spots(x0, 253, 16) + "],"
                 + "\"throwaways\":[[" + x0 + ",262],[" + (x0 + 2.5) + ",262],[" + (x0 + 5) + ",262,0],[" + (x0 + 7.5)
                 + ",262,2]]" + more + "}";
     }
@@ -274,13 +274,15 @@ public class StartAngleMeasureSimTest {
         assertBad("{\"mode\":\"dose\"," + t + "\"throwaways\":" + THROWAWAYS + "}", "mode 'dose' is not built yet "
                 + "(BR-77 PR C)");
         assertBad("{\"mode\":\"spiral\"," + t + "\"throwaways\":" + THROWAWAYS + "}", "'mode' must be");
-        assertBad("{\"mode\":\"halves\"," + t + "\"throwaways\":" + THROWAWAYS + "}", "32 targets");
+        // 12 pairs by default (Process 11-04 22:1x)
+        assertBad("{\"mode\":\"halves\"," + t + "\"throwaways\":" + THROWAWAYS + "}", "halves of 12 pairs take 48 "
+                + "targets (2 rows of 12 pairs), not 16");
         assertBad("{\"mode\":\"quarters\"," + t + "\"throwaways\":[[285,262]]}", "at least 2 throwaways");
         assertBad("{\"mode\":\"quarters\"," + t + "\"throwaways\":[[285,262,0],[287.5,262,3]]}", "layers");
         assertBad("{\"mode\":\"quarters\"," + t + "\"throwaways\":" + THROWAWAYS + ",\"startDeg\":360}", "startDeg");
         assertBad("{\"mode\":\"quarters\"," + t + "\"throwaways\":" + THROWAWAYS + ",\"turns\":9}", "turns");
-        assertBad("{\"mode\":\"halves\",\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16) + "],"
-                + "\"throwaways\":" + THROWAWAYS + "}", "halves take one set of throwaways per row: an even count, 2 to "
+        assertBad("{\"mode\":\"halves\",\"pairs\":8,\"targets\":[" + spots(285, 245, 16) + "," + spots(285, 253, 16)
+                + "],\"throwaways\":" + THROWAWAYS + "}", "halves take one set of throwaways per row: an even count, 2 to "
                 + "8 per row");
         assertBad("{\"mode\":\"quarters\"," + t + "\"throwaways\":[" + spots(280, 266, 9) + "]}", "at most 8");
         assertBad("{\"mode\":\"quarters\",\"targets\":[[285,245],[286,245]," + spots(285, 250, 14) + "],\"throwaways\":"

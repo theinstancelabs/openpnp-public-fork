@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 import org.openpnp.Main;
+import org.openpnp.instancelabs.sim.SimPa5Switch;
 import org.openpnp.instancelabs.sim.SimPaste;
 import org.openpnp.instancelabs.sim.SimVacuum;
 import org.openpnp.machine.reference.ReferenceMachine;
@@ -47,6 +48,8 @@ public class GcodeServer extends Thread {
     private SimVacuum vacuum;
     /** Instance Labs: the simulated needle paste and B step count, null unless the configuration has a sim scene. */
     private SimPaste paste;
+    /** Instance Labs: the simulated PA5 switch (M43 P5), null unless the configuration has a sim scene. */
+    private SimPa5Switch pa5;
 
     static final String firmware = "FIRMWARE_NAME:GcodeServer, FIRMWARE_URL:http%3A//openpnp.org, X-SOURCE_CODE_URL:https%3A//github.com/openpnp/openpnp, FIRMWARE_VERSION:"+Main.getVersion()+", "
             +"X-FIRMWARE_BUILD_DATE:Oct 23 2020 00:00:00";
@@ -93,6 +96,12 @@ public class GcodeServer extends Thread {
         this.driver = driver;
         this.vacuum = SimVacuum.forConfiguration(Configuration.get());
         this.paste = SimPaste.forConfiguration(Configuration.get());
+        this.pa5 = SimPa5Switch.forConfiguration(Configuration.get());
+    }
+
+    /** Instance Labs: the PA5 switch, for tests to read; null without a sim scene. */
+    public SimPa5Switch getPa5() {
+        return pa5;
     }
 
     public AxesLocation getMachineLocation() {
@@ -319,6 +328,18 @@ public class GcodeServer extends Thread {
                 String reply = vacuum.onLine(input, getMachineLocation(), driver, Math.max(0, moving));
                 if (reply != null) {
                     write(reply + "\nok");
+                    return;
+                }
+            }
+            if (pa5 != null) {
+                // Instance Labs: M43 P5 reads the PA5 switch where the head is now (it waits for no move).
+                String pin = pa5.onLine(input, getMachineLocation(), () -> {
+                    double now = NanosecondTime.getRuntimeSeconds();
+                    Motion motion = getMomentaryMotion(now);
+                    return motion.getMomentaryLocation(now - motion.getPlannedTime0());
+                }, driver);
+                if (pin != null) {
+                    write(pin + "\nok");
                     return;
                 }
             }
@@ -745,6 +766,11 @@ public class GcodeServer extends Thread {
                         t += motion.getTime();
                         motionPlan.put(t, motion);
                         motion.setPlannedTime1(t);
+                    }
+                    if (pa5 != null) {
+                        // Instance Labs: the PA5 switch sees where each move ends, when it ends, read or not.
+                        pa5.moveEnds(axesLocation, driver,
+                                motion.getPlannedTime1() - NanosecondTime.getRuntimeSeconds());
                     }
                     // Store new location.
                     Logger.trace("Move takes "+(motion.getTime()*1000)+" ms");

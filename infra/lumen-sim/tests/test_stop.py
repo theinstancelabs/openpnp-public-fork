@@ -3,6 +3,7 @@ import re
 import unittest
 
 from lumen_sim.bench import Bench
+from tests.hang import within
 
 REPORT = re.compile(r"^X:(-?\d+\.\d\d) Y:(-?\d+\.\d\d) Z:(-?\d+\.\d\d) A:(-?\d+\.\d\d) B:(-?\d+\.\d\d) "
                     r"Count X:(-?\d+) Y:(-?\d+) Z:(-?\d+) A:(-?\d+) B:(-?\d+)$")
@@ -64,36 +65,40 @@ class StockStopDuringHoming(unittest.TestCase):
         return b, t0
 
     def test_m410_in_an_approach_halts_the_board(self):
-        b, t0 = self._home_then_stop()
-        b.run(0.3)
-        stopped = b.sim.state(b.t)["physical"]
-        b.run(20.0)
-        self.assertEqual([round(t - t0, 3) for t, l in b.rx if t > t0], [2.0, 4.0])  # G28's busy lines, then silence
-        st = b.sim.state(b.t)
-        self.assertTrue(st["halted"])
-        self.assertEqual(st["halt_reason"], "Homing Failed")
-        self.assertEqual(st["physical"], stopped)  # motion stopped at the M410
-        self.assertEqual(st["fans"], [0, 0, 255, 255])  # outputs as they were
-        b.write("M115\n")
-        b.run(5.0)
-        self.assertEqual([l for t, l in b.rx if t > t0 + 5.0], [])
+        with within(self, 5):
+            b, t0 = self._home_then_stop()
+            b.run(0.3)
+            stopped = b.sim.state(b.t)["physical"]
+            b.run(20.0)
+            # G28's busy lines, then silence
+            self.assertEqual([round(t - t0, 3) for t, l in b.rx if t > t0], [2.0, 4.0])
+            st = b.sim.state(b.t)
+            self.assertTrue(st["halted"])
+            self.assertEqual(st["halt_reason"], "Homing Failed")
+            self.assertEqual(st["physical"], stopped)  # motion stopped at the M410
+            self.assertEqual(st["fans"], [0, 0, 255, 255])  # outputs as they were
+            b.write("M115\n")
+            b.run(5.0)
+            self.assertEqual([l for t, l in b.rx if t > t0 + 5.0], [])
 
     def test_power_cycle_recovers_a_halted_board(self):
-        b, _ = self._home_then_stop()
-        b.run(5.0)
-        b.sim.power_cycle(b.t)
-        self.assertEqual(b.send("M114").lines[0],
-                         "X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197")
-        st = b.sim.state(b.t)
-        self.assertFalse(st["halted"])
-        self.assertEqual(st["fans"], [0, 0, 0, 0])
+        with within(self, 5):
+            b, _ = self._home_then_stop()
+            b.run(5.0)
+            b.sim.power_cycle(b.t)
+            self.assertEqual(b.send("M114").lines[0],
+                             "X:0.00 Y:0.00 Z:0.00 A:720.00 B:720.00 Count X:0 Y:0 Z:0 A:3197 B:3197")
+            st = b.sim.state(b.t)
+            self.assertFalse(st["halted"])
+            self.assertEqual(st["fans"], [0, 0, 0, 0])
 
     def test_kill_messages_knob(self):
-        b, t0 = self._home_then_stop(kill_messages=True)
-        b.run(5.0)
-        lines = [(round(t - t0, 3), l) for t, l in b.rx if t > t0]
-        self.assertEqual(lines, [(2.0, "echo:busy: processing"), (4.0, "echo:busy: processing"),
-                                 (5.0, "echo:Homing Failed"), (5.0, "Error:Printer halted. kill() called!")])
+        with within(self, 5):
+            b, t0 = self._home_then_stop(kill_messages=True)
+            b.run(5.0)
+            lines = [(round(t - t0, 3), l) for t, l in b.rx if t > t0]
+            self.assertEqual(lines, [(2.0, "echo:busy: processing"), (4.0, "echo:busy: processing"),
+                                     (5.0, "echo:Homing Failed"), (5.0, "Error:Printer halted. kill() called!")])
 
     def test_a_stop_after_the_home_ended_is_a_plain_quick_stop(self):
         """Review round 3: from the start of serial.log line 168535 the board's G28 acks after 5.25 s, so the web STOP
@@ -141,14 +146,15 @@ class StockStopDuringHoming(unittest.TestCase):
                                  "ok", "ok"])
 
     def test_m112_kills_on_read(self):
-        b = Bench()
-        b.send("G1 X100 F600")
-        b.write("M112\n")
-        b.run(2.0)
-        st = b.sim.state(b.t)
-        self.assertTrue(st["halted"])
-        self.assertEqual(st["halt_reason"], "M112 Shutdown")
-        self.assertFalse(any(st["enabled"].values()))
+        with within(self, 5):
+            b = Bench()
+            b.send("G1 X100 F600")
+            b.write("M112\n")
+            b.run(2.0)
+            st = b.sim.state(b.t)
+            self.assertTrue(st["halted"])
+            self.assertEqual(st["halt_reason"], "M112 Shutdown")
+            self.assertFalse(any(st["enabled"].values()))
 
 
 def head_x(b):
@@ -168,15 +174,16 @@ class KillAndPowerMidMove(unittest.TestCase):
         return b
 
     def test_stock_m112_mid_move_runs_0_6_s_more_then_stops_with_fans_as_they_were(self):
-        b = self.moving()
-        x_kill = head_x(b)
-        self.assertGreater(x_kill, 50.0)
-        b.write("M112\n")
-        b.run(3.0)
-        self.assertAlmostEqual(head_x(b) - x_kill, 6.0, delta=0.01)  # minkill(): 0.6 s at 10 mm/s
-        st = b.sim.state(b.t)
-        self.assertTrue(st["halted"])
-        self.assertEqual(st["fans"], [255, 180, 255, 255])
+        with within(self, 5):
+            b = self.moving()
+            x_kill = head_x(b)
+            self.assertGreater(x_kill, 50.0)
+            b.write("M112\n")
+            b.run(3.0)
+            self.assertAlmostEqual(head_x(b) - x_kill, 6.0, delta=0.01)  # minkill(): 0.6 s at 10 mm/s
+            st = b.sim.state(b.t)
+            self.assertTrue(st["halted"])
+            self.assertEqual(st["fans"], [255, 180, 255, 255])
 
     def test_power_cycle_mid_move_leaves_the_head_where_it_is(self):
         b = self.moving()

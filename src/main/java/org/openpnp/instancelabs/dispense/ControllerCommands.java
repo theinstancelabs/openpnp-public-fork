@@ -35,7 +35,8 @@ import java.util.regex.Pattern;
  * <p>{@link #checkProbe(String)} is the narrower gate of the N1 vacuum probe only (bench probe.py):
  * {@link #check(String)}, or one of the exact N1 vacuum and VAC1 sensor lines. M260 can write any I2C
  * address, so only these texts pass; {@link #check(String)} still refuses all of them, so neither a
- * dispense stream nor the pressure hold can switch N1's vacuum or write I2C.</p>
+ * dispense stream nor the pressure hold can switch N1's vacuum or write I2C. The height switch's measure
+ * (BR-94) goes through the same gate: its pull-up and read on PA5 pass it, exactly; M42 can drive any pin.</p>
  */
 public final class ControllerCommands {
     private ControllerCommands() {
@@ -68,6 +69,9 @@ public final class ControllerCommands {
             "M260 A109 B6 S1"));
     /** Reads 3 bytes of the VAC1 sensor (24-bit two's complement, big-endian, in the {@code data:} reply). */
     public static final String VAC1_READ = "M261 A109 B3 S1";
+    /** BR-94: the bed's height switch on PA5, its pull-up and its read ({@link HeightSwitch}): the probe only. */
+    public static final String HEIGHT_SWITCH_PULL_UP = "M42 P" + HeightSwitch.M42_PIN + " T2";
+    public static final String HEIGHT_SWITCH_READ = "M43 P" + HeightSwitch.M43_PIN;
 
     private static final Set<String> OUTPUT_ON = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(PUMP_ON, VALVE_ON)));
@@ -86,11 +90,12 @@ public final class ControllerCommands {
 
     /** {@link #stopSequence} for the B axis. */
     public static final List<String> STOP_SEQUENCE = stopSequence("B");
-    /** The lines only the probe may send: 2 outputs, 6 distinct M260 and 1 M261. */
+    /** The lines only the probe may send: 2 outputs, 6 distinct M260, 1 M261 and the height switch's 2. */
     private static final Set<String> PROBE_LINES;
 
     static {
-        Set<String> l = new HashSet<>(Arrays.asList(LEFT_PUMP_ON, LEFT_VALVE_ON, VAC1_READ));
+        Set<String> l = new HashSet<>(Arrays.asList(LEFT_PUMP_ON, LEFT_VALVE_ON, VAC1_READ, HEIGHT_SWITCH_PULL_UP,
+                HEIGHT_SWITCH_READ));
         l.addAll(VAC1_INIT);
         l.addAll(VAC1_SELECT);
         PROBE_LINES = Collections.unmodifiableSet(l);
@@ -291,7 +296,9 @@ public final class ControllerCommands {
         }
     }
 
-    /** True for the exact N1 vacuum and VAC1 lines of the probe (which {@link #check(String)} refuses). */
+    /**
+     * True for the exact N1 vacuum, VAC1 and height-switch lines of the probe (which {@link #check(String)} refuses).
+     */
     public static boolean isProbeLine(String line) {
         return PROBE_LINES.contains(normalize(line));
     }
@@ -299,7 +306,8 @@ public final class ControllerCommands {
     /**
      * The gate of the N1 vacuum probe: {@link #check(String)}, or one of the exact probe lines
      * ({@link #LEFT_PUMP_ON}, {@link #LEFT_VALVE_ON}, {@link #VAC1_INIT}, {@link #VAC1_SELECT},
-     * {@link #VAC1_READ}). Why the line may not be sent, or null if it may.
+     * {@link #VAC1_READ}, {@link #HEIGHT_SWITCH_PULL_UP}, {@link #HEIGHT_SWITCH_READ}). Why the line may not be
+     * sent, or null if it may.
      */
     public static String checkProbe(String line) {
         String why = check(line);
