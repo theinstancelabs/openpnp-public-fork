@@ -259,7 +259,8 @@
       p && p.summary ? IL.plural(p.summary.pads, 'pad') + ' to paste' : null, last].filter(Boolean).map((t) => el('span', { text: t })));
     const list = entries();
     IL.keyed(n.designs, JSON.stringify([list.map((x) => [x.key, x.name, x.x.art && x.x.art.id]), R.form.sel, !!p, [...F.thumbs.keys()].length, R.boardsErr, !R.boards]), () => {
-      if (R.boardsErr) return el('p', { class: 'notebox notebox--block', text: 'The boards could not be read: ' + R.boardsErr });
+      // a read again on entering Run that fails keeps the list it has (the next entry reads it again)
+      if (R.boardsErr && !R.boards) return el('p', { class: 'notebox notebox--block', text: 'The boards could not be read: ' + R.boardsErr });
       if (!R.boards) return el('p', { class: 'muted', text: 'Reading the boards…' });
       const cards = list.map((x) => {
         const on = x.key === R.form.sel;
@@ -270,7 +271,8 @@
         b.addEventListener('click', () => choose(x, b));
         return b;
       });
-      return cards.concat(el('a', { class: 'design design--new', id: 'rs-new-design', href: '#designs' }, IL.icon('i-plus'), 'New design'));
+      const note = R.boardsErr ? [el('p', { class: 'reason reason--need rf-note', text: 'Could not read the designs again, so these are the ones from before. ' + R.boardsErr })] : [];
+      return note.concat(cards, el('a', { class: 'design design--new', id: 'rs-new-design', href: '#designs' }, IL.icon('i-plus'), 'New design'));
     });
     // Load side 1
     const seat = seatOf(e);
@@ -429,6 +431,9 @@
         });
         return { key, input, lab, row: el('label', { class: 'check' }, input, lab) };
       });
+      // the gauge is read with the pump on and the valve closed (BR-03's pump only: nothing moves); before BR-03, Pressure on
+      n.pump = IL.fixButton({ fix: 'pressure-pump', label: 'Pump on to adjust', icon: 'i-gauge', title: 'Switches the pump on with the valve closed, so the gauge shows the feed pressure. Nothing moves; nothing comes out.' }, { cls: 'btn--sm' });
+      n.pump.id = 'rs-pump';
       n.pressure = IL.fixButton({ fix: 'pressure-on', label: 'Pressure on to adjust', icon: 'i-gauge', title: 'Pressure on to read the gauge (press twice unless the needle is over the waste)' }, { cls: 'btn--sm' });
       n.pressure.id = 'rs-pressure';
       if (!F.chain) F.wiped = false;   // the box starts unticked, except under Start's own chain (it sends it)
@@ -442,7 +447,7 @@
         el('label', { class: 'check' }, n.wiped, n.wipedLab));
       n.sess = el('div', { class: 'sess', id: 'rs-session' },
         el('div', { class: 'sess__h' }, n.sessGlyph, el('div', {}, 'Before you start', n.sessSub)),
-        n.ticks[0].row, n.ticks[1].row, el('div', { class: 'rf-gauge' }, n.ticks[2].row, n.pressure), n.wipeRow);
+        n.ticks[0].row, n.ticks[1].row, el('div', { class: 'rf-gauge' }, n.ticks[2].row, n.pump, n.pressure), n.wipeRow);
       n.cards = el('div', { class: 'rf-cards', id: 'rs-need-cards' });
       n.needs = el('div', { class: 'rf-needs', id: 'rs-needs' }, n.cards, n.refusals);
       n.then = el('ol', { class: 'phases', id: 'rs-then' });
@@ -472,15 +477,18 @@
     IL.setText(n.wipedLab, 'I wiped it: no paste on it now');
     if (n.wiped.checked !== F.wiped) n.wiped.checked = F.wiped;
     for (const x of [n.wiped, n.newBoard].concat(n.ticks.map((t) => t.input))) x.disabled = !!F.chain;
+    IL.show(n.pump, IL.hasPumpOnly(s));
+    IL.show(n.pressure, !IL.hasPumpOnly(s));
     // what needs you first: a run of this plan that was refused (its words), then the checks
     const ref = R.refused && p && IL.planMatches(R.refused.planId) ? R.refused : null;
     const ns = needs();
     const clean = ref && /^I10/.test(String(ref.message || '')) ? IL.ready().items.find((x) => x.key === 'clean' && !x.ready) : null;
     if (clean && !ns.includes(clean)) ns.push(clean);
-    IL.keyed(n.cards, JSON.stringify([ref && [ref.runId, ref.message], ns.map((x) => [x.key, x.state, x.title, x.detail, (x.fixes || []).map((f) => f.fix || f.href || f.view || f.label)])]), () => [
+    IL.keyed(n.cards, JSON.stringify([ref && [ref.runId, ref.message], R.flow.needKey(ns, s)]), () => [
       ref ? el('div', { class: 'ri ri--block', 'data-key': 'refused' }, IL.glyph('block'), el('div', {}, el('div', { class: 'ri__t', text: 'The last run was refused' }),
         el('div', { class: 'ri__d', text: String(ref.message || 'Refused before anything moved.') }))) : null]
       .concat(ns.map((x, i) => R.flow.needCard(x, !ref && i === 0, s))));
+    R.flow.cleanTour(n.cards, s);
     // then, by itself
     const c = F.chain, reg = s && s.run && s.run.label === 'board registration' && s.run.running ? s.run : null;
     const regS = regSeconds(p), est = p ? R.flow.estimate(s) : null;

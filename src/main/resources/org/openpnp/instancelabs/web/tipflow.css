@@ -61,12 +61,26 @@
 .phases li.hand .ph__t, .phases li.notyet .ph__t { color: var(--ink-2); }
 .phases li .ph__d a { color: var(--accent-ink); }
 
-/* Designs and Machine (places.js) */
+/* Designs (designflow.js; mockups `design-upload`, `design-setup`): a card per design, Set up's checklist and picture */
 .designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
 .design { display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--surface); }
 .design__t { font: 700 15px/1.25 var(--font-ui); }
 .design__s { font-size: 13px; color: var(--ink-2); }
+a.design { color: var(--ink); text-decoration: none; min-width: 0; }
+a.design:hover { border-color: var(--accent); }
+#designs-list .design__img { height: 120px; margin-bottom: 4px; border-radius: 8px; background: var(--pv-bg, var(--sunken)); display: grid; place-items: center; overflow: hidden; }
+#designs-list .design__img img { max-width: 92%; max-height: 92%; display: block; }
+#designs-list .design__s { display: flex; align-items: center; gap: 6px; }
+.design-row > .card:first-child { flex: 1.5; }
+.design-todo { margin-left: auto; font: 650 14px/1.2 var(--font-ui); color: var(--need); white-space: nowrap; }
+.design-todo--ok { color: var(--ok); }
+#design-steps .rstep__t, #design-steps .rstep__d { overflow-wrap: anywhere; }
+.design-pic { height: 220px; border-radius: 10px; overflow: hidden; background: var(--pv-bg); border: 1px solid var(--line); }
+.design-cap { font-size: 13px; color: var(--ink-2); line-height: 1.4; margin-top: 8px; }
+#panel .design-cap { margin: 0; }
 .place-more { margin-top: 12px; }
+
+/* Machine (places.js) */
 .place-links { display: flex; flex-direction: column; gap: 8px; }
 .place-link { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-decoration: none; }
 .place-link:hover { border-color: var(--accent); }

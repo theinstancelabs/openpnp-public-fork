@@ -700,6 +700,11 @@
     out.cam = all.find((t) => t.kind === 'camera') || null;
     return out;
   };
+  /** A cup, as the engine reads a place's name (OutputZones.CUP): "cup" or "scale" as a part of it ("cup2", "scale-1"; not "cupboard"). */
+  IL.isCupPlace = (name) => /(^|[-_])(cup|scale)([-_0-9]|$)/i.test(String(name || ''));
+  /** A place where paste may go with nothing under it (OutputZones.isSinkPlace): the waste, the towel or a cup. */
+  IL.isSinkPlace = (name, d) => !!name && (String(name).toLowerCase() === String((d && d.wasteLocationName) || 'waste').toLowerCase()
+    || /^towel$/i.test(name) || IL.isCupPlace(name));
   /** mm from the dispenser needle (N2) to the waste place in X/Y, or null if either is unknown. */
   IL.wasteDistance = function (status) {
     const s = status || S.status;
@@ -1287,7 +1292,9 @@
     } else {
       add({ key: 'regulator', code: 'I6', title: 'Regulator', state: 'need', value: 'read gauge', short: 'read gauge',
         detail: 'Set the regulator to ' + psi + ' psi for profile ' + (prof.name || '') + ' (no sensor).',
-        fixes: [{ view: 'pressure', label: 'Pressure on to read the gauge' }, { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
+        // BR-03's pump only (I12): the valve stays closed and nothing moves; before it, the Pressure panel
+        fixes: [IL.hasPumpOnly(s) ? { fix: 'pressure-pump', label: 'Pump on to read the gauge' } : { view: 'pressure', label: 'Pressure on to read the gauge' },
+          { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
     }
 
     // 5 Pad types (PLAN); with the profile check, padprofile.js words it (PROFILE_CALIBRATION_DESIGN.md §13.2, H-P1)
@@ -3172,10 +3179,12 @@
     run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status)),
     ok: (r) => (r && (r.note || r.lastEvent)) || 'Pressure switching on',
   });
-  // BR-03: the pump only, the valve stays closed (read the gauge), anywhere; offered only by a backend with I12
+  // BR-03: the pump only, the valve stays closed (read the gauge), anywhere; only a backend with I12 has it (its own gate:
+  // a backend without it would open the valve wherever the needle is)
   IL.fix('pressure-pump', {
-    gate: (s) => (s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
-      : IL.lockReason(s, { connected: true, engine: true })),
+    gate: (s) => (!IL.hasPumpOnly(s) ? 'This OpenPnP has no pump-only start (I12)'
+      : s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
+        : IL.lockReason(s, { connected: true, engine: true })),
     run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status, true)),
     ok: (r) => (r && (r.note || r.lastEvent)) || 'Pump on, valve closed: read the gauge',
   });
