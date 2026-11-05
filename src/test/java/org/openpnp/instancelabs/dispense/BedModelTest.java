@@ -99,7 +99,7 @@ public class BedModelTest {
     /**
      * The bad files, in one list so lumen-sim's loader can mirror them (Infra): every string an exact JSON string (no
      * trimming, no number taken as text) and null nowhere, a key given a value or left out (design §2 "Strings and
-     * null", 11-05).
+     * null", 11-05), and the rest below.
      */
     static final List<Bad> BAD_FILES = Arrays.asList(
             new Bad("an id with a trailing space", j -> obj(j, 0).addProperty("id", "holder-left "),
@@ -119,7 +119,17 @@ public class BedModelTest {
                     "tools[1].layers[1].bottomZ is null"),
             new Bad("topZ null", j -> obj(j, 0).add("topZ", JsonNull.INSTANCE), "objects[0].topZ is null"),
             new Bad("restRaw null", j -> j.getAsJsonObject("seesaw").add("restRaw", JsonNull.INSTANCE),
-                    "seesaw.restRaw is null"));
+                    "seesaw.restRaw is null"),
+            // N1 and the needle each have their tip: a tip-end layer with aboveTipMm 0 (review 2 MINOR 5)
+            new Bad("N1 without its tip layer", j -> {
+                JsonArray holderOnly = new JsonArray();
+                holderOnly.add(layer(j, 0, 1));
+                tool(j, 0).add("layers", holderOnly);
+            }, "tools[0] (n1): a tool on the see-saw needs its tip"),
+            new Bad("the needle's tip layer above its tip", j -> layer(j, 1, 0).addProperty("aboveTipMm", 0.5),
+                    "tools[1] (needle): a tool on the see-saw needs its tip"),
+            new Bad("the needle's tip layer at the head", j -> layer(j, 1, 0).addProperty("at", "head"),
+                    "tools[1] (needle): a tool on the see-saw needs its tip"));
 
     /** Each of {@link #BAD_FILES} is refused with its own words; every case is run, the wrong ones listed together. */
     @Test

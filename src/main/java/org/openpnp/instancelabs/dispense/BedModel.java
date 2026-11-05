@@ -516,6 +516,7 @@ public final class BedModel {
         }
         List<Layer> layers = new ArrayList<>();
         Set<String> names = new HashSet<>();
+        boolean tipAt0 = false;
         JsonArray ls = array(o, "layers", path);
         if (ls.size() == 0) {
             throw new IllegalArgumentException(path + ": at least one layer");
@@ -552,6 +553,13 @@ public final class BedModel {
             }
             Poly poly = outline(l.get("outline"), lp + ".outline");
             layers.add(new Layer(name, tip, tip ? poly.shifted(dx, dy) : poly, above, bottom));
+            tipAt0 |= tip && above != null && above == 0;
+        }
+        if (rides && !tipAt0) {
+            // else its lowest layer could be a hub 12 mm up, and a plunge of the tip into a blank would pass (review 2
+            // MINOR 5; lumen-sim's loader the same)
+            throw new IllegalArgumentException(path + ": a tool on the see-saw needs its tip: a tip-end layer with "
+                    + "aboveTipMm 0");
         }
         return new Tool(id, moves, dx, dy, tipAt, Collections.unmodifiableList(layers));
     }
