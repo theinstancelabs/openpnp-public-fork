@@ -246,7 +246,7 @@ public final class OutputZones {
         if (f != null) {
             return "forbidden: " + f.name;
         }
-        String b = onBoard(x, y);
+        String b = boards.on(x, y, boardMarginMm);
         if (b != null) {
             return "board: " + b;
         }
@@ -287,7 +287,8 @@ public final class OutputZones {
         if (b != null) {
             Zone a = first(allow, x, y);
             String place = a != null && a.sink ? a.label : "it";
-            return at + "on " + b + ", where only the board's own run puts paste: set " + place + " again off the board";
+            return at + "on " + b + ", where only the board's own run puts paste: set " + place + " again off the "
+                    + "board";
         }
         return first(allow, x, y) != null ? null : at + why(x, y);
     }
@@ -335,7 +336,7 @@ public final class OutputZones {
         if (f != null) {
             return "over " + f.label + ", where the valve and the screw stay off";
         }
-        String b = onBoard(x, y);
+        String b = boards.on(x, y, boardMarginMm); // the hold has no own dots: a board run's are its program's
         if (b != null) {
             return "on " + b;
         }
@@ -350,7 +351,10 @@ public final class OutputZones {
                 + "pressure is held (the waste, the towel, a cup, the purge row, the calibration area or a coupon)";
     }
 
-    /** The board (x, y) lies on within the margin (BR-81), or null: also for a board run's own planned dot. */
+    /**
+     * BR-81: the board a program's paste at (x, y) lies on within the margin; null off the boards and at the program's
+     * own planned dots.
+     */
     private String onBoard(double x, double y) {
         String b = boards.on(x, y, boardMarginMm);
         if (b != null) {
