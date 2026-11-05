@@ -3,6 +3,7 @@ package org.openpnp.instancelabs.api;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,12 +19,17 @@ import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.FlatVacuum;
 import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
 import org.openpnp.machine.reference.camera.ImageCamera;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.spi.Camera;
+import org.openpnp.spi.Machine;
+import org.openpnp.spi.MachineListener;
+import org.openpnp.spi.base.AbstractHeadMountable;
+import org.openpnp.spi.base.AbstractNozzle;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -188,13 +194,17 @@ public class ControlApiSimTest {
         refused(409, "Home first", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
     }
 
-    /** The needle's frame as the bench has it (ApiServerSimTest.setPlaces): contact over a 5.5 surface at Z 2.91. */
+    /**
+     * The needle's frame as the bench has it (ApiServerSimTest.setPlaces): contact over a 5.5 surface at Z 2.91, and
+     * where its tip lands checked (on N2).
+     */
     void needleFrameAndBlank() throws Exception {
         ok(call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}",
                 UI));
         ok(call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}", UI));
         ok(call("PUT", "/api/surfaces/blank", "{\"points\":[[60,30,5.5],[200,30,5.5],[60,50,5.5],[200,50,5.5]]}",
                 UI));
+        landing(0);
     }
 
     /**
@@ -249,6 +259,34 @@ public class ControlApiSimTest {
     }
 
     /**
+     * BR-94 follow-up review (MAJOR 1, safety): with no lower safe zone on Z (OpenPnP's axis setting) X/Y skipped the
+     * travel-height rule: N1, 4 mm low beside the height switch, was moved into its circle (the needle with its frame
+     * too). With no travel height no X/Y press goes (OpenPnP refuses a move-to then itself).
+     */
+    @Test
+    public void withoutASafeZoneOnZNoToolMovesInXOrY() throws Exception {
+        needleFrameAndBlank();
+        ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        ReferenceControllerAxis axis = (ReferenceControllerAxis) ((AbstractHeadMountable) sim.n1).getAxisZ();
+        for (String tool : new String[] {"n1", "needle"}) {
+            axis.setSafeZoneLowEnabled(true);
+            ok(call("POST", "/api/move-to", "{\"tool\":\"" + tool + "\",\"x\":115,\"y\":100}", UI));
+            axis.setSafeZoneLowEnabled(false);
+            // 4 mm down 15 mm from the switch: no surface there, outside its circle
+            ok(call("POST", "/api/jog", "{\"tool\":\"" + tool + "\",\"dz\":-2}", UI));
+            ok(call("POST", "/api/jog", "{\"tool\":\"" + tool + "\",\"dz\":-2}", UI));
+            double x = loc(sim.n1).getX();
+            refused(409, "Z has no lower safe zone in OpenPnP (the Z axis's Safe Zone): X and Y move only at travel "
+                    + "height", call("POST", "/api/jog", "{\"tool\":\"" + tool + "\",\"dx\":-10}", UI));
+            assertEquals(x, loc(sim.n1).getX(), 1e-6, tool + ": nothing moved");
+            // nor a move-to into the switch's circle (review MINOR: OpenPnP's nozzle refuses it, no test held that)
+            refused(409, "Safe Zone", call("POST", "/api/move-to", "{\"tool\":\"" + tool + "\",\"x\":100,\"y\":100}",
+                    UI));
+            assertEquals(x, loc(sim.n1).getX(), 1e-6, tool + ": no move-to");
+        }
+    }
+
+    /**
      * BR-94: over the height switch (its place's circle) neither tool goes below its safe zone, also through the
      * see-saw, whatever its floor would allow (only the measure presses the switch); up is allowed; below its zone a
      * tool moves no X/Y at all, so never into the circle.
@@ -271,6 +309,36 @@ public class ControlApiSimTest {
         ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":130,\"y\":100}", UI));
         ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
         refused(409, "travel height", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dx\":-10}", UI));
+    }
+
+    /**
+     * BR-94 follow-up: with no lower safe zone on Z (OpenPnP's axis setting) a press over the height switch is still
+     * refused, not let through to the floor: only its measure presses it. N1's press, the needle's, and through the
+     * see-saw (review NIT: it covered N1's own press only).
+     */
+    @Test
+    public void overTheHeightSwitchWithoutASafeZoneOnZNoToolGoesDown() throws Exception {
+        needleFrameAndBlank(); // the needle's floor is its frame's then, far below the switch's top
+        ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        ReferenceControllerAxis axis = (ReferenceControllerAxis) ((AbstractHeadMountable) sim.n1).getAxisZ();
+        ok(call("POST", "/api/move-to", "{\"tool\":\"n1\",\"place\":\"height-switch\"}", UI));
+        axis.setSafeZoneLowEnabled(false);
+        double z = loc(sim.n1).getZ();
+        Res r = call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-1}", UI);
+        refused(409, "over the height switch", r);
+        assertTrue(r.body.contains("no lower safe zone on Z"), r.toString());
+        Res seeSaw = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":1}", UI); // lowers N1
+        refused(409, "over the height switch", seeSaw);
+        assertTrue(seeSaw.body.contains("N1 at Z") && seeSaw.body.contains("share one Z"), seeSaw.toString());
+        assertEquals(z, loc(sim.n1).getZ(), 1e-6, "nothing moved");
+        axis.setSafeZoneLowEnabled(true);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"place\":\"height-switch\"}", UI));
+        axis.setSafeZoneLowEnabled(false);
+        z = loc(sim.n2).getZ();
+        r = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI);
+        refused(409, "over the height switch", r);
+        assertTrue(r.body.contains("the needle at Z") && r.body.contains("no lower safe zone on Z"), r.toString());
+        assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
     }
 
     /**
@@ -347,6 +415,253 @@ public class ControlApiSimTest {
         l.setAtMs = System.currentTimeMillis();
         c.needleLanding = l;
         svc.updateConfig(c);
+    }
+
+    /**
+     * BR-94 follow-up MINOR 1: the engine gone between the route's start and the floor check (a configuration load
+     * restarts it) took the needle for N1: a press with no floor and no switch check. Refused, nothing moved.
+     */
+    @Test
+    public void aZPressWithTheEngineGoneMidRouteIsRefused() throws Exception {
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        double z = loc(sim.n2).getZ();
+        Field instance = DispenseService.class.getDeclaredField("instance");
+        instance.setAccessible(true);
+        // OpenPnP fires busy on its machine thread just before the press's task runs: the engine goes there
+        MachineListener gone = new MachineListener.Adapter() {
+            @Override
+            public void machineBusy(Machine m, boolean busy) {
+                try {
+                    if (busy) {
+                        instance.set(null, null);
+                    }
+                }
+                catch (IllegalAccessException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+        sim.machine.addListener(gone);
+        try {
+            refused(409, "the dispense engine is not running", call("POST", "/api/jog",
+                    "{\"tool\":\"needle\",\"dz\":-1}", UI));
+        }
+        finally {
+            sim.machine.removeListener(gone);
+            instance.set(null, svc);
+        }
+        assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+    }
+
+    /**
+     * BR-94 follow-up MINOR 2: where the tip lands is the landing in effect, which a needle change keeps (and a change
+     * of N2's head offset makes 0, 0) until a landing check, while a bent tip lands up to 15 mm away. With the frame
+     * recorded again but the landing not checked, the needle's floor is its safe zone.
+     */
+    @Test
+    public void withItsLandingNotCheckedTheNeedleStaysInItsSafeZone() throws Exception {
+        needleFrameAndBlank();
+        ok(call("POST", "/api/needle/changed", "{}", UI));
+        long t = svc.getConfig().needleChangedAtMs;
+        // the new needle's frame recorded again (K is refused after a needle change: both tips on the same spot)
+        ok(call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":" + t
+                + ",\"surfaceZ\":5.5,\"needleContactZ\":2.91}", UI));
+        ok(call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":" + t + ",\"offsetMm\":-2.59}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        double z = loc(sim.n2).getZ();
+        // review NIT: the engine's own words, which say what to do
+        refused(409, "(its safe zone: the ", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        // its sentence's period dropped inside the brackets (review NIT: "…(Setup › Dispenser & tip).)")
+        refused(409, "where it lands has not been checked: check where it lands (Setup › Dispenser & tip))",
+                call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+        landing(0); // checked: the surface's floor (2.91) again
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        // N2's head offset changed since: the way back is named too
+        Location ho = sim.n2.getHeadOffsets();
+        sim.n2.setHeadOffsets(ho.add(new Location(ho.getUnits(), 1, 0, 0, 0)));
+        refused(409, "set it back, or check where it lands", call("POST", "/api/jog",
+                "{\"tool\":\"needle\",\"dz\":-0.1}", UI));
+    }
+
+    /**
+     * BR-94 follow-up review (MAJOR, safety): the engine up but one of its nozzles not found (N2 renamed in OpenPnP, or
+     * {@code nozzle} in dispense-config.json not matching) was left out of the floors: an N1 press up lowered the
+     * needle with no floor, no switch circle, no safe zone (and the mirror). Refused naming it, nothing moved; X/Y then
+     * checks every nozzle of the head, each by its own name.
+     */
+    @Test
+    public void withOneOfItsNozzlesNotFoundTheEngineRefusesEveryZPress() throws Exception {
+        needleFrameAndBlank();
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI)); // the needle below its safe zone
+        DispenseConfig c = svc.getConfig();
+        c.nozzle = "N9";
+        svc.updateConfig(c);
+        double n2 = loc(sim.n2).getZ();
+        Res up = call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI);
+        refused(409, "has not found the needle (no dispenser nozzle 'N9' in the machine)", up);
+        assertTrue(up.body.contains("name it back in OpenPnP, or set 'nozzle' in the settings"), up.toString());
+        assertEquals(n2, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+        refused(409, "N2 is below its safe zone", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1}", UI));
+        refused(503, "the dispenser is unavailable: no dispenser nozzle 'N9'", call("POST", "/api/jog",
+                "{\"tool\":\"needle\",\"dz\":1}", UI));
+        // the mirror: N1 renamed in OpenPnP (the SIM's N1 has the id N1 too)
+        c = svc.getConfig();
+        c.nozzle = "N2";
+        svc.updateConfig(c);
+        sim.n1.setName("P1");
+        Field id = AbstractNozzle.class.getDeclaredField("id");
+        id.setAccessible(true);
+        id.set(sim.n1, "P1");
+        double n1 = loc(sim.n1).getZ();
+        Res down = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":1}", UI);
+        refused(409, "has not found N1 (no nozzle named 'N1' in OpenPnP)", down);
+        assertTrue(down.body.contains("name it back in OpenPnP"), down.toString());
+        assertEquals(n1, loc(sim.n1).getZ(), 1e-6, "nothing moved");
+        // a press of N1 itself: 503, as for the needle (review MINOR: the doc had it under 409)
+        refused(503, "this machine has no N1", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
+    }
+
+    /**
+     * BR-94 follow-up review (MAJOR 2, safety): the needle resolved to N1 itself (`nozzle` "N1" in the settings, or N1
+     * named "N2" in OpenPnP with N2 named otherwise): both floors tested N1, and six N1 presses up put the real N2 2 mm
+     * below its safe zone. The engine never takes N1 for the needle: it has not found the needle, and every check
+     * applies; PUT /api/config refuses that {@code nozzle}.
+     */
+    @Test
+    public void theEngineNeverTakesN1ForTheNeedle() throws Exception {
+        ok(call("POST", "/api/move-to", "{\"tool\":\"n1\",\"x\":100,\"y\":40}", UI));
+        refused(400, "'N1' is N1, the probe nozzle", call("PUT", "/api/config", "{\"nozzle\":\"N1\"}", UI));
+        // nor none (it was saved, and the engine failed on it: 500, and at its next start)
+        refused(400, "nozzle must be", call("PUT", "/api/config", "{\"nozzle\":null}", UI));
+        assertEquals("N2", svc.getConfig().nozzle, "not saved");
+        double n2 = loc(sim.n2).getZ();
+        // the settings file says so (a hand edit), or the names are swapped in OpenPnP (N1 keeps its id N1)
+        for (boolean swapped : new boolean[] {false, true}) {
+            DispenseConfig c = svc.getConfig();
+            c.nozzle = swapped ? "N2" : "N1";
+            if (swapped) {
+                sim.n1.setName("N2");
+                sim.n2.setName("N1");
+            }
+            svc.updateConfig(c);
+            assertEquals(null, svc.getDispenserNozzle(), "the needle is not N1");
+            // unchanged it goes (the full settings editor sends every setting back): only a changed one is refused
+            ok(call("PUT", "/api/config", "{\"nozzle\":\"" + c.nozzle + "\"}", UI));
+            refused(409, "has not found the needle (the settings' nozzle '" + c.nozzle + "' is N1, the probe nozzle)",
+                    call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":2}", UI));
+            assertEquals(n2, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+        }
+    }
+
+    /**
+     * Review NIT: a hand-edited {@code "nozzle": null} in the settings file failed the engine at its start (a
+     * NullPointerException: "failed", and PUT /api/config answered 503, so the API could not set it). It starts without
+     * the needle and says why; PUT /api/config sets it.
+     */
+    @Test
+    public void withNoNozzleInTheSettingsFileTheEngineStartsAndTheApiSetsIt() throws Exception {
+        DispenseConfig c = svc.getConfig();
+        c.nozzle = null;
+        c.save(svc.getConfigDir()); // the hand edit: saved as it is
+        svc = DispenseService.start(Configuration.get());
+        assertEquals("'nozzle' is not set in the settings", svc.getUnavailableReason());
+        refused(409, "has not found the needle ('nozzle' is not set in the settings)", call("POST", "/api/jog",
+                "{\"tool\":\"n1\",\"dz\":1}", UI));
+        ok(call("PUT", "/api/config", "{\"nozzle\":\"N2\"}", UI));
+        assertTrue(svc.getDispenserNozzle() == sim.n2, "the needle: " + svc.getDispenserNozzle());
+    }
+
+    /**
+     * MAJOR 2, by id: N1's id "N2" made {@code nozzle} "N2" find N1 (ids come first). The needle is N2 (by its name)
+     * and its floor holds for an N1 press up: its safe zone.
+     */
+    @Test
+    public void withN1sIdTheSettingsNozzleTheNeedleIsStillN2() throws Exception {
+        ok(call("POST", "/api/move-to", "{\"tool\":\"n1\",\"x\":100,\"y\":40}", UI));
+        Field id = AbstractNozzle.class.getDeclaredField("id");
+        id.setAccessible(true);
+        id.set(sim.n1, "N2");
+        svc.updateConfig(svc.getConfig());
+        assertTrue(svc.getDispenserNozzle() == sim.n2, "the needle: " + svc.getDispenserNozzle());
+        for (int i = 0; i < 5; i++) { // the needle down 2 mm a press, from 36.5 to its safe zone's bottom (26.5)
+            ok(call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":2}", UI));
+        }
+        double n2 = loc(sim.n2).getZ();
+        Res up = call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":2}", UI);
+        refused(409, "the needle at Z 24.50", up);
+        assertTrue(up.body.contains("share one Z"), up.toString());
+        assertEquals(n2, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+    }
+
+    /**
+     * MAJOR 2's backstop: renamed in OpenPnP after the engine found them (N1 "P1", N2 "N1"), N1 and the needle are one
+     * nozzle: no Z press, and X/Y checks every nozzle of the head (it checked N2 twice and N1 never).
+     */
+    @Test
+    public void withN1AndTheNeedleOneNozzleNoZPressAndXyChecksEveryNozzle() throws Exception {
+        ok(call("POST", "/api/move-to", "{\"tool\":\"n1\",\"x\":100,\"y\":40}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-2}", UI)); // N1 below its safe zone
+        Field id = AbstractNozzle.class.getDeclaredField("id");
+        id.setAccessible(true);
+        id.set(sim.n1, "P1");
+        sim.n1.setName("P1");
+        sim.n2.setName("N1");
+        assertTrue(svc.getProbeNozzle() == svc.getDispenserNozzle(), "one nozzle for both");
+        double n1 = loc(sim.n1).getZ();
+        Res r = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":2}", UI);
+        refused(409, "the needle the engine found is now named N1 in OpenPnP: ", r);
+        // review NIT: not the settings (they named N2), and a new 'nozzle' ("P1") would take the vacuum nozzle
+        assertTrue(r.body.contains("name them back in OpenPnP") && !r.body.contains("'nozzle'"), r.toString());
+        assertEquals(n1, loc(sim.n1).getZ(), 1e-6, "nothing moved");
+        refused(409, "P1 is below its safe zone", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dx\":1}", UI));
+    }
+
+    /**
+     * Review NITs: with the engine down, N1 and the needle answer as the doc says (503, the engine is not running; it
+     * said "this machine has no N1"), and a low nozzle is named by its own name (any was "N1": with the needle low,
+     * "N1 is below its safe zone: raise it first", and raising N1 lowers the needle).
+     */
+    @Test
+    public void withTheEngineDownTheToolsSaySoAndALowNozzleIsNamed() throws Exception {
+        needleFrameAndBlank();
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI)); // the needle below its safe zone
+        ImageCamera top = new ImageCamera();
+        top.setName("Top");
+        top.setLooking(Camera.Looking.Down);
+        sim.machine.getDefaultHead().addCamera(top);
+        Field instance = DispenseService.class.getDeclaredField("instance");
+        instance.setAccessible(true);
+        instance.set(null, null);
+        try {
+            refused(409, "N2 is below its safe zone", call("POST", "/api/jog", "{\"tool\":\"camera\",\"dx\":1}", UI));
+            refused(503, "the dispense engine is not running", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}",
+                    UI));
+            refused(503, "the dispense engine is not running", call("POST", "/api/move-to",
+                    "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        }
+        finally {
+            instance.set(null, svc);
+        }
+    }
+
+    /**
+     * Review NIT: the needle's floor without its frame is its safe zone; with no lower safe zone on Z (OpenPnP's axis
+     * setting) that was NaN, no floor at all. Refused, also through the see-saw, nothing moved; up still goes.
+     */
+    @Test
+    public void withoutASafeZoneOnZTheNeedleWithoutItsFrameGoesNoLower() throws Exception {
+        ok(call("POST", "/api/needle/changed", "{}", UI)); // its frame stale: its floor is its safe zone
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        ((ReferenceControllerAxis) ((AbstractHeadMountable) sim.n1).getAxisZ()).setSafeZoneLowEnabled(false);
+        assertEquals(null, sim.n2.getSafeZ(), "no lower end of the needle's safe zone");
+        double z = loc(sim.n2).getZ();
+        refused(409, "the needle has no floor", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI));
+        refused(409, "the needle has no floor", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
+        assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":1}", UI));
     }
 
     /** #19 review of BR-49, MINOR 7: a real unhomed state (STOP, then Start), not a faked flag. */

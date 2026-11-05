@@ -1064,9 +1064,10 @@ public final class DispenseService {
     }
 
     /**
-     * Finds the dispenser nozzle. Each field is written once, the reason before a null nozzle: every config update
-     * resolves again, and a transient null made concurrent readers (the status's interlocks, availability) fail with a
-     * NullPointerException or "unavailable (null)".
+     * Finds the dispenser nozzle, never N1, the probe nozzle (BR-94 follow-up review, MAJOR 2: taken for both, the
+     * floors tested N1 twice and the real N2 never). Each field is written once, the reason before a null nozzle: every
+     * config update resolves again, and a transient null made concurrent readers (the status's interlocks,
+     * availability) fail with a NullPointerException or "unavailable (null)".
      */
     private void resolveNozzle() {
         Machine machine = configuration.getMachine();
@@ -1075,10 +1076,14 @@ public final class DispenseService {
         if (!(machine instanceof ReferenceMachine)) {
             why = "machine is not a ReferenceMachine";
         }
+        else if (cfg.nozzle == null) { // a hand edit (PUT /api/config refuses none): the engine starts, the API sets it
+            why = "'nozzle' is not set in the settings";
+        }
         else {
+            Nozzle probe = getProbeNozzle();
             for (Head h : machine.getHeads()) {
                 for (Nozzle n : h.getNozzles()) {
-                    if (cfg.nozzle.equals(n.getId())) {
+                    if (cfg.nozzle.equals(n.getId()) && n != probe) {
                         found = n;
                     }
                 }
@@ -1086,14 +1091,15 @@ public final class DispenseService {
             if (found == null) {
                 for (Head h : machine.getHeads()) {
                     for (Nozzle n : h.getNozzles()) {
-                        if (cfg.nozzle.equals(n.getName())) {
+                        if (cfg.nozzle.equals(n.getName()) && n != probe) {
                             found = n;
                         }
                     }
                 }
             }
             if (found == null) {
-                why = "no dispenser nozzle '" + cfg.nozzle + "' in the machine";
+                why = namesProbeNozzle(cfg.nozzle) ? "the settings' nozzle '" + cfg.nozzle + "' is N1, the probe nozzle"
+                        : "no dispenser nozzle '" + cfg.nozzle + "' in the machine";
             }
         }
         if (found == null) {
@@ -3867,6 +3873,12 @@ public final class DispenseService {
             }
         }
         return null;
+    }
+
+    /** {@code key} (the settings' {@code nozzle}) is N1's id or name: the probe nozzle, never the dispenser. */
+    public boolean namesProbeNozzle(String key) {
+        Nozzle p = getProbeNozzle();
+        return p != null && (key.equals(p.getId()) || key.equals(p.getName()));
     }
 
     /**
