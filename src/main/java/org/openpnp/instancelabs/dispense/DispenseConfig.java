@@ -410,6 +410,13 @@ public class DispenseConfig {
         public long atMs;
         /** The home it was measured under ({@link HomeTracker#getLastHomeAtMs()}); null: a home of unknown time. */
         public Long homeAtMs;
+        /** The needle's: N1's trip of the same home + this (raw Z), its later windows' K; null in a trip before it. */
+        public Double kSwitch;
+        /** Which needle (the needle token then) and tip setup. */
+        public Long needleSinceMs;
+        public String setupKey;
+        /** Recorded on its checks and used; marked for review (nothing waits for it). */
+        public boolean forReview;
     }
 
     /**

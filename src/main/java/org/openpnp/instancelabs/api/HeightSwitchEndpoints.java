@@ -13,7 +13,7 @@ import com.google.gson.JsonObject;
 /**
  * BR-94: the bed's height switch on PA5. N1 and the needle press it through the engine ({@link HeightSwitch}); each
  * accepted measure is that tool's trip in this home, and K_switch is their sum. The needle's end from below
- * ({@link NeedleEndMeasure}) is measured here too. Every route is the lock holder's.
+ * ({@link NeedleEndMeasure}) aims it. Every route is the lock holder's.
  */
 final class HeightSwitchEndpoints {
     private final ApiContext ctx;
@@ -29,26 +29,26 @@ final class HeightSwitchEndpoints {
     }
 
     /**
-     * POST /api/height-switch/measure {tool: "n1" | "needle", presses? (1..20, 5), zStart?, zFloor? (raw Z),
-     * tipClean?}: waits for the measure and answers its result; a refused, stopped or failed one answers 409 with its
-     * reason.
+     * POST /api/height-switch/measure {tool: "n1" | "needle", presses? (1..20, 5), zStart?, zFloor? (raw Z)}: waits for
+     * the measure and answers its result; a refused, stopped or failed one answers 409 with its reason, its code (the
+     * needle's end from below: needle-end-not-found, needle-end-paste), next and photoId. A tipClean field is ignored:
+     * the engine checks the tip itself.
      */
     Object measure(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
         String tool = Json.str(b, "tool", null);
         int presses = Json.integer(b, "presses", 5);
         Double zStart = Json.num(b, "zStart", null), zFloor = Json.num(b, "zFloor", null);
-        boolean tipClean = Json.bool(b, "tipClean", false);
         DispenseService svc = ctx.availableSvc();
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
         ctx.requirePositionKnown(svc);
         ctx.tracker.expect("height switch");
-        HeightSwitch.Result res = svc.measureHeightSwitch(tool, presses, zStart, zFloor, tipClean).get(
-                ApiContext.MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+        HeightSwitch.Result res = svc.measureHeightSwitch(tool, presses, zStart, zFloor).get(ApiContext.MAX_WAIT_MS,
+                TimeUnit.MILLISECONDS);
         if (res.refused) {
-            throw ApiException.refused(res.why).with("result", res);
+            throw refusal(res.code, res.why, res.next, res.photoId).with("result", res);
         }
         return res;
     }
@@ -102,9 +102,12 @@ final class HeightSwitchEndpoints {
             why = who + " has no accepted trip on the height switch in this home";
         }
         HeightSwitch.Read last = svc.getLastHeightSwitchRead();
+        HeightSwitch.Window w = svc.needleWindow();
         return Views.map("place", c.location(HeightSwitch.PLACE), "n1", n1, "needle", needle, "kSwitch",
                 why == null ? Double.valueOf(n1.tripRawZ + needle.tripRawZ) : null, "kSwitchWhy", why, "lastRead",
-                last == null ? null : lastRead(last));
+                last == null ? null : lastRead(last), "needleWindow", w.why != null ? null : Views.map("zStart",
+                        w.zStart, "zFloor", w.zFloor, "expectedRawZ", w.expectedRawZ, "from", w.from),
+                "needleWindowWhy", w.why);
     }
 
     private static boolean thisHome(DispenseConfig.HeightSwitchTrip t, Long home) {

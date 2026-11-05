@@ -55,6 +55,13 @@ public final class HeightSwitch {
     /** The needle's measure without {@code heightSwitchMaxPastTripMm}. */
     public static final String NO_MAX_PAST_TRIP = "Process sets how far past the trip the switch may be pressed: "
             + "heightSwitchMaxPastTripMm is not set (PUT /api/config)";
+    /** The needle's measure without N1's trip of this home (the needle's window is K − N1's trip). */
+    public static final String PRESS_N1_FIRST = "press N1 on the switch first: N1 has no accepted trip on the height "
+            + "switch in this home";
+    /** A needle's first window: this far above and past the trip K by parallax expects (mm). */
+    public static final double FIRST_WINDOW_MM = 1.0;
+    /** A later window: 1.0 above ({@link #LIFT_MM}) and this far past the trip its K_switch expects (mm). */
+    public static final double PAST_MM = 0.5;
     /**
      * The needle's accepted trip, or null when it was measured before the needle now on was put on: another tip's trip
      * gives neither a window nor K_switch (#60 review).
@@ -75,6 +82,10 @@ public final class HeightSwitch {
         void send(String line) throws Exception;
 
         List<String> query(String line) throws Exception;
+
+        /** Press {@code n} of {@code of} begins (the task's progress). */
+        default void press(int n, int of) {
+        }
     }
 
     /** One measure: the tool's head position over the switch and the window, all raw controller mm. */
@@ -127,6 +138,69 @@ public final class HeightSwitch {
         /** The engine's: the presses asked for, the home it was measured under, when it ended. */
         public Integer presses;
         public Long homeAtMs, atMs;
+        /** A refusal's code and what it offers (the needle's end from below: needle-end-not-found, needle-end-paste). */
+        public String code, next;
+        /** The refusal's picture (a photo id). */
+        public Long photoId;
+        /** The needle's: its end measured from below in the same task right before the press, the aim, the window. */
+        public DispenseConfig.NeedleEnd needleEnd;
+        public Aim aim;
+        public Window window;
+        /** Which needle (the needle token then) and tip kind; whether it is the tool's trip in use; marked for review. */
+        public Long needleSinceMs;
+        public String setupKey, tipName;
+        public boolean inUse, forReview;
+    }
+
+    /** Where the needle's press aimed: the end at the press height (from the head, mm) and the head's raw X/Y. */
+    public static final class Aim {
+        public double atRawZ, endDxMm, endDyMm, rawX, rawY;
+    }
+
+    /** The needle's window (raw Z) as the engine derives it, or why there is none. */
+    public static final class Window {
+        public Double zStart, zFloor, expectedRawZ;
+        /** kParallax (its first press since a change) or kSwitch (from its last trip). */
+        public String from;
+        public String why;
+    }
+
+    /**
+     * BR-94: the needle's window, from the engine's records only. Its first press since a change (no trip of its own):
+     * (kParallax − N1's trip in this home) ± 1 mm; a later one 1.0 above to 0.5 past (the K_switch of its last trip's
+     * home − N1's trip now). The floor is never more than {@code heightSwitchMaxPastTripMm} past the expected trip.
+     * {@code end}: the needle's end on record now, or null; {@code down}: +1 when the needle goes down as raw Z rises.
+     */
+    public static Window needleWindow(DispenseConfig c, DispenseConfig.NeedleEnd end, Long home, int down) {
+        Window w = new Window();
+        DispenseConfig.HeightSwitchTrip n1 = c.heightSwitch.n1, own = needleTrip(c);
+        if (c.heightSwitchMaxPastTripMm == null) {
+            w.why = NO_MAX_PAST_TRIP;
+            return w;
+        }
+        if (n1 == null || home == null || !home.equals(n1.homeAtMs)) {
+            w.why = PRESS_N1_FIRST;
+            return w;
+        }
+        double above, past;
+        if (own != null && own.kSwitch != null) {
+            w.expectedRawZ = round(own.kSwitch - n1.tripRawZ);
+            w.from = "kSwitch";
+            above = LIFT_MM;
+            past = PAST_MM;
+        }
+        else if (end != null) {
+            w.expectedRawZ = round(end.kParallax - n1.tripRawZ);
+            w.from = "kParallax";
+            above = past = FIRST_WINDOW_MM;
+        }
+        else {
+            w.why = "the needle's first window comes from its end measured from below: the press measures it first";
+            return w;
+        }
+        w.zStart = round(w.expectedRawZ - down * above);
+        w.zFloor = round(w.expectedRawZ + down * Math.min(past, c.heightSwitchMaxPastTripMm));
+        return w;
     }
 
     /** A read of the pin with the machine idle: its level and when, or (level null) why there is none. */
@@ -263,6 +337,7 @@ public final class HeightSwitch {
         }
         double from = p.zStart, floor = p.floor();
         for (int i = 0; i < p.presses; i++) {
+            io.press(i + 1, p.presses);
             Double zc = descend(io, p, from, floor, p.coarseMm, r.idleLevel);
             if (zc == null) {
                 // with a cap the window was the expected trip's: no trip by its floor means the estimate or the aim

@@ -506,6 +506,80 @@ public class HeightSwitchTest {
         assertFalse(nr.refused, nr.why);
     }
 
+    /** A trip of the needle or N1 at raw Z {@code z}, measured under home {@code home} at {@code atMs}. */
+    static DispenseConfig.HeightSwitchTrip trip(double z, long home, long atMs, Double kSwitch) {
+        DispenseConfig.HeightSwitchTrip t = new DispenseConfig.HeightSwitchTrip();
+        t.tripRawZ = z;
+        t.homeAtMs = home;
+        t.atMs = atMs;
+        t.kSwitch = kSwitch;
+        return t;
+    }
+
+    /**
+     * BR-94 needle aim: the engine derives the needle's window from its records only, with Process's pair on the
+     * lever's straight part (11-04 NP-5: N1 23.875 + the needle 41.200 = K 65.075). A first press after a change: K by
+     * parallax − N1's trip of this home ± 1 mm, the floor capped at heightSwitchMaxPastTripMm; a later one: its last
+     * trip's K_switch − N1's trip now (a new home moved N1's by +0.1), 1.0 above and 0.5 past. Without the setting, N1's
+     * trip of this home, or an end: no window, and why.
+     */
+    @Test
+    public void theEngineDerivesTheNeedlesWindowFromItsRecords() {
+        DispenseConfig c = new DispenseConfig();
+        DispenseConfig.NeedleEnd end = new DispenseConfig.NeedleEnd();
+        end.kParallax = 65.075;
+        assertEquals(HeightSwitch.NO_MAX_PAST_TRIP, HeightSwitch.needleWindow(c, end, 100L, 1).why);
+        c.heightSwitchMaxPastTripMm = 0.5;
+        assertEquals(HeightSwitch.PRESS_N1_FIRST, HeightSwitch.needleWindow(c, end, 100L, 1).why, "no N1 trip");
+        c.heightSwitch.n1 = trip(23.875, 99, 1, null);
+        assertEquals(HeightSwitch.PRESS_N1_FIRST, HeightSwitch.needleWindow(c, end, 100L, 1).why, "another home's");
+        c.heightSwitch.n1 = trip(23.875, 100, 1, null);
+        HeightSwitch.Window first = HeightSwitch.needleWindow(c, end, 100L, 1);
+        assertNull(first.why, first.why);
+        assertEquals("kParallax", first.from);
+        assertEquals(41.2, first.expectedRawZ, 1e-9);
+        assertEquals(40.2, first.zStart, 1e-9, "1 mm above (the needle goes down as raw Z rises)");
+        assertEquals(41.7, first.zFloor, 1e-9, "1 mm past, capped 0.5 past");
+        c.heightSwitchMaxPastTripMm = 2.0;
+        assertEquals(42.2, HeightSwitch.needleWindow(c, end, 100L, 1).zFloor, 1e-9, "the full 1 mm under a wider cap");
+        c.heightSwitchMaxPastTripMm = 0.3;
+        assertEquals(41.5, HeightSwitch.needleWindow(c, end, 100L, 1).zFloor, 1e-9);
+        assertTrue(HeightSwitch.needleWindow(c, null, 100L, 1).why.contains("its end measured from below"),
+                "a first press needs the end");
+        // its own trip with K_switch, a home later: N1's trip there moved +0.1, the needle's expected trip −0.1
+        c.heightSwitchMaxPastTripMm = 0.5;
+        c.heightSwitch.needle = trip(41.2, 100, 2, 65.075);
+        c.heightSwitch.n1 = trip(23.975, 200, 3, null);
+        HeightSwitch.Window later = HeightSwitch.needleWindow(c, null, 200L, 1);
+        assertEquals("kSwitch", later.from);
+        assertEquals(41.1, later.expectedRawZ, 1e-9);
+        assertEquals(40.1, later.zStart, 1e-9);
+        assertEquals(41.6, later.zFloor, 1e-9);
+        c.heightSwitchMaxPastTripMm = 0.3;
+        assertEquals(41.4, HeightSwitch.needleWindow(c, null, 200L, 1).zFloor, 1e-9, "capped");
+        // a needle change voids its trip: the first window again; a trip recorded before K_switch was kept: the same
+        c.needleChangedAtMs = 5L;
+        assertEquals("kParallax", HeightSwitch.needleWindow(c, end, 200L, 1).from);
+        c.needleChangedAtMs = null;
+        c.heightSwitch.needle.kSwitch = null;
+        assertEquals("kParallax", HeightSwitch.needleWindow(c, end, 200L, 1).from);
+    }
+
+    /** Each press announces itself before its descent: the task's progress (press n of N). */
+    @Test
+    public void eachPressIsAnnouncedForTheTasksProgress() throws Exception {
+        List<String> said = new ArrayList<>();
+        FakeSwitch sw = new FakeSwitch(12.0, -1) {
+            @Override
+            public void press(int n, int of) {
+                said.add(n + "/" + of + "@" + lines.size());
+            }
+        };
+        HeightSwitch.measure(sw, plan("n1", -1, 13.0, 11.0, 3));
+        assertEquals(3, said.size(), said.toString());
+        assertTrue(said.get(0).startsWith("1/3") && said.get(2).startsWith("3/3"), said.toString());
+    }
+
     /**
      * Review MINOR 5: a coarse press the fine pass does not see again (a bounce, noise) ends the fine pass one fine step
      * past the coarse trip, not 0.30 past it.
