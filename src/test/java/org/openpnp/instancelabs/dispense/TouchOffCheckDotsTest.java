@@ -56,10 +56,11 @@ public class TouchOffCheckDotsTest {
     }
 
     /**
-     * The 25G's ladder as a camera sees it: 3 droplets, the reference pair and 4 steady dots at 1.2 mm, then squashed
-     * (contact between 0.000 and -0.025 mm); the droplets landed at (0.2, 0) (a wrong pair would show), the reference
-     * pair at (0.01, 0) and (-0.01, 0.02), the 1st check dot 0.3 mm off (paste from the floor), the 2nd at
-     * {@code check2}, the deepest squashed dot at {@code floor}.
+     * The 25G's ladder as a camera sees it: 3 droplets, the reference pair at 1.2 mm and 4 steady dots at 1.25 mm (a
+     * free dot grows as the gap shrinks: a wrong pair's area would show), then squashed (contact between 0.000 and
+     * -0.025 mm); the droplets landed at (0.2, 0) (a wrong pair would show), the reference pair at (0.01, 0) and
+     * (-0.01, 0.02), the 1st check dot 0.3 mm off (paste from the floor), the 2nd at {@code check2}, the deepest
+     * squashed dot at {@code floor}; both check dots 1.2 mm.
      */
     static List<SpotDot> seen(double[] check2, double[] floor) {
         List<SpotDot> l = new ArrayList<>();
@@ -67,7 +68,7 @@ public class TouchOffCheckDotsTest {
             double[] at = i < 3 ? new double[] {0.2, 0} : i == 3 ? new double[] {0.01, 0} : i == 4
                     ? new double[] {-0.01, 0.02} : i == 12 ? floor
                     : i == 13 ? new double[] {0.3, 0} : i == 14 ? check2 : new double[] {0, 0.01};
-            double d = i < 3 ? 0.5 : i < 9 || i > 12 ? 1.2 : 1.8;
+            double d = i < 3 ? 0.5 : i < 5 || i > 12 ? 1.2 : i < 9 ? 1.25 : 1.8;
             l.add(at == null ? SpotDot.none() : SpotDot.dot(new Dot(at[0], at[1], d, Math.PI * d * d / 4, 0.9)));
         }
         return l;
@@ -166,6 +167,25 @@ public class TouchOffCheckDotsTest {
         // no dot at the floor: the deepest one that formed counts (dot 11, where the pair landed)
         NeedleTouchOff.Analysis none = analyzed(seen(new double[] {0, 0.01}, null));
         assertEquals(0, none.squashedShiftMm, 1e-9);
+    }
+
+    /**
+     * A reference dot that left no dot: no contact, and no pair to compare the measured check dots with, so the 2nd
+     * check dot's landing and area are not compared (it is off in both here) and only the reason says why.
+     */
+    @Test
+    public void aMissingReferenceDotLeavesTheCheckDotsUncompared() {
+        List<SpotDot> l = seen(new double[] {0, 0.01}, new double[] {0, 0.01});
+        l.set(4, SpotDot.none());
+        l.set(14, SpotDot.dot(new Dot(0.15, 0.01, 1.5, 1.77, 0.9)));
+        NeedleTouchOff.Analysis a = analyzed(l);
+        assertEquals("only the first dot after the 3 not counted formed before a missing one (1.200 mm at gap 0.125, "
+                + "none at gap 0.100): a contact needs two steady dots before it (the first may be a droplet from too "
+                + "high); run the ladder again from another start gap", a.reason);
+        assertNull(a.landingProblem);
+        assertNull(a.landingShiftMm);
+        assertNull(a.checkAreaOffPct);
+        assertEquals("dot", a.checkDots.get(1).state, "the 2nd check dot was measured");
     }
 
     @Test
