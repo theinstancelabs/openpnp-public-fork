@@ -262,7 +262,7 @@
   function usedText(r) {
     if (!r) return null;
     const n = (r.applied || []).length, skipped = r.skipped || [];
-    return (n ? 'Used the doses found for ' + IL.plural(n, 'pad group') + '. Other designs with the same packages use them too.' : 'No dose found was used.')
+    return (n ? 'Used the doses found for ' + IL.plural(n, 'pad group') + '. Other designs with the same packages use them too.' : 'No dose was used.')
       + (skipped.length ? ' Not used: ' + skipped.map((x) => x.why).join('; ') + '.' : '');
   }
   /** Groups without a suggestion: Pad types › Needs a profile for this design (today's by-hand path). */
@@ -316,10 +316,11 @@
     const { use, cal, measure, hand } = kinds(g);
     const ready = !!st && st.state === 'ready';
     const tipRefs = [...new Set(g.tip.flatMap((x) => x.refs || []))];
+    const waitsOn = [g.fix.length ? IL.plural(g.fix.length, 'pad group') : null, tipRefs.length ? 'another tip for ' + IL.boardImport.refList(tipRefs, 3) : null].filter(Boolean);
     IL.setText(n.pTitle, !D.sel ? 'Designs' : ready ? 'Ready' : 'Set up the rest');
     IL.setText(n.pLead, !D.sel ? 'Pick a design to see what it still needs.' : !st || !st.g ? st ? st.text : D.err ? 'Could not read the designs.' : 'Reading the design…'
       : ready ? 'Every pad on the top has a dose. The steps not built yet are done by hand or later.'
-        : 'This design waits on ' + [g.fix.length ? IL.plural(g.fix.length, 'pad group') : null, tipRefs.length ? 'another tip for ' + IL.boardImport.refList(tipRefs, 3) : null].filter(Boolean).join(' and ') + '.');
+        : waitsOn.length ? 'This design waits on ' + waitsOn.join(' and ') + '.' : st.text + '.');
     const left = !st || !st.g || ready ? [] : [
       use.length ? ['Paste per pad', 'use the doses found · nothing moves', 'todo'] : null,
       cal.length ? ['Missing doses', 'the machine lays test dots, then you weigh once', 'todo'] : null,
@@ -329,7 +330,7 @@
       ['Feeders', NOT_YET, 'notyet']].filter(Boolean);
     IL.keyed(n.pList, JSON.stringify(left), () => left.map(([t, d, k]) => el('li', { class: k, 'data-state': k }, IL.glyph('wait', 'xs'),
       el('div', {}, el('div', { class: 'ph__t', text: t + (k === 'notyet' ? ' · ' + NOT_YET : '') }), el('div', { class: 'ph__d', text: k === 'notyet' ? 'comes later' : d })), el('span', { class: 'ph__v' }))));
-    IL.setText(n.pBlock, tipRefs.length ? IL.boardImport.refList(tipRefs, 3) + (tipRefs.length === 1 ? ' needs' : ' need') + ' another tip: ' + (g.tip[0].short || 'not with this tip')
+    IL.setText(n.pBlock, tipRefs.length ? IL.boardImport.refList(tipRefs, 3) + (tipRefs.length === 1 ? ' needs' : ' need') + ' another tip' + (g.tip[0].short ? ': ' + g.tip[0].short : '')
       + '. This design can’t be made until the tip is changed.' : '');
     IL.show(n.pBlock, tipRefs.length > 0);
     IL.show(n.pMore, !D.sel);
