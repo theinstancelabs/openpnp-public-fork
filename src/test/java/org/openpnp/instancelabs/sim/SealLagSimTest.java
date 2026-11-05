@@ -19,12 +19,13 @@ import org.openpnp.model.Configuration;
 
 /**
  * INF-15 (2), Process's BR-100 test in the SIM: N1's line lags a seal by 0.5 s (the real ~0.3-1 s,
- * tools/tilesetup.py) under the bench's probe timings. The blank's probe reads the Z it reads without the lag,
- * within one fine step below the contact, and the Z check after a home on the unmoved frame passes.
+ * tools/tilesetup.py) with the bench's 70 ms read delay (the recording server answers dwells at once). The lag
+ * hides touching steps, yet the blank's probe reads the first step at or below the contact, as it does without the
+ * lag (SimVacuumTest), and the Z check after a home on the unmoved frame touches the same Z.
  */
 public class SealLagSimTest {
     /** Off the probe's 0.025 mm grid (nominal 5.45): the first step at or below it is 5.425. */
-    static final double CONTACT = 5.437;
+    static final double CONTACT = 5.437, FIRST_STEP = 5.425;
     SimMachine sim;
     DispenseService svc;
 
@@ -43,22 +44,22 @@ public class SealLagSimTest {
 
     @Test
     public void aLaggingLineReadsTheSameBlankZAndTheZCheckAfterAHomePasses() throws Exception {
-        double[] quick = probeBlank(0);
-        double[] lagging = probeBlank(0.5);
-        assertEquals(Arrays.toString(quick), Arrays.toString(lagging), "the lag changes no point's Z");
-        for (double z : lagging) {
-            assertTrue(z <= CONTACT && z > CONTACT - 0.025, "within one fine step below the contact: " + z);
-        }
+        SurfaceProbeResult r = probeBlank(0.5);
+        assertEquals(Arrays.toString(new double[] {FIRST_STEP, FIRST_STEP, FIRST_STEP}),
+                Arrays.toString(r.points.stream().mapToDouble(p -> p.z).toArray()), "the lag changes no point's Z");
+        assertTrue(r.points.stream().anyMatch(p -> p.readings.stream().anyMatch(m -> m[0] <= CONTACT
+                && m[1] > p.threshold)), "the lag hid a touching step (else this test proves nothing)");
         // A home on the unmoved frame: the Z check touches a blank point from before it, through the lag.
         sim.machine.setEnabled(false);
         sim.enableAndHome();
-        RunResult r = svc.checkZ().get(120, TimeUnit.SECONDS);
-        assertEquals(RunResult.Status.OK, r.status, r.toString());
-        assertTrue(r.zCheck != null && r.zCheck.pass, String.valueOf(r.zCheck));
+        RunResult z = svc.checkZ().get(120, TimeUnit.SECONDS);
+        assertEquals(RunResult.Status.OK, z.status, z.toString());
+        assertTrue(z.zCheck != null && z.zCheck.pass, String.valueOf(z.zCheck));
+        assertEquals(0, z.zCheck.deltaMm, 1e-9, "the same step as the probe, not one within the check's tolerance");
     }
 
-    /** The blank probed at 3 spots with N1's line lagging by sealTauS = releaseTauS = lagS; the contact Zs. */
-    double[] probeBlank(double lagS) throws Exception {
+    /** The blank probed at 3 spots with N1's line lagging by sealTauS = releaseTauS = lagS. */
+    SurfaceProbeResult probeBlank(double lagS) throws Exception {
         SimScene sc = FlatVacuum.scene(CONTACT, null, 0);
         sc.vacuum.sealTauS = lagS;
         sc.vacuum.releaseTauS = lagS;
@@ -69,6 +70,6 @@ public class SealLagSimTest {
         req.targets = Arrays.asList(new double[] {86, 36}, new double[] {129, 36}, new double[] {86, 49});
         SurfaceProbeResult r = svc.probeSurface(req).get(120, TimeUnit.SECONDS);
         assertTrue(r.ok, r.message);
-        return r.points.stream().mapToDouble(p -> p.z).toArray();
+        return r;
     }
 }

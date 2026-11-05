@@ -311,8 +311,8 @@ public final class SimVacuum {
         if (depth < -v.partialBandMm) {
             return openAir;
         }
-        double drop = Math.min(leaky ? v.leakDrop : sealDrop(v, tx, ty),
-                FIRST_TOUCH_DROP + DROP_PER_MM * Math.max(0, depth));
+        double drop = leaky ? v.leakDrop
+                : Math.min(sealDrop(v, tx, ty), FIRST_TOUCH_DROP + DROP_PER_MM * Math.max(0, depth));
         return openAir - (depth < 0 ? drop / 2 : drop);
     }
 

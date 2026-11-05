@@ -56,7 +56,8 @@ Three more pieces use the same parts:
 
 The simulator gets two new parts, so the whole flow can be tested end to end without the machine:
 
-- a vacuum model inside the simulated G-code server, with the bench's slow release and partial seals;
+- a vacuum model inside the simulated G-code server, with the bench's slow release and a seal that builds below the
+  first touch;
 - a top camera that draws the board's fiducials and pads at a deliberately shifted, rotated and scaled seat.
 
 Neither works unless the controller identified itself as OpenPnP's `GcodeServer` (M115) over loopback TCP.
@@ -1858,7 +1859,7 @@ the board in a running session.
   −100 k from normal, the bench's ≥ 80 k for a held 0603).
 - **`dirtySpots`** (board mm) and **`blank.dots`** (machine mm): paste dots of 1.0 mm, drawn in the paste colour, for
   the camera look.
-- **The defaults** come from the bench: the open-air value, seal drops (deciles), partial seals and release from the
+- **The defaults** come from the bench: the open-air value, seal drops (deciles), the first touch and release from the
   offline parse of `runs/serial.log` (§4.4); the board surface from `BOARD_PROBES_R7`
   (src/test/sim/il_sim_acceptance.py:76); the blank from `BLANK_PROBES` (:79-80).
 
@@ -2146,7 +2147,7 @@ the board in a running session.
   - −1,508,992 ↔ `E8 F9 80`;
   - the off value;
   - settling with tau (a read at 0.3 s is still falling);
-  - seal at z ≤ contact; the partial band; **release with `releaseTauS`** (a read 0.37 s after lifting still reads
+  - the first touch at z = contact, the seal building below it (INF-15); **release with `releaseTauS`** (a read 0.37 s after lifting still reads
     sealed); a leaky spot; the edge (tip disc partly off the board);
   - tip states, including `part`;
   - seal drops drawn from the deciles; seeded determinism;
