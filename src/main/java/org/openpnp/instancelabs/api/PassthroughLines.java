@@ -98,10 +98,13 @@ final class PassthroughLines {
         if (s.startsWith("N") || s.contains("*")) {
             return no(s, "line numbers and checksums are the passthrough's job, not the line's: send the bare command");
         }
-        // at most 9 digits: a longer number would overflow the int below (#50 re-review NIT)
-        Matcher head = Pattern.compile("^([GM])(\\d{1,9})(?!\\d)").matcher(s);
+        Matcher head = Pattern.compile("^([GM])(\\d+)").matcher(s);
         if (!head.find()) {
             return no(s, "not a G or M command: ask Backend");
+        }
+        // at most 9 digits: a longer number would overflow the int below (#50 re-review NIT)
+        if (head.group(2).length() > 9) {
+            return no(s, "command number too long (at most 9 digits)");
         }
         String word = head.group(1) + Integer.parseInt(head.group(2));
         String rest = s.substring(head.end());

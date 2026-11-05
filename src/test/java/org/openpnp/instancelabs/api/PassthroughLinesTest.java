@@ -167,11 +167,12 @@ public class PassthroughLinesTest {
         assertTrue(PassthroughLines.level(-32, -33, -30, 0).contains("32 mm"));
     }
 
-    /** #50 re-review NIT: a command number past an int is a refused line, not an exception. */
+    /** #50 re-review NIT: a command number past an int is a refused line, not an exception, and says so. */
     @Test
     public void aHugeCommandNumberIsRefusedAsALine() {
-        refused("M99999999999");
-        refused("G99999999999999999999 X1");
+        assertTrue(refused("M99999999999").contains("command number too long"), refused("M99999999999"));
+        assertTrue(refused("G99999999999999999999 X1").contains("command number too long"));
+        assertTrue(refused("X1").contains("not a G or M command"), refused("X1"));
     }
 
     @Test
