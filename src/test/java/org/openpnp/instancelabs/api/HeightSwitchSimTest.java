@@ -25,6 +25,7 @@ import org.openpnp.instancelabs.dispense.FromBelowScene;
 import org.openpnp.instancelabs.dispense.HeightSwitch;
 import org.openpnp.instancelabs.dispense.NeedleEndMeasure;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
+import org.openpnp.instancelabs.dispense.PhotoStore;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.instancelabs.dispense.TipCamera;
 import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
@@ -565,6 +566,7 @@ public class HeightSwitchSimTest {
      */
     @Test
     public void theNeedlesEndFromBelowIsRecordedAndShown() throws Exception {
+        svc.getPhotoStore().setUsableBytes(() -> PhotoStore.RAW_MIN_FREE_BYTES); // at the floor: kept
         assertEquals("guarded", LockEndpoints.kindOf("POST", "/api/needle/end/measure"));
         assertTrue(dispenseStatus().get("needleEnd").isJsonNull());
         JsonObject r = ok("POST", "/api/needle/end/measure", null);
@@ -620,6 +622,27 @@ public class HeightSwitchSimTest {
         assertEquals(p.get("photoId"), p.getAsJsonObject("result").getAsJsonObject("clean").get("photoId"));
         assertEquals(e.get("kParallax"), dispenseStatus().getAsJsonObject("needleEnd").get("kParallax"),
                 "a refusal keeps the end on record");
+    }
+
+    /**
+     * Re-review MINOR 2: the frames as taken (some 515 kB each on the machine, 22 MB a measure) are kept only while the
+     * photo folder's disk has at least 5 GiB usable. Under that the end is still measured and recorded, its frames' ids
+     * null; its drawn pictures are kept.
+     */
+    @Test
+    public void theFramesAsTakenAreNotKeptUnder5GiBFree() throws Exception {
+        svc.getPhotoStore().setUsableBytes(() -> PhotoStore.RAW_MIN_FREE_BYTES - 1);
+        int photos = svc.getDb().query("SELECT id FROM photos").size();
+        JsonObject r = ok("POST", "/api/needle/end/measure", null);
+        assertTrue(r.get("ok").getAsBoolean(), r.toString());
+        JsonObject e = r.getAsJsonObject("end");
+        assertEquals(43, e.getAsJsonArray("framePhotoIds").size());
+        for (com.google.gson.JsonElement id : e.getAsJsonArray("framePhotoIds")) {
+            assertTrue(id.isJsonNull(), e.getAsJsonArray("framePhotoIds").toString());
+        }
+        assertTrue(e.getAsJsonObject("clean").get("framePhotoId").isJsonNull());
+        assertEquals(photos + 8, svc.getDb().query("SELECT id FROM photos").size(), "its 8 drawn pictures only");
+        assertFalse(dispenseStatus().get("needleEnd").isJsonNull(), "recorded");
     }
 
     /**

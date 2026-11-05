@@ -23,6 +23,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
+import java.util.function.LongSupplier;
 
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReadParam;
@@ -55,6 +56,11 @@ public final class PhotoStore {
     public static final int MAX_TIP_PER_RECORD = 6, MAX_UNLINKED_PER_SETUP = 20;
     /** Removable pictures (tip and setup) take at most this; result photos are not counted (they are pruned). */
     public static final long DISK_CAP_BYTES = 2L * 1024 * 1024 * 1024;
+    /**
+     * BR-94: the needle's frames as taken (some 22 MB a measure, swept 30 days on at a start) are kept only while the
+     * folder's disk has this much usable (re-review MINOR 2).
+     */
+    public static final long RAW_MIN_FREE_BYTES = 5L * 1024 * 1024 * 1024;
     public static final int MAX_CAPTION = 200;
     /** A removed picture's file stays this long (restore); an unlinked result photo this long. */
     public static final long KEEP_REMOVED_MS = 7L * 24 * 3600 * 1000, UNLINKED_RESULT_MS = 30L * 24 * 3600 * 1000;
@@ -88,6 +94,8 @@ public final class PhotoStore {
 
     private final File folder;
     private final DispenseDb db;
+    /** The folder's usable bytes in tests ({@link #setUsableBytes}); null = its disk's. */
+    private volatile LongSupplier usableBytesOverride;
     /**
      * One upload pipeline at a time (§22.4: header, decode, encode, store), taken without waiting by
      * {@link #storeExclusive}: the API's thread pool is unbounded, so this also bounds memory.
@@ -110,6 +118,24 @@ public final class PhotoStore {
     /** The folder the pictures are kept in. */
     public File folder() {
         return folder;
+    }
+
+    /** The usable bytes of the folder's disk: of the nearest folder that exists (the first picture makes it). */
+    public long usableBytes() {
+        LongSupplier o = usableBytesOverride;
+        if (o != null) {
+            return o.getAsLong();
+        }
+        File f = folder;
+        while (!f.isDirectory() && f.getParentFile() != null) {
+            f = f.getParentFile();
+        }
+        return f.getUsableSpace();
+    }
+
+    /** Overrides {@link #usableBytes} (tests; null = the folder's disk). */
+    public void setUsableBytes(LongSupplier bytes) {
+        usableBytesOverride = bytes;
     }
 
     /**

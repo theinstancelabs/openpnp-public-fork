@@ -617,7 +617,8 @@ tip setup puts the end over it: its head offset + landing + trim), approached fr
 the height; frames at B, B ± (d, 0), B ± (0, d) and B again, each approached the same way, after `M400` and
 `G4 P<settleMs>` (OpenPnP's capture switches the camera's light on: `M150 P255 R255 U255 B255`); travel Z at the end,
 also after a refusal or a failure (a STOP sends nothing more). Every frame is kept as taken, nothing drawn, for Process's
-tools (`framePhotoIds`, JPEG quality 1: the store keeps JPEG only). The needle's end is the brightest small spot (a white
+tools (`framePhotoIds`, JPEG quality 1: the store keeps JPEG only), while the photo folder's disk has at least 5 GiB
+usable (else its id is null; the end is measured and recorded the same). The needle's end is the brightest small spot (a white
 top-hat of `kernelPx`), searched `searchMm` around the camera's pixel `centrePx` (in px by the bottom camera's scale,
 OpenPnP's units per pixel) in a height's first frame and `followPx` around that spot in the others; N1 is followed by a high-pass template (`n1TemplateHalfPx`, searched
 `n1SearchPx`). At each height the fit of the pixel against the head's step gives M (px per mm); the end = the nominal end
@@ -648,7 +649,7 @@ was not measured), n1: [{rawZ, pxPerMm, residualPx, driftPx}], residualPx, drift
 and needle_mm_per_rawz: 1 on a true see-saw; these three null without N1), photoIds (each needle height's centre frame
 with the found end and the regions drawn, then N1's, then the clean check's, `clean.photoId`), framePhotoIds (every frame as taken, nothing drawn, in the order
 taken: N1's heights, then the needle's, six each in the order B, B + (d, 0), B − (d, 0), B + (0, d), B − (0, d), B,
-then the clean check's; each captioned with its tool, raw Z and step), cameraCalibration {x, y, z, centrePx},
+then the clean check's; each captioned with its tool, raw Z and step; null where not kept: under 5 GiB usable), cameraCalibration {x, y, z, centrePx},
 needleSinceMs (the needle token), setupKey, setAtMs, runId, forReview, clean {ok, failed, why, rawZ, k, rim, rimRg, peak,
 spread, red, limits, setupKey, photoId (its frame with the end's 0.5 and 1.0 mm drawn), framePhotoId (as taken),
 atMs}}`; null after a needle change (or a mount) or a new camera calibration. `clean` is history: what the tip looked

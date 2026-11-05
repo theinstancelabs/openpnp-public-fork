@@ -5424,6 +5424,9 @@ public final class DispenseService {
 
             @Override
             public Long keepRaw(BufferedImage frame, String caption, double mmPerPx) throws Exception {
+                if (photoStore.usableBytes() < PhotoStore.RAW_MIN_FREE_BYTES) {
+                    return null; // re-review MINOR 2: the end measured on, its frames not kept: the disk stays usable
+                }
                 PhotoStore.Input in = endPhoto(c, s, frame, caption, mmPerPx);
                 in.jpegQuality = 1f; // the store keeps JPEG only: its best, for Process's tools
                 return photoStore.store(in).id; // no event each: the measure's NEEDLE_END event lists them
