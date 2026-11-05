@@ -474,21 +474,46 @@ final class ControlEndpoints {
                         c.getHeight()));
             }
         }
+        out.addAll(machine.usbCameras.list()); // BR-102: machine, gauge
         return Views.map("cameras", out);
     }
 
+    /**
+     * A camera's frame, at most {@code w} wide. BR-102: {@code after=<epoch ms>} waits for a frame captured after that
+     * time (504 when none comes within {@code usbCameras.frameWaitMs}); every answer carries {@code X-Frame-At-Ms}.
+     */
     Object frame(ApiServer.Request r) throws Exception {
         String id = r.group(1);
+        int w = r.queryInt("w", 0, 0, 4096);
+        Long after = epochMs(r, "after");
+        if (UsbCameras.IDS.contains(id)) {
+            return machine.usbCameras.frame(id, w, after);
+        }
         Camera c = camera(id);
         if (c == null) {
             throw ApiException.notFound("no " + id + " camera here (GET /api/cameras)");
         }
-        int w = r.queryInt("w", 0, 0, 4096);
         int settle = r.queryInt("settleMs", 0, Integer.MIN_VALUE, Integer.MAX_VALUE);
         if (settle < 0 || settle > MAX_SETTLE_MS) {
             throw ApiException.badRequest("'settleMs' is 0.." + MAX_SETTLE_MS);
         }
-        return machine.frame(c, w, settle);
+        long now = System.currentTimeMillis();
+        if (after != null) {
+            UsbCameras.requireWithinWait(after, now, machine.usbCameras.frameWaitMs());
+        }
+        // OpenPnP's capture takes a frame when asked: one taken after that time is one asked for after it
+        return machine.frame(c, w, Math.max(settle, after == null ? 0 : after + 1 - now));
+    }
+
+    /** {@code after=}: a time in epoch ms (a frame's X-Frame-At-Ms), or null when not given. */
+    private static Long epochMs(ApiServer.Request r, String name) throws ApiException {
+        String v = r.query(name, null);
+        try {
+            return v == null ? null : Long.valueOf(v);
+        }
+        catch (NumberFormatException e) {
+            throw ApiException.badRequest("'" + name + "' is a time in epoch ms (the X-Frame-At-Ms of a frame)");
+        }
     }
 
     /** top = the head's first camera looking down; bottom = the machine's first camera looking up. */

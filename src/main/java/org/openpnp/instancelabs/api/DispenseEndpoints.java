@@ -74,7 +74,7 @@ final class DispenseEndpoints {
     /** Nested settings PUT /api/config merges one level deep (a partial object keeps the other fields). */
     static final java.util.Set<String> NESTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "profile", "purgeRow", "cleanPadCheck", "fiducialCheck", "vacuumProbe", "paste", "calibrationArea",
-            "padCalibration", "outputZones"));
+            "padCalibration", "outputZones", "usbCameras"));
     /**
      * Nested fields only the engine or their own endpoints change: the start angle, its set and change times and the
      * feature of the measure it was set from (I11, BR-02's checks, BR-77: POST /api/screw/start-angle), the time of
@@ -835,6 +835,18 @@ final class DispenseEndpoints {
             floors.removeAll(live.padCalibration.realMachineProblems());
             if (!floors.isEmpty()) {
                 throw ApiException.badRequest(String.join("; ", floors));
+            }
+        }
+        // BR-102: a camera this write sets or changes follows this session's device rules (Infra 11-05 01:4x)
+        for (String id : UsbCameras.IDS) {
+            DispenseConfig.UsbCamera n = next.usbCameras == null ? null : next.usbCameras.get(id);
+            DispenseConfig.UsbCamera was = live.usbCameras == null ? null : live.usbCameras.get(id);
+            if (n != null && (was == null || !java.util.Objects.equals(n.device, was.device)
+                    || !n.mode().equals(was.mode()))) {
+                String why = UsbCameras.refusal(n, simulated, UsbCameras.fixturesDir(svc.getConfigDir()));
+                if (why != null) {
+                    throw ApiException.badRequest("usbCameras." + id + ": " + why);
+                }
             }
         }
         return next;

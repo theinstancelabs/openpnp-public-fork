@@ -24,6 +24,7 @@ import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeReport;
+import org.openpnp.instancelabs.sim.SimGuard;
 import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.LengthUnit;
@@ -66,9 +67,17 @@ final class MachineEndpoints {
     /** One capture thread per camera: a hung camera never holds up the other (BR-53 review). */
     private final Map<Camera, ExecutorService> cameraExecutors = new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean noJpegLogged;
+    /** BR-102: the USB cameras the engine opens itself (machine, gauge). */
+    final UsbCameras usbCameras;
 
     MachineEndpoints(ApiContext ctx) {
         this.ctx = ctx;
+        this.usbCameras = new UsbCameras(() -> {
+            DispenseService s = ctx.svcOrNull();
+            return s == null ? null : s.usbCameras();
+        }, () -> SimGuard.isSimulated(ctx.configuration.getMachine()),
+                () -> ctx.configuration.getConfigurationDirectory(), UsbCameras::openV4l2,
+                (img, w) -> encodeFrame(scaled(img, w)));
     }
 
     void register(ApiServer s) {
@@ -652,7 +661,7 @@ final class MachineEndpoints {
     /**
      * One frame of an OpenPnP camera (no motion, no lights, no scripts), at most {@code maxW} wide (0 = as is), taken
      * {@code settleMs} after the call: JPEG (PNG without a JPEG writer), with {@code X-Frame-At} the server time when
-     * it was taken (BR-53: the picture's age).
+     * it was taken (BR-53: the picture's age), and {@code X-Frame-At-Ms}, the same time (BR-102: every camera's).
      */
     ApiServer.Response frame(Camera cam, int maxW, long settleMs) throws Exception {
         if (settleMs > 0) {
@@ -680,6 +689,12 @@ final class MachineEndpoints {
         if (img == null) {
             throw ApiException.unavailable("the camera returned no image");
         }
+        return encodeFrame(scaled(img, maxW)).header("X-Frame-At", String.valueOf(at))
+                .header("X-Frame-At-Ms", String.valueOf(at));
+    }
+
+    /** The frame in RGB, at most {@code maxW} wide (0 = as is). */
+    static BufferedImage scaled(BufferedImage img, int maxW) {
         int w = img.getWidth(), h = img.getHeight();
         if (maxW > 0 && w > maxW) {
             h = Math.max(1, Math.round(h * (maxW / (float) w)));
@@ -690,7 +705,7 @@ final class MachineEndpoints {
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
         g.drawImage(img, 0, 0, w, h, null);
         g.dispose();
-        return encodeFrame(rgb).header("X-Frame-At", String.valueOf(at));
+        return rgb;
     }
 
     /** The camera frames' JPEG quality (0..1): light enough for a 2-5 per second view over the tailnet. */
@@ -723,6 +738,7 @@ final class MachineEndpoints {
         for (ExecutorService ex : cameraExecutors.values()) {
             ex.shutdownNow();
         }
+        usbCameras.shutdown();
     }
 
     private static String capitalize(String s) {
