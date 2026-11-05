@@ -155,8 +155,9 @@ public class ScrewPhaseFitTest {
 
     /**
      * Each half's area is its trimmed mean, min and max dropped (Process 11-04 15:0x): a start-up or carried blob at 2-3×
-     * comes one at a time, so one per half moves neither the peak nor the error (winsorized); a second in one half is
-     * left after the trim and makes the angle low ("two outliers in one half"), never a quiet peak.
+     * comes one at a time, so one per half moves neither the peak nor the error (winsorized); a second one still above
+     * 1.5× its half's median after the trim makes the angle low ("two outliers in one half"). The guard misses some
+     * second blobs (ScrewPhaseFit.OUTLIER_SHARE), so a quiet peak is still possible.
      */
     @Test
     public void halvesTrimEachHalfSoOneBlobPerHalfDoesNotMoveThePeak() {

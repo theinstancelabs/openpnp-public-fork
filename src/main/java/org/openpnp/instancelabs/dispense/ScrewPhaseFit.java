@@ -14,7 +14,8 @@ import java.util.TreeMap;
  * <li><b>Halves</b> (the 22G, roles/process.md "Screw timing"): two rows of half-turn pairs, the second 90° after the
  * first. Per row x = (A − B)/(A + B) of the trimmed means (min and max dropped) of the found dots at its start and half
  * a turn on (a half turn always lays paste; a start-up or carried blob at 2-3× comes one at a time and is trimmed; a
- * second in one half makes the angle low); x = −(2a/π)·sin(start − peak) gives the flow's peak and its amplitude a.</li>
+ * second in one half makes the angle low when still above 1.5× the half's median, OUTLIER_SHARE); x = −(2a/π)·sin(start
+ * − peak) gives the flow's peak and its amplitude a.</li>
  * <li><b>Quarters</b> (the 25G at a threshold): 4 quarter dots per turn, a dot not found laid nothing; the dead quarter's
  * start by the first harmonic of the 4 means (the 90° grid alone misses ±22.5°), the grid's own minimum kept beside
  * it.</li>
@@ -28,7 +29,10 @@ public final class ScrewPhaseFit {
     static final double HIGH_SE_DEG = 10, LOW_SE_DEG = 20, RIPPLE_SE = 3;
     /**
      * Halves (Process 11-04 15:0x): a dot this many times its half's median left after the trim is a second outlier in
-     * that half (normal scatter is 10-15 % cv, the blobs 1.7-2.9×).
+     * that half, and the angle is low (normal scatter is 10-15 % cv, the blobs 1.7-2.9×). It misses some (Monte Carlo,
+     * cv 0.10-0.15): a 1.7× second blob in 23-36 % of 8-dot halves, 36-49 % at 5; it cannot fire with 3 dots, and
+     * with 4 only for a second blob above 3× the other dot; normal scatter never fires it (≤ 0.2 %). Kept at 1.5×
+     * (Process 11-04 15:2x: 1.4× would give 2-8 % false low per measure).
      */
     static final double OUTLIER_SHARE = 1.5;
     static final int MIN_FOUND_PER_HALF = 3;
