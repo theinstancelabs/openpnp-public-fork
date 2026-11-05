@@ -316,6 +316,12 @@ final class GcodePassthrough {
         long t0 = System.currentTimeMillis();
         List<Map<String, Object>> results = new ArrayList<>();
         String who = b.holder == null ? "?" : b.holder.who;
+        String queued = stopReason(m, b);
+        if (queued != null) {
+            // stopped while still queued: nothing to prove, nothing sent (review 2 NIT)
+            return new Outcome(queued.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), 0,
+                    lines.get(0).text, null, queued);
+        }
         try {
             prove(m, b, lines);
         }

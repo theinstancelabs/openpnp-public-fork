@@ -462,13 +462,18 @@ public class BedGuardSimTest {
 
     /**
      * The dry run proves from where the head is: while OpenPnP's position is not re-read after the passthrough's moves
-     * it refuses, as the real routes re-read it first (#66 review MINOR e).
+     * it refuses, as the real routes re-read it first (#66 review MINOR e); the bed's view and the status show the
+     * head's place unknown meanwhile (review 2 NIT).
      */
     @Test
     public void theDryRunWaitsForTheHeadsPlaceToBeRead() throws Exception {
         start(BedFixture.text());
         String token = acquire();
         ok("POST", "/api/gcode", "{\"lines\":[\"G1 X120 F3000\"]}", token);
+        JsonObject head = ok("GET", "/api/bed", null, null).getAsJsonObject("head");
+        assertFalse(head.get("known").getAsBoolean(), head.toString());
+        assertEquals("unknown", head.get("source").getAsString());
+        assertFalse(ok("GET", "/api/status", null, null).getAsJsonObject("bed").get("headKnown").getAsBoolean(), body);
         String dry = "{\"kind\":\"move-to\",\"tool\":\"n1\",\"x\":100,\"y\":400}";
         JsonObject r = call("POST", "/api/motion/check", dry, UI);
         assertEquals(409, status, body);
@@ -476,6 +481,37 @@ public class BedGuardSimTest {
         assertTrue(r.get("reason").getAsString().contains("not re-read"), body);
         ok("POST", "/api/gcode", "{\"lines\":[\"M400\"]}", token);
         assertTrue(ok("POST", "/api/motion/check", dry, UI).get("clear").getAsBoolean(), body);
+        assertTrue(ok("GET", "/api/bed", null, null).getAsJsonObject("head").get("known").getAsBoolean(), body);
+        assertTrue(ok("GET", "/api/status", null, null).getAsJsonObject("bed").get("headKnown").getAsBoolean(), body);
+    }
+
+    /** A batch stopped while still queued sends nothing and is not proven: no MOTION_PROOF row (review 2 NIT). */
+    @Test
+    public void aBatchStoppedWhileQueuedIsNotProven() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        int proofs = rows("MOTION_PROOF").size();
+        GcodePassthrough.submitHook = () -> api.getContext().passthrough.abort("the web STOP");
+        try {
+            sim.server.mark();
+            JsonObject r = call("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\",\"M400\"]}", token);
+            assertEquals(409, status, body);
+            assertEquals("stopped", r.get("error").getAsString(), body);
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertEquals(List.of(), motionSent(), "nothing sent");
+        assertEquals(proofs, rows("MOTION_PROOF").size(), "no proof of a batch that never ran");
+    }
+
+    /** A start already unknown keeps its own reason where the passthrough's place is not known (review 2 NIT). */
+    @Test
+    public void anUnknownStartKeepsItsReason() {
+        BedGuard.Start unhomed = new BedGuard.Start("the machine is not homed", "home first", 1, 2, 3, null);
+        assertEquals("the machine is not homed", unhomed.at(null).why);
+        assertEquals("home first", unhomed.at(null).next);
+        assertTrue(new BedGuard.Start(null, null, 1, 2, 3, null).at(null).why.contains("cut short"));
     }
 
     /**

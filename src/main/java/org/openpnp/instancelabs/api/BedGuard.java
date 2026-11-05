@@ -80,9 +80,9 @@ final class BedGuard {
                     : new Start(why, next, xyz[0], xyz[1], xyz[2], homeAtMs);
         }
 
-        /** The same start, not known: why, and what makes it known again. */
+        /** The same start, not known: why, and what makes it known again (one not known already keeps its own). */
         Start unknown(String why, String next) {
-            return new Start(why, next, x, y, z, homeAtMs);
+            return known ? new Start(why, next, x, y, z, homeAtMs) : this;
         }
     }
 
@@ -323,11 +323,18 @@ final class BedGuard {
     private Boolean headKnown() {
         Machine m = ctx.configuration.getMachine();
         try {
-            return m != null && start(m).known;
+            return m != null && shown(m).known;
         }
         catch (ApiException e) {
             return false;
         }
+    }
+
+    /** Where the views show the head: not known while the passthrough's moves are not re-read (review 2 NIT). */
+    private Start shown(Machine m) throws ApiException {
+        Start s = start(m);
+        return ctx.passthrough.positionStale() ? s.unknown("the G-code passthrough's moves are not re-read yet",
+                "send M400 alone: OpenPnP then reads where the head is") : s;
     }
 
     private static String why(BedModelStore.State st) {
@@ -347,7 +354,7 @@ final class BedGuard {
         Machine mach = ctx.configuration.getMachine();
         Start s = null;
         try {
-            s = mach == null ? null : start(mach);
+            s = mach == null ? null : shown(mach);
         }
         catch (ApiException e) {
             // N1's axes cannot be read: the head shows as unknown, the tools at their worst case

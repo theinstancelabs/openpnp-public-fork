@@ -71,10 +71,11 @@ public class BedModelTest {
         refused("moves", j -> tool(j, 1).addProperty("moves", "both"));
         refused("mmPerRaw", j -> j.getAsJsonObject("seesaw").getAsJsonObject("n1").remove("mmPerRaw"));
         refused("endStopsRaw", j -> j.getAsJsonObject("seesaw").add("endStopsRaw", new JsonParser().parse("[63,0]")));
-        // the check sweeps N1 and the needle on every leg: exactly one of each (#66 review MAJOR 4)
-        refused("moves needle", j -> j.add("tools", tools(j, 0, 2)));
-        refused("moves n1", j -> j.add("tools", tools(j, 1, 2)));
-        refused("moves n1", j -> tool(j, 1).addProperty("moves", "n1"));
+        // the check sweeps N1 and the needle on every leg: exactly one of each (#66 review MAJOR 4), the counts naming
+        // which is wrong (review 2 NIT: N1 and no needle, no N1 and the needle, two N1s)
+        refused("moves needle (here 1 and 0)", j -> j.add("tools", tools(j, 0, 2)));
+        refused("moves needle (here 0 and 1)", j -> j.add("tools", tools(j, 1, 2)));
+        refused("moves needle (here 2 and 0)", j -> tool(j, 1).addProperty("moves", "n1"));
         // both loaders cap the contact depth (Infra and Backend 11-04)
         refused("contactDepthMm must be 0 to 1.0", j -> j.addProperty("contactDepthMm", 1.5));
         refused("contactDepthMm must be 0 to 1.0", j -> j.addProperty("contactDepthMm", -0.1));
