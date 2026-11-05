@@ -6,7 +6,7 @@
  * design", "Design name", "Save the design"), the parts that get no paste under "No paste" (the Nano's bottom side
  * is not read yet: BR-25), and Save the design opens its Set up while Designs lists it, after one read of the list,
  * and leaves an operator who went elsewhere meanwhile where they are; the drawing given to a board file keeps the
- * preview's "paste the DNP parts"; (3) Set up of a design that
+ * preview's "paste the DNP parts", and its saved step's button and line name Set up (Open its Set up); (3) Set up of a design that
  * waits (padcal under a new name): the checklist B1-B6 (the top read; the bottom's parts from the upload's record,
  * GET /api/boards' `imported.skipped` (BR-88 (a)); paste per pad with the groups that wait; one row per part that needs another
  * tip, with Change the tip; missing doses; the copper check, the fine-pitch rehearsal, feeders and the holder not
@@ -273,12 +273,17 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       const on = await page.evaluate(() => { const c = document.getElementById('board-import-paste-dnp'); return !!c && c.checked; });
       await page.click('#btn-board-import-attach');
       await page.waitForFunction(() => document.getElementById('dlg-board-import').dataset.state === 'saved', null, { timeout: 15000 }).catch(() => null);
+      const words = await page.evaluate(() => { const u = document.getElementById('btn-board-import-use'), x = document.querySelector('#board-import-saved .bi-saved__next');
+        return { use: u ? u.textContent.trim() : null, next: x ? x.textContent : null }; });
       await page.keyboard.press('Escape');
       await page.waitForSelector('#dlg-board-import', { state: 'detached', timeout: 10000 }).catch(() => null);
-      return { on, attach: ST.attachUrl };
+      return { on, attach: ST.attachUrl, words };
     };
     const dnpOff = await attachOnce(false);
     check('(2e) Use the drawing for a board file, DNP parts not pasted: the attach sends no pasteDnp', !dnpOff.on && dnpOff.attach !== null && !/pasteDnp/.test(dnpOff.attach), dnpOff);
+    // its button opens the design's Set up (Designs' onSaved), so it and its line say so, not Run's "then plan it"
+    check('(2e) after an attach in Designs the button and its line name Set up: "Open its Set up"',
+      dnpOff.words.use === 'Open its Set up' && /Set up/.test(dnpOff.words.next || '') && !/plan it|Use this/.test(dnpOff.words.next || ''), dnpOff.words);
     const dnpOn = await attachOnce(true);
     check('(2e) Use the drawing for a board file, DNP parts pasted: the attach sends pasteDnp=1, as the save does', dnpOn.on && /(^|[?&])pasteDnp=1(&|$)/.test(dnpOn.attach || ''), dnpOn);
 
