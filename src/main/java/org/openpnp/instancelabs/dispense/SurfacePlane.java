@@ -59,7 +59,7 @@ public final class SurfacePlane {
             }
             // far outside any machine: the sums below would overflow into a NaN plane, or a flat one at the mean
             if (Math.abs(p.x) > MAX_MM || Math.abs(p.y) > MAX_MM || Math.abs(p.z) > MAX_MM) {
-                throw new IllegalArgumentException(String.format(Locale.ROOT, "surface point (%g, %g, %g) is out of "
+                throw new IllegalArgumentException(String.format(Locale.ROOT, "surface point (%s, %s, %s) is out of "
                         + "range: machine coordinates are within ±%.0f mm", p.x, p.y, p.z, MAX_MM));
             }
             mx += p.x;
@@ -113,6 +113,9 @@ public final class SurfacePlane {
 
     /** Distance of (x, y) outside the convex hull of the points; 0 inside or on it. */
     public double distanceOutside(double x, double y) {
+        if (!(Math.abs(x) <= MAX_MM && Math.abs(y) <= MAX_MM)) {
+            return Double.POSITIVE_INFINITY; // beyond any machine, or NaN: each edge's cross is NaN, never "outside"
+        }
         boolean inside = true;
         double best = Double.MAX_VALUE;
         for (int i = 0; i < hull.size(); i++) {

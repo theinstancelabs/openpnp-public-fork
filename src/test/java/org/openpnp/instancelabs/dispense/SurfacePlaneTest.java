@@ -36,6 +36,29 @@ public class SurfacePlaneTest {
     }
 
     @Test
+    public void theBoundItselfFitsAndJustBeyondItIsRefusedByItsExactValue() {
+        SurfacePlane.fit(points(-1e4, -1e4, 5, 1e4, -1e4, 5, 1e4, 1e4, 5)); // corners at ±10,000 mm fit
+        for (double over : new double[] {Math.nextUp(1e4), -Math.nextUp(1e4)}) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> SurfacePlane.fit(points(0, 0, 5, over, 0, 5, 0, 100, 5)));
+            assertTrue(e.getMessage().contains("(" + over + ", 0.0, 5.0)"), e.getMessage()); // not "10000.0"
+        }
+    }
+
+    @Test
+    public void aTestedPointFarOutsideIsOutsideNeverOnTheSurface() {
+        // the fit bounds its points, not the point tested: at (1e307, 1e307) every edge's cross was Inf - Inf = NaN,
+        // never "< -1e-9", so I4 and I12 read it as on the surface (distance 0)
+        SurfacePlane p = SurfacePlane.fit(points(0, 0, 5, 985, 174, 5, 1159, 1159, 5));
+        for (double[] xy : new double[][] {{1e307, 1e307}, {-1e307, 1e307}, {Double.NaN, 500},
+                {500, Double.POSITIVE_INFINITY}}) {
+            assertTrue(p.distanceOutside(xy[0], xy[1]) > 1e6, xy[0] + ", " + xy[1]);
+        }
+        assertEquals(0, p.distanceOutside(700, 500), 1e-9);
+        assertEquals(100, p.distanceOutside(-100, 0), 1e-9);
+    }
+
+    @Test
     public void aPlaneWithinReachStillFits() {
         SurfacePlane p = SurfacePlane.fit(points(0, 0, 5, 100, 0, 6, 0, 100, 7, -400, -400, -7));
         assertEquals(5.0, p.z(0, 0), 1e-9);
