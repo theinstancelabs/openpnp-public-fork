@@ -551,8 +551,8 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   stopped while a line ran (its last line included): 409 `lock-lost` / `stopped` with that line in `results` marked
   `interrupted: true` (its `ok` may be the STOP's flush, not the move's end: never take it as done). Every line
   is checked first (`PassthroughLines`): the bench tools' commands; X/Y/Z inside the soft limits; X/Y only once
-  homed; while not homed (BR-97: levelling the see-saw before a reset's Home) `G0`/`G1` with Z as the only axis and
-  `F` ≤ 300, each line at most 1 mm from the Z before it (the first from OpenPnP's Z, re-read with M400 and M114 first
+  homed; while not homed (BR-97: levelling the see-saw before a reset's Home) `G1` with Z as the only axis and `F` ≤
+  300 (not `G0`: it keeps `F` only while the firmware's `G0_FEEDRATE` is off), each line at most 1 mm from the Z before it (the first from OpenPnP's Z, re-read with M400 and M114 first
   when a passthrough move was not), every target at most 5 mm from where the call began and 32 mm from where the
   levelling began (its first call since the last home; a home clears it); such a call needs `what` (400 without it)
   and is an `events` row `Z_LEVEL` (the holder, the lines, `what`); on that line any other axis is refused; pump P2 /

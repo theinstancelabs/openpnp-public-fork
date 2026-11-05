@@ -349,6 +349,11 @@ final class PassthroughLines {
                         Double.isNaN(lim[0]) ? "-" : plain(lim[0]), Double.isNaN(lim[1]) ? "-" : plain(lim[1]));
             }
         }
+        // G0 keeps F only while marlin-lumen's G0_FEEDRATE stays commented out (BR-97 review)
+        if (levelling && "G0".equals(word)) {
+            return "while not homed Z moves by G1 alone (levelling the see-saw: G1 Z1 F300): a G0 may run at the "
+                    + "firmware's own speed, not F";
+        }
         Double f = p.get('F');
         if (f != null && f <= 0) {
             return "F must be positive";

@@ -127,7 +127,7 @@ public class PassthroughLinesTest {
     }
 
     /**
-     * BR-97: while not homed the see-saw is levelled by Z alone (the PM 16:4x, Process's numbers): G0/G1 with Z as its
+     * BR-97: while not homed the see-saw is levelled by Z alone (the PM 16:4x, Process's numbers): G1 with Z as its
      * only axis and F at most 300; X/Y, any other axis on that line, G91, G92 Z and G28 stay refused.
      */
     @Test
@@ -136,7 +136,10 @@ public class PassthroughLinesTest {
         assertNull(l.refusal, l.refusal);
         assertEquals(1.0, l.levelZ, 1e-9);
         assertTrue(l.motion && l.frame);
-        assertEquals(-0.5, PassthroughLines.check("g0 z-0.5 f120", LIMITS, false).levelZ, 1e-9);
+        assertEquals(-0.5, PassthroughLines.check("g1 z-0.5 f120", LIMITS, false).levelZ, 1e-9);
+        // BR-97 review: G0 keeps F only while marlin-lumen's G0_FEEDRATE stays commented out: G1 alone levels
+        assertTrue(refused("G0 Z1 F300", false).contains("G1"), refused("G0 Z1 F300", false));
+        assertNull(ok("G0 Z1 F300").levelZ, "homed: G0 as before");
         assertNull(ok("G1 Z1 F300").levelZ, "homed: an ordinary move");
         assertNull(PassthroughLines.check("G1 B90 F600", LIMITS, false).levelZ);
         assertTrue(refused("G1 X1 Z1 F300", false).contains("home"));
