@@ -434,6 +434,29 @@ class PlannedStop(unittest.TestCase):
                 self.assertIsNone(self.deployer(api).planned_stop(off_is_done=True)[0])
                 self.assertNotIn("/api/stop", api.calls)
 
+    def test_before_the_switch_already_stopped_after_a_refusal_is_a_stop(self):
+        """The idle check found the machine off, so a refused try had nothing on to switch off: 'already stopped'
+        after it is a stop (in the health check it is not: PLANNED_MAY_HAVE_RUN)."""
+        stopped = (200, dict(PLANNED_OK[1], linesSent=[], actions=["machine was already stopped"]))
+        api = PlannedApi(lambda n: REFUSED if n == 1 else stopped, st=lambda n: status(busy=True))
+        self.assertEqual(self.deployer(api).planned_stop(off_is_done=True), (True, il_deploy.STOP_DONE))
+        api = PlannedApi(lambda n: REFUSED if n == 1 else stopped)
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIs(ok, False)
+        self.assertTrue(detail.startswith(il_deploy.PLANNED_MAY_HAVE_RUN), detail)
+
+    def test_a_lasting_refusal_names_a_first_one_that_differs(self):
+        """A task that outlived its wait, then refusals that last: the hold note says one may have run."""
+        ran = (409, {"error": "refused", "reason": "the planned stop has not ended after 20 s: the machine may still "
+                                                    "be switching off. The real STOP is POST /api/stop"})
+        api = PlannedApi(lambda n: ran if n == 1 else REFUSED)
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIsNone(ok)
+        self.assertIn("a G-code batch", detail)
+        self.assertIn("has not ended after 20 s", detail)
+        api = PlannedApi(lambda n: REFUSED)
+        self.assertEqual(self.deployer(api).planned_stop()[1].count("a G-code batch"), 1, "the same one once")
+
     def test_a_planned_stop_that_times_out_is_a_failure(self):
         """It may have run: no second stop blind (the old stop's fallback STOPs without its home check)."""
         api = PlannedApi(lambda n: il_deploy.ApiTimeout("no answer within 60 s"))

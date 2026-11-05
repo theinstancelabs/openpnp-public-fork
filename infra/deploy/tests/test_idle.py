@@ -223,6 +223,26 @@ class Idle(unittest.TestCase):
         st["machine"]["homing"] = False
         self.assertEqual(il_deploy.api_busy_reasons(st), [])
 
+    def test_a_lost_controller_link_is_not_idle(self):
+        """BR-93: no deploy while machine.linkLost is set (the restart would clear it and the health check home a
+        controller that may have reset); its why and next step are named. Not explained: taken as lost."""
+        lost = {"atMs": 1, "why": "the link to the controller was lost at 15:07 (the controller left USB)",
+                "next": "once the board is back on USB: Stop, then Start, then Home as after a reset"}
+        st = {"machine": {"busy": False, "enabled": False, "linkLost": lost}}
+        self.assertEqual(il_deploy.api_busy_reasons(st), [f"the controller link is lost (machine.linkLost): "
+                                                          f"{lost['why']}; {lost['next']}"])
+        for v in (None, "lost", 1, {}):
+            with self.subTest(v):
+                st["machine"]["linkLost"] = v
+                self.assertEqual(bool(il_deploy.api_busy_reasons(st)), v is not None)
+        del st["machine"]["linkLost"]  # a build before BR-93
+        self.assertEqual(il_deploy.api_busy_reasons(st), [])
+
+    def test_a_lost_controller_link_through_the_api(self):
+        self.start_fake(link_lost={"atMs": 1, "why": "the link to the controller was lost at 15:07", "next": "Stop"})
+        r = self.reasons()
+        self.assertTrue(any("machine.linkLost" in x for x in r), r)
+
     def test_recent_activity_in_openpnp(self):
         for key, word in (("last_run_ended_s_ago", "run"), ("run_finished_s_ago", "run"),
                           ("pad_cal_ended_s_ago", "pad calibration"), ("pressure_event_s_ago", "pressure")):

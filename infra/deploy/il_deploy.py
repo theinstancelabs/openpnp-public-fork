@@ -605,8 +605,21 @@ def _json(raw):
     return v if isinstance(v, dict) else {"value": v}
 
 
+def api_link_lost_reasons(m):
+    """BR-93: OpenPnP lost the controller's link unasked (machine.linkLost {atMs, why, next} of /api/status or
+    /api/machine; absent before BR-93, null while the link is fine): nothing the deployer sends reaches the controller
+    (#41's planned stop still answers 200), a Start would connect again and clear it, and the home after it would home
+    a controller that may have reset. Anything else than null is taken as lost."""
+    lost = m.get("linkLost") if isinstance(m, dict) else None
+    if lost is None:
+        return []
+    if not isinstance(lost, dict) or not lost:
+        return [f"the controller link is lost (machine.linkLost {json.dumps(lost)[:80]})"]
+    return [f"the controller link is lost (machine.linkLost): {lost.get('why')}; {lost.get('next')}"]
+
+
 def api_busy_reasons(st):
-    """Why OpenPnP's /api/status says the machine is in use (fail closed on a missing machine)."""
+    """Why OpenPnP's /api/status says the machine is in use, or its link is lost (fail closed on a missing machine)."""
     r = []
     m = st.get("machine")
     if not isinstance(m, dict):
@@ -615,6 +628,7 @@ def api_busy_reasons(st):
         r.append("OpenPnP's machine is busy")
     elif machine_homing(m):
         r.append("OpenPnP is homing (machine.homing)")
+    r += api_link_lost_reasons(m)
     run = st.get("run")
     if run is not None and (not isinstance(run, dict) or run.get("running") is not False):
         r.append("a run is running (%s)" % (run.get("kind") if isinstance(run, dict) else run))
@@ -1328,7 +1342,8 @@ def api_planned_stop(api, timeout, poll=0.2, clock=None, off_is_done=False):
                 if st_code == 200 and not (stop_left(st) or api_busy_reasons(st) or api_lock_reasons(st)):
                     return True, f"{STOP_DONE} (already: the planned stop answered {reason})"
             if clock.monotonic() >= end:
-                return None, f"no planned stop for {timeout:g} s: {reason}"
+                first = f" (first: {refused})" if refused != reason else ""  # it may have run
+                return None, f"no planned stop for {timeout:g} s: {reason}{first}"
             clock.sleep(max(poll, min(PLANNED_STOP_RETRY_S, end - clock.monotonic())))
             continue
         if code != 200:
@@ -1336,6 +1351,7 @@ def api_planned_stop(api, timeout, poll=0.2, clock=None, off_is_done=False):
         failed = body.get("linesFailed") or []
         if failed:
             return False, LINES_UNANSWERED + ", ".join(map(str, failed))
+        # before the switch the idle check found the machine off: a refused try had nothing on to switch off
         if refused and not off_is_done and not body.get("linesSent"):
             return False, f"{PLANNED_MAY_HAVE_RUN}refused ({refused}), then the machine was already stopped"
         return wait_stopped(api, timeout, poll, clock, PLANNED_STOP)
@@ -2285,7 +2301,7 @@ class Deployer:
 
     def planned_stop(self, stop=None, off_is_done=False):
         """The deployer's own stop of an idle machine (BR-75, api_planned_stop); without a planned stop to use (a
-        build before BR-75, the API refusing connections) stop() decides, as before (default stop_machine). (ok,
+        build before BR-75, no connection to the API) stop() decides, as before (default stop_machine). (ok,
         detail); ok None: nothing sent, someone holds the lock or the machine still works."""
         ok, detail = api_planned_stop(self.api, self.cfg.stop_timeout, self.cfg.poll_interval, self.clock, off_is_done)
         if ok is None and detail == NO_PLANNED_STOP:
@@ -2565,6 +2581,9 @@ class Deployer:
 
         try:
             code, m = self.api.get("/api/machine", timeout=10)
+            lost = api_link_lost_reasons(m) if code == 200 else []
+            if lost:  # before its stop, its Start and its home (BR-93)
+                return fail("enable", f"{lost[0]}: not stopping, starting or homing it", "machine", stop=False)
             if code == 200 and m.get("enabled"):
                 if m.get("busy") is not False or machine_homing(m):
                     return fail("enable", "the machine is already enabled and busy; not touching it", "machine", False)
@@ -2607,6 +2626,9 @@ class Deployer:
             code, m = self.api.get("/api/machine", timeout=10)
         except ApiDown as e:
             return gone("axes", e)
+        lost = api_link_lost_reasons(m) if code == 200 else []
+        if lost:  # lost after the enable: no home (BR-93)
+            return fail("axes", f"{lost[0]}: not homing", "machine")
         axes = m.get("axes") or []
         coords = {str(a.get("letter")).upper(): a.get("driverCoordinate") for a in axes if a.get("letter")}
         # all four: reset_signature needs B too, and a controller whose position is not known is never homed

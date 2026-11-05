@@ -49,7 +49,11 @@ home endpoint), old-status (a build before BR-44: no machine.homing, server.star
 dispense.startError, and an enable on a kept-alive link that died fails on the dead port), old-stop (a build before
 BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the lock just before the planned stop),
 planned-lines-failed (the planned stop's M107 P3 gets no ok: linesFailed), planned-slow (the first planned stop
-of an enabled machine switches it off but answers 409 refused: its task outlived the API's 20 s wait).
+of an enabled machine switches it off but answers 409 refused: its task outlived the API's 20 s wait),
+link-lost-after-enable (the controller's link is lost right after the enable).
+BR-93's machine.linkLost {atMs, why, next} (fake-machine.json "link_lost", null while the link is fine): while set
+connected and homed read false and a home answers 409 refused "MACHINE: <why>: <next>"; a Start clears it (a connect).
+As #53, the planned stop does not look at it (it answers 200 on a lost link).
 BR-75's planned stop: 409 locked while someone holds the lock, 409 refused (nothing sent) while anything works or for
 the first fake-machine.json "planned_refusals" N calls; else the STOP without the screw's motor-off, the link closed
 (keep-alive or not). A STOP of a machine already off sends nothing (it still vents the pressure and ends a run).
@@ -126,6 +130,7 @@ class FakeOpenPnP:
         self.run_active = "run" in self.fail  # the engine run: a STOP ends it (after "run_abort_s")
         self.pressure_state = "on" if "pressure" in self.fail else "off"  # PressureHold: a STOP vents it
         self.planned_refusals = int(machine.get("planned_refusals", 0))
+        self.link_lost = machine.get("link_lost")  # BR-93's machine.linkLost, None while the link is fine
         log_dir = os.path.join(config_dir, "log")
         os.makedirs(log_dir, exist_ok=True)
         # OpenPnP's tinylog RollingFileWriter (StartupPolicy) starts a new OpenPnP.log at each start
@@ -184,6 +189,9 @@ class FakeOpenPnP:
             out = {"present": True, "enabled": self.enabled, "connected": self.enabled, "homed": self.homed}
             if self.br44:
                 out["homing"] = self.homing or self.run_homing()  # ReferenceMachine.isHoming
+                out["linkLost"] = self.link_lost
+                if self.link_lost:
+                    out.update(connected=False, homed=False)
             out.update({"busy": busy, "zCheck": {"needed": True, "homeAtMs": self.home_at_ms, "places": []},
                         "drivers": [{"name": "GcodeDriver", "class": "GcodeDriver", "connection": "fake"}],
                         "positions": [], "axes": axes})
@@ -303,8 +311,13 @@ class FakeOpenPnP:
                                                            "on reading from the controller"}
             if relink:
                 self.connected = self.link_dead = False  # GcodeDriver.setEnabled: disconnect(), then connect()
-            connect = not self.connected
+            connect = not self.connected or self.link_lost is not None
             self.enabled = self.connected = True
+            self.link_lost = None  # a connect opens the link again
+            if "link-lost-after-enable" in self.fail:
+                self.link_lost = {"atMs": int(time.time() * 1000), "next": "once the board is back on USB: Stop, then "
+                                  "Start (or restart il-openpnp), then Home as after a reset",
+                                  "why": "the link to the controller was lost at 15:07 (the controller left USB)"}
             if connect and self.connected_at_ms is None:
                 self.connected_at_ms = int(time.time() * 1000)
             if "reset" in self.fail or self.booted:
@@ -332,6 +345,8 @@ class FakeOpenPnP:
         with self.lock:
             if not self.enabled:
                 return 409, {"error": "refused", "reason": "the machine is not started: press Start first"}
+            if self.link_lost:  # BR-93 (ApiContext): every route that moves refuses before anything is tried
+                return 409, {"error": "refused", "reason": f"MACHINE: {self.link_lost['why']}: {self.link_lost['next']}"}
             if self.pressure_state != "off":
                 return 409, {"error": "refused", "reason": "the pressure is being held on from the Dispense tab. "
                                                            "Switch it off first: Pressure off"}
