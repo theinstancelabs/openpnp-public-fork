@@ -26,6 +26,7 @@ public class GcodeDriverLinkLossTest {
         assertTrue(GcodeDriver.devicePathGone(dev.getPath()), "gone");
         assertFalse(GcodeDriver.devicePathGone("COM3"), "a port named without a path is never checked");
         assertFalse(GcodeDriver.devicePathGone("ttyACM0"));
+        assertFalse(GcodeDriver.devicePathGone("\\\\.\\COM3"), "#53 re-review: Windows' device name is no path");
         assertFalse(GcodeDriver.devicePathGone(null));
     }
 
@@ -75,6 +76,41 @@ public class GcodeDriverLinkLossTest {
         }
         finally {
             sim.close();
+        }
+    }
+
+    /**
+     * #53 re-review: the exit flag is set by a hook registered with jSerialComm itself (its hooks run before it closes the
+     * ports), not by one of the JVM's (those run in no fixed order with jSerialComm's): a serial connect registers it
+     * once, even one that fails to open its port.
+     */
+    @Test
+    public void aSerialConnectRegistersTheExitFlagWithJSerialComm() throws Exception {
+        SerialPortCommunications c = new SerialPortCommunications();
+        c.setPortName("/dev/no-such-port-br93");
+        try {
+            c.connect();
+        }
+        catch (Exception expected) {
+            // no such port: the hook is registered before the open
+        }
+        java.lang.reflect.Field f = com.fazecast.jSerialComm.SerialPort.class.getDeclaredField("shutdownHooks");
+        f.setAccessible(true);
+        Thread hook = null;
+        for (Object t : (java.util.List<?>) f.get(null)) {
+            if ("serial-exit-flag".equals(((Thread) t).getName())) {
+                assertNull(hook, "registered once");
+                hook = (Thread) t;
+            }
+        }
+        assertNotNull(hook, "the exit flag's hook is jSerialComm's");
+        boolean was = SerialPortCommunications.jvmShuttingDown;
+        try {
+            hook.run();
+            assertTrue(SerialPortCommunications.jvmShuttingDown);
+        }
+        finally {
+            SerialPortCommunications.jvmShuttingDown = was;
         }
     }
 }

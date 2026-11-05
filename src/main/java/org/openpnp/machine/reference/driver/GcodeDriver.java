@@ -1393,11 +1393,12 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     }
 
     /**
-     * Instance Labs (BR-93): a port named by its device path whose path is gone: the board left USB (udev removes its
-     * /dev/serial/by-id link at once). A name without a path ("COM3", "ttyACM0") is never checked.
+     * Instance Labs (BR-93): a device opened by its Unix path whose path is gone: the board left USB (udev removes the
+     * device and its /dev/serial/by-id link at once). Anything else (Windows' \\.\COM3, which never "exists" as a file)
+     * is never checked.
      */
     static boolean devicePathGone(String port) {
-        return port != null && new File(port).isAbsolute() && !new File(port).exists();
+        return port != null && port.startsWith("/") && !new File(port).exists();
     }
 
     /**
