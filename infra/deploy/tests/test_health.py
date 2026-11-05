@@ -273,6 +273,30 @@ class Health(HealthLab, unittest.TestCase):
         self.assertNotIn(("POST", "/api/stop"), posts)
         self.assertEqual([r for r in self.lab.requests() if "screw" in r], [], "no M18 B")
 
+    def test_a_link_lost_at_the_enable_steps_planned_stop_gets_no_start(self):
+        """An enabled machine is stopped first. #53's planned stop answers 200 on a lost link and the Start after it
+        would clear machine.linkLost: read again after it, no Start, no home."""
+        self.start(jar_fail=["link-lost-at-planned-stop"])
+        self.fake.enable()
+        rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "enable"), rep)
+        self.assertEqual(self.after("/api/stop/planned"), [], "no Start, no home")
+
+    def test_no_answer_after_the_enable_steps_planned_stop_gets_no_start(self):
+        """Fail closed there too: the Start would clear a loss nothing read."""
+        self.start()
+        self.fake.enable()
+        get = il_deploy.Api.get
+
+        def no_answer_after_the_stop(api, path, timeout=10):
+            if path == "/api/machine" and ("POST", "/api/stop/planned") in self.posts():
+                raise il_deploy.ApiTimeout(f"GET {path}: no answer within {timeout:g} s")
+            return get(api, path, timeout)
+        with mock.patch.object(il_deploy.Api, "get", no_answer_after_the_stop):
+            rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "enable"), rep)
+        self.assertEqual(self.after("/api/stop/planned"), [], "no Start, no home")
+
     def test_an_enabled_machine_whose_lock_is_taken_is_left_alone(self):
         """Someone starts the machine (and so holds the lock) just before the check reads it: their session, never
         the build's fault, no STOP."""

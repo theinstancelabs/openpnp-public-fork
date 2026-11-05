@@ -198,8 +198,9 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
        only if the previous build passes. If the previous build fails too, the machine is suspect: nothing goes
        on the bad list, the hold is set, and the previous build stays pending (deploys refused) until a health
        check passes.
-     - **A home that never ends** (or that OpenPnP timed out on), or **the claim lost**: OpenPnP is left alone
-       (running), the build stays installed but NOT verified, the hold is set.
+     - **A home that never ends** (or that OpenPnP timed out on), **the claim lost**, or **a lost controller
+       link** (BR-93, kind `link-lost`): OpenPnP is left alone (running), the build stays installed but NOT
+       verified, the hold is set.
    - **At the end** it writes the `- **Deployed on the machine:**` line in STATE.md's `## Code` section,
      records the build as verified with a manifest of the config (file hashes, without `log/` and `-shm`)
      as the baseline for a later rollback, and puts OpenPnP back as it was (running or stopped). The Holder:
@@ -279,9 +280,12 @@ Exit codes:
   - OpenPnP not answering at all (connection refused): nothing to stop.
 - Never stops, starts or homes a machine whose controller link is lost (BR-93: `machine.linkLost` in `/api/status`
   and `/api/machine`, absent before BR-93, null while the link is fine, anything else counts as lost): the idle
-  check is not idle, so no deploy (its restart would clear it). The health check reads it before its stop of an
-  enabled machine and its Start, before its home, and before and after its last stop (#53's planned stop answers 200
-  on a lost link: nothing reaches the controller; after one that passed, a read without an answer counts as lost),
+  check is not idle, so no deploy (its restart would clear it). The stop before the switch reads it again after its
+  planned stop: lost, or no answer, is not idle (exit 3, OpenPnP left running, nothing deployed). The recovery's
+  service stop after a failed check reads it after its STOP: lost leaves OpenPnP alone (held, nothing put back or
+  restarted, the build not marked bad). The health check reads it before its stop of an enabled machine and after
+  it (before the Start), before its home, and before and after its last stop (#53's planned stop answers 200 on a
+  lost link: nothing reaches the controller; after one that passed, a read without an answer counts as lost),
   and at every step that fails after the status step (a Start, home or read that failed on a link lost meanwhile:
   #53's 409 `MACHINE: …`, `homing failed: … IO Error …`, homed reading false). Set at any of them, the check fails
   with kind `link-lost`, handled like a home that never ends: no STOP (nothing reaches the controller), no config put

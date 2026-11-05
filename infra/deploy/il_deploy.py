@@ -2309,6 +2309,20 @@ class Deployer:
             return (stop or self.stop_machine)()
         return ok, detail
 
+    def _link_lost_now(self, closed):
+        """BR-93: why /api/machine says the controller link is lost, or None. Read just before anything that clears
+        machine.linkLost (a Start connects; a service stop restarts). A read without an answer is a loss only if
+        closed (nothing reads it again before that)."""
+        try:
+            code, m = self.api.get("/api/machine", timeout=10)
+            unread = None if code == 200 else f"HTTP {code}"
+        except ApiDown as e:
+            unread = str(e)
+        if unread:
+            return f"machine.linkLost not read ({unread})" if closed else None
+        lost = api_link_lost_reasons(m)
+        return lost[0] if lost else None
+
     def stop_service(self):
         """Stop the running service gracefully, the machine first by the planned stop. None if stopped, else (rc,
         note) for the caller to return."""
@@ -2320,6 +2334,9 @@ class Deployer:
             note = f"OpenPnP did not switch the machine off ({detail}); nothing changed, a person must check"
             self.set_hold(note)
             return 1, note
+        lost = self._link_lost_now(closed=True)
+        if lost:  # #53's planned stop answers 200 on a lost link; the service stop would clear it
+            return self.not_idle([lost]), f"{lost}; OpenPnP left running, nothing deployed"
         self.svc.stop()
         self.record("service-stop")
         end = self.clock.monotonic() + 15
@@ -2340,6 +2357,10 @@ class Deployer:
         ok, detail = self.stop_machine()
         self.record("stop", ok=ok, detail=detail)
         if not ok:
+            return False
+        lost = self._link_lost_now(closed=False)
+        if lost:  # BR-93: the restart would clear it, and the recovery would Start and home a build on it
+            self.record("link-lost", detail=lost)
             return False
         self.svc.stop()
         self.record("service-stop")
@@ -2553,17 +2574,8 @@ class Deployer:
             the engine's journal rows of the loss: OpenPnP is left as it is for a person, handled like a home that never
             ends (kind link-lost). m: /api/machine already read, else read now; a read without an answer is no loss
             unless closed (after the last stop: nothing reads it again)."""
-            if m is None:
-                try:
-                    code, m = self.api.get("/api/machine", timeout=10)
-                    unread = None if code == 200 else f"HTTP {code}"
-                except ApiDown as e:
-                    unread = str(e)
-                if unread:
-                    why = f"machine.linkLost not read ({unread})"
-                    return fail(name, f"{why}: {what}", "link-lost", stop=False) if closed else None
-            lost = api_link_lost_reasons(m)
-            return fail(name, f"{lost[0]}: {what}", "link-lost", stop=False) if lost else None
+            why = self._link_lost_now(closed) if m is None else next(iter(api_link_lost_reasons(m)), None)
+            return fail(name, f"{why}: {what}", "link-lost", stop=False) if why else None
 
         def claim_lost(name, enabled):
             why = self._claim_lost()
@@ -2617,6 +2629,10 @@ class Deployer:
                         return fail("enable", d if taken is True else f"{d}; {taken}", "claim-lost", stop=False)
                     return fail("enable", f"could not stop the already enabled machine first: {d}",
                                 planned_stop_kind(ok, d), stop=False)
+                lost = link_lost("enable", f"its planned stop ({d}) may have reached nothing; not starting or homing it",
+                                 closed=True)
+                if lost:  # #53's planned stop answers 200 on a lost link, and the Start next would clear it
+                    return lost
             offset = os.path.getsize(self._log_path()) if os.path.exists(self._log_path()) else 0
         except ApiDown as e:
             return fail("enable", str(e))

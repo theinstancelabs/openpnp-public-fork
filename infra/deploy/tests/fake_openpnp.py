@@ -55,7 +55,7 @@ the home), link-lost-at-planned-stop (as the planned stop runs; it still answers
 link-lost-at-enable (as the Start connects: it answers 409 "could not start the machine: ... IO Error ..."),
 link-lost-at-home (just before the home: #53 refuses it), link-lost-during-home (mid-G28: "homing failed: ... IO
 Error ..."), link-lost-after-homed (right after the health check's homed read: the second GET /api/machine that reads
-homed, after the not-busy wait's).
+homed, after the not-busy wait's), link-lost-at-stop (as a STOP runs: a write on a flaky link fails as its lines go out).
 BR-93's machine.linkLost {atMs, why, next} (fake-machine.json "link_lost", null while the link is fine): while set
 connected and homed read false and a home answers 409 refused "MACHINE: <why>: <next>"; a Start clears it (a connect).
 As #53, the planned stop does not look at it (it answers 200 on a lost link).
@@ -421,6 +421,8 @@ class FakeOpenPnP:
             c.close()
 
     def stop(self):
+        if "link-lost-at-stop" in self.fail:
+            self.lose_link()
         with self.lock:
             sends = self.enabled  # MachineEndpoints.stop: OpenPnP's Stop (the DISABLE_COMMAND) on a started machine only
             if sends and self.connected:
