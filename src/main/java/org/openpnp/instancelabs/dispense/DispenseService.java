@@ -5128,6 +5128,12 @@ public final class DispenseService {
                 res.photoId = er.photoId;
                 throw e;
             }
+            DispenseConfig.CleanCheck clean = res.needleEnd.clean;
+            if (clean == null || !clean.ok) {
+                // review MAJOR 1: the press needs this task's passing clean verdict, whatever the measure returned
+                throw refused("the needle presses the switch only after its end passed the clean check right before: "
+                        + (clean == null ? "the check did not run" : clean.why));
+            }
             c = cfg;
             HeightSwitch.Window w = HeightSwitch.needleWindow(c, res.needleEnd, home, p.down);
             res.window = w;
@@ -5265,6 +5271,13 @@ public final class DispenseService {
     private String needleEndProblem(DispenseConfig c, TipCamera cam) {
         if (cam == null || !cam.isAvailable()) {
             return "No bottom camera: OpenPnP has no camera looking up.";
+        }
+        // review MAJOR 1: the settings file is loaded as it is (PUT /api/config validates, a hand edit does not)
+        List<String> bad = new ArrayList<>();
+        c.needleEndMeasure.validate(bad);
+        if (!bad.isEmpty()) {
+            return "the needle's end from below: " + String.join("; ", bad) + " (Process sets them: PUT /api/config "
+                    + "needleEndMeasure)";
         }
         if (c.needleEndMeasure.clean.get(c.tip.key) == null) {
             return "no clean-check thresholds for this tip kind: Process sets them (needleEndMeasure.clean for the "

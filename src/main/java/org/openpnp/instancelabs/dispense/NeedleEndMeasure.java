@@ -94,7 +94,7 @@ public final class NeedleEndMeasure {
         public transient List<Picture> pictures = new ArrayList<>();
     }
 
-    /** A refusal of the job with its picture (the measure ends at travel Z). */
+    /** A refusal of the job with its picture (the measure ends at travel Z); no code: the settings, nothing offered. */
     private static final class Refused extends Exception {
         private static final long serialVersionUID = 1L;
 
@@ -102,9 +102,9 @@ public final class NeedleEndMeasure {
             super(detail);
             r.ok = false;
             r.code = code;
-            r.why = PASTE.equals(code) ? "paste on the end: " + detail + ": wipe the tip, then measure again"
-                    : "the end was not found (light or focus): " + detail;
-            r.next = PASTE.equals(code) ? WIPE_THEN_MEASURE_AGAIN : MEASURE_AGAIN;
+            r.why = code == null ? detail : PASTE.equals(code) ? "paste on the end: " + detail + ": wipe the tip, then "
+                    + "measure again" : "the end was not found (light or focus): " + detail;
+            r.next = code == null ? null : PASTE.equals(code) ? WIPE_THEN_MEASURE_AGAIN : MEASURE_AGAIN;
             r.pictures.clear();
             if (frame != null) {
                 r.pictures.add(new Picture(frame, caption, mmPerPx));
@@ -368,6 +368,11 @@ public final class NeedleEndMeasure {
     /** K, the tilt and the record, once every height passed. */
     private static void finish(Plan p, Result r, List<Look> n1, List<Look> nd) throws Refused {
         DispenseConfig.NeedleEndSettings s = p.s;
+        if (r.clean == null) {
+            // review MAJOR 1: no end without a clean verdict (the needle's press needs one)
+            throw new Refused(r, null, String.format(Locale.ROOT, "the clean check did not run: no needle height at its "
+                    + "raw Z %.3f (needleEndMeasure.cleanRawZ must be one of needleRawZ)", s.cleanRawZ), null, null, 0);
+        }
         double[] n1z = new double[n1.size()], n1k = new double[n1.size()], z = new double[nd.size()],
                 k = new double[nd.size()], dx = new double[nd.size()], dy = new double[nd.size()];
         DispenseConfig.NeedleEnd e = new DispenseConfig.NeedleEnd();

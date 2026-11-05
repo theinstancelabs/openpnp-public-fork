@@ -643,6 +643,39 @@ public class HeightSwitchSimTest {
         assertEquals(r.getAsJsonObject("needleEnd").get("runId").getAsString(), run.get("runId").getAsString());
     }
 
+    /**
+     * Review MAJOR 1: the end measure and the press need a fresh passing clean check whatever the settings file says. A
+     * file whose needle heights miss the clean check's (needleRawZ [36, 39, 42], cleanRawZ 40.4: PUT /api/config refuses
+     * it, a hand edit or another jar's file does not) is loaded as it is; both routes are refused before anything is
+     * sent (the end measure moved the machine before, and failed only when it recorded the end).
+     */
+    @Test
+    public void aSettingsFileWithoutTheCleanHeightIsRefusedBeforeAnythingIsSent() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}"); // while the file is valid
+        java.io.File f = DispenseConfig.fileFor(sim.configDir);
+        JsonObject o = new JsonParser().parse(new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+        com.google.gson.JsonArray z = new com.google.gson.JsonArray();
+        for (double v : new double[] {36, 39, 42}) {
+            z.add(new com.google.gson.JsonPrimitive(v));
+        }
+        o.getAsJsonObject("needleEndMeasure").add("needleRawZ", z);
+        java.nio.file.Files.write(f.toPath(), o.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        svc = DispenseService.start(Configuration.get()); // the engine's start reads the file as it is
+        svc.setTipCamera(new SceneCamera());
+        sim.machine.home();
+        assertEquals(java.util.Arrays.asList(36.0, 39.0, 42.0), svc.getConfig().needleEndMeasure.needleRawZ);
+        for (String[] route : new String[][] {{"/api/needle/end/measure", null}, {"/api/height-switch/measure",
+            "{\"tool\":\"needle\"}"}}) {
+            sim.server.mark();
+            call("POST", route[0], route[1]);
+            assertEquals(409, lastStatus, lastBody);
+            assertTrue(lastBody.contains("cleanRawZ must be one of needleRawZ"), lastBody);
+            assertEquals(new ArrayList<String>(), sim.server.sinceMark(), route[0] + ": nothing sent");
+        }
+        assertTrue(heightSwitchStatus().get("needle").isJsonNull());
+    }
+
     /** Without N1's trip in this home, or without clean-check limits for the tip kind: refused, nothing sent. */
     @Test
     public void theNeedleWaitsForN1AndForItsTipKindsCleanLimits() throws Exception {

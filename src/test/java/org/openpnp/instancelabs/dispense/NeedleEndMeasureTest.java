@@ -278,6 +278,25 @@ public class NeedleEndMeasureTest {
         assertEquals(40.4, r.clean.rawZ, 1e-9);
     }
 
+    /**
+     * Review MAJOR 1: needle heights without the clean check's (needleRawZ [36, 39, 42], cleanRawZ 40.4, which PUT
+     * /api/config refuses but a settings file may hold) give no clean verdict, so no end: refused with no code (the
+     * settings are Process's), nothing recorded, the head back at travel Z.
+     */
+    @Test
+    public void noCleanVerdictIsNoEnd() throws Exception {
+        FromBelowScene sc = new FromBelowScene(12);
+        Camera cam = new Camera(sc);
+        NeedleEndMeasure.Plan p = plan(sc, sc.endDx, sc.endDy);
+        p.s.needleRawZ = new ArrayList<>(java.util.Arrays.asList(36.0, 39.0, 42.0));
+        NeedleEndMeasure.Result r = NeedleEndMeasure.measure(cam, p);
+        assertFalse(r.ok, "an end without a clean verdict");
+        assertNull(r.end);
+        assertNull(r.code, r.why);
+        assertTrue(r.why.contains("the clean check did not run"), r.why);
+        assertEquals("G1 Z31.500 F1200", cam.lines.get(cam.lines.size() - 2), "back at travel Z");
+    }
+
     /** A room-lit frame (the ring's glow not white): the clean check's light, the end not found (light or focus). */
     @Test
     public void aRingThatIsNotWhiteIsTheLight() throws Exception {
