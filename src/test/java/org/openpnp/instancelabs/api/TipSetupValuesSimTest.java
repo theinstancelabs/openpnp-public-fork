@@ -330,16 +330,21 @@ public class TipSetupValuesSimTest {
             assertEquals(json(LADDER_25), ladder(), "unchanged: " + bad);
         }
         for (String bad : new String[] {"{\"startGapMm\":0.20,\"stepMm\":0.025}", "{\"startGapMm\":\"NaN\","
-                + "\"stepMm\":0.025,\"steps\":13}", "{}"}) {
+                + "\"stepMm\":0.025,\"steps\":13}", "{\"startGapMm\":0.20,\"stepMm\":\"NaN\",\"steps\":13}",
+                "{\"startGapMm\":0.20,\"stepMm\":\"Infinity\",\"steps\":13}", "{}"}) {
             JsonObject put = TipSim.refused(t.call("PUT", "/api/config", recipe + "\"touchOffLadder\":" + bad + "}}"),
                     400, "bad-request");
             assertEquals("invalid dispense config: [profile touchOffLadder needs startGapMm, stepMm and steps, each a "
                     + "number (null: none)]", TipSim.str(put, "reason"));
             assertEquals(json(LADDER_25), ladder(), "unchanged: " + bad);
         }
+        // a key the ladder has not is refused by its name, as any unknown nested setting (not dropped with a 200)
+        JsonObject extra = TipSim.refused(t.call("PUT", "/api/config", recipe + "\"touchOffLadder\":{\"startGapMm\":"
+                + "0.20,\"stepMm\":0.025,\"steps\":13,\"pitchMm\":1.8}}}"), 400, "bad-request");
+        assertEquals("unknown setting 'profile.touchOffLadder.pitchMm'", TipSim.str(extra, "reason"));
         assertEquals(json(LADDER_25), savedLadder(null), "nothing saved");
 
-        JsonObject skip = TipSim.refused(t.call("PUT", "/api/config", recipe + "\"touchOffSkipDots\":5}}"), 400,
+        JsonObject skip =TipSim.refused(t.call("PUT", "/api/config", recipe + "\"touchOffSkipDots\":5}}"), 400,
                 "bad-request");
         assertEquals("invalid dispense config: [profile touchOffLadder: the 25G straight's recipe skips the first 5 dots "
                 + "after the prime (touchOffSkipDots): with a start gap of 0.200 mm its reference dots would sit at "

@@ -2,6 +2,7 @@ package org.openpnp.instancelabs.dispense;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
@@ -130,6 +131,9 @@ public class DispenseProfile {
      * {@code stepMm} and {@code steps}; immutable (shared). Boxed: a field the JSON left out is null, not 0.
      */
     public static final class TouchOffLadder {
+        /** Its keys: PUT /api/config refuses any other by name, as one level up (a ladder is set whole). */
+        public static final List<String> KEYS = Arrays.asList("startGapMm", "stepMm", "steps");
+
         public final Double startGapMm;
         public final Double stepMm;
         public final Integer steps;

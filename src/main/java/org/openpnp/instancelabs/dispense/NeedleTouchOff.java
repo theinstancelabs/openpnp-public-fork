@@ -334,7 +334,9 @@ public final class NeedleTouchOff {
 
     /**
      * The touch-off route's refusal of its request under a recipe that skips {@code skip} dots (the first, in its
-     * order), or null. BR-90: a recipe's own ladder ({@link DispenseProfile#touchOffLadder}) is checked by it too.
+     * order), or null. BR-90: a recipe's own ladder ({@link DispenseProfile#touchOffLadder}) is checked by it too: a
+     * tighter rule here makes the mounted tip's stored ladder a CONFIG block until it is sent again (a mount clears a
+     * parked one), so a change that tightens it clears or migrates the stored ladders.
      */
     public static String requestProblem(Request req, int skip, DispenseConfig c) {
         // skip + 3 dots from at most 2 mm end at -0.1 mm or above in steps of at most (2 + 0.1) / (skip + 2) mm: 0.42,

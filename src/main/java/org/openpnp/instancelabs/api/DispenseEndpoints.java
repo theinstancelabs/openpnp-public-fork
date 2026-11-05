@@ -806,6 +806,13 @@ final class DispenseEndpoints {
                     if (!sub.has(f.getKey())) {
                         throw ApiException.badRequest("unknown setting '" + path + "'");
                     }
+                    if (path.equals("profile.touchOffLadder") && f.getValue().isJsonObject()) {
+                        for (Map.Entry<String, JsonElement> k : f.getValue().getAsJsonObject().entrySet()) {
+                            if (!DispenseProfile.TouchOffLadder.KEYS.contains(k.getKey())) {
+                                throw ApiException.badRequest("unknown setting '" + path + "." + k.getKey() + "'");
+                            }
+                        }
+                    }
                     if (PROTECTED_NESTED.contains(path)) {
                         if (!sub.get(f.getKey()).equals(f.getValue())) {
                             throw ApiException.badRequest("'" + path + "' is stamped by the engine: set or confirm "

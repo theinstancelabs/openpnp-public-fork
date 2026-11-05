@@ -648,6 +648,37 @@ public class MountTest {
         }
     }
 
+    /**
+     * BR-90 review: the ladder is the touch-off form's hint, checked by the touch-off route's rules (they change): a
+     * stored one that no longer passes is cleared alone, never the whole recipe, and the words name the incoming tip.
+     */
+    @Test
+    public void anIncomingLadderThatNoLongerPassesIsClearedAlone() throws Exception {
+        try (TipFixture f = new TipFixture()) {
+            DispenseService svc = f.svc;
+            f.add25();
+            svc.updateConfigAtomically(live -> {
+                DispenseProfile p = live.parkedTips.get(K25).profile;
+                p.liftMm = 3.0;
+                p.touchOffSkipDots = 3;
+                p.touchOffLadder = new DispenseProfile.TouchOffLadder(0.15, 0.025, 13); // its reference pair at 0.075
+                return live;
+            });
+            MountResult r = f.mount(K25);
+            assertEquals(1, r.warnings.size(), r.warnings.toString());
+            assertTrue(r.warnings.get(0).startsWith("The 25G straight's touch-off ladder no longer passes the "
+                    + "touch-off's checks (profile touchOffLadder: the 25G straight's recipe skips the first 3 dots"),
+                    r.warnings.get(0));
+            DispenseProfile now = svc.getConfig().profile;
+            assertNull(now.touchOffLadder);
+            assertEquals(3.0, now.liftMm, 0, "the rest of the recipe is kept");
+            assertEquals(3, now.touchOffSkipDots);
+            assertFalse(now.name.contains("reset"), now.name);
+            assertFalse(svc.getDb().query("SELECT * FROM events WHERE code = 'TIP' AND message LIKE '%touch-off ladder "
+                    + "no longer passes%'").isEmpty());
+        }
+    }
+
     @Test
     public void undoWithinTwoMinutesAndNotAfterATaskOrAFrame() throws Exception {
         try (TipFixture f = new TipFixture()) {

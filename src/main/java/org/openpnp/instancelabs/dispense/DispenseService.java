@@ -1745,7 +1745,19 @@ public final class DispenseService {
             DispenseProfile prof = e.profile == null ? new DispenseProfile() : e.profile.copy();
             // the start angle belongs to the controller's power-up and the screw, not to the needle (§22.3)
             prof.withStartAngleOf(c.profile);
+            c.tip = in.toSpec(); // the recipe is checked as its own tip's (the touch-off's words name the tip)
             List<String> problems = prof.validate(c);
+            if (!problems.isEmpty() && prof.touchOffLadder != null) {
+                // BR-90: the ladder is the touch-off form's hint, checked by the touch-off's rules (they change): one
+                // that no longer passes is cleared alone, never the whole recipe
+                String ladderWhy = problems.get(0);
+                prof.touchOffLadder = null;
+                problems = prof.validate(c);
+                if (problems.isEmpty()) {
+                    r.warnings.add("The " + in.name + "'s touch-off ladder no longer passes the touch-off's checks ("
+                            + ladderWhy + "): it was cleared, the rest of its recipe kept.");
+                }
+            }
             if (!problems.isEmpty()) {
                 DispenseProfile reset = new DispenseProfile();
                 reset.name = in.name + " (reset: " + problems.get(0) + ")";
@@ -1762,7 +1774,6 @@ public final class DispenseService {
             c.needleXyTrim = e.needleXyTrim != null ? e.needleXyTrim : new DispenseConfig.NeedleXyTrim();
             c.needleLanding = e.needleLanding;
             c.doseAnchor = e.doseAnchor;
-            c.tip = in.toSpec();
             List<String> invalid = c.validate();
             if (!invalid.isEmpty()) {
                 throw new IllegalArgumentException("invalid dispense config after the mount: " + invalid);
