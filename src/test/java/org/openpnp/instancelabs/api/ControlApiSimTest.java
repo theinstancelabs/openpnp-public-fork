@@ -3,6 +3,7 @@ package org.openpnp.instancelabs.api;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -24,6 +25,8 @@ import org.openpnp.model.Configuration;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.spi.Camera;
+import org.openpnp.spi.Machine;
+import org.openpnp.spi.MachineListener;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -347,6 +350,42 @@ public class ControlApiSimTest {
         l.setAtMs = System.currentTimeMillis();
         c.needleLanding = l;
         svc.updateConfig(c);
+    }
+
+    /**
+     * BR-94 follow-up MINOR 1: the engine gone between the route's start and the floor check (a configuration load
+     * restarts it) took the needle for N1: a press with no floor and no switch check. Refused, nothing moved.
+     */
+    @Test
+    public void aZPressWithTheEngineGoneMidRouteIsRefused() throws Exception {
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        double z = loc(sim.n2).getZ();
+        Field instance = DispenseService.class.getDeclaredField("instance");
+        instance.setAccessible(true);
+        // OpenPnP fires busy on its machine thread just before the press's task runs: the engine goes there
+        MachineListener gone = new MachineListener.Adapter() {
+            @Override
+            public void machineBusy(Machine m, boolean busy) {
+                try {
+                    if (busy) {
+                        instance.set(null, null);
+                    }
+                }
+                catch (IllegalAccessException e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        };
+        sim.machine.addListener(gone);
+        try {
+            refused(409, "the dispense engine is not running", call("POST", "/api/jog",
+                    "{\"tool\":\"needle\",\"dz\":-1}", UI));
+        }
+        finally {
+            sim.machine.removeListener(gone);
+            instance.set(null, svc);
+        }
+        assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
     }
 
     /** #19 review of BR-49, MINOR 7: a real unhomed state (STOP, then Start), not a faked flag. */

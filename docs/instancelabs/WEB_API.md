@@ -570,7 +570,8 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   height) → `{tool, from: {x, y, z}, to: {x, y, z}, positions}`.
 - Refused (409, the reason in words): not started, unhomed (nothing moves), switching off, busy (OpenPnP, a task, a
   G-code batch, a pressure hold, a pad calibration), another move still running; X/Y while either nozzle is below
-  its safe zone; the camera's `dz`; a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
+  its safe zone; the camera's `dz`; a Z press while the dispense engine is not running (it holds the floors; a
+  configuration load restarts it); a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
   always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current frame (anchored and
   touched off since the needle change, and no failed Z check of this home), not below the surface where its tip
   lands (N2 + its landing and trim) nor the one under N2 (the higher holds) + its offset, nor its I4 floor, without
