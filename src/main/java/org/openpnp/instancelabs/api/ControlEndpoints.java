@@ -143,31 +143,33 @@ final class ControlEndpoints {
             }
         }
         return ctx.bed.prove("jog", tool, s, Collections.singletonList(new CollisionCheck.Leg(label.toString(), s.x,
-                s.y, s.z, t[0], t[1], t[2])), jogOptions(m, hm, tool, to), dry);
+                s.y, s.z, t[0], t[1], t[2])), d[2] != 0 ? jogOptions(m, hm, tool, to)
+                        : CollisionCheck.Options.strict(null), dry); // the exemption: only where requireFloors ran
     }
 
     /**
      * BR-98's jog exemption (design §3 step 4): over a probed surface the jogged tool's tip may go down to the floor
-     * this route already holds it to ({@link #requireFloors}); every other layer and tool stays strict.
+     * this route already holds a Z press to ({@link #requireFloors}); every other layer and tool stays strict.
      */
     private CollisionCheck.Options jogOptions(Machine m, HeadMountable hm, String tool, Location to) throws Exception {
         CollisionCheck.Options o = CollisionCheck.Options.strict(null);
-        DispenseService svc = ctx.svcOrNull(); // an X/Y jog has not been through requireFloors
-        if (svc == null || "camera".equals(tool) || !Double.isFinite(surfaceUnder(svc, to.getX(), to.getY()))) {
+        DispenseService svc = ctx.svcOrNull(); // null only if the engine restarted since requireFloors
+        if (svc == null || "camera".equals(tool)) {
+            return o;
+        }
+        boolean needle = hm == svc.getDispenserNozzle();
+        double[] tip = needle ? svc.needleXY(to.getX(), to.getY()) : new double[] {to.getX(), to.getY()};
+        if (!Double.isFinite(surfaceUnder(svc, tip[0], tip[1]))) {
             return o;
         }
         double floor;
         try {
-            if (hm == svc.getDispenserNozzle()) { // as requireFloors: at its tip and under N2, the higher holds
-                double[] tip = svc.needleXY(to.getX(), to.getY());
-                floor = needleFloor(svc, hm, tip[0], tip[1]);
+            floor = needle ? needleFloor(svc, hm, tip[0], tip[1]) : n1Floor(svc, tip[0], tip[1]);
+            if (needle) { // as requireFloors: under N2 too, the higher holds
                 double underN2 = needleFloor(svc, hm, to.getX(), to.getY());
                 if (Double.isNaN(floor) || underN2 > floor) {
                     floor = underN2;
                 }
-            }
-            else {
-                floor = n1Floor(svc, to.getX(), to.getY());
             }
         }
         catch (ApiException e) {
