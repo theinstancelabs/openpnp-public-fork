@@ -1119,6 +1119,8 @@
     if (surf(d.boardSurfaceName || 'board')) return { step: 'register', fixes: [registerFix(S.plan), { fix: 'probe-by-hand', label: 'Do it by hand' }] };
     return { step: 'done', fixes: [] };
   };
+  /** The remedy's steps in IL.zMoved's order (the heights view lists them). */
+  IL.zMoved.STEPS = ['frame', 'blank', 'places', 'touch-off', 'register'];
   /**
    * Register board's fix-it for a plan: "Probe only (X/Y as planned)" for a board without fiducials (F10: N1 probes it
    * where it is planned; registrationTargets.probeOnly), else "Register board".
@@ -2300,7 +2302,7 @@
     const mc = $('cell-machine'), conn = $('pill-conn'), homed = $('pill-homed');
     if (!mc) return;
     const sep = mc.querySelector('.cell__sep');
-    let showStart = false, showHome = false;
+    let showStart = false, showHome = false, open = 'machine';
     const homedVisible = (on) => {
       IL.setClass(homed, on ? '' : 'sr');
       IL.setClass(conn, on ? 'long' : '');
@@ -2347,13 +2349,18 @@
         }
       } else {
         const p = (s.dispense && s.dispense.profile) || {};
-        setCell(mc, 'ok', undefined, 'Connected' + (p.controllerConnectedAtMs ? ' ' + IL.fmtTime(p.controllerConnectedAtMs - S.skewMs) : '')
+        const zm = IL.zMoved(s);
+        const moved = !!zm && zm.step !== 'done';
+        setCell(mc, moved ? 'need' : 'ok', undefined, moved ? 'Homed, but its Z check found the heights moved: measure them again (press for the steps).'
+          : 'Connected' + (p.controllerConnectedAtMs ? ' ' + IL.fmtTime(p.controllerConnectedAtMs - S.skewMs) : '')
           + ' · homed' + (S.homedAt ? ' ' + IL.fmtTime(S.homedAt) : ''));
         IL.setText(conn, 'Connected');
-        IL.setText(homed, 'Homed');
+        IL.setText(homed, moved ? 'Z moved' : 'Homed');
         homedVisible(true);
+        if (moved) open = 'heights';   // the cell opens the steps while the heights are measured again
       }
     }
+    IL.setAttr(mc, 'data-open-view', open);
     const bs = $('btn-start'), bh = $('btn-home');
     // while an agent holds the machine its controls are not the user's: Take control stands there instead
     const agentHolds = !!s && !off && IL.lockOf(s).agent;
@@ -3031,7 +3038,9 @@
         if (k === 'zcheck') {
           if (/^(I4:\s*)?z moved\b/i.test(msg)) {
             const zm = IL.zMoved(s);
-            return zm && zm.fixes.length ? zm.fixes : [{ href: '#setup/needle', label: 'Open Needle Z frame' }];
+            // the guided sequence first (every step in order, one press each), then the step now's own fix-its
+            return zm && zm.fixes.length ? [{ view: 'heights', label: 'Measure the heights again…', primary: true }].concat(zm.fixes)
+              : [{ href: '#setup/needle', label: 'Open Needle Z frame' }];
           }
           return /no point measured before/i.test(msg) ? [{ href: '#setup/needle', label: 'Open Needle Z frame' }] : [{ fix: 'check-z', label: 'Check Z' }];
         }

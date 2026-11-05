@@ -796,6 +796,8 @@ public final class BoardImporter {
                     throw new ImportException(409, "refused", "OpenPnP's window did not respond within 10 s: "
                             + "nothing was changed. Try again.");
                 }
+                // BR-88: status.boardImport.savedAtMs, once every file and list holds the board
+                BoardArtStore.forDir(configuration.getConfigurationDirectory()).saved(atMs);
                 return out;
             }
             catch (Stale s) {
@@ -1249,6 +1251,8 @@ public final class BoardImporter {
                 BoardStore.deleteTree(staging);
                 BoardArtStore.forDir(configuration.getConfigurationDirectory()).invalidate();
             }
+            // BR-88: status.boardImport.savedAtMs, once the files are in place
+            BoardArtStore.forDir(configuration.getConfigurationDirectory()).saved(atMs);
             Logger.info("Instance Labs: drawing {} from {} attached to {}", artId, parsed.fileName, board.file);
             return map("slug", slug, "name", name, "board", board.file, "art", map("id", artId, "kind",
                     BoardArt.KIND_KICAD), "maxOffsetMm", m.maxOffsetMm, "offsets", m.offsets, "replaced",

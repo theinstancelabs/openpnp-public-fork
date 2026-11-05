@@ -37,7 +37,8 @@ CLI:
   il_sim_scene.py amend --config DIR [PADCAL]      the session's scene file, changed in place (it reloads on its stamp)
   il_sim_scene.py selftest [--board FILE] [--config DIR]
   PADCAL: [--paste] [--coupons] [--balance display|connected] [--bench-blank] [--variant NAME]
-          [--paste-by-tip KEY:mRevMg=M,c=C,e=E,landing=DX:DY]... [--physical-tip KEY|mounted]
+          [--paste-by-tip KEY:[preset=NAME,]mRevMg=M,c=C,e=E,landing=DX:DY,<paste key>=V]...
+          [--physical-tip KEY|mounted]
 
 Tip setups (PROFILE_CALIBRATION_DESIGN.md §22.8): --paste-by-tip gives one tip setup its own paste (mass per
 revolution, footprint law, where it lands off the commanded spot; fields left out are the paste's), --physical-tip
@@ -383,33 +384,93 @@ def variant(sc, name, config_dir=None):
 
 
 PASTE_BY_TIP_FIELDS = ("mRevMg", "c", "e", "landing")
+# INF-06: per-tip pastes from Process's measured reference (preset=NAME), checked by SimPasteReferenceTest
+PASTE_TIPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paste-tips.json")
+# INF-06: any other key of the paste block, laid over it for that tip (SimScene.apply); SimScene checks the values
+PASTE_BY_TIP_FLAGS = ("newPhaseOnMotorOff", "wholeTurnsOnly")
+PASTE_BY_TIP_INTS = ("emptyDotsAfterPowerCycle", "offsetSteps")
+PASTE_BY_TIP_NUMBERS = ("ripple", "ripplePeakDeg", "cv", "transferRatio", "oozeFirst", "refillDip", "refillTauDots",
+                        "idleFullS", "idleDeadS", "threadShare", "threadFullMg", "threadZeroMg", "missBelowMg",
+                        "maxGapMm", "needleZOffsetMm", "feedLimitMgS", "landingSdMm", "primeTurns")
 
 
 def parse_paste_by_tip(text):
-    """'KEY:mRevMg=1.6,c=0.6,e=0.77,landing=2.4:-0.4' -> (KEY, the byTip entry of the scene's paste, §22.8)."""
+    """'KEY:mRevMg=1.6,c=0.6,e=0.77,landing=2.4:-0.4' -> (KEY, the byTip entry of the scene's paste, §22.8); any other
+    key of the paste block too ('primeTurns=230,wholeTurnsOnly=true', INF-06), and preset=NAME (paste-tips.json) with
+    the other keys laid over it."""
     key, sep, rest = text.partition(":")
     if not key or not sep or not rest:
         raise ValueError("--paste-by-tip %r: expected KEY:mRevMg=..,c=..,e=..,landing=DX:DY" % text)
+    items = rest.split(",")
+    named = [i.partition("=")[2].strip() for i in items if i.partition("=")[0].strip() == "preset"]
     entry = {}
-    for item in rest.split(","):
+    if len(named) > 1:
+        raise ValueError("--paste-by-tip %r: one preset at most" % text)
+    if named:  # the preset's keys first, through the same checks as typed ones; the typed keys go over them
+        items = preset_items(text, named[0]) + [i for i in items if i.partition("=")[0].strip() != "preset"]
+    for item in items:
         name, eq, value = item.partition("=")
-        name = name.strip()
+        name, value = name.strip(), value.strip()
+        if eq and name in PASTE_BY_TIP_FLAGS:
+            if value not in ("true", "false"):
+                raise ValueError("--paste-by-tip %r: %s=true|false" % (text, name))
+            entry[name] = value == "true"
+            continue
+        if eq and name in PASTE_BY_TIP_INTS + PASTE_BY_TIP_NUMBERS:
+            try:
+                entry[name] = int(value) if name in PASTE_BY_TIP_INTS else float(value)
+            except ValueError:
+                raise ValueError("--paste-by-tip %r: %s=%r is not a%s number" % (
+                    text, name, value, "n integer" if name in PASTE_BY_TIP_INTS else "")) from None
+            if not math.isfinite(entry[name]):  # SimScene refuses it, and the running SIM keeps its old scene
+                raise ValueError("--paste-by-tip %r: %s=%r is not finite" % (text, name, value))
+            continue
         if not eq or name not in PASTE_BY_TIP_FIELDS:
-            raise ValueError("--paste-by-tip %r: %r is not one of %s" % (text, item, ", ".join(PASTE_BY_TIP_FIELDS)))
+            raise ValueError("--paste-by-tip %r: %r is not one of %s" % (text, item, ", ".join(
+                PASTE_BY_TIP_FIELDS + PASTE_BY_TIP_FLAGS + PASTE_BY_TIP_INTS + PASTE_BY_TIP_NUMBERS)))
         if name == "landing":
             xy = value.split(":")
             if len(xy) != 2:
                 raise ValueError("--paste-by-tip %r: landing=DX:DY (mm)" % text)
             entry["landingBiasMm"] = [float(xy[0]), float(xy[1])]
+            if not all(math.isfinite(c) for c in entry["landingBiasMm"]):
+                raise ValueError("--paste-by-tip %r: landing=%r is not finite" % (text, value))
             continue
         v = float(value)
-        if not v > 0:
-            raise ValueError("--paste-by-tip %r: %s must be > 0" % (text, name))
+        if not (v > 0 and math.isfinite(v)):
+            raise ValueError("--paste-by-tip %r: %s must be a finite number > 0" % (text, name))
         if name == "mRevMg":
             entry["mRevMg"] = v
         else:
             entry.setdefault("footprint", {})[name] = v
     return key, entry
+
+
+def preset_items(text, name):
+    """paste-tips.json's preset NAME as KEY=VALUE items (a mistyped key or a wrong value is refused, not dropped)."""
+    try:
+        with open(PASTE_TIPS) as f:
+            tips = dict(json.load(f)["presets"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise ValueError("--paste-by-tip %r: cannot read the presets in %s: %r" % (text, PASTE_TIPS, e)) from None
+    if not isinstance(tips.get(name), dict):
+        raise ValueError("--paste-by-tip %r: no preset %r in %s (%s)" % (text, name, PASTE_TIPS,
+                                                                        ", ".join(sorted(tips))))
+    items = []
+    for k, v in tips[name].items():
+        if k == "footprint" and isinstance(v, dict) and set(v) <= {"c", "e"}:
+            items += ["%s=%r" % kv for kv in v.items()]
+        elif k == "landingBiasMm" and isinstance(v, list) and len(v) == 2:
+            items.append("landing=%r:%r" % tuple(v))
+        elif isinstance(v, bool) and k in PASTE_BY_TIP_FLAGS:  # exact keys only: SimScene.apply reads no others
+            items.append("%s=%s" % (k, "true" if v else "false"))
+        elif not isinstance(v, bool) and isinstance(v, (int, float)) and k in (
+                ("mRevMg",) + PASTE_BY_TIP_INTS + PASTE_BY_TIP_NUMBERS):
+            items.append("%s=%r" % (k, v))
+        else:
+            raise ValueError("--paste-by-tip %r: preset %r's %s=%r is not a key of the paste block" % (
+                text, name, k, v))
+    return items
 
 
 def paste_by_tip(sc, key, entry):
@@ -521,7 +582,9 @@ def _add_padcal_args(p):
     p.add_argument("--bench-blank", action="store_true", help="the bench blank colour (DotInspector sees the paste)")
     p.add_argument("--variant", choices=sorted(VARIANTS), help="one negative control of §11.7")
     p.add_argument("--paste-by-tip", action="append", default=[], metavar="KEY:mRevMg=M,c=C,e=E,landing=DX:DY",
-                   help="a tip setup's own paste (§22.8; fields left out are the paste's)")
+                   help="a tip setup's own paste (§22.8; fields left out are the paste's): also preset=NAME of "
+                   "paste-tips.json and any key of the paste block, laid over it (cv=0.1). It replaces the tip's "
+                   "entry, in amend too: name the preset again to keep it")
     p.add_argument("--physical-tip", metavar="KEY", help="the tip on the head (default the mounted one; 'mounted' "
                    "removes it)")
 
@@ -571,12 +634,49 @@ def cmd_selftest(a):
     check("paste-by-tip: §22.8's example", k == "25g-straight"
           and e == {"mRevMg": 1.6, "footprint": {"c": 0.6}, "landingBiasMm": [2.4, -0.4]})
     check("paste-by-tip: e alone", parse_paste_by_tip("x:e=0.8")[1] == {"footprint": {"e": 0.8}})
-    for bad in ("25g-straight", "25g-straight:", "k:mRevMg=0", "k:c=-1", "k:landing=2.4", "k:speed=3", "k:mRevMg"):
+    k22, e22 = parse_paste_by_tip("22g:preset=22g-bent,cv=0.2")
+    check("paste-by-tip: a preset of paste-tips.json, a key over it (INF-06)", k22 == "22g"
+          and e22["primeTurns"] == 75 and e22["footprint"] == {"c": 0.911, "e": 0.77} and e22["cv"] == 0.2)
+    check("paste-by-tip: any key of the paste block (INF-06)", parse_paste_by_tip(
+        "k:primeTurns=230,wholeTurnsOnly=true,newPhaseOnMotorOff=false,maxGapMm=0.35,emptyDotsAfterPowerCycle=12")[1]
+        == {"primeTurns": 230.0, "wholeTurnsOnly": True, "newPhaseOnMotorOff": False, "maxGapMm": 0.35,
+            "emptyDotsAfterPowerCycle": 12})
+    for bad in ("25g-straight", "25g-straight:", "k:mRevMg=0", "k:c=-1", "k:landing=2.4", "k:speed=3", "k:mRevMg",
+                "k:wholeTurnsOnly=yes", "k:emptyDotsAfterPowerCycle=1.5", "k:cv=x", "k:cv=nan", "k:maxGapMm=inf",
+                "k:mRevMg=inf", "k:c=1e400", "k:landing=nan:0", "k:landing=0:inf", "k:preset=27g-steel"):
         try:
             parse_paste_by_tip(bad)
             check("paste-by-tip refuses %r" % bad, False)
         except ValueError:
             check("paste-by-tip refuses %r" % bad, True)
+    with open(PASTE_TIPS) as f:
+        names = sorted(json.load(f)["presets"])
+    check("paste-by-tip: every preset of paste-tips.json passes the typed keys' checks (%s)" % ", ".join(names),
+          all(parse_paste_by_tip("k:preset=" + name)[1] for name in names))
+    with tempfile.TemporaryDirectory() as d:
+        bad_tips = {"typo": {"maxGapMM": 0.35}, "flag": {"wholeTurnsOnly": 1}, "nested": {"footprint": {"x": 1}},
+                    "inf": {"cv": float("inf")}, "list": [1], "alias": {"c": 0.5},
+                    "space": {"cv ": 0.3}, "boolean": {"c": True}}
+        with open(os.path.join(d, "tips.json"), "w") as f:
+            json.dump({"presets": bad_tips}, f)
+        with open(os.path.join(d, "bare.json"), "w") as f:
+            json.dump({"typo": {}}, f)
+        real = PASTE_TIPS
+        try:
+            for path, presets in ((os.path.join(d, "tips.json"), sorted(bad_tips)),
+                                  (os.path.join(d, "none.json"), ["typo"]), (os.path.join(d, "bare.json"), ["typo"])):
+                globals()["PASTE_TIPS"] = path
+                for name in presets:
+                    try:
+                        parse_paste_by_tip("k:preset=" + name)
+                        ok = False
+                    except ValueError:
+                        ok = True
+                    except Exception:  # an OSError or KeyError would end the CLI with a traceback
+                        ok = False
+                    check("paste-by-tip refuses preset %r of %s" % (name, os.path.basename(path)), ok)
+        finally:
+            globals()["PASTE_TIPS"] = real
     sc = paste_by_tip(padcal({}), k, e)
     check("paste-by-tip: in paste.byTip, the paste untouched", sc["paste"]["byTip"][k] == e
           and sc["paste"]["mRevMg"] == 2.30 and "byTip" not in PASTE)

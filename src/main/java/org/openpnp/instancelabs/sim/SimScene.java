@@ -167,6 +167,14 @@ public final class SimScene {
         public boolean reportCount = true;
         /** The physical screw angle at count 0 (steps); null = drawn per connection from the seed. */
         public Integer offsetSteps;
+        /** Every motor-off (M18/M84 of B, the idle timeout, a power cycle) draws a new screw angle (INF-06 §4). */
+        public boolean newPhaseOnMotorOff;
+        /** Only whole net turns lay paste; other contacts lay nothing, counted (sub-turns not modelled, INF-06). */
+        public boolean wholeTurnsOnly;
+        /** Whole turns a newly mounted tip takes before paste comes out (INF-06 §8); 0 = always full. */
+        public double primeTurns;
+        /** Contacts after a power cycle that come out empty (INF-06 §5: the 22G ~12). */
+        public int emptyDotsAfterPowerCycle;
         /**
          * BR-74: the seed of the dose and thread noise on every connection (null: seed + the connection's number, as
          * before), so a scene's paste is the same however often the controller reconnected (a test alone in a fresh
@@ -174,10 +182,10 @@ public final class SimScene {
          */
         public Long noiseSeed;
         /**
-         * Per tip setup key (tip setups design §22.8, {@code "byTip"}): the paste and landing of that tip on the
-         * head; a tip without an entry uses the fields above.
+         * Per tip setup key (tip setups design §22.8, {@code "byTip"}): that tip's entry, any keys of this paste block,
+         * laid over a copy of it ({@link SimScene#pasteFor}; INF-06); a tip without an entry uses the fields above.
          */
-        public Map<String, TipPaste> byTip = new LinkedHashMap<>();
+        public Map<String, JsonObject> byTip = new LinkedHashMap<>();
 
         /** A field-by-field copy (the per-tip overlays of {@link SimScene#pasteFor}). */
         public Paste copy() {
@@ -207,24 +215,14 @@ public final class SimScene {
             p.n2OffsetMm = n2OffsetMm == null ? null : n2OffsetMm.clone();
             p.reportCount = reportCount;
             p.offsetSteps = offsetSteps;
+            p.newPhaseOnMotorOff = newPhaseOnMotorOff;
+            p.wholeTurnsOnly = wholeTurnsOnly;
+            p.primeTurns = primeTurns;
+            p.emptyDotsAfterPowerCycle = emptyDotsAfterPowerCycle;
             p.noiseSeed = noiseSeed;
             p.byTip = new LinkedHashMap<>(byTip);
             return p;
         }
-    }
-
-    /**
-     * What one tip on the SIM head changes (§22.8, {@code paste.byTip}): {@code {mRevMg, footprint: {c, e},
-     * landingBiasMm: [dx, dy]}}. A 25G lays smaller dots than the 22G and lands elsewhere, so measuring and
-     * calibrating it give numbers of its own.
-     */
-    public static final class TipPaste {
-        /** Mass per screw revolution with this tip (mg); null = the paste's. */
-        public Double mRevMg;
-        /** Footprint A = c·m^e with this tip; null = the paste's. */
-        public Double footprintC, footprintE;
-        /** Where this tip lands off the commanded spot {dx, dy} (mm); null = the paste's landingBiasMm. */
-        public double[] landingBiasMm;
     }
 
     /** A weigh coupon: a piece of blank PCB on a named place (machine mm, its top an N1 contact Z). */
@@ -467,6 +465,27 @@ public final class SimScene {
         return s;
     }
 
+    /** Throws IllegalArgumentException (the message starting with {@code what}) for a paste the model cannot use. */
+    static void check(Paste p, String what) {
+        if (!(p.mRevMg > 0) || !(p.footprintC > 0) || !(p.footprintE > 0) || !(p.transferRatio > 0)
+                || p.transferRatio > 1 || !(p.refillTauDots > 0) || !(p.idleFullS > 0) || !(p.feedLimitMgS > 0)) {
+            throw new IllegalArgumentException(what + "mRevMg, footprint c and e, refillTauDots, idleFullS and "
+                    + "feedLimitMgS must be > 0, transferRatio in (0, 1]");
+        }
+        if (p.ripple < 0 || p.cv < 0 || p.oozeFirst < 0 || p.refillDip < 0 || p.refillDip > 1 || p.idleDeadS < 0
+                || p.primeTurns < 0 || p.emptyDotsAfterPowerCycle < 0
+                || p.threadShare < 0 || p.threadShare > 1 || p.threadFullMg < 0
+                || p.threadZeroMg < p.threadFullMg || p.missBelowMg < 0 || p.landingSdMm < 0) {
+            throw new IllegalArgumentException(what + "negative ripple, cv, transient, idle, prime turns, empty dots, "
+                    + "miss or landing sd, "
+                    + "refillDip or threadShare above 1, or threadZeroMg below threadFullMg");
+        }
+        if (p.landingBiasMm == null || p.landingBiasMm.length != 2 || p.n2OffsetMm == null
+                || p.n2OffsetMm.length != 2) {
+            throw new IllegalArgumentException(what + "landingBiasMm and n2OffsetMm need 2 numbers");
+        }
+    }
+
     /** Throws IllegalArgumentException for values the models cannot use. */
     public void validate() {
         if (seat == null || Math.abs(seat.getDeterminant()) < 1e-6) {
@@ -481,30 +500,17 @@ public final class SimScene {
             throw new IllegalArgumentException("negative time constant, noise, band, tip radius or blur");
         }
         if (paste != null) {
-            Paste p = paste;
-            if (!(p.mRevMg > 0) || !(p.footprintC > 0) || !(p.footprintE > 0) || !(p.transferRatio > 0)
-                    || p.transferRatio > 1 || !(p.refillTauDots > 0) || !(p.idleFullS > 0) || !(p.feedLimitMgS > 0)) {
-                throw new IllegalArgumentException("paste: mRevMg, footprint c and e, refillTauDots, idleFullS and "
-                        + "feedLimitMgS must be > 0, transferRatio in (0, 1]");
-            }
-            if (p.ripple < 0 || p.cv < 0 || p.oozeFirst < 0 || p.refillDip < 0 || p.refillDip > 1 || p.idleDeadS < 0
-                    || p.threadShare < 0 || p.threadShare > 1 || p.threadFullMg < 0
-                    || p.threadZeroMg < p.threadFullMg || p.missBelowMg < 0 || p.landingSdMm < 0) {
-                throw new IllegalArgumentException("paste: negative ripple, cv, transient, idle, miss or landing sd, "
-                        + "refillDip or threadShare above 1, or threadZeroMg below threadFullMg");
-            }
-            if (p.landingBiasMm == null || p.landingBiasMm.length != 2 || p.n2OffsetMm == null
-                    || p.n2OffsetMm.length != 2) {
-                throw new IllegalArgumentException("paste: landingBiasMm and n2OffsetMm need 2 numbers");
-            }
-            for (Map.Entry<String, TipPaste> e : p.byTip.entrySet()) {
-                TipPaste t = e.getValue();
-                if (t == null || t.mRevMg != null && !(t.mRevMg > 0) || t.footprintC != null && !(t.footprintC > 0)
-                        || t.footprintE != null && !(t.footprintE > 0)
-                        || t.landingBiasMm != null && t.landingBiasMm.length != 2) {
-                    throw new IllegalArgumentException("paste.byTip['" + e.getKey() + "']: mRevMg and footprint c and e "
-                            + "must be > 0, landingBiasMm 2 numbers");
+            check(paste, "paste: ");
+            for (Map.Entry<String, JsonObject> e : paste.byTip.entrySet()) {
+                String what = "paste.byTip['" + e.getKey() + "']: ";
+                Paste t;
+                try {
+                    t = apply(e.getValue(), paste.copy());
                 }
+                catch (RuntimeException x) { // a wrong count or type in the entry
+                    throw new IllegalArgumentException(what + x.getMessage(), x);
+                }
+                check(t, what);
             }
         }
         Set<String> places = new HashSet<>();
@@ -543,7 +549,23 @@ public final class SimScene {
 
     /** The paste block (§11.3); missing keys keep the defaults of {@link Paste}. */
     static Paste pasteOf(JsonObject o) {
-        Paste p = new Paste();
+        Paste p = apply(o, new Paste());
+        JsonObject byTip = obj(o, "byTip");
+        if (byTip != null) {
+            for (Map.Entry<String, JsonElement> e : byTip.entrySet()) {
+                if (e.getValue() != null && e.getValue().isJsonObject()) {
+                    p.byTip.put(e.getKey(), e.getValue().getAsJsonObject());
+                }
+            }
+        }
+        return p;
+    }
+
+    /**
+     * Sets on {@code p} the fields {@code o} names (a paste block, or a tip's entry laid over a copy of it); the others
+     * keep their value. A null clears needleZOffsetMm, noiseSeed or offsetSteps.
+     */
+    static Paste apply(JsonObject o, Paste p) {
         p.mRevMg = num(o, "mRevMg", p.mRevMg);
         p.ripple = num(o, "ripple", p.ripple);
         p.ripplePeakDeg = num(o, "ripplePeakDeg", p.ripplePeakDeg);
@@ -565,8 +587,9 @@ public final class SimScene {
         p.threadZeroMg = num(o, "threadZeroMg", p.threadZeroMg);
         p.missBelowMg = num(o, "missBelowMg", p.missBelowMg);
         p.maxGapMm = num(o, "maxGapMm", p.maxGapMm);
-        p.needleZOffsetMm = o.has("needleZOffsetMm") && !o.get("needleZOffsetMm").isJsonNull()
-                ? num(o, "needleZOffsetMm", 0) : null;
+        if (o.has("needleZOffsetMm")) {
+            p.needleZOffsetMm = o.get("needleZOffsetMm").isJsonNull() ? null : num(o, "needleZOffsetMm", 0);
+        }
         p.feedLimitMgS = num(o, "feedLimitMgS", p.feedLimitMgS);
         p.landingSdMm = num(o, "landingSdMm", p.landingSdMm);
         double[] bias = numbers(o, "landingBiasMm", 2);
@@ -578,33 +601,52 @@ public final class SimScene {
             p.n2OffsetMm = n2;
         }
         p.reportCount = o.has("reportCount") ? o.get("reportCount").getAsBoolean() : p.reportCount;
-        p.noiseSeed = o.has("noiseSeed") && !o.get("noiseSeed").isJsonNull() ? Long.valueOf(o.get("noiseSeed").getAsLong())
-                : null;
-        p.offsetSteps = o.has("offsetSteps") && !o.get("offsetSteps").isJsonNull()
-                ? Integer.valueOf(Math.floorMod(o.get("offsetSteps").getAsInt(), SimPaste.STEPS_PER_REV)) : null;
-        JsonObject byTip = obj(o, "byTip");
-        if (byTip != null) {
-            for (Map.Entry<String, JsonElement> e : byTip.entrySet()) {
-                if (e.getValue() == null || !e.getValue().isJsonObject()) {
-                    continue;
-                }
-                JsonObject t = e.getValue().getAsJsonObject();
-                TipPaste tp = new TipPaste();
-                tp.mRevMg = t.has("mRevMg") && !t.get("mRevMg").isJsonNull() ? t.get("mRevMg").getAsDouble() : null;
-                JsonObject f2 = obj(t, "footprint");
-                if (f2 != null) {
-                    tp.footprintC = f2.has("c") && !f2.get("c").isJsonNull() ? f2.get("c").getAsDouble() : null;
-                    tp.footprintE = f2.has("e") && !f2.get("e").isJsonNull() ? f2.get("e").getAsDouble() : null;
-                }
-                tp.landingBiasMm = numbers(t, "landingBiasMm", 2);
-                p.byTip.put(e.getKey(), tp);
-            }
+        p.newPhaseOnMotorOff = flag(o, "newPhaseOnMotorOff", p.newPhaseOnMotorOff);
+        p.wholeTurnsOnly = flag(o, "wholeTurnsOnly", p.wholeTurnsOnly);
+        p.primeTurns = num(o, "primeTurns", p.primeTurns);
+        p.emptyDotsAfterPowerCycle = integer(o, "emptyDotsAfterPowerCycle", p.emptyDotsAfterPowerCycle);
+        if (o.has("noiseSeed")) {
+            p.noiseSeed = o.get("noiseSeed").isJsonNull() ? null : Long.valueOf(o.get("noiseSeed").getAsLong());
+        }
+        if (o.has("offsetSteps")) {
+            p.offsetSteps = o.get("offsetSteps").isJsonNull() ? null
+                    : Integer.valueOf(Math.floorMod(o.get("offsetSteps").getAsInt(), SimPaste.STEPS_PER_REV));
         }
         return p;
     }
 
+    /** A JSON true or false (Gson reads 1 or "yes" as false: a guard would switch off without a word). */
+    static boolean flag(JsonObject o, String key, boolean def) {
+        if (!o.has(key)) {
+            return def;
+        }
+        JsonElement e = o.get(key);
+        if (!e.isJsonPrimitive() || !e.getAsJsonPrimitive().isBoolean()) {
+            throw new IllegalArgumentException(key + " must be true or false, not " + e);
+        }
+        return e.getAsBoolean();
+    }
+
+    /** A JSON integer, null keeping the default as for every number of the block (Gson's getAsInt makes 12.7 a 12
+     * and reads "12" as 12: both refused). */
+    static int integer(JsonObject o, String key, int def) {
+        JsonElement e = o.get(key);
+        if (e == null || e.isJsonNull()) {
+            return def;
+        }
+        double v = e.isJsonPrimitive() && e.getAsJsonPrimitive().isNumber() ? e.getAsDouble() : Double.NaN;
+        if (v != Math.rint(v) || Math.abs(v) > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(key + " must be an integer, not " + e);
+        }
+        return (int) v;
+    }
+
     /** Overlays of {@link #paste} per tip key, made once per scene ({@link #pasteFor}). */
     private final transient Map<String, Paste> overlays = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** The scene file's stamp (file key, mtime, size) this scene was read from, by {@link Source}; null when built in
+     * code. OpenPnP's simulator makes a new Source, so a new SimScene, on every connect: this tells versions apart. */
+    public transient List<Object> fileVersion;
 
     /**
      * The paste of the SIM needle with the tip {@code tipKey} on the head (§22.8): the scene's paste with that tip's
@@ -615,23 +657,7 @@ public final class SimScene {
         if (base == null || tipKey == null || !base.byTip.containsKey(tipKey)) {
             return base;
         }
-        return overlays.computeIfAbsent(tipKey, k -> {
-            TipPaste tp = base.byTip.get(k);
-            Paste x = base.copy();
-            if (tp.mRevMg != null) {
-                x.mRevMg = tp.mRevMg;
-            }
-            if (tp.footprintC != null) {
-                x.footprintC = tp.footprintC;
-            }
-            if (tp.footprintE != null) {
-                x.footprintE = tp.footprintE;
-            }
-            if (tp.landingBiasMm != null) {
-                x.landingBiasMm = tp.landingBiasMm.clone();
-            }
-            return x;
-        });
+        return overlays.computeIfAbsent(tipKey, k -> apply(base.byTip.get(k), base.copy()));
     }
 
     /**
@@ -997,6 +1023,7 @@ public final class SimScene {
             try {
                 SimScene s = load(file);
                 scene = s.withBoardSize(boardOf.apply(s));
+                scene.fileVersion = st;
                 stamp = st;
             }
             catch (Exception e) {

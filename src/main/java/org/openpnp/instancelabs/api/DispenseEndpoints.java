@@ -75,14 +75,14 @@ final class DispenseEndpoints {
             "profile", "purgeRow", "cleanPadCheck", "fiducialCheck", "vacuumProbe", "paste", "calibrationArea",
             "padCalibration", "outputZones"));
     /**
-     * Nested fields only the engine or their own endpoints change: the start angle's set time (I11:
+     * Nested fields only the engine or their own endpoints change: the start angle's set and change times (I11:
      * POST /api/screw/start-angle, or a changed angle), the time of the purge reset,
      * and the used purge spots (runs reserve them, POST /api/purge-row/reset frees them: a stale
      * full-settings save must not put paste-covered spots back in use); likewise the used calibration
      * area and its wipe (POST /api/calibration-area/reset), and when the paste was loaded (POST /api/paste).
      */
     static final java.util.Set<String> PROTECTED_NESTED = new java.util.HashSet<>(java.util.Arrays.asList(
-            "profile.startAngleSetAtMs", "purgeRow.resetAtMs", "purgeRow.usedSpots",
+            "profile.startAngleSetAtMs", "profile.startAngleChangedAtMs", "purgeRow.resetAtMs", "purgeRow.usedSpots",
             "calibrationArea.usedMm", "calibrationArea.resetAtMs", "paste.loadedAtMs"));
 
     /** How long OpenPnP's thread may take to start a read of its board list (BOARD_IMPORT_DESIGN.md §3.6). */
@@ -164,8 +164,10 @@ final class DispenseEndpoints {
         out.put("run", run);
         PadCalibrationJob pcal = ctx.padCalJobs.current();
         out.put("padCalibration", pcal == null || svc == null ? null : pcal.view());
-        // an upload holds the import pipeline: every engine endpoint refuses until it has read the file
-        out.put("boardImport", Views.map("reading", BoardImporter.reading()));
+        // an upload holds the import pipeline: every engine endpoint refuses until it has read the file; BR-88: when
+        // the last save, replace or attach succeeded, so a page sees an upload made in another tab
+        out.put("boardImport", Views.map("reading", BoardImporter.reading(), "savedAtMs",
+                BoardArtStore.forDir(ctx.configuration.getConfigurationDirectory()).savedAtMs()));
         if (svc == null) {
             String state = DispenseService.startState();
             d.put("state", state);

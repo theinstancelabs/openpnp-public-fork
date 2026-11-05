@@ -1,6 +1,7 @@
 package org.openpnp.instancelabs.sim;
 
 import java.io.File;
+import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -17,6 +18,7 @@ import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.model.AxesLocation;
 import org.openpnp.model.Configuration;
@@ -59,6 +61,9 @@ public final class SimPaste {
     /** Marlin's M92 B and the steps of one screw revolution (D/DispenseConfig.java:134-136). */
     public static final double STEPS_PER_DEG = 4.44;
     public static final int STEPS_PER_REV = 1600;
+    /** How near one of the engine's aims a contact is that target (its test dot lies 2 mm from the waste, its purge
+     * spots 2.5 mm apart). */
+    static final double AIM_RADIUS_MM = 1.0;
     /** The right pump and valve: the barrel pressure (D/ControllerCommands.java:43-46). */
     static final int PUMP_OUTPUT = 2, VALVE_OUTPUT = 3;
     /** The feed demand is the paste laid in this window (s) divided by it. */
@@ -72,6 +77,11 @@ public final class SimPaste {
     static final double THREAD_MAX_LIFT_MM = 2.0;
     /** A needle below the surface smears its dot to this axis ratio (counted as a string). */
     static final double SMEAR_RATIO = 2;
+    /** A whole net turn within this many steps, wholeTurnsOnly: the engine sends whole steps (4.44 per degree, so
+     * a "G1 B720" is 3197 steps: refused, 3 off). */
+    static final int WHOLE_TURN_TOLERANCE_STEPS = 2;
+    /** Marlin's stepper idle timeout after boot (s) until an M18/M84 S changes it (lumen-sim's bench firmware). */
+    static final double DEFAULT_MOTOR_TIMEOUT_S = 3600;
     /** A dot commanded at exactly the reach lands, however the doubles round (5.62 + 0.20 - 5.62 = 0.2000...02). */
     static final double GAP_TOLERANCE_MM = 1e-6;
     /** A round dot's axis ratio is 1 + |N(0, 0.05)|. */
@@ -150,6 +160,11 @@ public final class SimPaste {
         /** (time s, mg) of the paste the screw asked for lately, for the feed demand. */
         private final ArrayDeque<double[]> asked = new ArrayDeque<>();
         private int connections;
+        private final Map<String, Double> primedTurns = new HashMap<>(); // per tip fill: turns pushed into it so far
+        private int unmodelled; // contacts a wholeTurnsOnly tip refused on a work surface
+        private WeakReference<SimScene> powerUpScene = new WeakReference<>(null); // a scene built in code
+        private List<Object> powerUpFile; // or the version of the scene file (SimScene.fileVersion)
+        private int powerUps; // of that scene version: the file written again counts from 0
         private double timeS = Double.NEGATIVE_INFINITY;
         private Double lastDotS;
         private String balancePlace;
@@ -178,6 +193,23 @@ public final class SimPaste {
 
         private static String key(File f) {
             return f.getAbsoluteFile().toPath().normalize().toString();
+        }
+
+        /**
+         * This power-up's number in the scene's current version: 0 for its first. A scene file's version is its stamp
+         * (each OpenPnP connect reads the file into a new SimScene, the same version); a file written again, or a scene
+         * built in code anew, starts over, so the phase draws repeat from the first (BR-74) from the next power-up on:
+         * a connection already open keeps drawing from its own stream, so a test that needs the first draws writes its
+         * scene, then reconnects or power-cycles.
+         */
+        synchronized int powerUp(SimScene sc) {
+            boolean same = sc.fileVersion != null ? sc.fileVersion.equals(powerUpFile) : powerUpScene.get() == sc;
+            if (!same) {
+                powerUpScene = new WeakReference<>(sc);
+                powerUpFile = sc.fileVersion;
+                powerUps = 0;
+            }
+            return powerUps++;
         }
 
         /** Deposits in order, {@code where} as {@link Deposit#in}. */
@@ -216,6 +248,28 @@ public final class SimPaste {
         synchronized void add(Deposit d) {
             deposits.add(d);
             VERSION.incrementAndGet();
+        }
+
+        /**
+         * Of {@code turns} of the screw (negative: back) into the fill {@code tip}, the share it takes: forward,
+         * what fills it up to {@code primeTurns}; back, all of it (down to empty) while it is not yet full. The fill
+         * follows the net turns.
+         */
+        synchronized double prime(String tip, double primeTurns, double turns) {
+            double had = primedTurns.getOrDefault(tip, 0.0);
+            double took = turns >= 0 ? Math.max(0, Math.min(turns, primeTurns - had))
+                    : had < primeTurns ? Math.max(turns, -had) : 0;
+            primedTurns.put(tip, had + took);
+            return took;
+        }
+
+        synchronized void refused() {
+            unmodelled++;
+        }
+
+        /** Contacts a wholeTurnsOnly tip refused on a work surface, on every connection to this scene. */
+        public synchronized int unmodelledContacts() {
+            return unmodelled;
         }
 
         synchronized int connect() {
@@ -291,6 +345,16 @@ public final class SimPaste {
     private int connection;
     private Integer offset;
     private Random noise;
+    // A motor-off's new screw phase (newPhaseOnMotorOff, INF-06), the motor-offs this connection, the idle timeout.
+    private Integer jumped;
+    private Random phases; // the motor-offs' phase draws this connection (one stream: consecutive seeds are not)
+    private boolean unmodelledWarned; // a wholeTurnsOnly refusal said in the log (once per connection)
+    private int emptyLeft; // contacts after a power cycle that still lay nothing (emptyDotsAfterPowerCycle)
+    private String fill; // the open dot's tip fill (primeTurns): its tip and its needle
+    private double motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
+    private Double lastMotionS;
+    private Supplier<EngineAims> engineAims = SimPaste::engineAims;
+    private int powerUpIndex; // this connection's last power-up in the scene's current version (Store.powerUp)
     // The screw and the pneumatics.
     private double logicalB, machineB;
     private boolean absolute = true;
@@ -331,6 +395,7 @@ public final class SimPaste {
         this.clockNs = clockNs;
         this.configNeedleZOffsetMm = configNeedleZOffsetMm;
         this.connection = store.connect();
+        powerUp();
     }
 
     /**
@@ -405,6 +470,10 @@ public final class SimPaste {
         connection = store.connect();
         offset = null;
         noise = null;
+        jumped = null;
+        motorTimeoutS = DEFAULT_MOTOR_TIMEOUT_S;
+        lastMotionS = null;
+        powerUp();
         logicalB = 0;
         machineB = 0;
         absolute = true;
@@ -454,7 +523,7 @@ public final class SimPaste {
         if (sc == null || sc.paste == null) {
             throw new IllegalStateException("the sim scene has no paste block");
         }
-        return offset(sc.paste);
+        return offset(sc.pasteFor(physicalTip(sc)));
     }
 
     /** Paste hanging on the tip (mg). */
@@ -527,6 +596,18 @@ public final class SimPaste {
             else if (number == 106 || number == 107) {
                 pressure(number == 106, words);
             }
+            else if (number == 18 || number == 84) {
+                Double secs = word(words, 'S');
+                String axes = code.trim().toUpperCase(Locale.ROOT).replaceFirst("^M0*(18|84)", "")
+                        .replaceAll("[^A-Z]", "").replace("S", "");
+                if (secs != null) {
+                    motorTimeoutS = secs; // Marlin: with S <n> the idle timeout is set (and restarted), nothing is off
+                    lastMotionS = store.timeS();
+                }
+                else if (axes.isEmpty() || axes.indexOf('B') >= 0) {
+                    motorOff(p);
+                }
+            }
             else if (number == 114 && p != null && p.reportCount) {
                 return countLine();
             }
@@ -548,7 +629,9 @@ public final class SimPaste {
         if (dist < 1e-9) {
             return;
         }
+        idleCheck(p);
         store.advance(moveSeconds(dist, feedPerMin / 60, accel));
+        lastMotionS = store.timeS();
         if (dotOpen) {
             closeDot(sc, p);
         }
@@ -570,7 +653,9 @@ public final class SimPaste {
         machineB += deg;
         logicalB += deg;
         long c1 = count(); // the motor turns whole steps
+        idleCheck(p);
         store.advance(moveSeconds(Math.abs(deg), feedPerMin / 60, accel));
+        lastMotionS = store.timeS();
         if (p == null || c1 == c0) {
             return;
         }
@@ -583,9 +668,15 @@ public final class SimPaste {
             dotX = posX;
             dotY = posY;
             dotZ = posZ;
+            fill = p.primeTurns > 0 ? fill(sc) : null;
         }
         if (pump && valve) {
-            extruded += flowMg(p, c0, c1, offset(p));
+            long from = c0;
+            if (p.primeTurns > 0) { // a fresh tip fills first (INF-06 §8)
+                from += Math.round(store.prime(fill == null ? fill(sc) : fill, p.primeTurns,
+                        (c1 - c0) / (double) STEPS_PER_REV) * STEPS_PER_REV);
+            }
+            extruded += flowMg(p, from, c1, offset(p));
             pressured = true;
         }
         if (c1 < c0 && forwardSeen) {
@@ -617,6 +708,7 @@ public final class SimPaste {
         if (p == null || !pr || ex <= 1e-9) {
             return; // net zero, or no pressure: no paste
         }
+        long net = count() - dotStartCount;
         double t = store.timeS();
         int n = sessionDots++;
         if (n == 0) {
@@ -627,6 +719,23 @@ public final class SimPaste {
         }
         store.dotAt(t);
         lastDot = null;
+        // refused and empty contacts are still dots of the session: "12 empty, then normal" (INF-06 §5)
+        if (p.wholeTurnsOnly && !wholeTurns(net) && measured(sc, p, n)) {
+            store.refused();
+            if (!unmodelledWarned) {
+                unmodelledWarned = true;
+                Logger.warn("SIM paste: a contact of {} steps on tip {}, not a whole number of turns: this tip's "
+                        + "sub-turn dots are not modelled (INF-06: a threshold and the contacts' history, not a "
+                        + "cosine), so it lays nothing; later ones are counted (SimPaste.unmodelledContacts)", net,
+                        physicalTip(sc));
+            }
+            emptyLeft = Math.max(0, emptyLeft - 1);
+            return;
+        }
+        if (emptyLeft > 0) {
+            emptyLeft--; // INF-06 §5: the first dots after a power cycle come out empty
+            return;
+        }
         if (sessionDead && n < 2) {
             return; // after a long idle with the pressure off the first two dots lay nothing
         }
@@ -707,6 +816,9 @@ public final class SimPaste {
     }
 
     private int offset(SimScene.Paste p) {
+        if (jumped != null && p.newPhaseOnMotorOff) { // a reload that turns the flag off ends the jump
+            return jumped;
+        }
         if (p.offsetSteps != null) {
             return p.offsetSteps;
         }
@@ -714,6 +826,142 @@ public final class SimPaste {
             offset = new Random(p.seed + connection).nextInt(STEPS_PER_REV);
         }
         return offset;
+    }
+
+    /**
+     * A board that just booted: every connection (OpenPnP's simulator makes one SimPaste per connect) and a power
+     * cycle. Its motor was unpowered and its first contacts come out empty (INF-06 §4-5); both keys are off by default.
+     */
+    private void powerUp() {
+        SimScene sc = scenes.get();
+        SimScene.Paste p = sc == null ? null : sc.pasteFor(physicalTip(sc));
+        powerUpIndex = sc == null ? 0 : store.powerUp(sc);
+        phases = null;
+        motorOff(p);
+        emptyLeft = p == null ? 0 : p.emptyDotsAfterPowerCycle;
+        unmodelledWarned = false;
+    }
+
+    /** The fill a tip's prime turns go into: the tip on the head and, with the engine, its needle (a needle change
+     * is a fresh tip, tip setups design §22.3). */
+    static String fill(SimScene sc) {
+        String tip = physicalTip(sc);
+        DispenseService svc = DispenseService.get();
+        return (tip == null ? "" : tip) + "@" + (svc == null ? null : svc.getConfig().needleChangedAtMs);
+    }
+
+    /**
+     * A contact something measures: the board, a coupon, the blank, and the engine's I9 test dot wherever it lands (it
+     * comes first). Spared: the rest of the bed (the waste), and a pressure session's first contact at a purge-row spot,
+     * where the engine lays its phase dot (it turns the screw to its start angle; without an engine: a first contact on
+     * the blank). Phase dots the
+     * engine lays mid-session (at a block switch) are refused: only partial-turn blocks have them, whose dots are
+     * refused too. The region is judged where the paste lands, the engine's targets where it sends the head.
+     * shortcut: ignores the gap, so a sub-turn contact in the air over the blank is refused and its paste lost (it
+     * would hang on the tip); judge the gap too if a test ever turns in the air there.
+     */
+    private boolean measured(SimScene sc, SimScene.Paste p, int sessionDot) {
+        SimScene.Region r = sc.regionAt(dotX + p.n2OffsetMm[0] + p.landingBiasMm[0],
+                dotY + p.n2OffsetMm[1] + p.landingBiasMm[1]);
+        EngineAims a = engineAims.get();
+        if (a == null) {
+            return r != SimScene.Region.BED && !(sessionDot == 0 && r == SimScene.Region.BLANK);
+        }
+        if (a.testDot != null && Math.hypot(dotX - a.testDot[0], dotY - a.testDot[1]) <= a.testDotRadius) {
+            return true; // the I9 test dot, wherever it lands and even beside a purge spot: the measured reading wins
+        }
+        if (sessionDot == 0 && a.purge.stream().anyMatch(t -> Math.hypot(dotX - t[0], dotY - t[1]) <= AIM_RADIUS_MM)) {
+            return false;
+        }
+        return r != SimScene.Region.BED;
+    }
+
+    static boolean wholeTurns(long net) {
+        long rem = Math.floorMod(net + WHOLE_TURN_TOLERANCE_STEPS, STEPS_PER_REV);
+        return net >= STEPS_PER_REV - WHOLE_TURN_TOLERANCE_STEPS && rem <= 2 * WHOLE_TURN_TOLERANCE_STEPS;
+    }
+
+    /**
+     * Where the engine sends the head (raw head XY: a place minus the tip's landing and trim, GcodeStreamBuilder.trimX,
+     * minus OpenPnP's N2 head offset), so the match does not depend on the scene's n2OffsetMm: its I9 test dot (imaged
+     * by TestDotCheck) and its purge-row spots (a session's phase dot).
+     */
+    static final class EngineAims {
+        final double[] testDot;
+        final List<double[]> purge;
+        /** How near the test dot's aim a contact is that dot: AIM_RADIUS_MM, less when the waste is nearer. */
+        final double testDotRadius;
+
+        EngineAims(double[] testDot, List<double[]> purge) {
+            this(testDot, purge, AIM_RADIUS_MM);
+        }
+
+        EngineAims(double[] testDot, List<double[]> purge, double testDotRadius) {
+            this.testDot = testDot;
+            this.purge = purge;
+            this.testDotRadius = testDotRadius;
+        }
+    }
+
+    /**
+     * The engine's aims for its config, its landing in effect (DispenseService.landingInEffect) and OpenPnP's N2 head
+     * offset. The test dot's radius stays under half its distance from the waste; at the waste itself every contact
+     * there counts as it (the two cannot be told apart).
+     */
+    static EngineAims aims(DispenseConfig c, double[] landing, double[] headOffset) {
+        double dx = landing[0] + c.needleXyTrim.dxMm + headOffset[0], dy = landing[1] + c.needleXyTrim.dyMm + headOffset[1];
+        DispenseConfig.NamedLocation w = c.location(c.wasteLocationName);
+        double[] t = w == null ? null : new double[] {w.x + c.testDotOffsetXMm - dx, w.y + c.testDotOffsetYMm - dy};
+        List<double[]> purge = new ArrayList<>();
+        DispenseConfig.PurgeRow r = c.purgeRow;
+        if (r != null && r.x0Mm != null && r.y0Mm != null) {
+            for (int i = 0; i < r.spots; i++) {
+                double[] at = r.spot(i);
+                purge.add(new double[] {at[0] - dx, at[1] - dy});
+            }
+        }
+        double apart = Math.hypot(c.testDotOffsetXMm, c.testDotOffsetYMm);
+        return new EngineAims(t, purge, apart > 0 ? Math.min(AIM_RADIUS_MM, apart / 2) : AIM_RADIUS_MM);
+    }
+
+    /** The running engine's aims, or null: no engine (the unit tests) or no dispense nozzle. */
+    static EngineAims engineAims() {
+        DispenseService svc = DispenseService.get();
+        double[] ho = svc == null ? null : svc.headOffsetNow();
+        return ho == null ? null : aims(svc.getConfig(), svc.landingInEffect(), ho);
+    }
+
+    /** For tests: the engine's aims, instead of the running engine's. */
+    synchronized void engineAims(Supplier<EngineAims> aims) {
+        engineAims = aims;
+    }
+
+    /** Contacts a wholeTurnsOnly tip refused on a work surface (this scene, every connection). */
+    public int unmodelledContacts() {
+        return store.unmodelledContacts();
+    }
+
+    /** Marlin switches the motors off after motorTimeoutS without motion (0: never): a motor-off before this one. */
+    private void idleCheck(SimScene.Paste p) {
+        if (lastMotionS != null && motorTimeoutS > 0 && store.timeS() - lastMotionS > motorTimeoutS) {
+            motorOff(p);
+        }
+    }
+
+    /**
+     * B unpowered (M18/M84, the idle timeout, a power cycle): with newPhaseOnMotorOff the screw, turned by the paste
+     * pressure while free, settles at a uniform random angle (Process: 2 of 2 motor-offs moved it far, INF-06 §4).
+     */
+    private void motorOff(SimScene.Paste p) {
+        if (p == null) {
+            return;
+        }
+        if (phases == null) {
+            // as the noise (BR-74), and each power-up of the scene's version draws anew (with a noiseSeed too)
+            long base = p.noiseSeed != null ? p.noiseSeed : p.seed + connection;
+            phases = new Random((base * 0x9E3779B97F4A7C15L + 0x5C2E_0FF5L) ^ (powerUpIndex * 0xC2B2AE3D27D4EB4FL));
+        }
+        jumped = phases.nextInt(STEPS_PER_REV); // drawn whatever tip is on; offset() uses it while the flag holds
     }
 
     /** The dose and thread noise: the scene's noiseSeed on every connection (BR-74), else seed + connection. */
