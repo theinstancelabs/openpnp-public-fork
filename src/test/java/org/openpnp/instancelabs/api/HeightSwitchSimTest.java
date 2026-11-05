@@ -19,10 +19,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.DotImager;
 import org.openpnp.instancelabs.dispense.DriverGcodeChannel;
+import org.openpnp.instancelabs.dispense.FromBelowScene;
 import org.openpnp.instancelabs.dispense.HeightSwitch;
+import org.openpnp.instancelabs.dispense.NeedleEndMeasure;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
 import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.instancelabs.dispense.TipCamera;
+import org.openpnp.instancelabs.vision.TipClean;
 import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.Length;
@@ -35,7 +40,9 @@ import com.google.gson.JsonParser;
 /**
  * BR-94 on the simulated controller: N1 and the needle press the bed's height switch (RecordingGcodeServer's PA5,
  * pressed below N1's trip and above the needle's in raw Z) through the engine; an accepted measure is the tool's trip
- * of this home, and the needle presses it only with a clean tip.
+ * of this home, and the needle presses it only with a clean tip. The needle's end from below is measured on a drawn
+ * bottom camera ({@link FromBelowScene}) that follows the simulated controller's raw position: the SIM's own does not
+ * draw the end yet (INF-16).
  */
 public class HeightSwitchSimTest {
     /** N1 trips at raw Z 20 (it goes down as raw Z falls), the needle at 43 (as raw Z rises; z2 = 63 - raw). */
@@ -47,6 +54,28 @@ public class HeightSwitchSimTest {
     HttpClient http;
     int lastStatus;
     String lastBody;
+    /** The bottom camera: a clean straight tip 0.2 mm off where the tip setup puts it, K as the SIM's switch says. */
+    FromBelowScene scene;
+    double[] camAt;
+
+    /** The drawn bottom camera at {@link #camAt}, the head where the simulated controller has it. */
+    final class SceneCamera implements TipCamera {
+        @Override
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @Override
+        public double[] locationMm() {
+            return camAt.clone();
+        }
+
+        @Override
+        public DotImager.Frame capture() {
+            return new DotImager.Frame(scene.render(sim.server.position('X'), sim.server.position('Y'),
+                    sim.server.position('Z')), 0.0667, 0.0656, camAt[0], camAt[1]);
+        }
+    }
 
     @BeforeEach
     public void before() throws Exception {
@@ -57,7 +86,18 @@ public class HeightSwitchSimTest {
         sim.server.heightSwitchNeedleTripZ = NEEDLE_TRIP;
         DispenseConfig c = svc.getConfig();
         c.heightSwitchMaxPastTripMm = 0.5; // Process's first value (BR-94: the lever's differential x overtravel)
+        c.needleEndMeasure.clean.put(c.tip.key, new TipClean.Limits()); // the 25G's limits for the SIM's tip
         svc.updateConfig(c);
+        scene = new FromBelowScene(1);
+        scene.k = N1_TRIP + NEEDLE_TRIP; // the SIM's see-saw
+        // its K is 2 mm under the machine's (~65): the camera 2 mm nearer in raw Z keeps the needle as far from it at
+        // each raw Z as on the machine (k ~15.6 at the clean check's raw 40.4, inside tipclean's 14.0-16.3)
+        scene.cRaw -= 65.0 - scene.k;
+        double[] ho = svc.headOffsetNow(), l = svc.landingInEffect();
+        scene.endDx = ho[0] + l[0] + c.needleXyTrim.dxMm + 0.2;
+        scene.endDy = ho[1] + l[1] + c.needleXyTrim.dyMm - 0.1;
+        camAt = new double[] {scene.camX, scene.camY, 25.2};
+        svc.setTipCamera(new SceneCamera());
         ApiSettings s = new ApiSettings();
         s.port = 0;
         api = ApiServer.start(Configuration.get(), s);
@@ -505,5 +545,63 @@ public class HeightSwitchSimTest {
         assertEquals(409, lastStatus, lastBody);
         assertTrue(lastBody.contains("zStart and zFloor (raw Z) are needed"), lastBody);
         assertEquals(new ArrayList<String>(), moves(), "nothing moved");
+    }
+
+    JsonObject dispenseStatus() throws Exception {
+        return ok("GET", "/api/status", null).getAsJsonObject("dispense");
+    }
+
+    /**
+     * POST /api/needle/end/measure: the end at each height and its tilt, K by parallax as the switch says, the clean
+     * check, a picture per height, the camera's calibration and the needle it is of; recorded (engine-stamped) and shown
+     * in the status; void under another camera calibration. Its progress is the run's phases, its events carry the run.
+     * Paste on the end is refused the same way as in a press, with its picture.
+     */
+    @Test
+    public void theNeedlesEndFromBelowIsRecordedAndShown() throws Exception {
+        assertEquals("guarded", LockEndpoints.kindOf("POST", "/api/needle/end/measure"));
+        assertTrue(dispenseStatus().get("needleEnd").isJsonNull());
+        JsonObject r = ok("POST", "/api/needle/end/measure", null);
+        assertTrue(r.get("ok").getAsBoolean(), r.toString());
+        JsonObject e = r.getAsJsonObject("end");
+        assertEquals(N1_TRIP + NEEDLE_TRIP, e.get("kParallax").getAsDouble(), 0.1);
+        assertEquals(4, e.getAsJsonArray("heights").size());
+        for (com.google.gson.JsonElement h : e.getAsJsonArray("heights")) {
+            double z = h.getAsJsonObject().get("rawZ").getAsDouble();
+            assertEquals(scene.end(z)[0], h.getAsJsonObject().get("dxMm").getAsDouble(), 0.02, "dx at " + z);
+            assertEquals(scene.end(z)[1], h.getAsJsonObject().get("dyMm").getAsDouble(), 0.02, "dy at " + z);
+        }
+        assertEquals(scene.tiltX, e.get("tiltXMmPerRawMm").getAsDouble(), 0.005);
+        assertTrue(e.getAsJsonObject("clean").get("ok").getAsBoolean(), e.toString());
+        assertEquals(7, e.getAsJsonArray("photoIds").size());
+        assertEquals(e.getAsJsonArray("photoIds").get(2), e.getAsJsonObject("clean").get("photoId"), "raw 40.4's");
+        assertEquals(scene.camX, e.getAsJsonObject("cameraCalibration").get("x").getAsDouble(), 1e-9);
+        assertTrue(e.get("forReview").getAsBoolean());
+        String run = r.get("runId").getAsString();
+        assertEquals(run, e.get("runId").getAsString());
+        JsonObject shown = dispenseStatus().getAsJsonObject("needleEnd");
+        assertEquals(e.get("kParallax"), shown.get("kParallax"));
+        JsonObject status = ok("GET", "/api/status", null).getAsJsonObject("run");
+        assertEquals(run, status.get("runId").getAsString());
+        assertEquals("needle-end", status.get("kind").getAsString());
+        assertTrue(status.getAsJsonArray("phases").toString().contains("needle end: N1 at raw Z 19.000 (1 of 3)"),
+                status.toString());
+        assertEquals(1, svc.getDb().query("SELECT * FROM events WHERE code = ? AND run_uuid = ?", "NEEDLE_END", run)
+                .size(), "its event carries the run");
+        call("PUT", "/api/config", "{\"needleEnd\":null}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("/api/needle/end/measure"), lastBody);
+        camAt[0] += 0.1; // a new calibration of the bottom camera
+        assertTrue(dispenseStatus().get("needleEnd").isJsonNull(), "void under another camera calibration");
+        camAt[0] -= 0.1;
+        assertFalse(dispenseStatus().get("needleEnd").isJsonNull());
+        scene.paste = true;
+        JsonObject p = call("POST", "/api/needle/end/measure", null);
+        assertEquals(409, lastStatus, lastBody);
+        assertEquals(NeedleEndMeasure.PASTE, p.get("error").getAsString());
+        assertEquals("spread", p.getAsJsonObject("result").getAsJsonObject("clean").get("failed").getAsString());
+        assertEquals(p.get("photoId"), p.getAsJsonObject("result").getAsJsonObject("clean").get("photoId"));
+        assertEquals(e.get("kParallax"), dispenseStatus().getAsJsonObject("needleEnd").get("kParallax"),
+                "a refusal keeps the end on record");
     }
 }

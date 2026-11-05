@@ -6,12 +6,14 @@ import java.util.concurrent.TimeUnit;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HeightSwitch;
+import org.openpnp.instancelabs.dispense.NeedleEndMeasure;
 
 import com.google.gson.JsonObject;
 
 /**
  * BR-94: the bed's height switch on PA5. N1 and the needle press it through the engine ({@link HeightSwitch}); each
- * accepted measure is that tool's trip in this home, and K_switch is their sum. Both routes are the lock holder's.
+ * accepted measure is that tool's trip in this home, and K_switch is their sum. The needle's end from below
+ * ({@link NeedleEndMeasure}) is measured here too. Every route is the lock holder's.
  */
 final class HeightSwitchEndpoints {
     private final ApiContext ctx;
@@ -23,6 +25,7 @@ final class HeightSwitchEndpoints {
     void register(ApiServer s) {
         s.route("POST", "/api/height-switch/measure", this::measure);
         s.route("POST", "/api/height-switch/read", r -> read());
+        s.route("POST", "/api/needle/end/measure", r -> measureEnd());
     }
 
     /**
@@ -48,6 +51,29 @@ final class HeightSwitchEndpoints {
             throw ApiException.refused(res.why).with("result", res);
         }
         return res;
+    }
+
+    /**
+     * POST /api/needle/end/measure: the needle's end from below and K by parallax ({@link NeedleEndMeasure}), recorded
+     * when every check passes ({@code dispense.needleEnd}); 409 with the reason, its code, next and photoId otherwise.
+     */
+    Object measureEnd() throws Exception {
+        DispenseService svc = ctx.availableSvc();
+        ctx.requireEngineIdle(svc);
+        ctx.requireNoPressureHold();
+        ctx.requireMachineIdle();
+        ctx.requirePositionKnown(svc);
+        ctx.tracker.expect("needle end");
+        NeedleEndMeasure.Result res = svc.measureNeedleEnd().get(ApiContext.MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+        if (!res.ok) {
+            throw refusal(res.code, res.why, res.next, res.photoId).with("result", res);
+        }
+        return res;
+    }
+
+    /** 409 with the stable code (refused when the task gave none), what it offers and its picture. */
+    private static ApiException refusal(String code, String why, String next, Long photoId) {
+        return new ApiException(409, code == null ? "refused" : code, why).with("next", next).with("photoId", photoId);
     }
 
     /** POST /api/height-switch/read: the pin's level now, with the machine idle ({level, atMs}). */

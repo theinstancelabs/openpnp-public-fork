@@ -5166,6 +5166,236 @@ public final class DispenseService {
         s.ok();
     }
 
+    /** BR-94: the needle's end as recorded, while it is of the needle on and of the bottom camera's calibration now. */
+    public DispenseConfig.NeedleEnd currentNeedleEnd() {
+        return currentNeedleEnd(cfg);
+    }
+
+    private DispenseConfig.NeedleEnd currentNeedleEnd(DispenseConfig c) {
+        TipCamera cam = tipCamera();
+        try {
+            return NeedleEndMeasure.current(c, cam == null || !cam.isAvailable() ? null : cam.locationMm());
+        }
+        catch (RuntimeException e) {
+            return null; // no camera location to compare with: no end
+        }
+    }
+
+    /** BR-94: why the needle's end cannot be measured from below now, before anything is sent, or null. */
+    private String needleEndProblem(DispenseConfig c, TipCamera cam) {
+        if (cam == null || !cam.isAvailable()) {
+            return "No bottom camera: OpenPnP has no camera looking up.";
+        }
+        if (c.needleEndMeasure.clean.get(c.tip.key) == null) {
+            return "no clean-check thresholds for this tip kind: Process sets them (needleEndMeasure.clean for the "
+                    + c.tip.name + ", '" + c.tip.key + "')";
+        }
+        if (getProbeNozzle() == null) {
+            return "nozzle '" + PROBE_NOZZLE + "' is not in the machine";
+        }
+        return null;
+    }
+
+    /**
+     * BR-94: the needle's end from below and K by parallax (POST /api/needle/end/measure), an engine task of kind
+     * {@code needle-end} ({@link #needleEnd}). The Future never throws for task failures: a refused, stopped or failed
+     * task is a result that is not ok, with its reason (and, for a check that failed, its code and picture).
+     */
+    public Future<NeedleEndMeasure.Result> measureNeedleEnd() throws Exception {
+        requireAvailable();
+        RunResult r = newRun("needle-end", null, "needle end", 0, 0);
+        NeedleEndMeasure.Result res = new NeedleEndMeasure.Result();
+        res.runId = r.runId;
+        Task t = new Task(r, "needle end");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> {
+            DispenseConfig c = cfg;
+            TipCamera cam = tipCamera();
+            String why = needleEndProblem(c, cam);
+            if (why != null) {
+                throw refused(why);
+            }
+            String unknown = positionUnknownWhy();
+            if (unknown != null) {
+                throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
+            }
+            if (!configuration.getMachine().isHomed()) {
+                throw refused("MACHINE: the machine is not homed: Home first");
+            }
+            Session s = t.start(c);
+            needleEnd(s, t, res, cam, getProbeNozzle(), 0);
+            s.ok();
+        }), () -> {
+            if (r.status != RunResult.Status.OK) {
+                res.ok = false;
+                if (res.why == null) {
+                    res.why = r.message;
+                }
+            }
+        });
+    }
+
+    /**
+     * BR-94: the needle's end from below inside a task (its own, or the needle's press): N1 and the needle over the
+     * bottom camera ({@link NeedleEndMeasure}), each tool's B from OpenPnP's model (N1 over the camera; N2 where the
+     * tip setup puts the end over it: its head offset + landing + trim), every point inside the soft limits, travel Z
+     * inside Z's safe zone. Every picture is kept (result photos of the run). Recorded at once when every check passes
+     * (the needle's {@code needleEnd}, unless the needle was changed meanwhile), marked for review; a failed check is a
+     * RunRefusedException with the result's code, next and photo. {@code extraSteps}: the task's steps after it.
+     */
+    private DispenseConfig.NeedleEnd needleEnd(Session s, Task t, NeedleEndMeasure.Result res, TipCamera cam,
+            Nozzle probeNozzle, int extraSteps) throws Exception {
+        DispenseConfig c = s.c;
+        ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
+        double[] at = cam.locationMm(), ho = headOffsetNow(), lt = landingAndTrim(c);
+        if (ho == null) {
+            throw refused("N2's head offset in OpenPnP cannot be read");
+        }
+        NeedleEndMeasure.Plan p = new NeedleEndMeasure.Plan();
+        p.s = c.needleEndMeasure;
+        p.clean = c.needleEndMeasure.clean.get(c.tip.key);
+        p.setupKey = c.tip.key;
+        p.nominalDx = ho[0] + lt[0];
+        p.nominalDy = ho[1] + lt[1];
+        OpenPnpRawMapper n1 = OpenPnpRawMapper.forProbeNozzle(m, probeNozzle, c.bAxisName);
+        double reach = Math.max(p.s.needleStepMm, p.s.n1StepMm) + p.s.approachMm;
+        RawPoint nb, n1b;
+        try {
+            nb = s.mapper.toRaw(at[0] - lt[0], at[1] - lt[1], c.travelSafeZMm);
+            n1b = n1.toRaw(at[0], at[1], c.travelSafeZMm);
+            for (int sx = -1; sx <= 1; sx += 2) {
+                for (int sy = -1; sy <= 1; sy += 2) {
+                    s.mapper.toRaw(at[0] - lt[0] + sx * reach, at[1] - lt[1] + sy * reach, c.travelSafeZMm);
+                    n1.toRaw(at[0] + sx * reach, at[1] + sy * reach, c.travelSafeZMm);
+                }
+            }
+        }
+        catch (Exception e) {
+            throw refused("the needle's end from below: " + e.getMessage());
+        }
+        p.needleX = nb.x;
+        p.needleY = nb.y;
+        p.n1X = n1b.x;
+        p.n1Y = n1b.y;
+        double[] here = s.mapper.currentNozzleLocation();
+        p.travelZ = s.mapper.toRaw(here[0], here[1], c.travelSafeZMm).z;
+        double[] lim = s.mapper.zSoftLimitsRaw(), zone = s.mapper.zSafeZoneRaw();
+        List<Double> heights = new ArrayList<>(p.s.n1RawZ);
+        heights.addAll(p.s.needleRawZ);
+        for (double z : heights) {
+            if (lim != null && (z < lim[0] - 1e-6 || z > lim[1] + 1e-6)) {
+                throw refused(String.format(Locale.ROOT, "the needle's end from below: raw Z %.3f lies outside Z's soft "
+                        + "limits", z));
+            }
+        }
+        if (zone != null && (p.travelZ < zone[0] - 1e-6 || p.travelZ > zone[1] + 1e-6)) {
+            throw refused(String.format(Locale.ROOT, "the travel Z %.3f lies outside Z's safe zone: check "
+                    + "travelSafeZMm", p.travelZ));
+        }
+        double[] pos = s.mapper.currentPlanned();
+        java.util.regex.Pattern word = java.util.regex.Pattern.compile("([XYZ])(-?\\d+(?:\\.\\d+)?)");
+        NeedleEndMeasure.Io io = new NeedleEndMeasure.Io() {
+            @Override
+            public void send(String line) throws Exception {
+                s.exec.sendGated(DispenseExecutor.Scope.PROBE, line, c.commandTimeoutMs, s.r);
+                java.util.regex.Matcher w = word.matcher(line);
+                while (line.startsWith("G1") && w.find()) {
+                    pos["XYZ".indexOf(w.group(1))] = Double.parseDouble(w.group(2));
+                }
+            }
+
+            @Override
+            public DotImager.Frame capture() throws Exception {
+                if (t.aborted()) {
+                    throw new DispenseExecutor.AbortedException(abortReason(s.exec, "STOP during the needle's end "
+                            + "from below"));
+                }
+                return cam.capture();
+            }
+
+            @Override
+            public void progress(String phase, int done, int planned) {
+                if (phase != null) {
+                    t.stage = "needle end";
+                    phase(s.r, phase);
+                }
+                t.stepsDone = done;
+                t.stepsPlanned = planned + extraSteps;
+                t.send();
+            }
+        };
+        NeedleEndMeasure.Result got;
+        try {
+            got = NeedleEndMeasure.measure(io, p);
+        }
+        catch (Exception e) {
+            boolean stop = t.aborted();
+            s.recover();
+            if (stop && !(e instanceof DispenseExecutor.AbortedException)) {
+                DispenseExecutor.AbortedException a = new DispenseExecutor.AbortedException(abortReason(s.exec,
+                        "stopped during the needle's end from below"));
+                a.addSuppressed(e);
+                throw a;
+            }
+            throw e;
+        }
+        s.mapper.resync(pos, pos, s.mapper.currentB());
+        res.ok = got.ok;
+        res.code = got.code;
+        res.why = got.why;
+        res.next = got.next;
+        res.clean = got.clean;
+        res.runId = s.r.runId;
+        List<Long> ids = new ArrayList<>();
+        for (NeedleEndMeasure.Picture pic : got.pictures) {
+            PhotoStore.Input in = new PhotoStore.Input();
+            in.image = pic.image;
+            in.kind = Photo.KIND_RESULT;
+            in.source = Photo.SOURCE_BOTTOM_CAMERA;
+            in.setupKey = c.tip.key;
+            in.needleSinceMs = c.needleChangedAtMs;
+            in.jobId = s.r.runId;
+            in.mmPerPx = pic.mmPerPx > 0 ? pic.mmPerPx : null;
+            in.caption = pic.caption;
+            in.simulated = isSimulatorConfirmed();
+            ids.add(storePhoto(in).id);
+        }
+        if (!got.ok) {
+            res.photoId = ids.isEmpty() ? null : ids.get(0);
+            if (res.clean != null && !res.clean.ok) {
+                res.clean.photoId = res.photoId;
+            }
+            db.event(s.r.runId, "WARN", "NEEDLE_END", new Gson().toJson(res));
+            throw refused(got.why);
+        }
+        DispenseConfig.NeedleEnd e = got.end;
+        e.photoIds = ids;
+        int cleanAt = p.s.needleRawZ.indexOf(p.s.cleanRawZ);
+        if (e.clean != null && cleanAt >= 0 && cleanAt < ids.size()) {
+            e.clean.photoId = ids.get(cleanAt);
+        }
+        e.cameraCalibration = new DispenseConfig.CameraCalibration();
+        e.cameraCalibration.x = at[0];
+        e.cameraCalibration.y = at[1];
+        e.cameraCalibration.z = at[2];
+        e.cameraCalibration.centrePx = new ArrayList<>(p.s.centrePx);
+        e.needleSinceMs = c.needleChangedAtMs;
+        e.runId = s.r.runId;
+        e.setAtMs = System.currentTimeMillis();
+        res.end = e;
+        synchronized (this) {
+            DispenseConfig now = cfg;
+            if (!java.util.Objects.equals(now.needleChangedAtMs, c.needleChangedAtMs) || !now.tip.key.equals(c.tip.key)) {
+                throw refused("the needle was changed during its end from below: nothing was recorded");
+            }
+            DispenseConfig n = now.copy();
+            n.needleEnd = e;
+            updateConfig(n);
+        }
+        db.event(s.r.runId, "INFO", "NEEDLE_END", new Gson().toJson(e));
+        return e;
+    }
+
     /**
      * BR-94: reads the height switch now, its pull-up set first ({@code M42 P53 T2}, {@code M43 P5}); nothing moves.
      * The last level is kept in memory for the status. The Future never throws for task failures: see {@code why}.

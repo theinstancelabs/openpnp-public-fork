@@ -61,19 +61,19 @@ final class DispenseEndpoints {
     /**
      * Settings that only their own endpoints may change: the needle's (they record a needle_touchoff row), and since
      * the tip setups (§22.1) the mounted tip, what the other tips keep, and where the needle lands with its trim; the
-     * mounted tip's dose anchor (BR-85); the tools' height-switch trips (BR-94).
+     * mounted tip's dose anchor (BR-85); the tools' height-switch trips and the needle's end from below (BR-94).
      */
     static final java.util.Set<String> PROTECTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "needleZOffsetMm", "needleZOffsetSetAtMs", "needleZOffsetHomeAtMs", "needleChangedAtMs", "needleAnchor",
             "surfaces", "schemaVersion", "boardRegistrations", "newSeatAtMs", "tip", "parkedTips", "needleLanding",
-            "needleXyTrim", "zFrameMovedAtMs", "doseAnchor", "heightSwitch"));
+            "needleXyTrim", "zFrameMovedAtMs", "doseAnchor", "heightSwitch", "needleEnd"));
     /** Protected settings that Register board and POST /api/board/new-seat stamp (not the needle's). */
     static final java.util.Set<String> REGISTRATION_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "boardRegistrations", "newSeatAtMs"));
     /** Nested settings PUT /api/config merges one level deep (a partial object keeps the other fields). */
     static final java.util.Set<String> NESTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "profile", "purgeRow", "cleanPadCheck", "fiducialCheck", "vacuumProbe", "paste", "calibrationArea",
-            "padCalibration", "outputZones"));
+            "padCalibration", "outputZones", "needleEndMeasure"));
     /**
      * Nested fields only the engine or their own endpoints change: the start angle's set and change times (I11:
      * POST /api/screw/start-angle, or a changed angle), the time of the purge reset,
@@ -217,6 +217,7 @@ final class DispenseEndpoints {
         d.put("homeBeforeRun", cfg.homeBeforeRun);
         d.put("newSeatAtMs", cfg.newSeatAtMs);
         d.put("heightSwitch", HeightSwitchEndpoints.status(svc, cfg));
+        d.put("needleEnd", svc.currentNeedleEnd());
         d.put("pasteVersion", ctx.paste.version());
         RunResult last = svc.getLastRun();
         Map<String, Object> lastView = Views.run(last, false);
@@ -860,6 +861,10 @@ final class DispenseEndpoints {
         }
         if ("heightSwitch".equals(key)) {
             return "The tools' height-switch trips are recorded by POST /api/height-switch/measure.";
+        }
+        if ("needleEnd".equals(key)) {
+            return "The needle's end from below is recorded by POST /api/needle/end/measure (and by the needle's press "
+                    + "on the height switch).";
         }
         if ("doseAnchor".equals(key)) {
             return "The tip's dose anchor is set with PUT /api/tip-setups/{key}/dose-anchor.";

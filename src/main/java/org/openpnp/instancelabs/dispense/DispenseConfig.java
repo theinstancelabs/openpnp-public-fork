@@ -9,6 +9,8 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
+import org.openpnp.instancelabs.vision.TipClean;
+
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
@@ -72,6 +74,10 @@ public class DispenseConfig {
      * (without it the needle's measure is refused).
      */
     public Double heightSwitchMaxPastTripMm = null;
+    /** BR-94: how the engine looks at the needle's end from below ({@link NeedleEndMeasure}): Process's method. */
+    public NeedleEndSettings needleEndMeasure = new NeedleEndSettings();
+    /** BR-94: the needle's end as last measured from below, engine-stamped; null until then. */
+    public NeedleEnd needleEnd = null;
 
     // --- named locations (x, y: N2 nozzle coordinates; z: surface Z in OpenPnP's frame, i.e. the
     // N1 nozzle Z touching that surface, the frame of OpenPnP's board Z) -------------------------
@@ -404,6 +410,178 @@ public class DispenseConfig {
         public long atMs;
         /** The home it was measured under ({@link HomeTracker#getLastHomeAtMs()}); null: a home of unknown time. */
         public Long homeAtMs;
+    }
+
+    /**
+     * BR-94: the needle's end from below ({@link NeedleEndMeasure}), each number Process's (runs/p37/bin/np1.py,
+     * tools/parallax.py, parallax_fit.py, parallax_k.py; the checks: BR-94's needle aim follow-up, 21:3x).
+     */
+    public static class NeedleEndSettings {
+        /**
+         * The needle's raw Z heights: Process's parallax run p34/t2_px25 (the 25G: K 65.13, spread 0.09) and np1.py's
+         * 40.4 (the bottom camera's focus, the clean check's pose).
+         */
+        public java.util.List<Double> needleRawZ = new java.util.ArrayList<>(java.util.Arrays.asList(36.0, 39.0, 40.4,
+                42.0));
+        /** N1's raw Z heights: the same run (parallax.py lets N1 down to raw 19 over the bottom camera). */
+        public java.util.List<Double> n1RawZ = new java.util.ArrayList<>(java.util.Arrays.asList(19.0, 22.0, 25.0));
+        /** The needle's head steps (mm): np1.py's B ± (1, 0), B ± (0, 1). */
+        public double needleStepMm = 1.0;
+        /** N1's head steps (mm): parallax.py's d in that run. */
+        public double n1StepMm = 5.0;
+        /** Every point is approached from (−this, −this) mm: np1.py. */
+        public double approachMm = 0.5;
+        /** The dwell after a point's M400, before its frame (ms): np1.py's G4 P300. */
+        public int settleMs = 300;
+        /** The white top-hat's ellipse (px): np1.py, parallax_k.py. */
+        public int kernelPx = 17;
+        /** Each height's first needle frame is searched this far around the camera's pixel (px): np1.py. */
+        public int searchPx = 220;
+        /** Its other frames this far around that first spot (px): np1.py. */
+        public int followPx = 60;
+        /** N1's template's half side (px): parallax_k.py's --half 8. */
+        public int n1TemplateHalfPx = 8;
+        /** N1's template is searched this far (px): parallax_fit.py's S. */
+        public int n1SearchPx = 140;
+        /**
+         * The pixel the bottom camera's location is in OpenPnP's frame: Process's BC (957.5, 544.2) (place.py: N1's tip,
+         * fitted on 14 placements; np1.py, parallax_k.py) in the raw camera's 1920 x 1080 frame, which OpenPnP turns
+         * over its x-axis (the bottom camera's flip-x; Process's lumen.py flips it back): y 1079 − 544.2.
+         */
+        public java.util.List<Double> centrePx = new java.util.ArrayList<>(java.util.Arrays.asList(957.5, 534.8));
+        /** Check (a): the end's top-hat peak at least this many times the sd of the rest of its window. */
+        public double minPeakToSd = 3;
+        /** Check (b): the frames' rms distance from the step fit at most (px). */
+        public double maxResidualPx = 1.0;
+        /** Check (c): the first and last centre frames at most this far apart (px). */
+        public double maxDriftPx = 1.0;
+        /** Check (d): K's spread over N1's heights at most (mm). */
+        public double maxKSpreadMm = 0.35;
+        /** Check (e): the end at most this far from where the tip setup puts it (mm). */
+        public double maxFromNominalMm = 2.0;
+        /** The clean check reads the centre frame at this raw Z (tipclean.md: np1.py's pose); one of needleRawZ. */
+        public double cleanRawZ = 40.4;
+        /**
+         * The clean check's limits per tip kind (the tip setup's key): Process's for the 25G plastic taper
+         * (tipclean.md; red holds for a red 25G only). A kind without its own limits is refused: never another's.
+         */
+        public java.util.Map<String, TipClean.Limits> clean = new java.util.LinkedHashMap<>(
+                java.util.Collections.singletonMap("plastic-25g-taper", new TipClean.Limits()));
+
+        void validate(java.util.List<String> p) {
+            heights(p, "needleRawZ", needleRawZ, 31.5, 44.0, "np1.py: the needle's look stays between travel and raw "
+                    + "44");
+            heights(p, "n1RawZ", n1RawZ, 19.0, 31.5, "parallax.py: N1 clears the bottom camera down to raw 19");
+            for (double d : new double[] {needleStepMm, n1StepMm}) {
+                if (!(d > 0 && d <= 6)) {
+                    p.add("needleEndMeasure: the steps must be above 0 and at most 6 mm (parallax.py: over the "
+                            + "camera's opening)");
+                }
+            }
+            if (!(approachMm > 0 && approachMm <= 1) || settleMs < 0 || settleMs > 5000) {
+                p.add("needleEndMeasure.approachMm must be above 0 and at most 1 mm, settleMs 0..5000");
+            }
+            if (kernelPx < 3 || kernelPx % 2 == 0 || searchPx < 1 || followPx < 1 || n1TemplateHalfPx < 2
+                    || n1SearchPx < 1) {
+                p.add("needleEndMeasure: kernelPx must be odd and at least 3; searchPx, followPx, n1TemplateHalfPx "
+                        + "and n1SearchPx positive");
+            }
+            if (centrePx == null || centrePx.size() != 2 || centrePx.stream().anyMatch(v -> v == null
+                    || !(v >= 0 && v < 100000))) {
+                p.add("needleEndMeasure.centrePx must be [x, y] (px)");
+            }
+            if (!(minPeakToSd > 0 && maxResidualPx > 0 && maxDriftPx > 0 && maxKSpreadMm > 0
+                    && maxFromNominalMm > 0)) {
+                p.add("needleEndMeasure: the checks' limits must be above 0");
+            }
+            if (needleRawZ != null && !needleRawZ.contains(cleanRawZ)) {
+                p.add("needleEndMeasure.cleanRawZ must be one of needleRawZ (the clean check reads that height's frame)");
+            }
+            if (clean == null || clean.values().stream().anyMatch(l -> l == null || !(l.rimRgLow <= l.rimRgHigh
+                    && l.kLow <= l.kHigh && l.endMm > 0 && l.annulusMm > l.endMm && l.redMm > 0 && l.findMm > 0))) {
+                p.add("needleEndMeasure.clean must map tip setup keys to limits (low <= high, the radii above 0, the "
+                        + "annulus beyond the end)");
+            }
+        }
+
+        private static void heights(java.util.List<String> p, String name, java.util.List<Double> z, double lo,
+                double hi, String why) {
+            if (z == null || z.stream().anyMatch(v -> v == null || !(v >= lo && v <= hi))
+                    || z.stream().distinct().count() < 2) {
+                p.add(String.format(java.util.Locale.ROOT, "needleEndMeasure.%s must be at least 2 different raw Z "
+                        + "heights within %.1f..%.1f (%s)", name, lo, hi, why));
+            }
+        }
+    }
+
+    /**
+     * BR-94: the needle's end measured from below ({@link NeedleEndMeasure}), engine-stamped. The end is the head (the
+     * top camera, offset 0, 0) + (dx, dy) in machine X/Y: absolute, not a trim of N2's head offset.
+     */
+    public static class NeedleEnd {
+        /** The end at each raw Z it was looked at. */
+        public java.util.List<EndHeight> heights = new java.util.ArrayList<>();
+        /** How the end moves per raw mm (the line through the heights; Process's 25G on p34: +0.019, −0.076). */
+        public double tiltXMmPerRawMm, tiltYMmPerRawMm;
+        /** K by parallax (mm): the needle's raw Z + N1's where both tips are the same distance from the camera. */
+        public double kParallax;
+        /** N1 at its heights. */
+        public java.util.List<EndHeight> n1 = new java.util.ArrayList<>();
+        /** The worst of every height's fit residual and centre-frame drift (px). */
+        public double residualPx, driftPx;
+        /** The worst height's residual in mm (the end's scatter about its fit); K's spread over N1's heights (mm). */
+        public double errXyMm, errKMm;
+        public java.util.List<Long> photoIds = new java.util.ArrayList<>();
+        public CameraCalibration cameraCalibration;
+        /** The needle it is of (the needle token then) and its tip setup. */
+        public Long needleSinceMs;
+        public String setupKey;
+        public long setAtMs;
+        /** The engine task that measured it. */
+        public String runId;
+        /** The clean check on the centre frame at {@code needleEndMeasure.cleanRawZ}. */
+        public CleanCheck clean;
+        /** Recorded on its checks and used; Process reviews the records (nothing waits for that). */
+        public boolean forReview = true;
+
+        /** The end at raw Z {@code z} (mm from the head): the line through the heights, extrapolated past them. */
+        public double[] at(double z) {
+            double mz = 0, mx = 0, my = 0;
+            for (EndHeight h : heights) {
+                mz += h.rawZ / heights.size();
+                mx += h.dxMm / heights.size();
+                my += h.dyMm / heights.size();
+            }
+            return new double[] {mx + tiltXMmPerRawMm * (z - mz), my + tiltYMmPerRawMm * (z - mz)};
+        }
+    }
+
+    /** One height of the end measure: the end (the needle's; null for N1), the scale and how well the frames agree. */
+    public static class EndHeight {
+        public double rawZ;
+        public Double dxMm, dyMm;
+        public double pxPerMm, residualPx, driftPx;
+        /** The needle's: the weakest frame's top-hat peak over its window's sd (check a). */
+        public Double peakToSd;
+    }
+
+    /** BR-94: the clean check of the needle's end (tipclean.py, {@link TipClean}). */
+    public static class CleanCheck {
+        public boolean ok;
+        /** light | found | z | spread | red: the first check that failed; null when clean. */
+        public String failed, why;
+        public double rawZ, k, rim, rimRg, peak, spread, red;
+        /** The tip kind's limits it was read against, and the kind. */
+        public TipClean.Limits limits;
+        public String setupKey;
+        public Long photoId;
+        public long atMs;
+    }
+
+    /** The bottom camera's calibration an end was measured with: its location (OpenPnP's) and its centre pixel. */
+    public static class CameraCalibration {
+        public double x, y, z;
+        public java.util.List<Double> centrePx;
     }
 
     /** A forbidden circle of {@link OutputZoneSettings#forbid}. */
@@ -784,6 +962,9 @@ public class DispenseConfig {
         if (c.heightSwitch == null) {
             c.heightSwitch = new HeightSwitchTrips();
         }
+        if (c.needleEndMeasure == null) {
+            c.needleEndMeasure = new NeedleEndSettings();
+        }
         if (c.padCalibration == null) {
             c.padCalibration = new PadCalibrationSettings();
         }
@@ -997,6 +1178,12 @@ public class DispenseConfig {
         }
         if (pasteThicknessMm <= 0 || pasteDensityMgMm3 <= 0) {
             p.add("paste thickness and density must be > 0");
+        }
+        if (needleEndMeasure == null) {
+            p.add("needleEndMeasure must be an object");
+        }
+        else {
+            needleEndMeasure.validate(p);
         }
         if (heightSwitchMaxPastTripMm != null && !(heightSwitchMaxPastTripMm > 0
                 && heightSwitchMaxPastTripMm <= HeightSwitch.MAX_WINDOW_MM)) {
