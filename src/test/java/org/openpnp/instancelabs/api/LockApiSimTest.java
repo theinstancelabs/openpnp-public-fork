@@ -215,7 +215,7 @@ public class LockApiSimTest {
         ok(post("/api/needle/offset", NEEDLE_OFFSET, token));
         // refused lines: nothing is sent (test 6)
         sim.server.mark();
-        for (String bad : new String[] {"G28", "G92 X0", "M18", "G1 X500", "M106 P2 S128"}) {
+        for (String bad : new String[] {"G28", "G92 X0", "M18", "G1 X500", "M106 P2 S128", "M99999999999"}) {
             Res refused = gcode(token, "M114", bad);
             assertError(400, "refused-line", refused);
             assertEquals(1, refused.json.get("index").getAsInt(), refused.toString());

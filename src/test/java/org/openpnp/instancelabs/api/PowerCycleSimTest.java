@@ -1133,4 +1133,104 @@ public class PowerCycleSimTest {
         svc = DispenseService.start(Configuration.get());
         assertEquals("running", DispenseService.startState());
     }
+
+    /** The response to a refused passthrough line: 400 refused-line, its rule, nothing sent. */
+    void refusedLevel(String body, String rule) throws Exception {
+        sim.server.mark();
+        call("POST", "/api/gcode", body);
+        assertEquals(400, lastStatus, body + ": " + lastBody);
+        assertTrue(lastBody.contains("refused-line") && lastBody.contains(rule), body + ": " + lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), body + " sends nothing");
+    }
+
+    /** The batch of these Z targets, F300, then M400, for the reason {@code what}. */
+    static String level(String what, double... z) {
+        StringBuilder sb = new StringBuilder("{\"lines\":[");
+        for (double v : z) {
+            sb.append("\"G1 Z").append(v).append(" F300\",");
+        }
+        return sb.append("\"M400\"],\"what\":\"").append(what).append("\"}").toString();
+    }
+
+    /** OpenPnP's believed Z (the controller axis Z, raw). */
+    double believedZ() throws Exception {
+        for (com.google.gson.JsonElement a : ok("GET", "/api/machine", null).getAsJsonArray("axes")) {
+            JsonObject ax = a.getAsJsonObject();
+            if (ax.has("letter") && "Z".equals(ax.get("letter").getAsString())) {
+                return ax.get("driverCoordinate").getAsDouble();
+            }
+        }
+        throw new AssertionError("no Z axis");
+    }
+
+    /**
+     * BR-97 (the PM 16:4x): after a power cycle the see-saw is levelled before the home by Z alone, by the lock holder
+     * through the passthrough: each line at most 1 mm from the Z before it, 5 mm per call, 32 mm from the Z where the
+     * levelling began, F at most 300, with a reason; each call journaled. A home clears that reference.
+     */
+    @Test
+    public void theSeeSawIsLevelledByZAloneBeforeTheHomeAfterAReset() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+        sim.server.mark();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z1 F300\",\"M400\"],\"what\":\"see-saw levelling, needle tip y 494 "
+                + "to 486\"}");
+        assertEquals(java.util.Arrays.asList("G1 Z1 F300"), motionAndOutputs());
+        assertEquals(1.0, believedZ(), 1e-6);
+        List<java.util.Map<String, Object>> ev = events("Z_LEVEL");
+        assertEquals(1, ev.size(), ev.toString());
+        String row = String.valueOf(ev.get(0).get("message"));
+        assertTrue(row.contains("process") && row.contains("G1 Z1 F300; M400")
+                && row.contains("see-saw levelling, needle tip y 494 to 486"), row);
+
+        refusedLevel("{\"lines\":[\"G1 X1 Z1.5 F300\"],\"what\":\"w\"}", "home");
+        refusedLevel(level("w", 2.5), "1 mm");
+        refusedLevel(level("w", 2, 3, 4, 5, 6, 7), "5 mm");
+        refusedLevel("{\"lines\":[\"G1 Z1.5 F600\"],\"what\":\"w\"}", "300");
+        refusedLevel("{\"lines\":[\"G1 Z1.5\"],\"what\":\"w\"}", "300");
+        refusedLevel("{\"lines\":[\"G91\",\"G1 Z0.5 F300\"],\"what\":\"w\"}", "absolute");
+        refusedLevel("{\"lines\":[\"G92 Z0\"],\"what\":\"w\"}", "G92");
+        refusedLevel("{\"lines\":[\"G28 Z\"],\"what\":\"w\"}", "/api/machine/home");
+        for (String body : new String[] {"{\"lines\":[\"G1 Z1.5 F300\"]}",
+                "{\"lines\":[\"G1 Z1.5 F300\"],\"what\":\" \"}"}) {
+            sim.server.mark();
+            call("POST", "/api/gcode", body);
+            assertEquals(400, lastStatus, lastBody);
+            assertTrue(lastBody.contains("what"), lastBody);
+            assertEquals(new ArrayList<String>(), motionAndOutputs(), "nothing sent");
+        }
+        assertEquals(1, events("Z_LEVEL").size(), "refused calls are not journaled");
+
+        // to 31 in calls of 5 mm, then past 32 from Z 0, where it began: refused
+        for (int c = 0; c < 6; c++) {
+            double z = 1 + 5 * c;
+            ok("POST", "/api/gcode", level("toward the far end", z + 1, z + 2, z + 3, z + 4, z + 5));
+        }
+        assertEquals(31.0, believedZ(), 1e-6);
+        refusedLevel(level("w", 32, 33), "32 mm");
+        assertEquals(7, events("Z_LEVEL").size());
+
+        // the home clears the reference: unhomed again at Z 30 (a Stop and Start, powered), 33 is 3 mm from it
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z30 F600\",\"M400\"]}");
+        reconnect();
+        assertFalse(sim.machine.isHomed());
+        assertEquals(30.0, believedZ(), 1e-6);
+        ok("POST", "/api/gcode", level("w", 31, 32, 33));
+        assertEquals(33.0, believedZ(), 1e-6);
+    }
+
+    /** BR-97: a levelling call after one that left its moves unwaited reads the controller's Z first. */
+    @Test
+    public void aLevellingCallAfterAnUnwaitedMoveStartsFromTheControllersZ() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z1 F300\"],\"what\":\"w\"}");
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z2 F300\"],\"what\":\"w\"}");
+        refusedLevel("{\"lines\":[\"G1 Z0.5 F300\"],\"what\":\"w\"}", "1 mm");
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z1.5 F300\",\"M400\"],\"what\":\"w\"}");
+        assertEquals(1.5, believedZ(), 1e-6);
+    }
 }

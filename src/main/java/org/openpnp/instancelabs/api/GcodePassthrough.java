@@ -65,6 +65,8 @@ final class GcodePassthrough {
     private boolean motionPending;
     /** OpenPnP's coordinates may differ from the controller's (a passthrough move or G92 not re-read yet). */
     private boolean positionStale;
+    /** BR-97: the Z where the see-saw's levelling began (its first call since the last home), or null. */
+    private Double levelRefZ;
     private final Object logLock = new Object();
 
     /** One running batch. */
@@ -110,12 +112,21 @@ final class GcodePassthrough {
         positionStale = false;
     }
 
+    /** OpenPnP homed: as a stop, and the levelling after the next reset begins afresh. */
+    synchronized void machineHomed() {
+        machineStopped();
+        levelRefZ = null;
+    }
+
     // ------------------------------------------------------------------------------------------
     // A batch
     // ------------------------------------------------------------------------------------------
 
-    /** Runs the holder's lines: the route's answer, or an ApiException ({@code lock-lost}: {@link Outcome#lockLost}). */
-    Outcome run(List<String> raw, long timeoutMs, MachineLock.Holder holder) throws Exception {
+    /**
+     * Runs the holder's lines: the route's answer, or an ApiException ({@code lock-lost}: {@link Outcome#lockLost}).
+     * {@code what}: the batch's reason, required with BR-97's Z moves while not homed.
+     */
+    Outcome run(List<String> raw, long timeoutMs, MachineLock.Holder holder, String what) throws Exception {
         if (raw.isEmpty() || raw.size() > MAX_LINES) {
             throw ApiException.badRequest("'lines' must hold 1.." + MAX_LINES + " lines");
         }
@@ -127,14 +138,18 @@ final class GcodePassthrough {
         List<PassthroughLines.Line> lines = new ArrayList<>();
         Map<Character, double[]> limits = limits(m, d);
         boolean homed = m.isHomed();
+        boolean levelling = false;
         for (int i = 0; i < raw.size(); i++) {
             PassthroughLines.Line l = PassthroughLines.check(raw.get(i), limits, homed);
             if (l.refusal != null) {
-                throw new ApiException(400, "refused-line", "line " + (i + 1) + " '" + l.text + "' refused: "
-                        + l.refusal + ". Nothing was sent.").with("index", i).with("line", raw.get(i)).with("why",
-                                l.refusal);
+                throw refusedLine(i, raw.get(i), l.text, l.refusal);
             }
             lines.add(l);
+            levelling = levelling || l.levelZ != null;
+        }
+        if (levelling && what == null) {
+            throw ApiException.badRequest("'what' is required with Z moves while not homed (levelling the see-saw): "
+                    + "say why, e.g. \"see-saw levelling, needle tip y 494 to 486\"");
         }
         if (!m.isEnabled()) {
             throw ApiException.refused("the machine is not started: press Start (POST /api/machine/enable) first");
@@ -154,6 +169,9 @@ final class GcodePassthrough {
             running = b;
         }
         try {
+            if (levelling) {
+                checkLevelling(m, d, raw, lines, holder, what);
+            }
             Future<Outcome> f = m.submit(() -> execute(m, d, b, lines, timeoutMs), null, true);
             long bound = lines.size() * (timeoutMs + 1000L) + 30000L;
             try {
@@ -172,6 +190,64 @@ final class GcodePassthrough {
                 }
             }
         }
+    }
+
+    private static ApiException refusedLine(int i, String raw, String text, String why) {
+        return new ApiException(400, "refused-line", "line " + (i + 1) + " '" + text + "' refused: " + why
+                + ". Nothing was sent.").with("index", i).with("line", raw).with("why", why);
+    }
+
+    /**
+     * BR-97: the batch's Z moves while not homed, walked from the controller's Z (OpenPnP's, re-read first when a
+     * passthrough move was not) by {@link PassthroughLines#level}: a refused one sends nothing, else the call is
+     * journaled (events {@code Z_LEVEL}: the holder, the lines, the reason).
+     */
+    private void checkLevelling(Machine m, GcodeDriver d, List<String> raw, List<PassthroughLines.Line> lines,
+            MachineLock.Holder holder, String what) throws ApiException {
+        if (positionStale()) {
+            resyncNow(m, d);
+        }
+        double z = zNow(m, d);
+        double first = z;
+        double ref;
+        synchronized (this) {
+            if (levelRefZ == null) {
+                levelRefZ = z;
+            }
+            ref = levelRefZ;
+        }
+        StringBuilder sent = new StringBuilder();
+        for (int i = 0; i < lines.size(); i++) {
+            PassthroughLines.Line l = lines.get(i);
+            if (l.levelZ != null) {
+                String why = PassthroughLines.level(z, l.levelZ, first, ref);
+                if (why != null) {
+                    throw refusedLine(i, raw.get(i), l.text, why);
+                }
+                z = l.levelZ;
+            }
+            if (!l.empty) {
+                sent.append(sent.length() == 0 ? "" : "; ").append(l.text);
+            }
+        }
+        DispenseService svc = ctx.svcOrNull();
+        if (svc != null) {
+            svc.getDb().event(null, "INFO", "Z_LEVEL", "Z levelling while not homed, by " + (holder == null ? "?"
+                    : holder.who) + " (" + what + "): " + sent);
+        }
+    }
+
+    /** The controller axis Z's coordinate as OpenPnP knows it (raw mm): the controller's own once re-read. */
+    private static double zNow(Machine m, GcodeDriver d) throws ApiException {
+        for (Axis a : m.getAxes()) {
+            if (a instanceof ReferenceControllerAxis && ((ReferenceControllerAxis) a).getDriver() == d
+                    && "Z".equalsIgnoreCase(((ReferenceControllerAxis) a).getLetter())) {
+                return ((ReferenceControllerAxis) a).getDriverLengthCoordinate().convertToUnits(LengthUnit.Millimeters)
+                        .getValue();
+            }
+        }
+        throw ApiException.refused("OpenPnP's G-code driver has no Z axis: Z cannot be levelled through the "
+                + "passthrough");
     }
 
     /** How a batch ended: {@link #status} "ok", "lock-lost", "stopped", "controller-error" or "controller-timeout". */
@@ -363,7 +439,11 @@ final class GcodePassthrough {
         if (!positionStale() || m == null || !m.isEnabled() || m.isBusy() || running != null) {
             return;
         }
-        GcodeDriver d = driver(m);
+        resyncNow(m, driver(m));
+    }
+
+    /** Waits for the head to stop (M400) and tells OpenPnP where it is, on the machine thread. */
+    private void resyncNow(Machine m, GcodeDriver d) throws ApiException {
         try {
             Future<String> f = m.submit(() -> {
                 try {

@@ -67,7 +67,7 @@ final class LockEndpoints {
         @Override
         public void machineHomed(Machine m, boolean isHomed) {
             if (isHomed) {
-                ctx.passthrough.machineStopped();
+                ctx.passthrough.machineHomed();
             }
         }
     };
@@ -473,7 +473,7 @@ final class LockEndpoints {
         if (what != null && a.holder.token != null) {
             ctx.lock.keepalive(a.holder.token, what);
         }
-        GcodePassthrough.Outcome o = ctx.passthrough.run(lines, t, a.holder);
+        GcodePassthrough.Outcome o = ctx.passthrough.run(lines, t, a.holder, what);
         if ("ok".equals(o.status)) {
             return Views.map("results", o.results, "ms", o.ms, "lock", ctx.lock.view());
         }
