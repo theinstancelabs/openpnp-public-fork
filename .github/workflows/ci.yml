@@ -449,9 +449,11 @@ jobs:
     name: Keep only the newest build artifact
     needs: [release]
     # The user (11-04 20:2x, 62 GB of artifacts): only the newest openpnp-build is kept. Each run downloads its own
-    # within the run and no job reads an older run's, so a completed run's build is dead weight (re-run such a run
-    # whole, not --failed). Its own job: the release keeps exactly the permissions publishing needs.
+    # within the run and no job reads an older run's, so a succeeded or cancelled run's build is dead weight; a failed
+    # run keeps its own for `gh run rerun --failed` until it expires. Its own job: the release keeps exactly the
+    # permissions publishing needs. A prune that fails or times out never turns the released run red.
     if: ${{ !cancelled() && needs.release.result == 'success' }}
+    continue-on-error: true
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -459,8 +461,9 @@ jobs:
       actions: write
     steps:
       - uses: actions/checkout@v7
-      - name: Delete every openpnp-build but this run's and unfinished runs'
+      - name: Delete every openpnp-build but this run's, unfinished runs' and failed runs'
         continue-on-error: true
+        timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 infra/ci/prune_artifacts.py --repo "$GITHUB_REPOSITORY" --keep-run "$GITHUB_RUN_ID"

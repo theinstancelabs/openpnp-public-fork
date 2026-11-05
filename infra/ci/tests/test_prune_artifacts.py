@@ -1,6 +1,8 @@
 """Only the newest build artifact is kept (the user, 11-04 20:2x: 62 GB of artifacts, 50 GB of them openpnp-build):
 every upload expires after a day, and after each green release a job deletes every openpnp-build but that run's own
 and those of runs still going (their own jobs download theirs within the run; no job reads an older run's build)."""
+import importlib.util
+import json
 import os
 import re
 import sys
@@ -11,6 +13,13 @@ import prune_artifacts  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 CI = os.path.join(REPO, ".github", "workflows", "ci.yml")
+for _d in (os.path.join(REPO, "infra", "deploy", "tests"), os.path.join(REPO, "infra", "deploy")):
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+_spec = importlib.util.spec_from_file_location(
+    "ci_wiring", os.path.join(REPO, "infra", "deploy", "tests", "test_ci_wiring.py"))
+ci_wiring = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ci_wiring)
 
 
 def art(i, run, expired=False, name="openpnp-build"):
@@ -18,14 +27,20 @@ def art(i, run, expired=False, name="openpnp-build"):
 
 
 class Plan(unittest.TestCase):
-    STATUS = {1: "completed", 2: "in_progress", 3: "queued", 4: "completed", 5: None}
+    STATE = {1: ("completed", "success"), 2: ("in_progress",), 3: ("queued",), 4: ("completed", "cancelled"),
+             5: None, 6: ("completed", "failure"), 7: ("completed", "timed_out")}
 
     def doomed(self, arts, keep=9):
-        return [a["id"] for a in prune_artifacts.plan(arts, keep, self.STATUS.get)]
+        return [a["id"] for a in prune_artifacts.plan(arts, keep, self.STATE.get)]
 
     def test_completed_runs_builds_go_this_runs_and_unfinished_ones_stay(self):
         arts = [art(10, 1), art(20, 2), art(30, 3), art(40, 4), art(90, 9)]
         self.assertEqual(self.doomed(arts), [10, 40])
+
+    def test_a_failed_runs_build_stays_for_its_re_run(self):
+        """`gh run rerun --failed` reuses the first attempt's build: a failed or timed-out run keeps its own until it
+        expires (a day)."""
+        self.assertEqual(self.doomed([art(60, 6), art(70, 7)]), [])
 
     def test_an_unknown_run_or_status_is_kept(self):
         self.assertEqual(self.doomed([art(50, 5), {"id": 60, "name": "openpnp-build", "workflow_run": None}]), [])
@@ -48,10 +63,10 @@ class Main(unittest.TestCase):
                 return prune_artifacts.Result(0 if ok else 1, "", "" if ok else "HTTP 500")
             m = re.search(r"actions/runs/(\d+)$", path)
             if m:
-                s = statuses.get(int(m.group(1)))
-                return prune_artifacts.Result(0 if s else 1, s or "", "" if s else "HTTP 404")
+                self.assertEqual(args[args.index("--jq") + 1], prune_artifacts.STATE_JQ)
+                s = statuses.get(int(m.group(1)))  # real gh ends its output with a newline
+                return prune_artifacts.Result(0 if s else 1, (s + "\n") if s else "", "" if s else "HTTP 404")
             page = int(re.search(r"[?&]page=(\d+)", path).group(1))
-            import json
             return prune_artifacts.Result(0, json.dumps({"artifacts": pages[page - 1] if page <= len(pages) else []}), "")
 
         rc = prune_artifacts.main(["--repo", "o/r", "--keep-run", "9"], gh=gh)
@@ -59,7 +74,7 @@ class Main(unittest.TestCase):
 
     def test_pages_until_a_short_one_and_deletes_completed_runs_builds(self):
         full = [art(1000 + i, 1) for i in range(100)]
-        rc, calls = self.run_main([full, [art(7, 2), art(8, 9)]], {1: "completed", 2: "in_progress"})
+        rc, calls = self.run_main([full, [art(7, 2), art(8, 9)]], {1: "completed success", 2: "in_progress "})
         self.assertEqual(rc, 0)
         deletes = [c for c in calls if "-X" in c]
         self.assertEqual(len(deletes), 100)
@@ -70,7 +85,7 @@ class Main(unittest.TestCase):
         self.assertTrue(all("name=openpnp-build" in " ".join(c) for c in calls if "artifacts?" in " ".join(c)))
 
     def test_a_failed_delete_is_reported_and_the_rest_still_go(self):
-        rc, calls = self.run_main([[art(1, 1), art(2, 1)]], {1: "completed"}, fail_delete=(1,))
+        rc, calls = self.run_main([[art(1, 1), art(2, 1)]], {1: "completed success"}, fail_delete=(1,))
         self.assertEqual(rc, 1)
         self.assertEqual(len([c for c in calls if "-X" in c]), 2)
 
@@ -97,8 +112,11 @@ class Wiring(unittest.TestCase):
         self.assertIsNotNone(m, "no prune-artifacts job")
         block = m.group(1)
         self.assertRegex(block, r"\n    needs: \[release\]\n")
-        self.assertIn("needs.release.result == 'success'", block)
-        self.assertIn("!cancelled()", block)
+        cond = ci_wiring.job_value(ci_wiring.jobs(self.ci)["prune-artifacts"], "if")
+        for result, runs in (("success", True), ("failure", False), ("skipped", False), ("cancelled", False)):
+            self.assertIs(ci_wiring.condition(cond, {"needs.release.result": result}), runs, result)
+        self.assertRegex(block, r"\n    continue-on-error: true\n", "a failed or timed-out job never turns the run red")
+        self.assertRegex(block, r"\n        timeout-minutes: [1-3]\n", "the step ends before the job's limit")
         perms = dict(re.findall(r"\n      ([a-z-]+): (read|write)", block.split("permissions:", 1)[1].split("steps:")[0]))
         self.assertEqual(perms, {"contents": "read", "actions": "write"})
         self.assertIn("continue-on-error: true", block, "a failed prune never turns a released run red")
