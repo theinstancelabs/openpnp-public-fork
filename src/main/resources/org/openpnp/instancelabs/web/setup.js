@@ -25,11 +25,14 @@
   const PLACE_RE = /^[A-Za-z0-9_-]{1,40}$/;
   /** Settings only their own actions may change: never sent by the JSON editor (WEB_API.md, PUT /api/config). Since the
    *  tip setups (PROFILE_CALIBRATION_DESIGN.md §22.1) the mounted tip, what the other tips keep, where the needle lands
-   *  and its trim are set by Setup › Dispenser & tip, Check where it lands and the trim panel. */
+   *  and its trim are set by Setup › Dispenser & tip, Check where it lands and the trim panel; the tip's dose anchor and the
+   *  switch's measures by their own steps, the needle's end from below by its measure. */
   const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleZOffsetHomeAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces',
-    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs']);
+    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs', 'doseAnchor',
+    'heightSwitch', 'needleEnd']);
   const STAMPED_NESTED = new Set(['profile.startAngleSetAtMs', 'profile.startAngleChangedAtMs', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
-  const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe']);
+  const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe', 'paste', 'calibrationArea', 'padCalibration',
+    'outputZones', 'needleEndMeasure']);
   /** Maps PUT /api/config replaces whole: the editor diffs them per entry and Save sends the server's map as it is then
    *  with only the edited entries changed (a place saved meanwhile on the Places card is kept). */
   const BY_ENTRY = new Set(['locations']);
