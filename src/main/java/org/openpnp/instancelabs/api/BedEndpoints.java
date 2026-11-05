@@ -11,6 +11,7 @@ import java.util.Set;
 
 import org.openpnp.instancelabs.dispense.BedModel;
 import org.openpnp.instancelabs.dispense.BedModelStore;
+import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.Photo;
 import org.openpnp.instancelabs.dispense.ZCheck;
@@ -268,6 +269,9 @@ final class BedEndpoints {
      */
     private Object save(ApiServer.Request r, BedModelStore st, BedModel before, JsonObject next, String what,
             JsonElement b, JsonElement a, String cleared) throws Exception {
+        DispenseService svc = ctx.svc();
+        // what rests on the needle (its tip end, K) is measured with the needle on now (review 2 MINOR 4)
+        Long needle = svc.getConfig().needleChangedAtMs;
         next.addProperty("version", before == null ? 0 : before.version);
         BedModel after;
         try {
@@ -277,7 +281,7 @@ final class BedEndpoints {
             throw ApiException.badRequest("the bed model would not be valid: " + e.getMessage());
         }
         if (before != null) {
-            List<String> needs = freed(before, after, cleared);
+            List<String> needs = freed(before, after, cleared, needle);
             if (!needs.isEmpty()) {
                 throw new ApiException(409, MEASUREMENT_NEEDED, String.join("; ", needs)).with("needs", needs);
             }
@@ -291,20 +295,32 @@ final class BedEndpoints {
         if (hook != null) {
             hook.run();
         }
-        try {
-            st.write(before, next, who, what, b, a);
-        }
-        catch (IllegalStateException e) {
-            throw ApiException.refused(e.getMessage());
+        // a needle change takes its token past the stored tip end and K under the engine's monitor: under it too, the
+        // change came before this write (refused: it was held to the needle before) or comes after (#66 review 4)
+        synchronized (svc) {
+            Long now = svc.getConfig().needleChangedAtMs;
+            if (!Objects.equals(needle, now)) {
+                throw new ApiException(409, "needle-changed", "the needle was changed at " + (now == null ? "?"
+                        : ZCheck.clock(now)) + " during this write, so nothing was written: send it again (its tip "
+                        + "end and K are held to the needle on now)").with("needleChangedAtMs", now);
+            }
+            try {
+                st.write(before, next, who, what, b, a);
+            }
+            catch (IllegalStateException e) {
+                throw ApiException.refused(e.getMessage());
+            }
         }
         return ctx.bed.view();
     }
 
-    /** What {@code after} frees against {@code before} without the new record that frees it, in words. */
-    private List<String> freed(BedModel before, BedModel after, String cleared) throws SQLException, ApiException {
+    /**
+     * What {@code after} frees against {@code before} without the new record that frees it, in words; {@code needle}:
+     * the needle token the write is held to.
+     */
+    private List<String> freed(BedModel before, BedModel after, String cleared, Long needle) throws SQLException,
+            ApiException {
         List<String> needs = new ArrayList<>();
-        // what rests on the needle (its tip end, K) is measured with the needle on now (review 2 MINOR 4)
-        Long needle = ctx.svc().getConfig().needleChangedAtMs;
         JsonObject bj = before.json(), aj = after.json();
         for (BedModel.Obj o : before.obstacles()) {
             if (BedModel.BED_ID.equals(o.id) || o.id.equals(cleared)) {
@@ -451,7 +467,9 @@ final class BedEndpoints {
             if (at == null) {
                 return "'" + x + "' is not a journal event or photo that exists (event:<id>, photo:<id>)";
             }
+            // motion rows: the check's, BR-97's levelling call and a home's start (review 4 NIT 2)
             if (code != null && (BedModelStore.EVENT.equals(code) || code.startsWith("MOTION_")
+                    || "Z_LEVEL".equals(code) || ControllerReset.EVENT_HOME_STARTED.equals(code)
                     || DispenseService.TIP_EVENT.equals(code))) {
                 return "'" + x + "' is a " + code + " row, not a measurement's";
             }

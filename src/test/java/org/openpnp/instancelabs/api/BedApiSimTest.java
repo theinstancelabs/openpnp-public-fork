@@ -25,6 +25,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.BedFixture;
 import org.openpnp.instancelabs.dispense.BedModelStore;
+import org.openpnp.instancelabs.dispense.ControllerReset;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.model.Configuration;
@@ -415,7 +416,8 @@ public class BedApiSimTest {
 
     /**
      * A record's evidence is a measurement's own: a journal row or photo at or after the stored record's time, never a
-     * bed-model or motion row (#66 review MINOR c).
+     * bed-model or motion row (#66 review MINOR c; review 4 NIT 2: BR-97's levelling call and a home's start too, while
+     * the height switch's measure is one).
      */
     @Test
     public void evidenceIsANewMeasurementsOwnRow() throws Exception {
@@ -430,15 +432,18 @@ public class BedApiSimTest {
         h.addProperty("topZ", 12.5);
         h.getAsJsonObject("measured").add("top", new JsonParser().parse(record("n1 on top", first)));
         refused(409, "measurement-needed", "older than", call("PUT", "/api/bed/objects/holder-left", h.toString(), UI));
-        // a bed-model row or a motion proof is no measurement
-        for (String code : new String[] {BedModelStore.EVENT, "MOTION_PROOF"}) {
+        // a bed-model row, a motion proof, a levelling call or a home's start is no measurement
+        for (String code : new String[] {BedModelStore.EVENT, "MOTION_PROOF", "Z_LEVEL",
+            ControllerReset.EVENT_HOME_STARTED}) {
             svc.getDb().event(null, "INFO", code, "{}");
             h.getAsJsonObject("measured").add("top", new JsonParser().parse(record("n1 on top", "event:" + svc.getDb()
                     .recentEvents(1).get(0).get("id"))));
             refused(409, "measurement-needed", "not a measurement", call("PUT", "/api/bed/objects/holder-left",
                     h.toString(), UI));
         }
-        h.getAsJsonObject("measured").add("top", new JsonParser().parse(record("n1 on top", evidence())));
+        svc.getDb().event(null, "INFO", "HEIGHT_SWITCH", "{}");
+        h.getAsJsonObject("measured").add("top", new JsonParser().parse(record("n1 on top", "event:" + svc.getDb()
+                .recentEvents(1).get(0).get("id"))));
         ok("PUT", "/api/bed/objects/holder-left", h.toString());
         assertEquals(12.5, object("holder-left").get("topZ").getAsDouble(), 0);
     }
@@ -561,6 +566,40 @@ public class BedApiSimTest {
         assertNotNull(object("a-tray"), "the write that went first is kept");
         assertNull(object("a-reel"), "the refused one wrote nothing");
         assertEquals(2, version());
+    }
+
+    /**
+     * A needle change between a write's checks and its write (#66 review 4 MINOR 1): the write was held to the needle
+     * before, and the change took its token from the model before the write, so a tip end stamped ahead would prove
+     * moves for the new needle. Refused (409 needle-changed), nothing written; sent again, it is held to the new one.
+     */
+    @Test
+    public void aNeedleChangeDuringAWriteRefusesIt() throws Exception {
+        start(true);
+        ok("POST", "/api/needle/changed", "{\"why\":\"bed test\"}");
+        JsonObject needle = BedFixture.json().getAsJsonArray("tools").get(1).getAsJsonObject();
+        needle.getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis() + 30000); // a clock ahead
+        needle.add("measured", new JsonParser().parse(record("bottom camera", evidence())));
+        Thread.sleep(5);
+        int v = version();
+        BedEndpoints.writeHook = () -> {
+            try {
+                svc.recordNeedleChange("bed test, during the write", null);
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
+        try {
+            refused(409, "needle-changed", "nothing was written", call("PUT", "/api/bed/tools/needle", needle
+                    .toString(), UI));
+        }
+        finally {
+            BedEndpoints.writeHook = null;
+        }
+        assertEquals(v, version(), "nothing written");
+        refused(409, "measurement-needed", "older than the needle change", call("PUT", "/api/bed/tools/needle", needle
+                .toString(), UI));
     }
 
     String postAcquire() throws Exception {
