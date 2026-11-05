@@ -251,17 +251,22 @@ board outline: it gets no paste (its paste would land off the board). Move it on
 this board.`; plural `R2, R3 are not inside …: they get no paste (their paste …)`). A pad turned 180° gives one
 package signature at any footprint angle.
 
-**Centre pads (BR-91 (a), `centrePads` `copper` (the default) | `design`).** With `copper`, an SMD pad on F.Cu at a
-footprint's origin, at least 1 mm², without paste of its own, in a footprint with other paste (a QFN's exposed pad) is
-pasted on its copper: one opening named after the pad (`IC3.33`), with the pad's shape and paste margin (the Nano's 3.25
-mm pad: 3.10 mm), and the paste openings drawn on it are dropped (the Nano's 1.27 mm square `33~1`, mobo U2's nine
-windows). A lone pad (a test point) has no other paste and gets none. One `CENTRE_PAD_COPPER` warning per package (group
-3) gives the design's share: `IC3's centre pad 33 has no paste of its own: it is pasted on its copper as one opening
-(3.10 × 3.10 mm). The design pastes 1.61 mm² of its 10.38 mm² (16 %); centrePads=design keeps the design's paste.`
+**Centre pads (BR-91 (a), `centrePads` `copper` (the default) | `design`).** With `copper`, the largest SMD pad on F.Cu
+at a footprint's origin, at least 1 mm², without paste of its own, in a footprint with other paste (a QFN's exposed pad)
+is pasted on the copper its solder mask leaves open: one opening named after the pad (`IC3.33`), that copper grown by
+the pad's paste margin, and the paste openings drawn on the pad are dropped (the Nano's 1.27 mm square `33~1`, mobo U2's
+nine windows). The open copper is the pad when it has a mask opening of its own (mobo U2, U7, U8; less a negative mask
+margin), else the one F.Mask rectangle or circle drawn inside it (the Nano's pad 33 is F.Cu only under a drawn Ø2.667 mm
+circle: a round opening of Ø2.515 mm with the pad's −0.0762 mm margin, not its 3.10 mm square), or the whole pad inside
+a drawn one. A lone pad (a test point) has no other paste and gets none; a pad the mask covers (or covers in part, or
+opens in several windows) keeps the design's paste. `CENTRE_PAD_COPPER` (group 3; packages with the same text share one
+warning) gives the design's share of the open copper: `IC3's centre pad 33 has no paste of its own: it is pasted as one
+opening (Ø2.52 mm) on the 5.59 mm² of copper the solder mask leaves open. The design pastes 1.61 mm² of it (29 %).`
+(none: `The design has no paste on it.`; a pad without a name: `U1's unnamed centre pad … as one opening P~1 (…) …`).
 `design` keeps the file's paste (the windows as pads of their own, `IC3.33~1`, and `QFN_WINDOWS`). Re-importing a board
 saved before BR-91 renames the pad (`IC3.33~1` → `IC3.33`); its package's footprint changed, so the package is saved
 as a new `…~2` (the old one is never changed): set `pastePartial` again on the new package id, and per-pad mappings
-again on the new pad name (a carried `…#33~1` mapping no longer matches a pad).
+again on the new pad name (a carried `…#33~1` mapping no longer matches a pad, and the preview does not warn of it).
 
 | Method + path | Query | Does |
 |---|---|---|
@@ -287,8 +292,10 @@ upload's choice; both null for drawings saved before them; BR-91: `centrePads` =
 null before it). `imported` is the board's own upload (BR-88): the newest save of this board
 file (`<slug>/<slug>.board.xml`) or attach to it, while the board has that upload's geometry (an upload a replace
 moved to `history/` no longer counts); any other file (a byte copy, e.g. uinav's) gets the upload of its drawing. The
-drawing (`art`, `origin`) is found by geometry: boards saved from one file share the newest upload's. A board without
-KiCad art gets a drawing made from the board file (`imported: null`).
+drawing (`art`, `origin`) is found by geometry: boards saved from one file share the newest upload's, also across
+`centrePads` modes (the mode does not move a placement), so a board saved with one mode can show the other mode's paste
+layer after a newer upload in the other; its plan dispenses its own packages. A board without KiCad art gets a drawing
+made from the board file (`imported: null`).
 
 **The plan view** adds `board` `{name, file, widthMm, heightMm, side, toMachine (the board → machine affine, 6
 numbers), transformStatus, fiducials: [{id, partId, bx, by, x, y}], art: {id, kind, note} | null}` (the drawing is

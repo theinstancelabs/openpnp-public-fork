@@ -31,7 +31,10 @@ public final class ImportRules {
     private static final Pattern DNP_VALUE = Pattern.compile("(?i)^(DNP|DNF|NP|DO NOT PLACE)$");
     /** A paste opening may reach this far past the board's box (rounding) and still be on the board. */
     private static final double EDGE_TOL_MM = 0.001;
-    /** BR-91 (a): a centre pad without paste of its own is pasted on its copper (the default), or as designed. */
+    /**
+     * BR-91 (a): a centre pad without paste of its own is pasted on the copper its solder mask leaves open (the
+     * default), or as designed.
+     */
     public static final String COPPER = "copper";
     public static final String DESIGN = "design";
 

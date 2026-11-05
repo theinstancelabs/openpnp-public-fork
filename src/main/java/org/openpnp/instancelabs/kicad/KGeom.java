@@ -163,6 +163,40 @@ public final class KGeom {
         return p;
     }
 
+    /** {cx, cy, r} when every point of the loop lies within 0.01 mm of one circle (8 points or more), else null. */
+    public static double[] circleOf(double[] loop) {
+        int n = loop.length / 2;
+        if (n < 8) {
+            return null;
+        }
+        double cx = 0;
+        double cy = 0;
+        for (int i = 0; i < n; i++) {
+            cx += loop[2 * i];
+            cy += loop[2 * i + 1];
+        }
+        return circleOf(loop, cx / n, cy / n);
+    }
+
+    /**
+     * {cx, cy, r} when every point of the loop (8 or more) lies within 0.01 mm of one circle around (cx, cy), else
+     * null: for points spaced unevenly, whose mean is off the centre (nano IC3's mask opening).
+     */
+    public static double[] circleOf(double[] loop, double cx, double cy) {
+        int n = loop.length / 2;
+        if (n < 8) {
+            return null;
+        }
+        double min = Double.POSITIVE_INFINITY;
+        double max = 0;
+        for (int i = 0; i < n; i++) {
+            double r = Math.hypot(loop[2 * i] - cx, loop[2 * i + 1] - cy);
+            min = Math.min(min, r);
+            max = Math.max(max, r);
+        }
+        return max - min <= 0.01 && min > 0 ? new double[] {cx, cy, (min + max) / 2} : null;
+    }
+
     /** Appends a cubic Bézier (4 control points, 8 numbers) flattened into at most 64 segments. */
     public static void flattenBezier(double[] c, Pts out, boolean includeStart) {
         double len = 0;

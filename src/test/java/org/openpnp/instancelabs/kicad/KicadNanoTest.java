@@ -5,6 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -72,7 +76,8 @@ public class KicadNanoTest {
 
     @Test
     public void ic3CentrePadIsPastedOnItsCopper() {
-        // BR-91 (a): pad 33 (F.Cu only) becomes one opening on its copper; the square drawn on F.Paste goes
+        // BR-91 (a): pad 33 (F.Cu only) becomes one opening on the copper its drawn F.Mask circle (Ø2.667 mm) leaves
+        // open, less the pad's paste margin −0.0762; the square drawn on F.Paste goes
         ImportProposal p = nano.proposal;
         assertEquals(ImportRules.COPPER, p.centrePads);
         PlacementP ic3 = p.placement("IC3");
@@ -81,19 +86,48 @@ public class KicadNanoTest {
         assertTrue(pk.pads.stream().noneMatch(x -> x.name.contains("~")), "no 33~1");
         PadP c = pk.pads.stream().filter(x -> x.name.equals("33")).findFirst().get();
         assertEquals("IC3.33", ic3.id + "." + c.name);
-        assertEquals(0, c.x, 1e-9);
-        assertEquals(0, c.y, 1e-9);
-        assertEquals(3.254 - 2 * 0.0762, c.w, 1e-9, "3.10 mm: the pad's paste margin −0.0762");
-        assertEquals(3.254 - 2 * 0.0762, c.h, 1e-9);
-        assertEquals(200 * (0.15 * 3.254 - 0.0762) / (3.254 - 2 * 0.0762), c.roundness, 1e-6);
+        assertEquals(0, c.x, 1e-3);
+        assertEquals(0, c.y, 1e-3);
+        assertEquals(2.667 - 2 * 0.0762, c.w, 1e-3, "the mask circle less the paste margin, not the 3.10 mm square");
+        assertEquals(c.w, c.h, 1e-9);
+        assertEquals(100, c.roundness, 1e-9, "round");
         assertEquals(55, p.counts.pastePads);
         assertTrue(p.warnings("PASTE_POLY").isEmpty());
         assertTrue(p.warnings("PAD_NAME_EMPTY").isEmpty());
         assertEquals(1, p.warnings("CENTRE_PAD_COPPER").size());
         assertEquals(List.of("IC3"), p.warnings("CENTRE_PAD_COPPER").get(0).refs);
-        assertEquals("IC3's centre pad 33 has no paste of its own: it is pasted on its copper as one opening "
-                + "(3.10 × 3.10 mm). The design pastes 1.61 mm² of its 10.38 mm² (16 %); centrePads=design keeps "
-                + "the design's paste.", p.warnings("CENTRE_PAD_COPPER").get(0).text);
+        assertEquals("IC3's centre pad 33 has no paste of its own: it is pasted as one opening (Ø2.52 mm) on the "
+                + "5.59 mm² of copper the solder mask leaves open. The design pastes 1.61 mm² of it (29 %).",
+                p.warnings("CENTRE_PAD_COPPER").get(0).text);
+    }
+
+    @Test
+    public void theDefaultChangesOnlyIc3sCentrePad() throws Exception {
+        // BR-91 (a): the other 54 openings are the design's (NanoPasteOracleTest: KiCad's own paste Gerber)
+        Map<String, String> copper = openings(nano.proposal);
+        Map<String, String> design = openings(Fixtures.load(Fixtures.NANO,
+                new ImportRules(true, false, ImportRules.DESIGN)).proposal);
+        Map<String, String> same = new TreeMap<>(copper);
+        same.entrySet().retainAll(design.entrySet());
+        assertEquals(54, same.size());
+        copper.keySet().removeAll(same.keySet());
+        design.keySet().removeAll(same.keySet());
+        assertEquals(Set.of("IC3.33"), copper.keySet());
+        assertEquals(Set.of("IC3.33~1"), design.keySet());
+    }
+
+    /** Placement id + pad name → the opening (x, y, w, h, rotation, roundness), the parts' only. */
+    static Map<String, String> openings(ImportProposal p) {
+        Map<String, String> m = new TreeMap<>();
+        for (PlacementP pl : p.placements) {
+            if ("Placement".equals(pl.type)) {
+                for (PadP pad : p.packages.get(pl.packageIndex).pads) {
+                    m.put(pl.id + "." + pad.name, String.format(Locale.ROOT, "%.6f %.6f %.6f %.6f %.6f %.6f", pad.x,
+                            pad.y, pad.w, pad.h, pad.rotation, pad.roundness));
+                }
+            }
+        }
+        return m;
     }
 
     @Test

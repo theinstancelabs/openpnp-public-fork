@@ -401,6 +401,19 @@ and Edge.Cuts from **every** footprint, top or bottom (§4.2).
 3. Not sources: `thru_hole` pads with F.Paste (pin-in-paste) → `THT_PASTE_SKIPPED` (warn, OQ9); board-level `gr_*` on
    F.Paste (they belong to no part) → drawn only + `BOARD_PASTE_GRAPHIC` (warn).
 
+**Centre pads** (BR-91 (a), `centrePads=copper`, the default; `design` skips this rule). The largest `smd` pad on F.Cu
+at the footprint's origin (its shape centre within 0.05 mm), at least 1 mm², without F.Paste, in a footprint with
+other paste (a test point has none and gets none), gets one opening named after the pad, at its place in the pad
+order; the openings whose centre lies on its copper (drawn windows, paste-only pads) are dropped. The opening is the
+copper the solder mask leaves open, grown by the pad's paste margin (Margins below): with the pad's own F.Mask, the
+pad (less a negative mask margin; mobo U2, U7, U8); without it, as the board drawing reads the filled F.Mask shapes of
+the footprint (§4.2): one rectangle or circle inside the pad is the opening (nano IC3's Ø2.667 mm circle, drawn as a
+polygon: Ø2.515 mm with its −0.0762 margin), a pad inside one is open whole. The design's paste stays when the mask
+covers the pad (no shape on it, one over part of it, several windows in it, or a shape that is neither a rectangle
+nor a circle) or the margin removes the opening. `CENTRE_PAD_COPPER` (warn, §2.10) gives the design's share of the
+open copper; the opening gets the notes of any pad (`PASTE_ZERO_OVERRIDE`; `PAD_SHAPE_APPROX` and `CHAMFER_IGNORED`
+when it has the pad's shape).
+
 **Margins** (KiCad's rule; brief: pad > footprint > board). The margin `m` and the ratio `ρ` are each resolved
 independently: pad value → footprint value → board setup (`pad_to_paste_clearance`, `pad_to_paste_clearance_ratio`)
 → 0, with the zero rule of §2.5. Per axis: `mx = m + ρ·w`, `my = m + ρ·h`. In the fixtures the only paste setting is
@@ -442,7 +455,8 @@ roundness / 200, O/model/Footprint.java:324-325, D/DotMath.java:9-12):
 3. Empty names and graphics apertures: `<host>~k`, where `host` is the name of the F.Cu pad of the same footprint
    whose rotated rectangle contains the aperture's centre (a named pad first), else `P`; `k` counts from 1 per host
    in file order, skipping names already used (`PAD_NAME_EMPTY`, info). mobo U2's nine windows inside the exposed pad
-   `33` become `33~1`…`33~9`; U7/U8's two windows inside `9` become `9~1`, `9~2`; nano IC3's polygon becomes `33~1`.
+   `33` become `33~1`…`33~9`; U7/U8's two windows inside `9` become `9~1`, `9~2`; nano IC3's polygon becomes `33~1`
+   (these three with `centrePads=design`; by default each of those centre pads is one opening, Centre pads above).
 
 **Fiducial packages** have no paste. Their footprint gets the **F.Cu pads** with the same shape rules and margin 0:
 ftp's fiducials become one round 1.0 mm pad (roundness 100). AR's BoardFeatures reads the diameter from the first
@@ -505,7 +519,7 @@ what to do, in plain words with units; internal names (regexes, setting keys) st
 | 3 | `DNP_STILL_PASTED` | warn | U2 is marked Do not populate. It will not be placed, but its 41 pads still get paste (the engine pastes disabled parts). |
 | 3 | `VALUE_SAYS_DNP` | warn | U5's value says DNP but the part is not marked Do not populate in KiCad: it is imported as a normal part and gets paste. |
 | 3 | `THT_PASTE_SKIPPED` | warn | J3 pads 1–4 are through-hole pads with paste (pin in paste): they get no paste. |
-| 3 | `CENTRE_PAD_COPPER` | warn | IC3's centre pad 33 has no paste of its own: it is pasted on its copper as one opening (3.10 × 3.10 mm). The design pastes 1.61 mm² of its 10.38 mm² (16 %); centrePads=design keeps the design's paste. (BR-91 (a), the default `centrePads=copper`.) |
+| 3 | `CENTRE_PAD_COPPER` | warn | IC3's centre pad 33 has no paste of its own: it is pasted as one opening (Ø2.52 mm) on the 5.59 mm² of copper the solder mask leaves open. The design pastes 1.61 mm² of it (29 %). (BR-91 (a), the default `centrePads=copper`. None on the pad: "The design has no paste on it." A pad without a name: "U1's unnamed centre pad … as one opening P~1 (2.00 × 2.00 mm) …".) |
 | 3 | `QFN_WINDOWS` | warn | U2's 9 paste windows (0.86 mm² each) inside its centre pad are dispensed as small edge pads, not as one centre pad. Check the dots in the pad inspector. (`centrePads=design` only.) |
 | 3 | `PAD_SHAPE_APPROX` / `PASTE_POLY_APPROX` | warn | U5 pad 3 is a trapezoid: its paste opening is taken as the surrounding rectangle (12 % more area). |
 | 3 | `PACKAGE_MAPPING_LOST` | warn | R_0603_1608Metric is mapped to pad type "Chip 0603" by hand; the new copy R_0603_1608Metric~2 is not, and gets "Chip 0805" by name. Map it in Profile › Pad types after saving. |
@@ -529,10 +543,10 @@ what to do, in plain words with units; internal names (regexes, setting keys) st
 | Board | 75 × 75 mm, closed | 10 × 10 (`gr_rect`) | 43.18 × 17.78, 4 circular cut-outs | 51.5677 × 89.0, arcs, 13 cut-outs |
 | Footprints | 89 (G1 logo removed) | 1 | 34 | 68 (6 logo footprints removed) |
 | Parts (`counts.placements`) + fiducials | 80 (R1–R40, D1–D40) + 3 (FID1–FID3) | 0 + 0 | 8 + 2 (FD1, FD2) | 55 (U2 disabled) + 3 |
-| Paste apertures | 160 (`roundrect` 0.25 → 50) | 0 | 55 (54 pads at −0.0762 + IC3's polygon) | 261 (259 pads + J5's 2 polygons) |
+| Paste apertures (`centrePads=design`; by default nano's IC3 and mobo's U2, U7, U8 get one opening on their centre pad, §2.8) | 160 (`roundrect` 0.25 → 50) | 0 | 55 (54 pads at −0.0762 + IC3's polygon) | 261 (259 pads + J5's 2 polygons) |
 | Bottom (no placement) | G2 | REF** (a bottom fiducial) | 20 (J1, J2: 30 drilled pads drawn) | J1 |
 | Art only | H1–H4, J1 | – | Silkscreen_Front, D+0, D−0, J4 | TP1–TP8, J8 |
-| Notable warnings (test config, seed pad types) | only `BOTTOM_SKIPPED` | `NO_PLACEMENTS`, `FIDUCIAL_COUNT` | `PASTE_POLY` (IC3), `PAD_NAME_EMPTY`, `NO_PAD_TYPE` (J3, SW1, Y1) | `DNP_STILL_PASTED` (U2), `PAD_NAME_EMPTY` (13), `PAD_NAME_DUPLICATE` (U4, J2, J3), `PASTE_POLY` (J5), `QFN_WINDOWS` (U2), `NO_PAD_TYPE` (WSON and the connectors) |
+| Notable warnings (test config, seed pad types; `centrePads=design`: by default `CENTRE_PAD_COPPER` replaces IC3's `PASTE_POLY` and `PAD_NAME_EMPTY` and mobo's `QFN_WINDOWS`) | only `BOTTOM_SKIPPED` | `NO_PLACEMENTS`, `FIDUCIAL_COUNT` | `PASTE_POLY` (IC3), `PAD_NAME_EMPTY`, `NO_PAD_TYPE` (J3, SW1, Y1) | `DNP_STILL_PASTED` (U2), `PAD_NAME_EMPTY` (13), `PAD_NAME_DUPLICATE` (U4, J2, J3), `PASTE_POLY` (J5), `QFN_WINDOWS` (U2), `NO_PAD_TYPE` (WSON and the connectors) |
 
 New fixtures (survey of the source files before stripping; the stripped counts are pinned by the tests):
 
@@ -896,9 +910,9 @@ block of §4.5.
 - `PACKAGE_MAPPING_LOST`: an explicit mapping (`package_pad_type`, exact id, D/PadTypeResolver.java:58-61) exists for
   `baseId` but not for the suffixed id, and the two resolve differently. The import never writes mappings (a mapping
   changes `padTypesFingerprint` and makes every plan stale, D/PadTypeResolver.java:27-37; OQ3).
-- `QFN_WINDOWS`: a package whose paste-only apertures lie inside one copper pad and resolve as `qfn-dfn-perimeter`
-  (the centre rule needs one pad at the origin ≥ 1.0 mm², D/PadTypeResolver.java:71-77). Nano IC3's 1.27 × 1.27 mm
-  polygon (1.61 mm², at the origin) does become `qfn-centre`.
+- `QFN_WINDOWS` (`centrePads=design`; by default such a pad is one opening, §2.8): a package whose paste-only apertures
+  lie inside one copper pad and resolve as `qfn-dfn-perimeter` (the centre rule needs one pad at the origin ≥ 1.0 mm²,
+  D/PadTypeResolver.java:71-77). Nano IC3's 1.27 × 1.27 mm polygon (1.61 mm², at the origin) does become `qfn-centre`.
 
 ### 3.10 Attach the drawing to an existing board file (ftp.board.xml)
 
@@ -1552,11 +1566,12 @@ that no fixture contains `opulo` or `lumenpnp` (case-insensitive) and that the s
   pins included), placed by §2.6, equals a hit of `F/NanoV3.3-PTH.drl` / `-NPTH.drl` within 0.001 mm, with the same
   diameter, and the hit counts match.
 - **`KicadNanoTest`** (KiCad 6, CRLF): 43.18 × 17.78 with 4 cut-outs; 8 parts + FD1/FD2 (name rule); with the name
-  rule switched off (a constructor flag), 0 fiducials; IC3's polygon → `33~1`, 1.27 × 1.27 at the origin; 20 bottom
-  skipped; `PASTE_POLY`; `viasonmask false` → vias tented.
+  rule switched off (a constructor flag), 0 fiducials; with `centrePads=design` IC3's polygon → `33~1`, 1.27 × 1.27 at
+  the origin, and `PASTE_POLY` (by default one round opening `33` on its mask opening, §2.8); 20 bottom skipped;
+  `viasonmask false` → vias tented.
 - **`KicadMoboTest`** (KiCad 9): exact min X 99.7323 (not 99.95) and 51.5677 × 89.0; U2 enabled = false +
-  `DNP_STILL_PASTED`; U2 windows `33~1…33~9`; U4 `2`, `2~2`; J2/J3 `MP`, `MP~2`; J5 2 polygon apertures; 13 cut-outs;
-  `(tenting front back)` → tented; stackup mask `Black`, silk `White` (mobo.kicad_pcb:33-45).
+  `DNP_STILL_PASTED`; U2 windows `33~1…33~9` (`centrePads=design`); U4 `2`, `2~2`; J2/J3 `MP`, `MP~2`; J5 2 polygon
+  apertures; 13 cut-outs; `(tenting front back)` → tented; stackup mask `Black`, silk `White` (mobo.kicad_pcb:33-45).
 - **`KicadSecondaryTest`** (KiCad 9): `gr_rect` outline 10 × 10; no placements; REF** bottom; `NO_PLACEMENTS`.
 - **`KicadK10Test`** (pi10): version 20260206, no `KICAD_NEWER`, 12 paste apertures, `(tenting (front yes) (back yes))`
   read, `FIDUCIAL_COUNT`, `covering`/`plugging`/… ignored without warnings; the stripped counts pinned.

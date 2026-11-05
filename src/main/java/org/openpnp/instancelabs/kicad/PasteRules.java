@@ -116,12 +116,13 @@ public final class PasteRules {
     /**
      * The paste openings of a top-side footprint, named, with its notes, under the import's deadline (one footprint
      * of a hostile file can hold most of its 1.5 million items). {@code centresOnCopper} (BR-91 (a)): a centre pad
-     * without paste of its own is pasted on its copper ({@link #onCopper}).
+     * without paste of its own is pasted on the copper its solder mask leaves open ({@link #exposed}).
      */
     public static Result paste(KicadPcb pcb, Footprint fp, boolean centresOnCopper, Deadline deadline)
             throws SExprException {
         Result res = new Result();
         Pad centre = null;
+        double centreMm2 = 0;
         int centreAt = 0;
         List<String> gone = new ArrayList<>();
         List<String> tht = new ArrayList<>();
@@ -131,9 +132,11 @@ public final class PasteRules {
         List<String> zeroNotes = new ArrayList<>();
         for (Pad p : fp.pads) {
             if (!p.onFrontPaste()) {
-                if (centresOnCopper && centre == null && "smd".equals(p.type) && p.onFrontCopper()
-                        && atCentre(fp, p)) {
+                double area = centresOnCopper && "smd".equals(p.type) && p.onFrontCopper() && atCentre(fp, p)
+                        ? padShape(fp, p, 0, 0).areaMm2() : 0;
+                if (area > centreMm2) { // of two pads at the origin, the larger
                     centre = p;
+                    centreMm2 = area;
                     centreAt = res.apertures.size();
                 }
                 continue;
@@ -146,7 +149,7 @@ public final class PasteRules {
                 continue;
             }
             double[] mm = pasteMargins(pcb, fp, p);
-            String zero = zeroOverride(pcb, fp, p, mm);
+            String zero = zeroOverride(pcb, fp, p, KText.clean(p.name, 40), mm);
             if (zero != null) {
                 zeroNotes.add(zero);
             }
@@ -155,23 +158,7 @@ public final class PasteRules {
                 gone.add(KText.clean(p.name, 40));
                 continue;
             }
-            if ("trapezoid".equals(a.approx)) {
-                double pct = 100 * ((p.w + Math.abs(p.deltaY)) * (p.h + Math.abs(p.deltaX)) / (p.w * p.h) - 1);
-                res.notes.add(new Note("PAD_SHAPE_APPROX", " pad " + KText.clean(p.name, 40) + " is a trapezoid: its "
-                        + "paste opening is taken as the surrounding rectangle (" + pct(pct) + " more area)."));
-            }
-            else if ("custom".equals(a.approx)) {
-                custom.add(KText.clean(p.name, 40));
-            }
-            int corners = chamferCorners(p);
-            if (corners > 0) {
-                double c = p.chamferRatio * Math.min(p.w, p.h);
-                double r = p.rratio * Math.min(p.w, p.h);
-                double area = p.w * p.h - (4 - Math.PI) * r * r;
-                double removed = corners * c * c / 2;
-                chamfered.add(KText.clean(p.name, 40));
-                chamferPct = Math.max(chamferPct, 100 * removed / Math.max(1e-9, area - removed));
-            }
+            chamferPct = Math.max(chamferPct, shapeNotes(p, a, KText.clean(p.name, 40), res, custom, chamfered));
             res.apertures.add(a);
         }
         for (Graphic g : fp.graphics) {
@@ -210,11 +197,22 @@ public final class PasteRules {
                 }
             }
         }
-        if (centre != null) {
-            onCopper(pcb, fp, centre, centreAt, res);
-        }
+        Aperture open = centre == null ? null : exposed(pcb, fp, centre);
+        double[] cm = open == null ? null : pasteMargins(pcb, fp, centre);
+        Aperture opening = open == null ? null : grown(open, centre, cm);
+        double design = opening == null ? -1 : onCopper(fp, centre, centreAt, opening, res);
         name(fp, res, true, deadline);
         polygonNotes(res);
+        if (design >= 0) { // the opening's notes under its name, as any pad's (its shape's when it has the pad's)
+            res.notes.add(centreNote(centre, opening, open.areaMm2(), design));
+            String zero = zeroOverride(pcb, fp, centre, opening.name, cm);
+            if (zero != null) {
+                zeroNotes.add(zero);
+            }
+            if (open.pad != null) {
+                chamferPct = Math.max(chamferPct, shapeNotes(centre, opening, opening.name, res, custom, chamfered));
+            }
+        }
         if (!custom.isEmpty()) {
             res.notes.add(new Note("PAD_SHAPE_APPROX", " " + pads(custom) + (custom.size() == 1
                     ? " has a custom shape: its paste opening is" : " have a custom shape: their paste openings are")
@@ -246,14 +244,12 @@ public final class PasteRules {
     }
 
     /**
-     * BR-91 (a): the centre pad gets one opening on its copper (its name, shape and paste margin) at its place in the
-     * pad order, and the openings drawn on it go; unless the footprint has no other paste (a test point keeps none) or
-     * the pad's margin removes the opening (the design's paste stays).
+     * BR-91 (a): the centre pad's opening takes the pad's place in the pad order and the openings on its copper go;
+     * unless the footprint has no other paste (a test point keeps none) or the pad's margin removes the opening. The
+     * design's paste on the pad in mm², or −1 when the design's paste stays.
      */
-    private static void onCopper(KicadPcb pcb, Footprint fp, Pad centre, int at, Result res) {
+    private static double onCopper(Footprint fp, Pad centre, int at, Aperture opening, Result res) {
         Aperture copper = padShape(fp, centre, 0, 0);
-        double[] mm = pasteMargins(pcb, fp, centre);
-        Aperture opening = padShape(fp, centre, mm[0], mm[1]);
         List<Aperture> kept = new ArrayList<>();
         double design = 0;
         int index = at;
@@ -268,15 +264,137 @@ public final class PasteRules {
             }
         }
         if (kept.isEmpty() || opening.w <= GONE_MM || opening.h <= GONE_MM) {
-            return;
+            return -1;
         }
         kept.add(index, opening);
         res.apertures.clear();
         res.apertures.addAll(kept);
-        res.notes.add(new Note("CENTRE_PAD_COPPER", String.format(Locale.ROOT, "'s centre pad %s has no paste of its "
-                + "own: it is pasted on its copper as one opening (%.2f × %.2f mm). The design pastes %.2f mm² of its "
-                + "%.2f mm² (%s); centrePads=design keeps the design's paste.", KText.clean(centre.name, 40),
-                opening.w, opening.h, design, copper.areaMm2(), pct(100 * design / copper.areaMm2()))));
+        return design;
+    }
+
+    /**
+     * BR-91 (a): the copper the solder mask leaves open on a centre pad. With a mask opening of its own, the pad (less
+     * a negative mask margin); else as the board drawing reads the filled F.Mask shapes of the footprint
+     * (BoardArtBuilder.exposeDrawnOpening): a rectangle or circle inside the pad (nano IC3's circle), or the pad whole
+     * inside one. Null when the mask covers the pad, part of it, or opens several windows in it.
+     */
+    private static Aperture exposed(KicadPcb pcb, Footprint fp, Pad pad) {
+        if (pad.onFrontMask()) {
+            double m = Math.min(0, maskMargin(pcb, fp, pad));
+            return padShape(fp, pad, m, m);
+        }
+        Aperture copper = padShape(fp, pad, 0, 0);
+        Aperture open = null;
+        for (Graphic g : fp.graphics) {
+            Aperture s = "F.Mask".equals(g.layer) && g.filled ? maskShape(g) : null;
+            if (s == null) {
+                continue;
+            }
+            if (inside(copper, s)) {
+                return copper;
+            }
+            if (inside(s, copper)) {
+                if (open != null) {
+                    return null; // windows: one opening cannot hold them
+                }
+                open = s;
+            }
+        }
+        return open;
+    }
+
+    /** A filled F.Mask shape as an opening: a rectangle or a circle (also one drawn as a polygon), else null. */
+    private static Aperture maskShape(Graphic g) {
+        Aperture a = graphicShape(g);
+        double[] c = a != null && "polygon".equals(a.approx) ? KGeom.circleOf(g.pts, a.x, -a.y) : null;
+        if (c != null) {
+            a.w = KGeom.round6(2 * c[2] + g.width);
+            a.h = a.w;
+            a.rotation = 0;
+            a.roundness = 100;
+            a.approx = null;
+        }
+        return a == null || a.approx != null ? null : a;
+    }
+
+    /**
+     * Every corner of a's rectangle lies in b, b's rounded corners counted: an opening inside a pad, or a pad inside an
+     * opening (a round a is held to its square: in doubt, not inside).
+     */
+    private static boolean inside(Aperture a, Aperture b) {
+        double ta = Math.toRadians(a.rotation);
+        double tb = Math.toRadians(-b.rotation);
+        double r = Math.min(b.w, b.h) * b.roundness / 200;
+        for (int k = 0; k < 4; k++) {
+            double cu = (k < 2 ? -a.w : a.w) / 2;
+            double cv = (k % 2 == 0 ? -a.h : a.h) / 2;
+            double dx = a.x + cu * Math.cos(ta) - cv * Math.sin(ta) - b.x;
+            double dy = a.y + cu * Math.sin(ta) + cv * Math.cos(ta) - b.y;
+            double u = Math.abs(dx * Math.cos(tb) - dy * Math.sin(tb)) - b.w / 2 + r; // past b's straight sides
+            double v = Math.abs(dx * Math.sin(tb) + dy * Math.cos(tb)) - b.h / 2 + r;
+            if (u > r + 1e-6 || v > r + 1e-6 || u > 0 && v > 0 && Math.hypot(u, v) > r + 1e-6) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The centre pad's opening: the open copper grown by the pad's paste margin per axis, its corner radius as a
+     * rounded rectangle's in padShape.
+     */
+    private static Aperture grown(Aperture open, Pad centre, double[] mm) {
+        Aperture a = new Aperture(centre);
+        a.x = open.x;
+        a.y = open.y;
+        a.rotation = open.rotation;
+        a.approx = open.approx;
+        a.w = KGeom.round6(open.w + 2 * mm[0]);
+        a.h = KGeom.round6(open.h + 2 * mm[1]);
+        double r = Math.max(0, Math.min(open.w, open.h) * open.roundness / 200 + Math.min(mm[0], mm[1]));
+        a.roundness = KGeom.round6(clamp(200 * r / Math.min(a.w, a.h)));
+        return a;
+    }
+
+    /** CENTRE_PAD_COPPER, after naming: the opening, and the design's share of the copper the mask leaves open. */
+    private static Note centreNote(Pad centre, Aperture opening, double openMm2, double design) {
+        String name = KText.clean(centre.name, 40);
+        String pad = name.isEmpty() ? "'s unnamed centre pad" : "'s centre pad " + name;
+        String id = opening.name.equals(name) ? "" : opening.name + " ";
+        String size = opening.roundness >= 100 && opening.w == opening.h
+                ? String.format(Locale.ROOT, "Ø%.2f mm", opening.w)
+                : String.format(Locale.ROOT, "%.2f × %.2f mm", opening.w, opening.h);
+        String share = design == 0 ? "The design has no paste on it." : String.format(Locale.ROOT,
+                "The design pastes %.2f mm² of it (%s).", design, pct(100 * design / openMm2));
+        return new Note("CENTRE_PAD_COPPER", String.format(Locale.ROOT, "%s has no paste of its own: it is pasted as "
+                + "one opening %s(%s) on the %.2f mm² of copper the solder mask leaves open. %s", pad, id, size,
+                openMm2, share));
+    }
+
+    /**
+     * The notes of a pad pasted in its own shape, under the name given: a trapezoid's at once, a custom shape and cut
+     * corners into the footprint's lists. The area the cuts leave out, in percent (0 without cuts).
+     */
+    private static double shapeNotes(Pad p, Aperture a, String name, Result res, List<String> custom,
+            List<String> chamfered) {
+        if ("trapezoid".equals(a.approx)) {
+            double pct = 100 * ((p.w + Math.abs(p.deltaY)) * (p.h + Math.abs(p.deltaX)) / (p.w * p.h) - 1);
+            res.notes.add(new Note("PAD_SHAPE_APPROX", " pad " + name + " is a trapezoid: its paste opening is taken "
+                    + "as the surrounding rectangle (" + pct(pct) + " more area)."));
+        }
+        else if ("custom".equals(a.approx)) {
+            custom.add(name);
+        }
+        int corners = chamferCorners(p);
+        if (corners == 0) {
+            return 0;
+        }
+        double c = p.chamferRatio * Math.min(p.w, p.h);
+        double r = p.rratio * Math.min(p.w, p.h);
+        double area = p.w * p.h - (4 - Math.PI) * r * r;
+        double removed = corners * c * c / 2;
+        chamfered.add(name);
+        return 100 * removed / Math.max(1e-9, area - removed);
     }
 
     /** A pad at the footprint's origin of at least 1 mm² (a QFN's exposed pad). */
@@ -519,7 +637,7 @@ public final class PasteRules {
     }
 
     /** A note when a present 0 margin reads differently under the KiCad 7 and the KiCad 8 rules. */
-    private static String zeroOverride(KicadPcb pcb, Footprint fp, Pad p, double[] used) {
+    private static String zeroOverride(KicadPcb pcb, Footprint fp, Pad p, String name, double[] used) {
         boolean zeroPresent = isZero(p.pasteMargin) || isZero(p.pasteRatio) || isZero(fp.pasteMargin)
                 || isZero(fp.pasteRatio);
         if (!zeroPresent) {
@@ -535,7 +653,7 @@ public final class PasteRules {
         }
         return String.format(Locale.ROOT, " pad %s sets a paste margin of exactly 0: read %s (%s), the paste opening "
                 + "grows by %.4f × %.4f mm per side; the %s rules would give %.4f × %.4f mm.",
-                KText.clean(p.name, 40), old ? "as not set" : "as an override",
+                name, old ? "as not set" : "as an override",
                 old ? "KiCad 7 and older" : "KiCad 8 and newer", used[0], used[1], old ? "KiCad 8" : "KiCad 7", ox,
                 oy);
     }

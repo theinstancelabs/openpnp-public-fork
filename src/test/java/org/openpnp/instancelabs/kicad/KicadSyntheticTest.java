@@ -10,6 +10,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.TreeSet;
 
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.kicad.ImportProposal.PackageP;
@@ -409,15 +411,134 @@ public class KicadSyntheticTest {
         assertEquals(1, w.size());
         assertEquals(3, w.get(0).group);
         assertEquals(List.of("U1"), w.get(0).refs);
-        assertEquals("U1's centre pad 5 has no paste of its own: it is pasted on its copper as one opening "
-                + "(1.90 × 1.90 mm). The design pastes 1.16 mm² of its 4.00 mm² (29 %); centrePads=design keeps the "
-                + "design's paste.", w.get(0).text);
+        assertEquals("U1's centre pad 5 has no paste of its own: it is pasted as one opening (1.90 × 1.90 mm) on the "
+                + "4.00 mm² of copper the solder mask leaves open. The design pastes 1.16 mm² of it (29 %).",
+                w.get(0).text);
 
         ImportProposal d = Fixtures.board(20240108, board, new ImportRules(true, false, ImportRules.DESIGN)).proposal;
         assertEquals(ImportRules.DESIGN, d.centrePads);
         assertEquals(List.of("1", "5~1", "2", "5~2"), names(d, "U1"), "the design's windows");
         assertTrue(d.warnings("CENTRE_PAD_COPPER").isEmpty());
         assertEquals(1, d.warnings("QFN_WINDOWS").size());
+    }
+
+    /**
+     * BR-91 (a) (Process 11-05): the opening stops at the solder mask, the pad's own mask opening, else the F.Mask
+     * shapes drawn over it (nano IC3's circle); a pad the mask covers keeps the design's paste.
+     */
+    @Test
+    public void aCentrePadIsPastedOnlyWhereItsMaskIsOpen() throws Exception {
+        String pins = pad("1", "rect", -3, 0, 0.5, 1, "") + pad("2", "rect", 3, 0, 0.5, 1, "");
+        String bare = "(pad \"5\" smd rect (at 0 0) (size 3 3) (layers \"F.Cu\"%s) (solder_paste_margin -0.05)%s)\n";
+        String cu = String.format(Locale.ROOT, bare, "", "");
+        String window = "(fp_rect (start -0.5 -0.5) (end 0.5 0.5) (stroke (width 0)) (fill yes) (layer \"F.Paste\"))\n";
+        String mask = " (stroke (width 0)) (fill yes) (layer \"F.Mask\"))\n";
+        String board = OUTLINE
+                + fp("M1", "QFN_MASK_CIRCLE", 10, 10, 0, "", pins + cu + window + "(fp_circle (center 0 0) (end 1 0)"
+                        + mask)
+                + fp("M2", "QFN_UNDER_MASK", 25, 10, 0, "", pins + cu + window)
+                + fp("M3", "QFN_IN_MASK", 40, 10, 0, "", pins + cu + window + "(fp_rect (start -4 -2) (end 4 2)" + mask)
+                + fp("M4", "QFN_MASK_MARGIN", 10, 30, 0, "", pins + String.format(Locale.ROOT, bare, " \"F.Mask\"",
+                        " (solder_mask_margin -0.2)") + window)
+                + fp("M5", "QFN_MASK_PART", 25, 30, 0, "", pins + cu + window + "(fp_rect (start 0 -1) (end 2 1)"
+                        + mask)
+                + fp("M6", "QFN_MASK_PANES", 40, 30, 0, "", pins + cu + window
+                        + "(fp_rect (start -1.2 -0.5) (end -0.2 0.5)" + mask + "(fp_rect (start 0.2 -0.5) (end 1.2 0.5)"
+                        + mask)
+                + fp("M7", "QFN_MASK_ROUND", 10, 45, 0, "", pins + cu + window + "(fp_circle (center 0 0) (end 2 0)"
+                        + mask);
+        ImportProposal p = Fixtures.board(20240108, board).proposal;
+        PadP circle = pad(p, "M1", "5");
+        assertEquals(List.of("1", "2", "5"), names(p, "M1"));
+        assertEquals(2 - 0.1, circle.w, 1e-9, "the drawn mask circle less the paste margin");
+        assertEquals(2 - 0.1, circle.h, 1e-9);
+        assertEquals(100, circle.roundness, 1e-9);
+        assertEquals(0, circle.x, 1e-9);
+        assertEquals(0, circle.y, 1e-9);
+        assertEquals(List.of("1", "2", "5~1"), names(p, "M2"), "the mask covers it: the design's paste");
+        assertEquals(3 - 0.1, pad(p, "M3", "5").w, 1e-9, "inside a drawn mask opening: the whole pad");
+        assertEquals(0, pad(p, "M3", "5").roundness, 1e-9);
+        assertEquals(3 - 0.4 - 0.1, pad(p, "M4", "5").w, 1e-9, "its own mask opening, 0.2 mm inside its copper");
+        assertEquals(List.of("1", "2", "5~1"), names(p, "M5"), "a mask opening over part of it: the design's paste");
+        assertEquals(List.of("1", "2", "5~1"), names(p, "M6"), "two mask openings on it: the design's paste");
+        assertEquals(List.of("1", "2", "5~1"), names(p, "M7"), "a mask circle that leaves its corners covered");
+        assertEquals(Set.of("M1", "M3", "M4"), refs(p.warnings("CENTRE_PAD_COPPER")));
+        assertTrue(p.warnings("CENTRE_PAD_COPPER").stream().anyMatch(w -> w.text.equals("M1's centre pad 5 has no "
+                + "paste of its own: it is pasted as one opening (Ø1.90 mm) on the 3.14 mm² of copper the solder mask "
+                + "leaves open. The design pastes 1.00 mm² of it (32 %).")));
+        assertTrue(p.warnings("CENTRE_PAD_COPPER").stream().anyMatch(w -> w.text.contains(" on the 6.76 mm² ")),
+                "M4: measured on its open copper");
+    }
+
+    /** BR-91 (a): of two bare pads at the origin the larger is the centre pad. */
+    @Test
+    public void theLargestBarePadAtTheOriginIsTheCentrePad() throws Exception {
+        String body = pad("1", "rect", -3, 0, 0.5, 1, "")
+                + "(pad \"6\" smd rect (at 0 0) (size 1.2 1.2) (layers \"F.Cu\" \"F.Mask\"))\n"
+                + "(pad \"5\" smd rect (at 0 0) (size 3 3) (layers \"F.Cu\" \"F.Mask\"))\n"
+                + pad("2", "rect", 3, 0, 0.5, 1, "")
+                + "(fp_rect (start 0.7 -0.2) (end 1.1 0.2) (stroke (width 0)) (fill yes) (layer \"F.Paste\"))\n"
+                + "(fp_rect (start -1.1 -0.2) (end -0.7 0.2) (stroke (width 0)) (fill yes) (layer \"F.Paste\"))\n";
+        ImportProposal p = Fixtures.board(20240108, OUTLINE + fp("U1", "QFN", 10, 10, 0, "", body)).proposal;
+        assertEquals(List.of("1", "5", "2"), names(p, "U1"));
+        assertEquals(3, pad(p, "U1", "5").w, 1e-9);
+    }
+
+    /** BR-91 (a): the warning in plain words, for a pad the design leaves bare and for a pad without a name. */
+    @Test
+    public void centrePadWarningWords() throws Exception {
+        String pins = pad("1", "rect", -3, 0, 0.5, 1, "") + pad("2", "rect", 3, 0, 0.5, 1, "");
+        String board = OUTLINE
+                + fp("Z1", "QFN_BARE", 10, 10, 0, "", pins
+                        + "(pad \"5\" smd rect (at 0 0) (size 2 2) (layers \"F.Cu\" \"F.Mask\"))\n")
+                + fp("N1", "QFN_NAMELESS", 25, 10, 0, "", pins
+                        + "(pad \"\" smd rect (at 0 0) (size 2 2) (layers \"F.Cu\" \"F.Mask\"))\n");
+        ImportProposal p = Fixtures.board(20240108, board).proposal;
+        assertEquals(List.of("1", "2", "P~1"), names(p, "N1"));
+        assertEquals(List.of("Z1's centre pad 5 has no paste of its own: it is pasted as one opening (2.00 × 2.00 mm) "
+                + "on the 4.00 mm² of copper the solder mask leaves open. The design has no paste on it.",
+                "N1's unnamed centre pad has no paste of its own: it is pasted as one opening P~1 (2.00 × 2.00 mm) on "
+                + "the 4.00 mm² of copper the solder mask leaves open. The design has no paste on it."),
+                texts(p.warnings("CENTRE_PAD_COPPER")));
+    }
+
+    /** BR-91 (a): a centre pad's opening gets the notes of any pad's where they apply (its own shape, its margin). */
+    @Test
+    public void aCentrePadGetsThePadNotes() throws Exception {
+        String pins = pad("1", "rect", -3, 0, 0.5, 1, "") + pad("2", "rect", 3, 0, 0.5, 1, "");
+        String layers = " (layers \"F.Cu\" \"F.Mask\")";
+        String chamfer = "(pad \"5\" smd roundrect (at 0 0) (size 2 2) (roundrect_rratio 0) (chamfer_ratio 0.2) "
+                + "(chamfer top_left)%s)\n";
+        String board = "(setup (pad_to_paste_clearance -0.05))\n" + OUTLINE
+                + fp("S1", "QFN_CUSTOM", 10, 10, 0, "", pins + "(pad \"5\" smd custom (at 0 0) (size 2 2)" + layers
+                        + " (options (clearance outline) (anchor rect)) (primitives (gr_poly (pts (xy -1.2 -0.3) "
+                        + "(xy 1.2 -0.3) (xy 1.2 0.3) (xy -1.2 0.3)) (width 0) (fill yes))))\n")
+                + fp("S2", "QFN_TRAPEZOID", 25, 10, 0, "", pins + "(pad \"5\" smd trapezoid (at 0 0) (size 2 2) "
+                        + "(rect_delta 0 0.4)" + layers + ")\n")
+                + fp("S3", "QFN_CHAMFER", 40, 10, 0, "", pins + String.format(Locale.ROOT, chamfer, layers))
+                + fp("S4", "QFN_CHAMFER_MASK", 10, 30, 0, "", pins + String.format(Locale.ROOT, chamfer,
+                        " (layers \"F.Cu\")") + "(fp_circle (center 0 0) (end 0.6 0) (stroke (width 0)) (fill yes) "
+                        + "(layer \"F.Mask\"))\n")
+                + fp("S5", "QFN_ZERO", 25, 30, 0, "", pins + "(pad \"5\" smd rect (at 0 0) (size 2 2)" + layers
+                        + " (solder_paste_margin 0))\n");
+        ImportProposal p = Fixtures.board(20240108, board).proposal;
+        assertEquals(Set.of("S1", "S2", "S3", "S4", "S5"), refs(p.warnings("CENTRE_PAD_COPPER")));
+        assertEquals(List.of("S1 pad 5 has a custom shape: its paste opening is taken as the surrounding rectangle.",
+                "S2 pad 5 is a trapezoid: its paste opening is taken as the surrounding rectangle (20 % more area)."),
+                texts(p.warnings("PAD_SHAPE_APPROX")));
+        assertEquals(List.of("S3 pad 5 has cut corners: the paste opening is taken without the cuts (up to 2 % more "
+                + "area)."), texts(p.warnings("CHAMFER_IGNORED")), "S4's opening is its mask circle: no cuts");
+        assertEquals(List.of("S5 pad 5 sets a paste margin of exactly 0: read as an override (KiCad 8 and newer), the "
+                + "paste opening grows by 0.0000 × 0.0000 mm per side; the KiCad 7 rules would give -0.0500 × -0.0500 "
+                + "mm."), texts(p.warnings("PASTE_ZERO_OVERRIDE")));
+    }
+
+    static Set<String> refs(List<ImportWarning> warnings) {
+        Set<String> s = new TreeSet<>();
+        for (ImportWarning w : warnings) {
+            s.addAll(w.refs);
+        }
+        return s;
     }
 
     static List<String> names(ImportProposal p, String ref) {

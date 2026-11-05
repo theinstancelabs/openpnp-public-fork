@@ -195,7 +195,7 @@ public final class BoardArtBuilder {
 
         /** A loop in the thumbnail: a circle (a drilled cut-out) as two arcs, anything else simplified at 0.1 mm. */
         void thumbLoop(ArtPath t, double[] loop) throws SExprException {
-            double[] c = circleOf(loop);
+            double[] c = KGeom.circleOf(loop);
             if (c != null) {
                 t.circle(c[0], c[1], c[2]);
             }
@@ -1198,30 +1198,6 @@ public final class BoardArtBuilder {
             }
         }
         return pts.length >= 2;
-    }
-
-    /** {cx, cy, r} when every point of the loop lies within 0.01 mm of one circle (8 points or more), else null. */
-    static double[] circleOf(double[] loop) {
-        int n = loop.length / 2;
-        if (n < 8) {
-            return null;
-        }
-        double cx = 0;
-        double cy = 0;
-        for (int i = 0; i < n; i++) {
-            cx += loop[2 * i];
-            cy += loop[2 * i + 1];
-        }
-        cx /= n;
-        cy /= n;
-        double min = Double.POSITIVE_INFINITY;
-        double max = 0;
-        for (int i = 0; i < n; i++) {
-            double r = Math.hypot(loop[2 * i] - cx, loop[2 * i + 1] - cy);
-            min = Math.min(min, r);
-            max = Math.max(max, r);
-        }
-        return max - min <= 0.01 && min > 0 ? new double[] {cx, cy, (min + max) / 2} : null;
     }
 
     /** Widths are grouped to 0.01 mm. */
