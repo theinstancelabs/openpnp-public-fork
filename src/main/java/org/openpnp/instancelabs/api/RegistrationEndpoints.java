@@ -7,7 +7,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.Future;
 
 import org.openpnp.instancelabs.board.BoardArt;
 import org.openpnp.instancelabs.board.BoardArtStore;
@@ -121,9 +120,9 @@ final class RegistrationEndpoints {
         req.fiducialHints = art.fiducials;
         req.keepOuts = art.keepOuts;
         Map<String, Object> preview = targets(svc, e);
-        ctx.tracker.expect("board registration");
-        Future<RegistrationResult> f2 = svc.registerBoard(req);
-        e.registrationFuture = f2;
+        RunTracker.Started<RegistrationResult> f2 = ctx.tracker.start("board registration",
+                () -> svc.registerBoard(req));
+        e.registrationFuture = f2.future;
         Map<String, Object> accepted = Views.map("kind", "board registration", "planId", e.plan.planId, "home",
                 Views.home(home), "fiducials", preview.get("fiducials"), "probeTargets", preview.get("probes"), "probe",
                 probe.toLowerCase(Locale.ROOT), "probeOnly", probeOnly, "estimatedSeconds", estimatedTotal(preview));
@@ -349,8 +348,7 @@ final class RegistrationEndpoints {
         req.surfaceName = name;
         req.nominalZ = nominalZ;
         req.targets = explicit;
-        ctx.tracker.expect("blank probe");
-        Future<SurfaceProbeResult> f = svc.probeSurface(req);
+        RunTracker.Started<SurfaceProbeResult> f = ctx.tracker.start("blank probe", () -> svc.probeSurface(req));
         Map<String, Object> accepted = Views.map("kind", "blank probe", "surface", name, "targets", targetList(targets),
                 "window", Views.window(w), "home", Views.home(home), "estimatedSeconds", (home.needed ? home.estimateS
                         : 0) + targets.size() * DispenseService.PROBE_POINT_ESTIMATE_S);
@@ -468,8 +466,7 @@ final class RegistrationEndpoints {
         ctx.requireMachineIdle();
         ctx.requirePositionKnown(svc);
         DispenseService.ZCheckPlan zp = svc.zCheckPlan(null, false);
-        ctx.tracker.expect("z check");
-        Future<RunResult> f = svc.checkZ();
+        RunTracker.Started<RunResult> f = ctx.tracker.start("z check", svc::checkZ);
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, rr -> Views.run(rr, false), Views.map("kind",
                 "z check", "needed", zp.needed, "reference", zp.reference == null ? null : Views.map("name",
                         zp.reference.name, "x", zp.reference.x, "y", zp.reference.y, "z", zp.reference.z),

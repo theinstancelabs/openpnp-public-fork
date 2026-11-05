@@ -1684,8 +1684,7 @@ final class PadCalibrationJob {
             if (stopRequested) {
                 throw new Halt(stopReason);
             }
-            ctx.tracker.expect("pad calibration");
-            f = submit.submit();
+            f = ctx.tracker.start("pad calibration", submit::submit).future;
         }
         T res;
         try {
