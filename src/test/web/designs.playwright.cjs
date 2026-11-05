@@ -535,11 +535,18 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
     const c6 = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
       cards: document.querySelectorAll('#rs-designs .design[data-board]').length, box: !!document.querySelector('#rs-designs .notebox--block'),
-      note: ((document.querySelector('#rs-designs .rf-note') || {}).textContent || '') })))));
+      note: ((document.querySelector('#rs-designs .rf-note') || {}).textContent || ''), first: !!document.querySelector('#rs-designs > .rf-note:first-child') })))));
     check('(6c) a failed read of the list on entering Run: Start keeps its design cards, no error box instead', !!c6.err && c6.cards > 0 && !c6.box, c6);
-    check('(6c) and says above them that the list could not be read again, with the reason (the re-check\'s MINOR)', /^Could not read the list again/.test(c6.note)
-      && c6.note.includes(c6.err || '\u0000'), c6);
+    check('(6c) and says above them that the list could not be read again, then the reason (the re-checks\' MINORs)', c6.first
+      && /^Could not read the designs again, so these are the ones from before\. /.test(c6.note) && c6.note.endsWith(c6.err || '\u0000'), c6);
     await page.unroute('**/api/boards', fail6);
+    // the next good read takes the note away (a note shown always, or never cleared, fails here)
+    await page.evaluate(() => IL.go('#machine'));
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !!IL.run.boards && !IL.run.boardsLoading && !IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+    const c6d = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
+      cards: document.querySelectorAll('#rs-designs .design[data-board]').length, note: !!document.querySelector('#rs-designs .rf-note') })))));
+    check('(6c) the next good read: the cards without the note', !c6d.err && c6d.cards > 0 && !c6d.note, c6d);
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------
     const allowed = ['POST /api/boards/import', 'POST /api/boards/import/save', 'POST /api/boards/import/attach', 'POST /api/pad-profile/apply', 'POST /api/package-mappings',
