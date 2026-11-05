@@ -31,6 +31,10 @@ public class NeedleEndMeasureTest {
         final List<double[]> frames = new ArrayList<>();
         final List<String> phases = new ArrayList<>();
         int framesDone, framesPlanned;
+        /** The frames kept as taken (ids 1000 on): their captions, and whether each was the image the camera gave. */
+        final List<String> kept = new ArrayList<>();
+        final List<Boolean> keptAsTaken = new ArrayList<>();
+        java.awt.image.BufferedImage taken;
         static final Pattern W = Pattern.compile("([XYZ])(-?\\d+(?:\\.\\d+)?)");
 
         Camera(FromBelowScene scene) {
@@ -61,7 +65,15 @@ public class NeedleEndMeasureTest {
         @Override
         public DotImager.Frame capture() throws Exception {
             frames.add(new double[] {x, y, z});
-            return new DotImager.Frame(scene.render(x, y, z), 0.0667, 0.0656, scene.camX, scene.camY);
+            taken = scene.render(x, y, z);
+            return new DotImager.Frame(taken, 0.0667, 0.0656, scene.camX, scene.camY);
+        }
+
+        @Override
+        public Long keepRaw(java.awt.image.BufferedImage frame, String caption, double mmPerPx) {
+            kept.add(caption);
+            keptAsTaken.add(frame == taken);
+            return 1000L + kept.size() - 1;
         }
 
         @Override
@@ -353,6 +365,38 @@ public class NeedleEndMeasureTest {
                 cam.lines.get(dwell - 3), "approached from (-0.5, -0.5)");
         assertEquals(java.util.Arrays.asList("G1 Z31.500 F1200", "M400"), cam.lines.subList(dwell + 1,
                 cam.lines.size()), "then only the lift");
+    }
+
+    /**
+     * Review MINOR 4: every frame is kept as taken (the camera's image, nothing drawn on it), in the order taken, for
+     * Process's tools: the result and the record list them (N1's heights, the needle's, six each in the steps' order,
+     * then the clean check's), each captioned with its tool, height and step; the clean verdict names its own. A
+     * refusal keeps them too.
+     */
+    @Test
+    public void everyFrameIsKeptAsTaken() throws Exception {
+        FromBelowScene sc = new FromBelowScene(14);
+        Camera cam = new Camera(sc);
+        NeedleEndMeasure.Result r = NeedleEndMeasure.measure(cam, plan(sc, sc.endDx, sc.endDy));
+        assertTrue(r.ok, r.why);
+        List<Long> ids = new ArrayList<>();
+        for (long i = 1000; i < 1043; i++) {
+            ids.add(i);
+        }
+        assertEquals(ids, r.framePhotoIds);
+        assertEquals(ids, r.end.framePhotoIds);
+        assertEquals(Long.valueOf(1042), r.end.clean.framePhotoId);
+        assertTrue(cam.keptAsTaken.stream().allMatch(b -> b), "the camera's own images: " + cam.keptAsTaken);
+        assertEquals("As taken: N1 at raw Z 19.000, B + (5.0, 0.0) mm (2 of 6)", cam.kept.get(1));
+        assertEquals("As taken: the needle at raw Z 36.000, B + (0.0, -1.0) mm (5 of 6)", cam.kept.get(22));
+        assertEquals("As taken: the clean check's frame, the needle at raw Z 40.400 over B", cam.kept.get(42));
+        FromBelowScene dirty = new FromBelowScene(15);
+        dirty.paste = true;
+        Camera cam2 = new Camera(dirty);
+        NeedleEndMeasure.Result p = NeedleEndMeasure.measure(cam2, plan(dirty, dirty.endDx, dirty.endDy));
+        assertEquals(NeedleEndMeasure.PASTE, p.code, p.why);
+        assertEquals(43, p.framePhotoIds.size());
+        assertEquals(Long.valueOf(1042), p.clean.framePhotoId);
     }
 
     /** A room-lit frame (the ring's glow not white): the clean check's light, the end not found (light or focus). */

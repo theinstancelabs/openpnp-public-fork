@@ -555,6 +555,12 @@ public class DispenseConfig {
         /** The worst height's residual in mm (the end's scatter about its fit); K's spread over N1's heights (mm). */
         public double errXyMm, errKMm;
         public java.util.List<Long> photoIds = new java.util.ArrayList<>();
+        /**
+         * Every frame as taken (nothing drawn; review MINOR 4: Process re-runs its tools on them), in the order taken:
+         * N1's heights, then the needle's, six each (B, B + (d, 0), B − (d, 0), B + (0, d), B − (0, d), B), then the
+         * clean check's.
+         */
+        public java.util.List<Long> framePhotoIds = new java.util.ArrayList<>();
         public CameraCalibration cameraCalibration;
         /** The needle it is of (the needle token then) and its tip setup. */
         public Long needleSinceMs;
@@ -597,7 +603,8 @@ public class DispenseConfig {
         /** The tip kind's limits it was read against, and the kind. */
         public TipClean.Limits limits;
         public String setupKey;
-        public Long photoId;
+        /** Its frame with the end's 0.5 and 1.0 mm drawn, and as taken. */
+        public Long photoId, framePhotoId;
         public long atMs;
     }
 

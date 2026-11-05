@@ -82,6 +82,8 @@ public final class PhotoStore {
         public List<Long> calibrationIds = new ArrayList<>();
         public boolean simulated;
         public String operator;
+        /** The JPEG's quality (0..1), null: {@link #JPEG_QUALITY} (BR-94: the needle's frames as taken are kept at 1). */
+        public Float jpegQuality;
     }
 
     private final File folder;
@@ -153,7 +155,7 @@ public final class PhotoStore {
         }
         BufferedImage img = in.image != null ? in.image : decode(in.bytes);
         img = rgb(scaleTo(img, LONG_SIDE_PX));
-        byte[] jpeg = jpeg(img);
+        byte[] jpeg = jpeg(img, in.jpegQuality == null ? JPEG_QUALITY : in.jpegQuality);
         byte[] thumb = jpeg(rgb(scaleTo(img, THUMB_PX)));
         String sha = sha256(jpeg);
         String month = new SimpleDateFormat("yyyy-MM", Locale.ROOT).format(new Date());
@@ -404,8 +406,13 @@ public final class PhotoStore {
 
     /** JPEG of quality {@link #JPEG_QUALITY}, no metadata but the JFIF header. */
     static byte[] jpeg(BufferedImage img) throws IOException {
+        return jpeg(img, JPEG_QUALITY);
+    }
+
+    /** JPEG of {@code quality}, no metadata but the JFIF header. */
+    static byte[] jpeg(BufferedImage img, float quality) throws IOException {
         // the shared encoder: ImageIO, else OpenCV (the deployed JVM has no ImageIO JPEG writer: next() threw, 11-03)
-        byte[] b = JpegEncoder.encode(img, JPEG_QUALITY);
+        byte[] b = JpegEncoder.encode(img, quality);
         if (b == null) {
             throw new IOException("no JPEG encoder works in this JVM (neither ImageIO's nor OpenCV's)");
         }

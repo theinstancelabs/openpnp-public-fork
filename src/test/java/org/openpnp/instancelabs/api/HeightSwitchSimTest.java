@@ -583,6 +583,16 @@ public class HeightSwitchSimTest {
         assertTrue(e.get("forReview").getAsBoolean());
         String run = r.get("runId").getAsString();
         assertEquals(run, e.get("runId").getAsString());
+        // review MINOR 4: every frame as taken, in order, kept at the store's best quality for Process's tools
+        assertEquals(43, e.getAsJsonArray("framePhotoIds").size());
+        long raw = e.getAsJsonObject("clean").get("framePhotoId").getAsLong();
+        assertEquals(e.getAsJsonArray("framePhotoIds").get(42).getAsLong(), raw);
+        org.openpnp.instancelabs.dispense.Photo kept = svc.getDb().photo(raw);
+        org.openpnp.instancelabs.dispense.Photo drawn = svc.getDb().photo(e.getAsJsonObject("clean").get("photoId")
+                .getAsLong());
+        assertTrue(kept.caption.startsWith("As taken: the clean check's frame"), kept.caption);
+        assertEquals(run, kept.jobId);
+        assertTrue(kept.bytes > 2 * drawn.bytes, "the best quality: " + kept.bytes + " vs " + drawn.bytes);
         JsonObject shown = dispenseStatus().getAsJsonObject("needleEnd");
         assertEquals(e.get("kParallax"), shown.get("kParallax"));
         JsonObject status = ok("GET", "/api/status", null).getAsJsonObject("run");

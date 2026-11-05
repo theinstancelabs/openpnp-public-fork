@@ -52,6 +52,11 @@ public final class NeedleEndMeasure {
 
         DotImager.Frame capture() throws Exception;
 
+        /** Keeps a frame as taken (nothing drawn), at the store's best quality: its photo id, or null. */
+        default Long keepRaw(BufferedImage frame, String caption, double mmPerPx) throws Exception {
+            return null;
+        }
+
         /** What the job does now, and the frames taken of all it plans (the task's progress). */
         default void progress(String phase, int framesDone, int framesPlanned) {
         }
@@ -90,6 +95,12 @@ public final class NeedleEndMeasure {
         public String runId;
         public DispenseConfig.NeedleEnd end;
         public DispenseConfig.CleanCheck clean;
+        /**
+         * Every frame as taken (review MINOR 4: Process re-runs its tools on them), in the order taken: N1's heights,
+         * then the needle's, six each in the order of {@link NeedleEndMeasure#STEPS}, then the clean check's (null:
+         * not kept).
+         */
+        public List<Long> framePhotoIds = new ArrayList<>();
         /** On success each height's centre frame, then the clean check's; on a refusal the one frame it failed in. */
         public transient List<Picture> pictures = new ArrayList<>();
     }
@@ -222,7 +233,9 @@ public final class NeedleEndMeasure {
         BufferedImage[] f = new BufferedImage[STEPS.length];
         double mmPerPx = 0;
         for (int k = 0; k < STEPS.length; k++) {
-            DotImager.Frame fr = frame(io, p, bx + d * STEPS[k][0], by + d * STEPS[k][1]);
+            DotImager.Frame fr = frame(io, p, r, bx + d * STEPS[k][0], by + d * STEPS[k][1], String.format(Locale.ROOT,
+                    "As taken: %s at raw Z %.3f, B + (%.1f, %.1f) mm (%d of %d)", tool, l.rawZ, d * STEPS[k][0],
+                    d * STEPS[k][1], k + 1, STEPS.length));
             f[k] = fr.image;
             mmPerPx = fr.mmPerPxX;
             io.progress(null, ++done[0], planned);
@@ -324,8 +337,9 @@ public final class NeedleEndMeasure {
         return l;
     }
 
-    /** One frame with the head at raw (x, y), approached from (−a, −a), after M400 and the dwell. */
-    private static DotImager.Frame frame(Io io, Plan p, double x, double y) throws Exception {
+    /** One frame with the head at raw (x, y), approached from (−a, −a), after M400 and the dwell; kept as taken. */
+    private static DotImager.Frame frame(Io io, Plan p, Result r, double x, double y, String caption)
+            throws Exception {
         io.send(xy(x - p.s.approachMm, y - p.s.approachMm, F_STEP));
         io.send(xy(x, y, F_STEP));
         io.send("M400");
@@ -334,6 +348,7 @@ public final class NeedleEndMeasure {
         if (fr == null || fr.image == null) {
             throw new IllegalStateException("the bottom camera gave no frame");
         }
+        r.framePhotoIds.add(io.keepRaw(fr.image, caption, fr.mmPerPxX));
         return fr;
     }
 
@@ -355,7 +370,8 @@ public final class NeedleEndMeasure {
         io.progress("needle end: the clean check, " + at, done[0], planned);
         io.send(z(s.cleanRawZ, F_DOWN));
         io.send("M400");
-        DotImager.Frame fr = frame(io, p, p.needleX, p.needleY);
+        DotImager.Frame fr = frame(io, p, r, p.needleX, p.needleY, "As taken: the clean check's frame, " + at
+                + " over B");
         io.progress(null, ++done[0], planned);
         double bcx = s.centrePx.get(0), bcy = s.centrePx.get(1), k = l.fit.pxPerMm();
         TipClean.Result t = TipClean.check(fr.image, k, bcx, bcy, s.kernelPx, p.clean);
@@ -373,6 +389,7 @@ public final class NeedleEndMeasure {
         c.limits = p.clean;
         c.setupKey = p.setupKey;
         c.atMs = System.currentTimeMillis();
+        c.framePhotoId = r.framePhotoIds.get(r.framePhotoIds.size() - 1);
         r.clean = c;
         BufferedImage pic = draw(fr.image, g -> {
             circle(g, Color.WHITE, t.endX, t.endY, p.clean.endMm * k);
@@ -433,6 +450,7 @@ public final class NeedleEndMeasure {
             e.driftPx = Math.max(e.driftPx, l.drift);
         }
         e.clean = r.clean;
+        e.framePhotoIds = new ArrayList<>(r.framePhotoIds);
         e.setupKey = p.setupKey;
         r.end = e;
         r.ok = true;

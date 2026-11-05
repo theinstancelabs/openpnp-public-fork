@@ -2,6 +2,7 @@ package org.openpnp.instancelabs.dispense;
 
 import java.awt.geom.AffineTransform;
 import java.awt.geom.Point2D;
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -5408,6 +5409,13 @@ public final class DispenseService {
             }
 
             @Override
+            public Long keepRaw(BufferedImage frame, String caption, double mmPerPx) throws Exception {
+                PhotoStore.Input in = endPhoto(c, s, frame, caption, mmPerPx);
+                in.jpegQuality = 1f; // the store keeps JPEG only: its best, for Process's tools
+                return photoStore.store(in).id; // no event each: the measure's NEEDLE_END event lists them
+            }
+
+            @Override
             public void progress(String phase, int done, int planned) {
                 if (phase != null) {
                     t.stage = "needle end";
@@ -5439,20 +5447,11 @@ public final class DispenseService {
         res.why = got.why;
         res.next = got.next;
         res.clean = got.clean;
+        res.framePhotoIds = got.framePhotoIds;
         res.runId = s.r.runId;
         List<Long> ids = new ArrayList<>();
         for (NeedleEndMeasure.Picture pic : got.pictures) {
-            PhotoStore.Input in = new PhotoStore.Input();
-            in.image = pic.image;
-            in.kind = Photo.KIND_RESULT;
-            in.source = Photo.SOURCE_BOTTOM_CAMERA;
-            in.setupKey = c.tip.key;
-            in.needleSinceMs = c.needleChangedAtMs;
-            in.jobId = s.r.runId;
-            in.mmPerPx = pic.mmPerPx > 0 ? pic.mmPerPx : null;
-            in.caption = pic.caption;
-            in.simulated = isSimulatorConfirmed();
-            ids.add(storePhoto(in).id);
+            ids.add(storePhoto(endPhoto(c, s, pic.image, pic.caption, pic.mmPerPx)).id);
         }
         if (!got.ok) {
             res.photoId = ids.isEmpty() ? null : ids.get(0);
@@ -5485,6 +5484,22 @@ public final class DispenseService {
         }
         db.event(s.r.runId, "INFO", "NEEDLE_END", new Gson().toJson(e));
         return e;
+    }
+
+    /** BR-94: a picture of the needle's end from below: a result photo of the run, from the bottom camera. */
+    private PhotoStore.Input endPhoto(DispenseConfig c, Session s, BufferedImage image, String caption,
+            double mmPerPx) {
+        PhotoStore.Input in = new PhotoStore.Input();
+        in.image = image;
+        in.kind = Photo.KIND_RESULT;
+        in.source = Photo.SOURCE_BOTTOM_CAMERA;
+        in.setupKey = c.tip.key;
+        in.needleSinceMs = c.needleChangedAtMs;
+        in.jobId = s.r.runId;
+        in.mmPerPx = mmPerPx > 0 ? mmPerPx : null;
+        in.caption = caption;
+        in.simulated = isSimulatorConfirmed();
+        return in;
     }
 
     /**
