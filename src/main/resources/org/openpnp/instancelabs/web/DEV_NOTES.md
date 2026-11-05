@@ -614,8 +614,11 @@ Never `/dev/ttyACM*`, `/dev/serial/*`, `/dev/video*` or a real-mode OpenPnP.
   message word for word under `Finished hh:mm · no contact found: nothing recorded` (`#to-live`, and the `cal` panel);
   the older row below is then `Last recorded touch-off · …`.
 - BR-90: `#to-start`, `#to-step`, `#to-steps` open at the mounted tip's `profile.touchOffLadder` when one is set, else
-  at `0.125 + skip × step` (step 0.025) and `skip + 10` steps (6 without a skip); a typed value stays. Profile's recipe
+  at `0.125 + skip × step` (step 0.025) and `skip + 10` steps (6 without a skip); a typed value stays (with a ladder,
+  a typed step no longer moves the start: the ladder is one set, a start it no longer fits says so). Profile's recipe
   form shows and saves it as `#pf-lstart`, `#pf-lstep`, `#pf-lsteps` (after `#pf-skip`): all three or none (`Give all
   three, or leave all three blank.`), checked with the route's rules under the edited skip (`IL.pcr.minStartText` at the
-  start gap, `minStepsText` / `lowestText` at the steps). The PUT carries `touchOffLadder` only when one of the three was
-  edited (all blank: `null`), so a save never clears or overwrites a ladder Process stored after the form drew.
+  start gap, `minStepsText` / `lowestText` at the steps). The PUT carries `touchOffLadder` only when one of the three
+  differs from the stored ladder (all blank: `null`), so a save that leaves them alone never clears or overwrites a
+  ladder Process stored after the form drew (a field with the focus keeps what it shows, as every field of the form);
+  after such a save the form shows the stored ladder at once (`PF.expect` holds only what was sent).

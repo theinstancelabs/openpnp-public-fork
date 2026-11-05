@@ -267,7 +267,7 @@
     if (!p0) return null;
     const p = Object.assign({}, p0, ladderOf(p0.touchOffLadder));
     if (PF.expect) {
-      const shown = FIELDS.every((f) => same(f, p[f.key], PF.expect[f.key]));
+      const shown = FIELDS.every((f) => !(f.key in PF.expect) || same(f, p[f.key], PF.expect[f.key]));
       if (shown || Date.now() > PF.expectUntil) PF.expect = null;
       else return Object.assign({}, p, PF.expect);
     }
@@ -473,7 +473,8 @@
   }
   function collectBody() {
     const v = (i) => readVal(FIELDS[i]);
-    // BR-90: the ladder goes only when edited, so a save never clears or overwrites one Process set after the form drew
+    // BR-90: the ladder goes only when one of its fields differs from the stored one (an edit; a focused field keeps what
+    // it shows, as every field here), so a save that leaves them alone never clears or overwrites one Process stored
     const ladder = !LADDER_IDS.some((id) => PF.dirty.has(id)) ? undefined
       : v(13) === undefined ? null : { startGapMm: v(13), stepMm: v(14), steps: v(15) };
     return { name: String(v(0) || '').trim(), pressurePsi: v(1), netStepsPerDot: v(2), dwellMs: v(3), suckBackDeg: v(4), gapMm: v(5),
@@ -484,7 +485,8 @@
     const s0 = S.status;
     const before = srvProfile(s0) || {};
     await IL.api('PUT', '/api/config', { profile: body, forTip: PF.tipKey || tipKey(s0) });
-    PF.expect = Object.assign({}, body, ladderOf(body.touchOffLadder === undefined ? before.touchOffLadder : body.touchOffLadder));
+    // a ladder not sent is not expected: the form shows the stored one at once (one Process set meanwhile included)
+    PF.expect = Object.assign({}, body, body.touchOffLadder === undefined ? null : ladderOf(body.touchOffLadder));
     PF.expectUntil = Date.now() + 4000;
     IL.planRefreshSoon();
     if (S.config) IL.loadConfig();
