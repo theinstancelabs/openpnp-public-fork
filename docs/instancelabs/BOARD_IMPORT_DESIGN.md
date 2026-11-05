@@ -1410,7 +1410,7 @@ boardimport.css (`.dialog` is 760 px, W/app.css:639).
 dropped anywhere outside a drop zone makes Chrome open it in the tab, replacing the app and its STOP button.
 `boardimport.js` adds document-level `dragover` and `drop` listeners that call `preventDefault()` for every drag whose
 `dataTransfer.types` includes `Files`. A `.kicad_pcb` dropped outside `#board-import-drop` opens the dialog with that
-file; any other file gives a toast: `Drop a .kicad_pcb file on the upload box (Run › Board › Upload KiCad board).`
+file; any other file gives a toast: `Only a KiCad board (a .kicad_pcb file) can be dropped here.`
 
 | State | What shows | Ids |
 |---|---|---|

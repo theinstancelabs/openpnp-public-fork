@@ -256,7 +256,7 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
       return { overAllowed: over, dropAllowed: drop, toast: document.getElementById('toast').textContent };
     });
     check('(4) a file dropped on the page is taken by the guard (default prevented) and named in a toast', !dg.overAllowed && !dg.dropAllowed
-      && /Drop a \.kicad_pcb file/.test(dg.toast), dg);
+      && /Only a KiCad board \(a \.kicad_pcb file\) can be dropped here\./.test(dg.toast), dg);
     check('(4) the page stays (same address, STOP visible)', (await page.evaluate(() => location.href)) === href0 && (await page.isVisible('#btn-stop')));
 
     // ---- (5) upload ftp ---------------------------------------------------------------------------------------------
@@ -366,7 +366,7 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
       && /exists/.test(await page.textContent('#board-import-exists')), await page.textContent('#board-import-exists'));
     await page.click('#btn-board-import-save');
     const armed = (await page.textContent('#btn-board-import-save')).trim();
-    check('(7) first press: "Press again: replace board"', armed === 'Press again: replace board', armed);
+    check('(7) first press: "Press again: replace the design"', armed === 'Press again: replace the design', armed);
     await sleep(450);
     await page.click('#btn-board-import-save');
     const st7 = await page.evaluate(() => document.getElementById('dlg-board-import').dataset.state);   // the save runs (not a pending press)

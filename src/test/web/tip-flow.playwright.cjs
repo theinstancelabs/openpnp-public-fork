@@ -8,8 +8,8 @@
  * on mounts the chosen kind (a new needle token); the gauge reading is kept with that needle; (5) Checks: the steps in
  * the flow's order, each done, by hand or not built yet; Start the checks takes the picture from below and runs the
  * landing check on the SIM; (6) On now shows where it lands with its time; (7) a direct load of a Tip page whose
- * status comes before the tips builds its panel; (8) Designs › Upload a design › Use this board chooses the board on
- * Run; no JavaScript errors, no native dialogs. Answers the SIM does not give on demand come from Playwright routes:
+ * status comes before the tips builds its panel; no JavaScript errors, no native dialogs (Designs' upload and Make a
+ * board: designs.playwright.cjs). Answers the SIM does not give on demand come from Playwright routes:
  * a task running or the pressure switching (Park and It's on wait, the hands-on steps hide), a picture stopped or
  * still running and a landing check that saved nothing or asks a question (nothing more moves; the step says why),
  * no boards at all. Runs after tip-setups.playwright.cjs in the same session (the tips it set up). Nothing here runs
@@ -346,31 +346,6 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
       await p3.close();
     }
 
-    // ---- (8) Designs › Upload a design › Use this board: the board chosen on Run, and Designs lists it ---------------
-    {
-      const name = 'tipflow-' + Date.now().toString(36);
-      const pcb = fs.readFileSync(path.join(__dirname, '..', 'resources', 'padprofile', 'padcal.kicad_pcb'));
-      await page.evaluate(() => IL.go('#designs'));
-      await page.click('#btn-design-upload');
-      await page.waitForSelector('#dlg-board-import #board-import-drop', { state: 'visible', timeout: 10000 });
-      await page.setInputFiles('#board-import-file', { name: name + '.kicad_pcb', mimeType: 'application/octet-stream', buffer: pcb });
-      await page.waitForSelector('#dlg-board-import[data-state="preview"]', { timeout: 60000 });
-      await page.fill('#board-import-name', name);
-      // the save's URL carries its query (file, name, sha256, decisions): match the path
-      const saveP = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/boards/import/save', { timeout: 60000 }).catch(() => null);
-      await page.click('#btn-board-import-save');
-      const saveRes = await saveP;
-      const saved = saveRes ? await saveRes.json().catch(() => null) : null;
-      await page.waitForSelector('#dlg-board-import[data-state="saved"]', { timeout: 60000 });
-      await page.click('#btn-board-import-use');
-      await page.waitForFunction((f) => { const s = document.getElementById('board-select'); return location.hash.startsWith('#run/board') && !!s && s.value === 'file:' + f; },
-        saved && saved.file, { timeout: 15000 }).catch(() => null);
-      const run8 = await page.evaluate(() => ({ hash: location.hash, board: (document.getElementById('board-select') || {}).value || null }));
-      const listed = await page.waitForFunction((n) => Array.from(document.querySelectorAll('#designs-list .design')).some((d) => (d.dataset.name || '').includes(n)), name,
-        { timeout: 10000 }).then(() => true, () => false);
-      check('(8) Use this board after an upload from Designs: Run\'s Board step opens with it chosen, and Designs lists it', !!saved && run8.hash.startsWith('#run/board')
-        && run8.board === 'file:' + saved.file && listed, { file: saved && saved.file, run8, listed });
-    }
     check('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
     check('no native dialogs', dialogs.length === 0, dialogs);
   } catch (e) {

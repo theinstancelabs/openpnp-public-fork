@@ -259,7 +259,8 @@
       p && p.summary ? IL.plural(p.summary.pads, 'pad') + ' to paste' : null, last].filter(Boolean).map((t) => el('span', { text: t })));
     const list = entries();
     IL.keyed(n.designs, JSON.stringify([list.map((x) => [x.key, x.name, x.x.art && x.x.art.id]), R.form.sel, !!p, [...F.thumbs.keys()].length, R.boardsErr, !R.boards]), () => {
-      if (R.boardsErr) return el('p', { class: 'notebox notebox--block', text: 'The boards could not be read: ' + R.boardsErr });
+      // a read again on entering Run that fails keeps the list it has (the next entry reads it again)
+      if (R.boardsErr && !R.boards) return el('p', { class: 'notebox notebox--block', text: 'The boards could not be read: ' + R.boardsErr });
       if (!R.boards) return el('p', { class: 'muted', text: 'Reading the boards…' });
       const cards = list.map((x) => {
         const on = x.key === R.form.sel;
@@ -270,7 +271,8 @@
         b.addEventListener('click', () => choose(x, b));
         return b;
       });
-      return cards.concat(el('a', { class: 'design design--new', id: 'rs-new-design', href: '#designs' }, IL.icon('i-plus'), 'New design'));
+      const note = R.boardsErr ? [el('p', { class: 'reason reason--need rf-note', text: 'Could not read the designs again, so these are the ones from before. ' + R.boardsErr })] : [];
+      return note.concat(cards, el('a', { class: 'design design--new', id: 'rs-new-design', href: '#designs' }, IL.icon('i-plus'), 'New design'));
     });
     // Load side 1
     const seat = seatOf(e);

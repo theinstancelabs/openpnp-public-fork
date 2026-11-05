@@ -3203,6 +3203,7 @@
       R.section = route && STEPS.includes(route.section) ? route.section : null;
       // into Run from elsewhere: Start, unless today's pages were asked for (a step, or #run/steps: their own step now)
       R.steps = !!R.section || !!(route && route.section === 'steps');
+      loadBoards();   // a design saved since (Designs, another tab) is in the list: Make a board chooses it
       if (R.bv) setTimeout(() => R.bv.relayout(), 0);
     },
     hide() {
