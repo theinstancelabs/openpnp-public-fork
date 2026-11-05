@@ -265,22 +265,21 @@ class Simulator:
         if not values or not set(values) <= set(keys):
             raise ValueError("%s takes %s (mm), not %r" % (kind, " and/or ".join(keys), sorted(values)))
         v = {k: mm(values[k], k) for k in values}
-        m = self.machine
+        m, to = self.machine, None
         if kind == "home_offset":    # the switches trigger here from now on: every later home lands off
             for i, k in enumerate("xy"):
                 if k in v:
                     m.switches[i] = v[k]
-        elif kind == "lost_steps":   # the head moves now, with no command
-            for i, k in enumerate("xy"):
-                m.physical[i] += v.get(k, 0.0)
-        elif kind == "z_shift":      # the whole Z frame: the head now, and the switch for every later home
-            m.physical[2] += v["z"]
+        elif kind == "lost_steps":   # the head moves now, with no command (a running move is swept up to there)
+            to = self.fw.stepper.jump(t, (v.get("x", 0.0), v.get("y", 0.0), 0.0))
+        elif kind == "z_shift":      # the whole Z frame: the head now (the stops hold it), the switch for later homes
+            to = self.fw.stepper.jump(t, (0.0, 0.0, v["z"]))
             m.switches[2] += v["z"]
         else:                        # z_drop: how far the head moves each time the Z driver lets go
             m.z_drop = v["z"]
         self.fw.pa5(t)  # the head moved under the switch (or off it), where it is now (a move may run)
-        if m.collision is not None:
-            m.collision.jumped(m.physical[:3])
+        if to is not None and m.collision is not None:
+            m.collision.jumped(to)
         # a homing move running toward a switch now ends where that switch triggers, and the firmware's wait with it
         self.fw.stepper.recheck_endstops(t)
         self.fw.wake(t)

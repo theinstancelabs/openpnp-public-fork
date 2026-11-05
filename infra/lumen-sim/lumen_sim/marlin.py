@@ -576,23 +576,31 @@ class Firmware:
 
     def release(self, axis):
         """stepper.disable_axis(): the driver lets go. A released Z falls (Machine.release_z): to the see-saw's rest,
-        else by the machine's z_drop."""
+        else by the machine's z_drop. Its callers have brought the stepper up to now (no block runs)."""
         if axis == "Z" and self.enabled["Z"]:
-            self._fall()
+            start = self.machine.physical[:3]
+            self.machine.release_z()
+            self._moved(start)  # a drop under or off the switch, and what the fall hits
         self.enabled[axis] = False
 
     def set_collision(self, model):
-        """The machine's collision model from now on (None: none). An unpowered Z has rested at the model's restRaw
-        all along: the head goes there now, the fall swept as a release's."""
-        self.machine.collision = model
-        if model is not None and model.rest is not None and not self.enabled["Z"]:
-            self._fall()
-
-    def _fall(self):
-        self.stepper.update(self.now)  # the moves that ended by now first: the head falls from where it is
-        start = self.machine.physical[:3]
-        self.machine.release_z()
-        self._moved(start)  # a drop under or off the switch, and what the fall hits
+        """The machine's collision model from now on (None: none). Nothing moves: an unpowered Z has rested at the
+        model's restRaw all along and the end stops hold Z, so the head is there now. The model checks it where the leg
+        under way began, with no sweep: a collision the old model reported stays reported while its layer is still in
+        that object there; any other is new."""
+        old, self.machine.collision = self.machine.collision, model
+        if model is None:
+            return
+        p = self.machine.physical
+        if model.rest is not None and not self.enabled["Z"]:
+            p[2] = model.rest
+        p[2] = self.machine.limit_z(p[2])
+        self.pa5(self.now)  # the head at that Z, under the switch or off it
+        if old is not None:
+            model.colliding = set(old.colliding)
+        at = self.stepper.origin()
+        for hit in model.sweep(at, at):
+            self._model_error(None, **hit)
 
     # ------------------------------------------------------------------ positions
     def logical(self):
@@ -869,12 +877,14 @@ class Firmware:
         if cmd.val("P") == 5:
             self._emit(PA5_LINE % self.pa5(self.now))
 
-    def _moved(self, start, line=None):
+    def _moved(self, start, line=None, end=None):
         """The head moved from start (physical X/Y/Z) to where it is now (a block ended or was cut, or Z fell): the
-        PA5 switch there, and what the move hit (the collision model's sweep, each collision once in sim_errors)."""
-        self.pa5()
+        PA5 switch there, and what the move hit (the collision model's sweep, each collision once in sim_errors). With
+        an end, a fault found a block running there: what it hit so far (the fault reads the switch)."""
+        if end is None:
+            self.pa5()
         if self.machine.collision is not None:
-            for hit in self.machine.collision.sweep(start, self.machine.physical[:3]):
+            for hit in self.machine.collision.sweep(start, end or self.machine.physical[:3]):
                 self._model_error(line, **hit)
 
     def pa5(self, at=None):

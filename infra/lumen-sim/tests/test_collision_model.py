@@ -146,7 +146,14 @@ class Load(unittest.TestCase):
         [(("tools", 1, "tipEnd"), {})], [(("tools", 1, "tipEnd"), [])], [(("tools", 1, "tipEnd"), 0)],
         [(("tools", 1, "tipEnd"), "")], [(("tools", 2, "tipEnd"), {})],  # an empty tipEnd is not (0, 0)
         [(("contactDepthMm",), -0.1)], [(("contactDepthMm",), "0.25")], [(("contactDepthMm",), True)],
+        [(("contactDepthMm",), 1.01)], [(("contactDepthMm",), 5.0)],
         [(("objects", 1, "touchable"), "true")], [(("objects", 1, "touchable"), 1)], [(("objects", 1, "touchable"), 0)],
+        # Backend's rules (23:1x), as the engine's loader: ids of 1-64 of A-Z a-z 0-9 . _ -, each once among the
+        # objects and among the tools, "bed" the bed's; kind fixed or movable
+        [(("objects", 0, "id"), "")], [(("objects", 0, "id"), "a block")], [(("objects", 0, "id"), "x" * 65)],
+        [(("objects", 0, "id"), "block\n")], [(("tools", 0, "id"), "n1/tip")], [(("tools", 0, "id"), None)],
+        [(("objects", 1, "id"), "block")], [(("tools", 1, "id"), "n1")], [(("objects", 0, "id"), "bed")],
+        [(("objects", 0, "kind"), "fixture")], [(("objects", 0, "kind"), DELETE)], [(("objects", 0, "kind"), None)],
         [(("tools", 1, "layers", 0, "at"), "tip")],
         [(("seesaw", "n1", "mmPerRaw"), 0)],
         [(("seesaw", "endStopsRaw"), [66, -1])],
@@ -174,6 +181,18 @@ class Load(unittest.TestCase):
         b = loaded(model((("zMarginMm",), 2.0), (("_comment",), ["a fixture"]), (("objects", 0, "note"), "a guess"),
                          (("tools", 2, "tipEnd"), None)))
         self.assertEqual(cm(b)["version"], 7)
+
+    def test_the_ids_and_depths_backend_allows_load(self):
+        """contactDepthMm 0 and 1.0; a 64-character id of every allowed kind of character; an object with a tool's id
+        (only objects among themselves and tools among themselves must differ). 1.01 is refused in Backend's words."""
+        for depth in (0, 1.0):
+            self.assertEqual(cm(loaded(model((("contactDepthMm",), depth))))["version"], 7)
+        b = loaded(model((("objects", 0, "id"), "needle"), (("objects", 1, "id"), "Az09._-" + "x" * 57)))
+        to(b, 145, 150)
+        to(b, z=50)  # the needle's hub over the block, now called "needle"
+        self.assertEqual(hits(b), [("needle", "needle", "hub", 0.4)])
+        reply = b.sim.control({"cmd": "set", "collision_model": model((("contactDepthMm",), 1.01))}, b.t)
+        self.assertEqual(reply["error"], "ValueError: collision_model.contactDepthMm must be 0 to 1.0, not 1.01")
 
     def test_the_cli_flag_loads_the_file(self):
         """At boot Z is not powered: the head starts at restRaw, the fall swept (the hub's edge over the block, as in
@@ -228,7 +247,8 @@ class TipHeights(unittest.TestCase):
         h2 = 2 ((64 - 6.2) - 31.5) = 52.6. The tilt counts in N1's mm (the plane is N1's contact raw): the camera, 40
         above the bed at the head, moves on in Y over a block 40.1 high 10 to 12 mm to its right, which stands
         0.5 x 0.01 x 12 = 0.06 mm higher on the bed: 0.16 mm into it."""
-        tall = {"id": "tall", "outline": {"box": [210, 299, 212, 301]}, "topZ": 40.1, "state": "measured"}
+        tall = {"id": "tall", "kind": "fixed", "outline": {"box": [210, 299, 212, 301]}, "topZ": 40.1,
+                "state": "measured"}
         b = loaded(model((("bed", "plane", "points"), [[0, 0, 4.0], [100, 0, 5.0], [0, 100, 4.0]]),
                          (("seesaw", "n1", "mmPerRaw"), 0.5), (("seesaw", "needle", "mmPerRaw"), 2),
                          (("objects",), [tall])))
@@ -291,7 +311,8 @@ class Sweep(unittest.TestCase):
     def test_on_a_tilted_bed_an_objects_top_is_its_highest_over_the_overlap(self):
         """rc(x, y) = 4 + 0.001 x + 0.002 y. The hub's path covers all of a 4 mm block (topZ 15): its top is highest at
         (164, 84), 4.332 + 15 = 19.332; the hub's bottom is 19 wherever it is (equal gains)."""
-        small = {"id": "small", "outline": {"box": [160, 80, 164, 84]}, "topZ": 15.0, "state": "measured"}
+        small = {"id": "small", "kind": "fixed", "outline": {"box": [160, 80, 164, 84]}, "topZ": 15.0,
+                 "state": "measured"}
         b = self.at_the_start(model((("bed", "plane", "points"), TILTED), (("objects",), [small])))
         to(b, y=190)
         self.assertEqual(hits(b), [("small", "needle", "hub", 0.332)])
@@ -321,6 +342,18 @@ class Sweep(unittest.TestCase):
         to(b, y=120)       # back across: a new one
         self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)] * 3)
 
+    def test_the_same_model_set_again_reports_nothing_again(self):
+        """A set keeps what was reported where the leg under way began: no second report at rest, nor at the end of
+        a move during which it was set, as the hub was leaving the block."""
+        b = self.at_the_start()
+        to(b, y=150)            # the hub over the block
+        put(b, MODEL)
+        b.send("G1 Y190 F600")  # 10 mm/s: out of it from Y 166
+        b.run(3.0)
+        put(b, MODEL)
+        b.send("M400")
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
+
     def test_after_a_fault_jump_once_counts_from_where_the_head_is(self):
         """A jump that leaves the hub in the block keeps that collision reported; one that carries it out makes a
         move back in a new collision; one that lands it in the block is reported by the next leg."""
@@ -342,8 +375,10 @@ class Sweep(unittest.TestCase):
     def test_a_circle_is_the_64_gon_around_it(self):
         """The hub (r 6) as the 64-gon around it, a vertex at 6 / cos(pi / 64) = 6.0072 mm on X each side of its
         centre: a block 6.004 mm to its right is hit, 0.4 mm below its top; one 6.008 mm to its left is not."""
-        near = {"id": "near", "outline": {"box": [126.004, 129, 140, 131]}, "topZ": 15.4, "state": "measured"}
-        far = {"id": "far", "outline": {"box": [100, 129, 113.992, 131]}, "topZ": 15.4, "state": "measured"}
+        near = {"id": "near", "kind": "fixed", "outline": {"box": [126.004, 129, 140, 131]}, "topZ": 15.4,
+                "state": "measured"}
+        far = {"id": "far", "kind": "fixed", "outline": {"box": [100, 129, 113.992, 131]}, "topZ": 15.4,
+               "state": "measured"}
         b = loaded(model((("objects",), [near, far])))
         to(b, 100, 200)  # the hub at (120, 130)
         to(b, z=50)
@@ -351,8 +386,10 @@ class Sweep(unittest.TestCase):
 
     def test_an_unmeasured_object_blocks_at_every_height(self):
         """Added (no topZ) or moved (a topZ it no longer has): the camera, 40 mm up, is over it."""
-        added = {"id": "added", "outline": {"box": [300, 300, 320, 320]}, "topZ": None, "state": "added"}
-        moved = {"id": "moved", "outline": {"box": [300, 360, 320, 380]}, "topZ": 1.0, "state": "moved"}
+        added = {"id": "added", "kind": "movable", "outline": {"box": [300, 300, 320, 320]}, "topZ": None,
+                 "state": "added"}
+        moved = {"id": "moved", "kind": "movable", "outline": {"box": [300, 360, 320, 380]}, "topZ": 1.0,
+                 "state": "moved"}
         b = loaded(model((("objects",), [BLOCK, BLANK, added, moved])))
         to(b, 310, 310)
         to(b, y=370)
@@ -385,6 +422,83 @@ class Sweep(unittest.TestCase):
         to(b, z=49.7)
         to(b, y=190)
         self.assertEqual(hits(b), [("block", "needle", "hub", 0.1)])
+
+    def test_a_tip_rests_only_inside_the_top_at_both_ends_of_the_leg(self):
+        """As the engine's check: contact needs the tip's outline inside the touchable object's at both ends. N1 0.2 mm
+        into the blank (raw 5.4) pressed and slid within it rests; slid out over its edge, in from the side or pressed
+        down astride its edge, it collides. So does the needle's tip slid into a touchable switch it may press from
+        above (h2 = 60 - r: 0.2 mm below the switch's top, 4 + 12, at raw 48.2)."""
+        b = loaded()
+        to(b, 250, 290)  # N1's tip at (230, 230), over the blank (x 200..260)
+        to(b, z=5.4)
+        to(b, x=240)
+        self.assertEqual(hits(b), [])
+        to(b, x=210)     # its tip out to x 190
+        self.assertEqual(hits(b), [("blank", "n1", "tip", 0.2)])
+        for start, end in (((210, 290), (250, 290)), ((220, 290), (220, 290))):  # in from x 190; astride x 200
+            b = loaded()
+            to(b, *start)
+            to(b, z=5.4)
+            to(b, *end)
+            self.assertEqual(hits(b), [("blank", "n1", "tip", 0.2)], start)
+        switch = {"id": "height-switch", "kind": "fixed", "outline": {"circle": [165, 80, 5]}, "topZ": 12.0,
+                  "state": "measured", "touchable": True}
+        b = loaded(model((("objects",), [switch])))
+        to(b, 145, 150)  # the needle's tip at the switch's centre
+        to(b, z=48.2)
+        to(b, z=31.5)
+        self.assertEqual(hits(b), [])
+        to(b, x=120)     # 25 mm to its left
+        to(b, z=48.2)
+        to(b, x=145)
+        self.assertEqual(hits(b), [("height-switch", "needle", "tip", 0.2)])
+
+    def test_every_other_layer_is_strict_on_a_touchable_top(self):
+        """Only a tip rests: the hub 0.1 mm into the block made touchable collides, swept across it as above or
+        pressed down inside it at both ends (the needle without its tip layer, which would be 5.1 mm into it)."""
+        touchable = (("objects", 0, "touchable"), True)
+        b = self.at_the_start(model(touchable))
+        to(b, z=49.7)
+        to(b, y=190)
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.1)])
+        b = loaded(model(touchable, (("tools", 1, "layers"), MODEL["tools"][1]["layers"][1:])))
+        to(b, 160, 150)  # the hub (r 6) at (180, 80), the block's centre
+        to(b, z=49.7)
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.1)])
+
+    def test_a_fault_mid_move_splits_its_sweep(self):
+        """A lost_steps jump during a move: the move is swept as far as the head went (its line), then on from where
+        the head landed. G1 Y190 F600 (10 mm/s) carries the hub across the block before 5 s: a jump 40 mm to the
+        left at 6 s does not unsee that, and from X 105 a jump 40 mm to the right at 6 s, past the block's Y, adds
+        no crossing the head never made. A jump that leaves the hub in the block keeps it reported once."""
+        def lost(**xy):
+            self.assertTrue(b.sim.control(dict(cmd="fault", fault="lost_steps", **xy), b.t)["ok"])
+        b = self.at_the_start()
+        b.send("G1 Y190 F600")
+        b.run(6.0)
+        lost(x=-40)
+        b.send("M400")
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
+        self.assertEqual(state(b)["sim_errors"][0]["line"], "G1 Y190 F600")
+        b = loaded()
+        to(b, 105, 120)  # the hub 39 mm left of the block
+        to(b, z=50)
+        b.send("G1 Y190 F600")
+        b.run(6.0)
+        lost(x=40)
+        b.send("M400")
+        self.assertEqual(state(b)["head"]["physical"], {"X": 145.0, "Y": 190.0, "Z": 50.0})
+        self.assertEqual(hits(b), [])
+        to(b, y=120)  # back across it at X 145, and on: each move swept from its own start
+        to(b, y=110)
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
+        b = self.at_the_start()
+        b.send("G1 Y150 F600")  # the hub over the block from Y 134
+        b.run(2.8)
+        self.assertGreater(state(b)["head"]["physical"]["Y"], 135)
+        lost(x=-0.5)            # still 0.5 mm over it
+        b.send("M400")
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
 
 
 class SeeSaw(unittest.TestCase):
@@ -432,6 +546,31 @@ class SeeSaw(unittest.TestCase):
                 b.sim.power_cycle(b.t)
                 self.assertEqual((z(b), len(hits(b))), (60.0, 1))
 
+    def test_a_model_set_with_z_off_checks_its_rest_and_sweeps_nothing(self):
+        """The arm has rested at the new model's restRaw all along: the head is checked there, not swept from where
+        the old model or the park had it. A collision the old model reported stays reported while its layer is still
+        in that object there: the same file again adds nothing; after a model without the block, the block's is new
+        again. Rest 60 with the blank only, then rest 40 with the block: the hub is 9.6 mm over it."""
+        r60 = model((("seesaw", "restRaw"), 60.0))
+        no_block = model((("seesaw", "restRaw"), 60.0), (("objects",), [BLANK]))
+        b = put(put(Bench(park=(145.0, 150.0, 31.5)), r60), r60)
+        self.assertEqual(hits(b), [("block", "needle", "hub", 10.4)])
+        put(put(b, no_block), r60)
+        self.assertEqual(hits(b), [("block", "needle", "hub", 10.4)] * 2)
+        b = put(put(Bench(park=(145.0, 150.0, 31.5)), no_block), model((("seesaw", "restRaw"), 40.0)))
+        self.assertEqual((z(b), hits(b)), (40.0, []))
+
+    def test_the_pa5_switch_sees_the_rest(self):
+        """A model set with Z off has the head at its rest for the PA5 switch too: the needle there, 0.6 mm past its
+        trip, is a press and an overtravel before any read."""
+        b = Bench(park=(200.0, 50.0, 31.5))
+        press = {"tool": "needle", "x0": 199.0, "y0": 49.0, "x1": 201.0, "y1": 51.0, "trip_z": 52.0}
+        self.assertTrue(b.sim.control({"cmd": "set", "pa5_switch": {"presses": [press]}}, b.t)["ok"])
+        put(b, model((("seesaw", "restRaw"), 52.6)))
+        self.assertTrue(state(b)["pa5"]["pressed"])
+        self.assertEqual([e["error"] for e in state(b)["sim_errors"]],
+                         ["PA5 switch overtravel: needle 0.60 mm past its trip point (overtravel 0.50 mm)"])
+
     def test_the_end_stops_hold_it(self):
         """Also where the fall is swept, and during a move. The fall stops at 66: the needle's tip 6 mm into the bed
         (it meets it at 60), the hub over the block 16.4 mm into it and 1 mm into the bed (at 70: 10, 20.4, 5)."""
@@ -451,6 +590,20 @@ class SeeSaw(unittest.TestCase):
         self.assertEqual(z(b), 26.0, "the 5.5 mm the arm could not go are lost")
         to(b, z=-40)
         self.assertEqual(z(b), -1.0)
+
+    def test_the_end_stops_hold_it_at_a_set_and_a_z_shift(self):
+        """Parked at raw 70, the head is at 66 once the model is set: the needle's tip 6 mm into the bed and its hub
+        1 mm, not 10 and 5, and 2 mm down is 64. A z_shift of 10 mm at raw 63 (the tip 3 mm into the bed) also stops
+        at 66: the next leg finds the hub 1 mm into the bed, not 8, and ends 1 mm down at 65."""
+        b = put(Bench(park=(100.0, 300.0, 70.0)), MODEL)
+        to(b, z=-2)  # not homed: Z 0 is where the head was parked
+        self.assertEqual((z(b), hits(b)), (64.0, [("bed", "needle", "tip", 6.0), ("bed", "needle", "hub", 1.0)]))
+        b = loaded()
+        to(b, 100, 300)
+        to(b, z=63)
+        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": 10.0}, b.t)["ok"])
+        to(b, z=62)
+        self.assertEqual((z(b), hits(b)), (65.0, [("bed", "needle", "tip", 3.0), ("bed", "needle", "hub", 1.0)]))
 
     def test_without_a_rest_the_z_drop_applies(self):
         b = loaded()
@@ -472,6 +625,8 @@ class Vacuum(unittest.TestCase):
         self.assertEqual(sealed(b, 120, 290, (5.3, 0.5)), [False, False], "the bare bed")
         self.assertEqual(hits(b), [("bed", "n1", "tip", 3.5)], "N1 at raw 0.5 is 3.5 mm below the bed plane")
         self.assertEqual(sealed(b, 200, 140, (19.4, 19.0)), [False, False], "the block: not touchable")
+        b = loaded(model((("objects", 1, "state"), "moved")))
+        self.assertEqual(sealed(b, 250, 290, (5.6, 5.0)), [False, False], "a touchable blank moved: no top")
 
     def test_touchable_says_where_not_surface(self):
         """The blank keeps its surface but is not touchable: no seal. The block, touchable with no surface, seals at

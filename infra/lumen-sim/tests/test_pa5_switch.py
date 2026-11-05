@@ -290,6 +290,18 @@ class Pa5Switch(unittest.TestCase):
         self.assertTrue(b.sim.control({"cmd": "fault", "fault": "home_offset", "x": 0.1}, b.t)["ok"])
         self.assertTrue(pa5(b)["pressed"], "a fault that moves no head keeps the press")
 
+    def test_a_fault_mid_move_reads_nothing_where_the_move_began(self):
+        """The fault sweeps the move so far for the collision model, which reads no switch: after a read mid-move has
+        released the press, the fault does not press it again where the move began."""
+        b = switch(homed())
+        to(b, 100, 50, 11.4)  # 0.6 mm past the trip
+        b.send("G1 Z20 F60")
+        b.run(4.0)
+        self.assertEqual(level(b), 0)
+        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "lost_steps", "x": 0.5}, b.t)["ok"])
+        b.send("M400")
+        self.assertEqual(errors(b), [OVER_06])
+
     def test_a_kill_drops_z_after_its_coast(self):
         """Stock Marlin's minkill() turns the steppers off only after its 0.6 s coast: an M112 0.15 s into a move up
         off the switch drops Z where the coast ends, above the trip (nothing to report)."""

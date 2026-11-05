@@ -5,6 +5,7 @@ lumen-sim is the physical truth: it uses no margin and no error term (the engine
 never meets a collision here and an engine bug shows up in sim_errors.
 """
 import math
+import re
 from collections import namedtuple
 
 CIRCLE_SIDES = 64  # a circle is the 64-gon around it: at most 0.12 % of its radius outside it
@@ -14,6 +15,8 @@ CIRCLE_SIDES = 64  # a circle is the 64-gon around it: at most 0.12 % of its rad
 TIP_CONTACT_MM = 0.25
 SEAL_INSIDE_MM = 2.0  # N1 seals on a touchable top only this far inside its outline (Process 11-04 17:3x)
 STATES = ("measured", "added", "moved", "removed")
+KINDS = ("fixed", "movable")
+ID = re.compile(r"[A-Za-z0-9._-]{1,64}")  # an object's or a tool's id (Backend's rule, as the engine's BedModel.ID)
 MOVES = ("n1", "needle", "fixed")  # which side of the see-saw a tool rides, or none
 
 Object = namedtuple("Object", "id pts box top touchable")  # top: topZ, None when not measured; touchable: measured too
@@ -34,8 +37,23 @@ def _get(d, key, what, kind=dict):
     return v
 
 
+def _id(d, taken, what):
+    """d's id: 1-64 of A-Z a-z 0-9 . _ - and none of taken (the ids so far), which it joins."""
+    v = d.get("id")
+    if not isinstance(v, str) or not ID.fullmatch(v):
+        raise ValueError("%s.id must be 1-64 of A-Z a-z 0-9 . _ -, not %r" % (what, v))
+    if v in taken:
+        raise ValueError("%s.id %r is taken" % (what, v))
+    taken.add(v)
+
+
 def _cross(o, a, b):
     return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+
+def _inside(pts, poly):
+    """How far every point of pts lies inside the convex counter-clockwise polygon poly (mm; below 0: one is out)."""
+    return min(_cross(p, q, r) / math.dist(p, q) for p, q in zip(poly[-1:] + poly[:-1], poly) for r in pts)
 
 
 def _hull(points):
@@ -141,8 +159,8 @@ class Model:
             raise ValueError("%s.version must be an integer, not %r" % (w, self.version))
         depth = raw.get("contactDepthMm")
         self.contact = TIP_CONTACT_MM if depth is None else _num(depth, w + ".contactDepthMm")
-        if self.contact < 0:
-            raise ValueError("%s.contactDepthMm must be >= 0, not %r" % (w, depth))
+        if not 0 <= self.contact <= 1.0:  # Backend's cap (23:1x)
+            raise ValueError("%s.contactDepthMm must be 0 to 1.0, not %r" % (w, depth))
         bed = _get(raw, "bed", w)
         self.a, self.b, self.c = _plane(_get(bed, "plane", w + ".bed").get("points"), w + ".bed.plane.points")
         bed_pts = _outline(bed.get("outline"), w + ".bed.outline")
@@ -160,11 +178,13 @@ class Model:
         if len(self.stops) != 2 or not self.stops[0] < self.stops[1]:
             raise ValueError("%s.seesaw.endStopsRaw must be [low, high] with low < high, not %r" % (w, stops))
         self.rest = None if ss.get("restRaw") is None else _num(ss["restRaw"], w + ".seesaw.restRaw")
-        self.objects = []
+        self.objects, ids = [], {"bed"}  # "bed" is the bed's
         for i, o in enumerate(_get(raw, "objects", w, list)):
             what = "%s.objects[%d]" % (w, i)
-            if not isinstance(o, dict) or not isinstance(o.get("id"), str) or o.get("state") not in STATES:
-                raise ValueError("%s needs an id (a string) and a state (%s), not %r" % (what, ", ".join(STATES), o))
+            if not isinstance(o, dict) or o.get("kind") not in KINDS or o.get("state") not in STATES:
+                raise ValueError("%s needs a kind (%s) and a state (%s), not %r" % (
+                    what, " or ".join(KINDS), ", ".join(STATES), o))
+            _id(o, ids, what)
             pts = _outline(o.get("outline"), what + ".outline")
             top = None if o.get("topZ") is None else _num(o["topZ"], what + ".topZ")
             if o["state"] != "measured":
@@ -174,11 +194,12 @@ class Model:
                 raise ValueError("%s.touchable must be true or false, not %r" % (what, touchable))
             self.objects.append(Object(o["id"], pts, _box(pts), top, top is not None and touchable))
         self.objects.append(Object("bed", bed_pts, _box(bed_pts), 0.0, False))  # the bed plane: Z 0 inside it
-        self.tools = []
+        self.tools, ids = [], set()
         for i, t in enumerate(_get(raw, "tools", w, list)):
             what = "%s.tools[%d]" % (w, i)
-            if not isinstance(t, dict) or not isinstance(t.get("id"), str) or t.get("moves") not in MOVES:
-                raise ValueError("%s needs an id (a string) and moves (%s), not %r" % (what, ", ".join(MOVES), t))
+            if not isinstance(t, dict) or t.get("moves") not in MOVES:
+                raise ValueError("%s needs moves (%s), not %r" % (what, ", ".join(MOVES), t))
+            _id(t, ids, what)
             if t.get("tipEnd") is None and t["moves"] != "fixed":
                 raise ValueError("%s: a tool on the see-saw needs its tipEnd" % what)
             # a fixed part's tip end: the head, unless it has one
@@ -246,7 +267,9 @@ class Model:
                     if low is None:
                         low = min(self._bottom(tool, layer, p) for p in (a, b))
                     depth = obj.top + max(self.bed(x, y) for x, y in over) - low
-                    if depth > (self.contact if layer.tip and obj.touchable else 0.0) + 1e-6:
+                    rests = layer.tip and obj.touchable and all(  # inside the top at both ends: the engine's rule
+                        _inside([(p[0] + x, p[1] + y) for x, y in layer.pts], obj.pts) >= -1e-9 for p in (a, b))
+                    if depth > (self.contact if rests else 0.0) + 1e-6:
                         hits[(obj.id, tool.id, layer.name)] = depth
         return hits
 
@@ -275,9 +298,8 @@ class Model:
         for tool in self.tools:
             if tool.moves == "n1":
                 tx, ty, h = self.tip(tool, x, y, r)
-                return any(o.touchable and h <= o.top + 1e-9 and min(
-                    _cross(p, q, (tx, ty)) / math.dist(p, q) for p, q in zip(o.pts[-1:] + o.pts[:-1], o.pts))
-                    >= SEAL_INSIDE_MM - 1e-9 for o in self.objects)
+                return any(o.touchable and h <= o.top + 1e-9 and _inside([(tx, ty)], o.pts) >= SEAL_INSIDE_MM - 1e-9
+                           for o in self.objects)
         return False
 
     def describe(self, x, y, r):

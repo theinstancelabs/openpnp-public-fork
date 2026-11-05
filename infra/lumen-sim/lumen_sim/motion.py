@@ -105,9 +105,11 @@ class Stepper:
         self.endstop_hit = False            # latched like Endstops::hit_state
         self.freeze_at = None               # kill(): the stepper ISR stops at this time
         self.frozen = False
-        self.on_move = None                 # on_move(start, line) after the head moved (a block ended or was cut):
-        # start = physical X/Y/Z before, line = the block's G-code line
+        self.on_move = None                 # on_move(start, line, end=None) after the head moved from start to end
+        # (physical X/Y/Z; end None: where it is now, a block ended or was cut), line = the block's G-code line
         self.limit_z = None                 # limit_z(z): where the arm's end stops hold Z (None: nothing does)
+        self.swept = None                   # the running block's counts where a physical fault moved the head: the
+        # block is swept up to there, and on from where the head landed (None: from its start)
 
     # --- queries ---
     def update(self, now):
@@ -166,7 +168,15 @@ class Stepper:
         return list(self.counts)
 
     def realtime_physical(self, now):
-        counts = self.realtime_counts(now)
+        return self._at(self.realtime_counts(now))
+
+    def origin(self):
+        """Where the leg under way began (physical X/Y/Z): the running block's start, or where a fault moved the head
+        during it; the head when no block runs."""
+        return self._at(self.swept or self.counts)[:3]
+
+    def _at(self, counts):
+        """The head at these counts of the running block (physical: at its start, self.counts)."""
         out = [p + (c - k) / s for p, c, k, s in zip(self.physical, counts, self.counts, self.steps)]
         if self.limit_z:  # a block is straight: Z goes one way, so the stop holds it from there to the block's end
             out[2] = self.limit_z(out[2])
@@ -188,6 +198,24 @@ class Stepper:
         self.update(now)
         self._cut(now)
         self.cleaning_until = now + CLEANING_S
+
+    def jump(self, now, d):
+        """A physical fault moves the head by d (X/Y/Z mm) at `now`, under the controller; the end stops hold Z. A
+        block running then is swept up to where the head is (on_move) and later on from where it lands. Returns where
+        that is."""
+        running = self.moving(now)
+        counts = self.realtime_counts(now)
+        here = self._at(counts)[:3]
+        to = [h + v for h, v in zip(here, d)]
+        if self.limit_z:
+            to[2] = self.limit_z(to[2])
+        if running:
+            if self.on_move:
+                self.on_move(self.origin(), self.blocks[0].line, here)
+            self.swept = counts
+        for i in range(3):
+            self.physical[i] += to[i] - here[i]
+        return to
 
     def freeze(self, at):
         """Interrupts off (minkill): motion goes on until `at`, then nothing moves again."""
@@ -243,7 +271,7 @@ class Stepper:
             self._move_to(b.end, b.line)
 
     def _move_to(self, counts, line):
-        start = self.physical[:3]
+        start, self.swept = self.origin(), None
         for i in range(NAXES):
             self.physical[i] += (counts[i] - self.counts[i]) / self.steps[i]
         if self.limit_z:  # steps past an end stop are lost: the counts go on, the head does not
