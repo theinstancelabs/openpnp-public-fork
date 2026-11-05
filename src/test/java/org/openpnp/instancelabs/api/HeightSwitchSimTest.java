@@ -692,18 +692,11 @@ public class HeightSwitchSimTest {
     @Test
     public void aSettingsFileWithoutTheCleanHeightIsRefusedBeforeAnythingIsSent() throws Exception {
         ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}"); // while the file is valid
-        java.io.File f = DispenseConfig.fileFor(sim.configDir);
-        JsonObject o = new JsonParser().parse(new String(java.nio.file.Files.readAllBytes(f.toPath()),
-                java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
         com.google.gson.JsonArray z = new com.google.gson.JsonArray();
         for (double v : new double[] {36, 39, 42}) {
             z.add(new com.google.gson.JsonPrimitive(v));
         }
-        o.getAsJsonObject("needleEndMeasure").add("needleRawZ", z);
-        java.nio.file.Files.write(f.toPath(), o.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        svc = DispenseService.start(Configuration.get()); // the engine's start reads the file as it is
-        svc.setTipCamera(new SceneCamera());
-        sim.machine.home();
+        restartOnFile(o -> o.getAsJsonObject("needleEndMeasure").add("needleRawZ", z));
         assertEquals(java.util.Arrays.asList(36.0, 39.0, 42.0), svc.getConfig().needleEndMeasure.needleRawZ);
         for (String[] route : new String[][] {{"/api/needle/end/measure", null}, {"/api/height-switch/measure",
             "{\"tool\":\"needle\"}"}}) {
@@ -714,6 +707,51 @@ public class HeightSwitchSimTest {
             assertEquals(new ArrayList<String>(), sim.server.sinceMark(), route[0] + ": nothing sent");
         }
         assertTrue(heightSwitchStatus().get("needle").isJsonNull());
+    }
+
+    /**
+     * Re-review MINOR 3: a settings file is loaded as it is (PUT /api/config bounds what it takes, a hand edit does
+     * not) and the press takes its window, cap and approach from it. A cap past the trip of 5 mm (a window 1.0 mm past
+     * the trip, an override's cap lifted) or an approach of 50 mm (N1 came from 50 mm away at travel Z, a point the
+     * soft limits are not checked at, and pressed; only its record refused the file) refuses either tool's press with
+     * the file's problem, before anything is sent.
+     */
+    @Test
+    public void aSettingsFileThatDoesNotValidateRefusesThePressBeforeAnythingIsSent() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        restartOnFile(o -> o.addProperty("heightSwitchMaxPastTripMm", 5));
+        assertEquals(Double.valueOf(5), svc.getConfig().heightSwitchMaxPastTripMm);
+        pressesRefusedBeforeAnythingIsSent("heightSwitchMaxPastTripMm must be above 0 and at most 2.0 mm");
+        restartOnFile(o -> {
+            o.addProperty("heightSwitchMaxPastTripMm", 0.5);
+            o.getAsJsonObject("needleEndMeasure").addProperty("approachMm", 50);
+        });
+        assertEquals(50, svc.getConfig().needleEndMeasure.approachMm, 1e-9);
+        pressesRefusedBeforeAnythingIsSent("needleEndMeasure.approachMm must be above 0 and at most 1 mm");
+    }
+
+    /** N1's press with its window, then the needle's: each 409 naming {@code why}, nothing sent. */
+    void pressesRefusedBeforeAnythingIsSent(String why) throws Exception {
+        for (String press : new String[] {"{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}",
+            "{\"tool\":\"needle\"}"}) {
+            sim.server.mark();
+            call("POST", "/api/height-switch/measure", press);
+            assertEquals(new ArrayList<String>(), sim.server.sinceMark(), press + ": nothing sent");
+            assertEquals(409, lastStatus, lastBody);
+            assertTrue(lastBody.contains("the settings file does not validate: ") && lastBody.contains(why), lastBody);
+        }
+    }
+
+    /** The settings file edited as by hand (PUT /api/config would refuse it), then the engine started on it, homed. */
+    void restartOnFile(java.util.function.Consumer<JsonObject> edit) throws Exception {
+        java.io.File f = DispenseConfig.fileFor(sim.configDir);
+        JsonObject o = new JsonParser().parse(new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+        edit.accept(o);
+        java.nio.file.Files.write(f.toPath(), o.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        svc = DispenseService.start(Configuration.get()); // the engine's start reads the file as it is
+        svc.setTipCamera(new SceneCamera());
+        sim.machine.home();
     }
 
     /**

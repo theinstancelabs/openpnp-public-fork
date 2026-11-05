@@ -5073,6 +5073,13 @@ public final class DispenseService {
             throw refused("the height switch's place is not set: PUT /api/locations/" + HeightSwitch.PLACE
                     + " {x, y}, the switch's top centre");
         }
+        List<String> invalid = c.validate();
+        if (!invalid.isEmpty()) {
+            // re-review MINOR 3: a settings file is loaded as it is (PUT /api/config validates, a hand edit does not);
+            // the window, its cap and the approach come from it, and the trip could not be recorded
+            throw refused("the settings file does not validate: " + String.join("; ", invalid) + " (Process sets "
+                    + "them: PUT /api/config)");
+        }
         TipCamera cam = needle ? tipCamera() : null;
         if (needle && c.heightSwitchMaxPastTripMm == null) {
             throw refused(HeightSwitch.NO_MAX_PAST_TRIP);
