@@ -191,8 +191,9 @@ browser keeps them. A value left in
 
 ### Actions, two-press, fix-its, refusals
 - `IL.act(btn, async fn, {ok, refusalIn, what})` runs an action: button disabled + `aria-busy` meanwhile; errors →
-  `IL.refuse`; then `pollNow` + `render`. `ok`: toast text or `fn(result)` (an empty text: no toast, e.g. an action that
-  showed its refusal at a field itself).
+  `IL.refuse`; then `pollNow` and a render at once (not at the next frame), so the button stays locked if its gate locks
+  it now, a lock the action's last step made too. `ok`: toast text or `fn(result)` (an empty text: no toast, e.g. an
+  action that showed its refusal at a field itself).
 - `IL.refuse(err, {host, what})` toast + activity + an inline `.refusal` box in `host` (default: the nearest
   `[data-refusals]` ancestor of the button) listing violations with their I-code and fix-it buttons.
 - `IL.press2(btn, verb, action, opts)` makes a **two-press** button (§11): first press → `.btn--press`, label
