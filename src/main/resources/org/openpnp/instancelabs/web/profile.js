@@ -127,6 +127,19 @@
     else if (opt.max !== undefined && (opt.maxExcl ? v >= opt.max : v > opt.max)) err = opt.msg || ((opt.maxExcl ? 'Below ' : 'At most ') + opt.max + (opt.unit ? ' ' + opt.unit : '') + '.');
     return { v, err };
   };
+  /** The engine's NeedleTouchOff.REFERENCE_GAP_MM: the counted dots start here, the uncounted ones go above it (#44). */
+  pcr.REFERENCE_GAP_MM = 0.125;
+  /** The lowest start that keeps the counted dots at 0.125 mm or above, rounded up to 1 µm as the engine's 400 is. */
+  pcr.minStart = (skip, step) => Math.ceil((pcr.REFERENCE_GAP_MM + skip * step) * 1000 - 1e-9) / 1000;
+  pcr.minStartText = function (skip, step) {
+    return 'At least ' + IL.fmt(pcr.minStart(skip, step), 3) + ' mm: the tip’s recipe does not count the first ' + (skip === 1 ? 'dot after the prime, so it goes' : skip + ' dots after the prime, so they go')
+      + ' above ' + IL.fmt(pcr.REFERENCE_GAP_MM, 3) + ' mm, where the counted dots start.';
+  };
+  pcr.minStepsText = function (skip) {
+    return 'At least ' + (skip + 3) + (skip ? ': the tip’s recipe does not count the first ' + (skip === 1 ? 'dot' : skip + ' dots') + ' after the prime, the next two set the normal dot size, and one'
+      : ': the first two dots after the prime set the normal dot size, and one') + ' more shows the contact.';
+  };
+  pcr.lowestText = (lowest) => 'The lowest gap would be ' + IL.fmt(lowest, 3) + ' mm: keep it at −0.100 mm or above.';
 
   // ================================================================================== pad-type data
   const PT = { data: null, ver: 0, loading: false, again: false, error: null, pkgs: null, pkgLoading: null, sel: null,
@@ -211,7 +224,17 @@
       check: (v) => v > 0 && v <= 10, err: 'Must be above 0 and at most 10 mm, or blank.', help: 'Blank: the machine’s hop height, with no pause after it. The 25G recipe lifts 3 mm.' },
     { id: 'pf-skip', key: 'touchOffSkipDots', int: true, label: 'Dots not counted after the prime', unit: 'dots', range: '0 to 5', step: '1', min: '0', max: '5',
       check: (v) => v >= 0 && v <= 5, err: 'Must be 0 to 5 dots.', help: 'The needle touch-off leaves these out: the first dots after a prime come out too big on some tips (the 25G: 3). Its ladder then starts that many steps higher. 0 counts every dot.' },
+    // BR-90: the tip's touch-off ladder (status profile.touchOffLadder, shown here as three keys: ladderOf)
+    { id: 'pf-lstart', key: 'ladderStartGapMm', optional: true, dec: 3, label: 'Touch-off start gap', unit: 'mm', range: 'at most 2, or blank', step: '0.005', max: '2',
+      check: (v) => v <= 2, err: 'Must be at most 2 mm, or blank.', help: 'The touch-off opens at this ladder on this tip. All three blank: none set, it opens at 0.125 mm plus a step per dot not counted.' },
+    { id: 'pf-lstep', key: 'ladderStepMm', optional: true, dec: 3, label: 'Touch-off step', unit: 'mm', range: 'above 0, at most 0.5, or blank', step: '0.005', min: '0', max: '0.5',
+      check: (v) => v > 0 && v <= 0.5, err: 'Must be above 0 and at most 0.5 mm, or blank.' },
+    { id: 'pf-lsteps', key: 'ladderSteps', optional: true, int: true, label: 'Touch-off steps', unit: 'dots', range: 'at most 20, or blank', step: '1', min: '3', max: '20',
+      check: (v) => v <= 20, err: 'Must be at most 20 dots, or blank.' },
   ];
+  const LADDER_IDS = ['pf-lstart', 'pf-lstep', 'pf-lsteps'];
+  /** BR-90: the recipe's touch-off ladder as the form's three keys (null each: none set). */
+  const ladderOf = (l) => ({ ladderStartGapMm: l ? l.startGapMm : null, ladderStepMm: l ? l.stepMm : null, ladderSteps: l ? l.steps : null });
   const FINGERPRINT_KEYS = new Set(['pressurePsi', 'netStepsPerDot', 'suckBackDeg', 'screwRpm', 'screwAccelDegS2', 'dwellMs', 'gapMm', 'purgeDots', 'liftPauseMs', 'liftMm']);
   const PF = { dirty: new Set(), expect: null, expectUntil: 0, turnKey: null, errors: {}, tipKey: null };
 
@@ -240,8 +263,9 @@
   const tipName = (s) => (s && s.dispense && s.dispense.tip && s.dispense.tip.name) || 'mounted tip';
   /** The values the form compares with: the server's, or what we just saved until the status shows it. */
   function baseProfile(s) {
-    const p = srvProfile(s);
-    if (!p) return null;
+    const p0 = srvProfile(s);
+    if (!p0) return null;
+    const p = Object.assign({}, p0, ladderOf(p0.touchOffLadder));
     if (PF.expect) {
       const shown = FIELDS.every((f) => same(f, p[f.key], PF.expect[f.key]));
       if (shown || Date.now() > PF.expectUntil) PF.expect = null;
@@ -311,6 +335,17 @@
     if (!errs['pf-lift'] && isNum(pause) && pause > 0 && readVal(FIELDS[11]) === undefined) {
       errs['pf-lift'] = 'Needed for the pause after the lift: give a lift, or set the pause to 0.';
     }
+    if (!LADDER_IDS.some((id) => errs[id])) {
+      const [a, b, n] = [13, 14, 15].map((i) => readVal(FIELDS[i]));
+      const skip = readVal(FIELDS[12]);
+      if ([a, b, n].some((x) => x === undefined)) {
+        if ([a, b, n].some(isNum)) [a, b, n].forEach((x, i) => { if (x === undefined) errs[LADDER_IDS[i]] = 'Give all three, or leave all three blank.'; });
+      } else if (!errs['pf-skip']) {
+        if (skip > 0 && a - skip * b < pcr.REFERENCE_GAP_MM - 1e-9) errs['pf-lstart'] = pcr.minStartText(skip, b);
+        if (n < skip + 3) errs['pf-lsteps'] = pcr.minStepsText(skip);
+        else if (a - (n - 1) * b < -0.1 - 1e-9) errs['pf-lsteps'] = pcr.lowestText(a - (n - 1) * b);
+      }
+    }
     const rpm = readVal(FIELDS[6]);
     if (!errs['pf-rpm'] && isNum(rpm) && p.feedDegPerMin && p.screwRpm && S.config && isNum(S.config.bMaxFeedDegS) && rpm * 6 > S.config.bMaxFeedDegS) {
       errs['pf-rpm'] = 'Above the screw axis limit of ' + IL.fmtInt(S.config.bMaxFeedDegS / 6) + ' rpm.';
@@ -334,6 +369,10 @@
     d(F.liftMm, 'lift after a dot', (v) => (isNum(v) ? IL.fmt(v, 1) + ' mm' : 'the machine’s hop height'));
     d(F.liftPauseMs, 'pause after the lift', String, ' ms');
     d(F.touchOffSkipDots, 'dots not counted after the prime', String);
+    const mm3 = (v) => (isNum(v) ? IL.fmt(v, 3) + ' mm' : 'none');
+    d(F.ladderStartGapMm, 'touch-off start gap', mm3);
+    d(F.ladderStepMm, 'touch-off step', mm3);
+    d(F.ladderSteps, 'touch-off steps', (v) => (isNum(v) ? String(v) : 'none'));
     if (!same(F.notes, b.notes, e.notes)) parts.push('notes edited');
     const stale = FIELDS.some((f) => FINGERPRINT_KEYS.has(f.key) && !same(f, b[f.key], e[f.key]));
     const psiChanged = !same(F.pressurePsi, b.pressurePsi, e.pressurePsi);
@@ -434,15 +473,18 @@
   }
   function collectBody() {
     const v = (i) => readVal(FIELDS[i]);
+    // BR-90: the ladder goes only when edited, so a save never clears or overwrites one Process set after the form drew
+    const ladder = !LADDER_IDS.some((id) => PF.dirty.has(id)) ? undefined
+      : v(13) === undefined ? null : { startGapMm: v(13), stepMm: v(14), steps: v(15) };
     return { name: String(v(0) || '').trim(), pressurePsi: v(1), netStepsPerDot: v(2), dwellMs: v(3), suckBackDeg: v(4), gapMm: v(5),
       screwRpm: v(6), screwAccelDegS2: v(7), purgeDots: v(8), notes: v(9) || '', liftPauseMs: v(10),
-      liftMm: v(11) === undefined ? null : v(11), touchOffSkipDots: v(12) };
+      liftMm: v(11) === undefined ? null : v(11), touchOffSkipDots: v(12), touchOffLadder: ladder };
   }
   async function doSave(body) {
     const s0 = S.status;
     const before = srvProfile(s0) || {};
     await IL.api('PUT', '/api/config', { profile: body, forTip: PF.tipKey || tipKey(s0) });
-    PF.expect = Object.assign({}, body);
+    PF.expect = Object.assign({}, body, ladderOf(body.touchOffLadder === undefined ? before.touchOffLadder : body.touchOffLadder));
     PF.expectUntil = Date.now() + 4000;
     IL.planRefreshSoon();
     if (S.config) IL.loadConfig();
@@ -520,7 +562,7 @@
         group('One dot', 'Each dot: lower to the gap, turn the screw forward, wait the dwell, turn back, lift, pause.',
           field(F('pf-turn')), field(F('pf-dwell')), field(F('pf-suck')), field(F('pf-gap')), field(F('pf-lift')), field(F('pf-liftpause')),
           el('div', { class: 'pf-derived span2' }, IL.icon('i-angle'), el('span', { id: 'pf-turn-info' }))),
-        group('Needle touch-off', null, field(F('pf-skip'))),
+        group('Needle touch-off', null, field(F('pf-skip')), field(F('pf-lstart')), field(F('pf-lstep')), field(F('pf-lsteps'))),
         group('Screw motion', null, field(F('pf-rpm')), field(F('pf-accel'))),
         group('Before each board', null, field(F('pf-purge')), field(F('pf-notes')))),
       el('div', { class: 'card__foot pf-foot', id: 'pf-foot' },

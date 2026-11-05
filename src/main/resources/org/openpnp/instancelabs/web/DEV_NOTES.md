@@ -613,3 +613,9 @@ Never `/dev/ttyACM*`, `/dev/serial/*`, `/dev/video*` or a real-mode OpenPnP.
   rows without `dotStates`). `IL.pcr.touchOffDot(analysis, i)` → `{text, note}`. A run that recorded nothing shows its
   message word for word under `Finished hh:mm · no contact found: nothing recorded` (`#to-live`, and the `cal` panel);
   the older row below is then `Last recorded touch-off · …`.
+- BR-90: `#to-start`, `#to-step`, `#to-steps` open at the mounted tip's `profile.touchOffLadder` when one is set, else
+  at `0.125 + skip × step` (step 0.025) and `skip + 10` steps (6 without a skip); a typed value stays. Profile's recipe
+  form shows and saves it as `#pf-lstart`, `#pf-lstep`, `#pf-lsteps` (after `#pf-skip`): all three or none (`Give all
+  three, or leave all three blank.`), checked with the route's rules under the edited skip (`IL.pcr.minStartText` at the
+  start gap, `minStepsText` / `lowestText` at the steps). The PUT carries `touchOffLadder` only when one of the three was
+  edited (all blank: `null`), so a save never clears or overwrites a ladder Process stored after the form drew.

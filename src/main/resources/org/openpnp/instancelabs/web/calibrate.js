@@ -204,7 +204,7 @@
         el('div', { class: 'cal-form' },
           el('div', { class: 'fgrid fgrid--3' },
             pcr.field('to-start', 'Start gap', 'mm', pcr.numInput('to-start', null, '0.005'), 'The first, largest gap.'),
-            pcr.field('to-step', 'Step', 'mm', pcr.numInput('to-step', '0.025', '0.005', { min: '0' })),
+            pcr.field('to-step', 'Step', 'mm', pcr.numInput('to-step', null, '0.005', { min: '0' })),
             pcr.field('to-steps', 'Steps', '3 to 20', pcr.numInput('to-steps', null, '1', { min: '3', max: '20' }))),
           el('div', { class: 'fgrid' },
             pcr.field('to-rot', 'Screw turn per dot', '°', pcr.numInput('to-rot', null, '0.01', { placeholder: 'one profile dot' }),
@@ -504,23 +504,15 @@
   /**
    * BR-85: the dots the mounted tip's recipe does not count after the prime (profile.touchOffSkipDots, 0-5), then the
    * reference pair, then one dot to show the contact: the engine refuses a shorter ladder (400), so the field says it first.
-   * The form opens at the recipe's ladder (renderTouchOff).
+   * The form opens at the tip's own ladder, else at the smallest that fits the recipe (renderTouchOff).
    */
   const skipDots = () => { const k = ((S.status && S.status.dispense && S.status.dispense.profile) || {}).touchOffSkipDots; return Number.isInteger(k) && k > 0 ? k : 0; };
-  /** The engine's NeedleTouchOff.REFERENCE_GAP_MM: the counted dots start here, the uncounted ones go above it (#44). */
-  const REFERENCE_GAP_MM = 0.125;
+  /** BR-90: the mounted tip's own touch-off ladder (its recipe's, Process sets it) or null: none set. */
+  const tipLadder = (s) => { const l = (((s && s.dispense) || {}).profile || {}).touchOffLadder; return l && isNum(l.startGapMm) && isNum(l.stepMm) && Number.isInteger(l.steps) ? l : null; };
   /** The engine's NeedleTouchOff.CHECK_DOTS (BR-89): laid after the ladder, one space on, at its first counted dot's gap. */
   const CHECK_DOTS = 2;
-  /** The lowest start that keeps the counted dots at 0.125 mm or above, rounded up to 1 µm as the engine's 400 is. */
-  const minStart = (skip, step) => Math.ceil((REFERENCE_GAP_MM + skip * step) * 1000 - 1e-9) / 1000;
-  function minStartText(skip, step) {
-    return 'At least ' + IL.fmt(minStart(skip, step), 3) + ' mm: the tip’s recipe does not count the first ' + (skip === 1 ? 'dot after the prime, so it goes' : skip + ' dots after the prime, so they go')
-      + ' above ' + IL.fmt(REFERENCE_GAP_MM, 3) + ' mm, where the counted dots start.';
-  }
-  function minStepsText(skip) {
-    return 'At least ' + (skip + 3) + (skip ? ': the tip’s recipe does not count the first ' + (skip === 1 ? 'dot' : skip + ' dots') + ' after the prime, the next two set the normal dot size, and one'
-      : ': the first two dots after the prime set the normal dot size, and one') + ' more shows the contact.';
-  }
+  // the rules the engine's route checks (BR-90: its recipe's ladder too, in profile.js): IL.pcr
+  const { REFERENCE_GAP_MM, minStart, minStartText, minStepsText } = pcr;
   function touchOffPlan() {
     const a = pcr.check('to-start', { required: true, max: 2, unit: 'mm' });
     const b = pcr.check('to-step', { required: true, min: 0, minExcl: true, max: 0.5, unit: 'mm' });
@@ -539,7 +531,7 @@
       for (let i = 0; i < n.v; i++) gaps.push(a.v - i * b.v);
       lowest = gaps[gaps.length - 1];
       check = a.v - skip * b.v;   // the engine's NeedleTouchOff.checkGapMm
-      if (lowest < -0.1 - 1e-9) errs['to-steps'] = 'The lowest gap would be ' + IL.fmt(lowest, 3) + ' mm: keep it at −0.100 mm or above.';
+      if (lowest < -0.1 - 1e-9) errs['to-steps'] = pcr.lowestText(lowest);
     }
     return { errs, gaps, check, lowest, body: { startGapMm: a.v, stepMm: b.v, steps: n.v, rotationDeg: rot.v, pitchMm: pitch.v, locationName: $('to-place').value || undefined, apply: $('to-apply').checked } };
   }
@@ -720,11 +712,14 @@
     if (!C.applyTouched) $('to-apply').checked = !n.touchedOff;
     setState('cal-touch-off', !n.anchored ? 'block' : n.touchedOff ? 'ok' : 'need',
       !n.anchored ? 'No needle frame' : n.touchedOff ? offsetWord(n) + ' ' + (n.setAtMs ? IL.fmtTime(n.setAtMs - S.skewMs) : '') : 'Not touched off');
-    const skip = skipDots(), minSteps = skip + 3, step = IL.num('to-step');
-    // the ladder opens at the recipe's: a tip that does not count dots (the 25G) counts 10 from 0.125 mm (Process 11-04
-    // 12:4x: a contact anywhere from −0.05 to +0.075, two squashed dots below it, two free above); the 22G keeps its 6
-    prefill('to-start', minStart(skip, step > 0 ? step : 0.025).toFixed(3));
-    prefill('to-steps', String(skip ? skip + 10 : 6));
+    const skip = skipDots(), minSteps = skip + 3, lad = tipLadder(s);
+    // the ladder opens at the tip's own (BR-90), else at the smallest the recipe fits: a tip that does not count dots
+    // (the 25G) counts 10 from 0.125 mm (Process 11-04 12:4x: a contact anywhere from −0.05 to +0.075, two squashed dots
+    // below it, two free above); the 22G keeps its 6
+    prefill('to-step', lad ? IL.inputNum(lad.stepMm, 3) : '0.025');
+    const step = IL.num('to-step');
+    prefill('to-start', lad ? IL.inputNum(lad.startGapMm, 3) : minStart(skip, step > 0 ? step : 0.025).toFixed(3));
+    prefill('to-steps', String(lad ? lad.steps : skip ? skip + 10 : 6));
     const p = touchOffPlan();
     showErrs(p.errs);
     IL.setText($('to-steps-wrap').querySelector('.unit'), minSteps + ' to 20');
