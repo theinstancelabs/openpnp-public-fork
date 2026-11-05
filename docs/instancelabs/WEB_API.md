@@ -588,9 +588,10 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   names which is missing, in the engine's words; with no lower safe zone on Z in OpenPnP not lower at all: `the needle
   has no floor …`); over the height switch (BR-94: its place's circle of `outputZones.heightSwitchRadiusMm`; the
   needle where its tip lands) neither tool below its safe zone, whatever its floor, also through the see-saw (only the
-  measure presses it); OpenPnP's soft limits. 404 for an unknown place. 503 for `n1` and `needle` while the engine is
-  not running (`the dispense engine is not running …`: it finds them), and for either while it has not found that tool
-  (`this machine has no N1`, `the dispenser is unavailable: …`).
+  measure presses it), and with no lower safe zone on Z in OpenPnP no press down over it at all; OpenPnP's soft
+  limits. 404 for an unknown place. 503 for `n1` and `needle` while the engine is not running (`the dispense engine is
+  not running …`: it finds them), and for either while it has not found that tool (`this machine has no N1`, `the
+  dispenser is unavailable: …`).
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
   `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
   ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.

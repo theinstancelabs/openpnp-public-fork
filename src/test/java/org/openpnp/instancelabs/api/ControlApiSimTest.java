@@ -309,18 +309,32 @@ public class ControlApiSimTest {
 
     /**
      * BR-94 follow-up: with no lower safe zone on Z (OpenPnP's axis setting) a press over the height switch is still
-     * refused, not let through to the floor: only its measure presses it.
+     * refused, not let through to the floor: only its measure presses it. N1's press, the needle's, and through the
+     * see-saw (review NIT: it covered N1's own press only).
      */
     @Test
     public void overTheHeightSwitchWithoutASafeZoneOnZNoToolGoesDown() throws Exception {
+        needleFrameAndBlank(); // the needle's floor is its frame's then, far below the switch's top
         ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        ReferenceControllerAxis axis = (ReferenceControllerAxis) ((AbstractHeadMountable) sim.n1).getAxisZ();
         ok(call("POST", "/api/move-to", "{\"tool\":\"n1\",\"place\":\"height-switch\"}", UI));
-        ((ReferenceControllerAxis) ((AbstractHeadMountable) sim.n1).getAxisZ()).setSafeZoneLowEnabled(false);
+        axis.setSafeZoneLowEnabled(false);
         double z = loc(sim.n1).getZ();
         Res r = call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-1}", UI);
         refused(409, "over the height switch", r);
         assertTrue(r.body.contains("no lower safe zone on Z"), r.toString());
+        Res seeSaw = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":1}", UI); // lowers N1
+        refused(409, "over the height switch", seeSaw);
+        assertTrue(seeSaw.body.contains("N1 at Z") && seeSaw.body.contains("share one Z"), seeSaw.toString());
         assertEquals(z, loc(sim.n1).getZ(), 1e-6, "nothing moved");
+        axis.setSafeZoneLowEnabled(true);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"place\":\"height-switch\"}", UI));
+        axis.setSafeZoneLowEnabled(false);
+        z = loc(sim.n2).getZ();
+        r = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI);
+        refused(409, "over the height switch", r);
+        assertTrue(r.body.contains("the needle at Z") && r.body.contains("no lower safe zone on Z"), r.toString());
+        assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
     }
 
     /**
@@ -453,8 +467,9 @@ public class ControlApiSimTest {
         double z = loc(sim.n2).getZ();
         // review NIT: the engine's own words, which say what to do
         refused(409, "(its safe zone: the ", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
-        refused(409, "where it lands has not been checked: check where it lands", call("POST", "/api/jog",
-                "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        // its sentence's period dropped inside the brackets (review NIT: "…(Setup › Dispenser & tip).)")
+        refused(409, "where it lands has not been checked: check where it lands (Setup › Dispenser & tip))",
+                call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
         assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
         landing(0); // checked: the surface's floor (2.91) again
         ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));

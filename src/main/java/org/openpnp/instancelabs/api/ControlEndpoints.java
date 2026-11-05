@@ -43,9 +43,9 @@ import com.google.gson.JsonObject;
  * surface under it (it may touch: the by-hand probe), the needle with a current frame and its landing checked not below
  * the surface where its tip lands (N2 + its landing and trim; contact = surface + offset) nor the one under N2, nor its
  * I4 floor, without them not below its safe zone (none on Z: not lower at all); over the height switch (BR-94: the
- * circle around its place; the needle where its tip lands) neither below its safe zone, whatever its floor. Move-to
- * travels at safe Z and ends at the tool's safe Z (both nozzles at travel height). A STOP ends either at once; a move
- * that saw one answers 409.</p>
+ * circle around its place; the needle where its tip lands) neither below its safe zone, whatever its floor (none on Z:
+ * no press down there at all). Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel height).
+ * A STOP ends either at once; a move that saw one answers 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
@@ -373,8 +373,9 @@ final class ControlEndpoints {
         if (!needleFrameCurrent(svc)) {
             return "its safe zone: its Z frame is not set for this needle, or this home's Z check failed";
         }
-        String xy = svc.needleXyProblem();
-        return xy == null ? "the surface under its tip or under N2, or its I4 floor" : "its safe zone: " + xy;
+        String xy = svc.needleXyProblem(); // the engine's sentence: here inside brackets, so without its period
+        return xy == null ? "the surface under its tip or under N2, or its I4 floor"
+                : "its safe zone: " + xy.replaceFirst("\\.$", "");
     }
 
     /**
