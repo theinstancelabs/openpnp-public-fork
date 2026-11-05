@@ -2935,7 +2935,7 @@
       IL.pollNow();
       // drawn now, not at the next frame: the gates see what the action left (a lock its last step made too), then the
       // button stays locked if its gate locks it (IL.gate keeps its title) and is free otherwise
-      if (booted) renderAll(); else IL.render();
+      if (booted) renderAll();
       if (btn) btn.disabled = btn.dataset.titleIdle !== undefined;
     }
   };

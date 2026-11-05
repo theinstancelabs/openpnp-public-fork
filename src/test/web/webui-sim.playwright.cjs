@@ -586,6 +586,7 @@ async function runFirstDots(page, n) {
     await page.fill('#pr-spots', '48');
     // Save makes its own lock in its last step (the fields clean: nothing left to save), so it stays locked from the press
     // on: IL.act's end once freed it until the next render (#87's review)
+    await page.waitForSelector('#btn-pr-save:not([disabled])', { timeout: 5000 }).catch(() => {});   // the fields' render first
     await page.evaluate(() => {
       const b = document.getElementById('btn-pr-save');
       window.__prFreed = 0;
@@ -597,8 +598,10 @@ async function runFirstDots(page, n) {
     check('purge row saved from its card', pr.dispense.purgeRow.spots === 48 && pr.dispense.purgeRow.surfaceProbed, pr.dispense.purgeRow);
     await page.waitForFunction(() => !document.getElementById('btn-pr-save').hasAttribute('aria-busy'), null, { timeout: 10000 }).catch(() => {});
     await page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));   // the render after it
-    const prLock = await page.evaluate(() => { window.__prObs.disconnect(); const b = document.getElementById('btn-pr-save'); return { freed: window.__prFreed, save: b.disabled, title: b.title }; });
-    check('purge row: Save stays locked from the press on (nothing left to save), never freed for a frame at its end', prLock.freed === 0 && prLock.save, prLock);
+    const prLock = await page.evaluate(() => { window.__prObs.disconnect(); const b = document.getElementById('btn-pr-save');
+      return { freed: window.__prFreed, save: b.disabled, busy: b.hasAttribute('aria-busy'), title: b.title }; });
+    check('purge row: Save stays locked from the press on (nothing left to save), never freed for a frame at its end',
+      prLock.freed === 0 && prLock.save && !prLock.busy && prLock.title === 'No unsaved changes', prLock);
     // a row that moved while spots were used asks in-page whether the new row is clean
     if (await page.waitForSelector('#dlg-purge-moved', { timeout: 1500 }).then(() => true, () => false)) {
       await page.click('#dlg-purge-moved button:has-text("No, keep the count")');
