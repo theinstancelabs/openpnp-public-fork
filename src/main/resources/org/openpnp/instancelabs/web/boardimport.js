@@ -93,7 +93,7 @@
     } catch (e) {
       const why = signal && signal.aborted ? 'cancelled' : ctl.signal.aborted ? 'timeout' : 'network';
       throw new IL.ApiError(0, { error: why }, why === 'cancelled' ? 'Cancelled.' : why === 'timeout'
-        ? 'No answer from OpenPnP within ' + TIMEOUT_MS / 1000 + ' s.' : 'OpenPnP did not answer (' + e.message + ').');
+        ? 'No answer from OpenPnP within ' + TIMEOUT_MS / 1000 + ' s.' : 'OpenPnP did not answer (no connection).');
     } finally {
       clearTimeout(timer);
       if (signal) signal.removeEventListener('abort', stop);

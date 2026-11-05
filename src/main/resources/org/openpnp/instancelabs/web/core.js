@@ -495,7 +495,7 @@
     } catch (e) {
       const timeout = ctl.signal.aborted;
       throw new ApiError(0, { error: timeout ? 'timeout' : 'network' },
-        timeout ? 'No answer from OpenPnP within ' + Math.round(ms / 100) / 10 + ' s.' : 'OpenPnP did not answer (' + e.message + ').', method);
+        timeout ? 'No answer from OpenPnP within ' + Math.round(ms / 100) / 10 + ' s.' : 'OpenPnP did not answer (no connection).', method);
     } finally {
       clearTimeout(timer);
     }
