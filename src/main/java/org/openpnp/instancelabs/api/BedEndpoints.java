@@ -147,17 +147,28 @@ final class BedEndpoints {
                 throw ApiException.refused(id + " is " + state + ": only a removed object is cleared (mark it removed "
                         + "first)");
             }
-            JsonObject cleared = cleared(b, removedAt(id));
+            Long removedAt = removedAt(id);
+            if (removedAt == null) {
+                // set to removed by a PUT: no time to hold the clearing measurements to (review 2 MINOR 6)
+                throw ApiException.refused(id + "'s removal is not on record (it was set to removed by a PUT): mark it "
+                        + "removed with POST /api/bed/objects/" + id + "/removed, then clear it with measurements "
+                        + "from since");
+            }
+            JsonObject cleared = cleared(b, removedAt);
             replace(next, "objects", id, null);
             JsonObject after = new JsonObject();
             after.add("cleared", cleared);
             return save(r, st, m, next, route, before, after, id);
         }
         if ("removed".equals(state)) {
-            if ("removed".equals(what)) {
+            if (!"removed".equals(what)) {
+                throw ApiException.refused(id + " is removed: put down again, it is a new object (POST "
+                        + "/api/bed/objects)");
+            }
+            if (removedAt(id) != null) {
                 return ctx.bed.view();
             }
-            throw ApiException.refused(id + " is removed: put down again, it is a new object (POST /api/bed/objects)");
+            // removed by a PUT: written again, so its removal is on record for /cleared
         }
         o.addProperty("state", what);
         JsonArray after = new JsonArray();
@@ -466,7 +477,7 @@ final class BedEndpoints {
      * Process's two measurements that clear a removed object (20:5x): the top camera's comparison of the old outline's
      * area with the stored empty-bed reference picture of that spot (diff within the engine's fixed threshold, never
      * the caller's), and N1 lowered to its floor at 3 points or more inside the outline with no contact, both since it
-     * was marked removed ({@code removedAt}; null: any time). Anything less: 409, it stays removed.
+     * was marked removed ({@code removedAt}). Anything less: 409, it stays removed.
      */
     private JsonObject cleared(JsonObject b, Long removedAt) throws ApiException, SQLException {
         List<String> needs = new ArrayList<>();

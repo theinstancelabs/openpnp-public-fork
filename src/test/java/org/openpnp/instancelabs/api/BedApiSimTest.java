@@ -334,6 +334,32 @@ public class BedApiSimTest {
         assertEquals("measured", object("blank-front-2").get("stateLabel").getAsString());
     }
 
+    /**
+     * A removed object whose removal is not on record (a PUT set it to removed) is not cleared: its clearing
+     * measurements must be from since the removal, and there is no time to hold them to (review 2 MINOR 6). Marked
+     * removed through its route, it is.
+     */
+    @Test
+    public void aRemovalNotOnRecordIsNotCleared() throws Exception {
+        start(true);
+        ok("PUT", "/api/config", "{\"emptyBedMaxDiff\":2.0}");
+        ok("PUT", "/api/bed/objects/blank-front", objectWith("blank-front", "state", "\"removed\""));
+        assertEquals("removed, not checked", object("blank-front").get("stateLabel").getAsString());
+        String camera = "\"camera\":{\"reference\":\"empty-bed:blank-front\",\"diff\":0.8,\"evidence\":\""
+                + evidence() + "\"}";
+        String n1 = "\"n1\":{\"points\":3,\"floorRaw\":0.5,\"evidence\":\"" + evidence() + "\"}";
+        refused(409, "refused", "POST /api/bed/objects/blank-front/removed", call("POST",
+                "/api/bed/objects/blank-front/cleared", "{" + camera + "," + n1 + "}", UI));
+        assertEquals("removed", object("blank-front").get("state").getAsString());
+        ok("POST", "/api/bed/objects/blank-front/removed", "{}");
+        assertEquals("POST /api/bed/objects/blank-front/removed", rows(BedModelStore.EVENT).get(0).get("what")
+                .getAsString(), "its removal on record now");
+        camera = camera.replaceAll("event:\\d+", evidence());
+        n1 = n1.replaceAll("event:\\d+", evidence());
+        ok("POST", "/api/bed/objects/blank-front/cleared", "{" + camera + "," + n1 + "}");
+        assertNull(object("blank-front"), "cleared");
+    }
+
     /** Tools, the plane and the see-saw: growing a layer is a person's word; the rest needs a new record. */
     @Test
     public void toolsPlaneAndSeesawChangeWithRecords() throws Exception {
