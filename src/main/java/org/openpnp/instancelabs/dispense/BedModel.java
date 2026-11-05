@@ -333,6 +333,17 @@ public final class BedModel {
     // ------------------------------------------------------------------------------------------
 
     public static BedModel parse(String json) {
+        try {
+            return read(json);
+        }
+        catch (StackOverflowError x) {
+            // Gson's JsonParser caught it; the strict read does not, and the scan overflows on a file a few thousand
+            // deep that the read takes: not valid, never a store that throws and an engine that does not start
+            throw new IllegalArgumentException("nested too deep to read (a bed model is a few levels deep)");
+        }
+    }
+
+    private static BedModel read(String json) {
         JsonElement e;
         try {
             // strict, as lumen-sim's loader reads it: Gson's JsonParser is always lenient, so a hand-edited comment,

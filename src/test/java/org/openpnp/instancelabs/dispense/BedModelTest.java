@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -11,6 +14,7 @@ import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
@@ -157,7 +161,9 @@ public class BedModelTest {
             Bad.text("an unquoted value", t -> t.replace("\"kind\": \"fixed\"", "\"kind\": fixed"), "not JSON"),
             Bad.text("single quotes", t -> t.replace("\"id\": \"holder-left\"", "'id': 'holder-left'"), "not JSON"),
             Bad.text("a comment", t -> t.replace("\"schema\": 1,", "\"schema\": 1, // the first schema"), "not JSON"),
-            Bad.text("text after the model", t -> t + "\n{}", "not JSON"));
+            Bad.text("text after the model", t -> t + "\n{}", "not JSON"),
+            // deeper than the loader's recursion: not valid, never an engine that does not start (#66 review 4 NIT 3)
+            Bad.text("nested 20 000 deep", t -> "[".repeat(20000), "nested too deep"));
 
     /** Each of {@link #BAD_FILES} is refused with its own words; every case is run, the wrong ones listed together. */
     @Test
@@ -183,6 +189,26 @@ public class BedModelTest {
         JsonObject how = BedFixture.json();
         obj(how, 0).getAsJsonObject("measured").getAsJsonObject("top").addProperty("how", "caliper height + margin");
         assertNotNull(BedModel.parse(how));
+    }
+
+    /**
+     * A file nested too deep loads as not valid (every hooked move refused) and the store, so the engine, starts (#66
+     * review 4 NIT 3): 20 000 deep, the strict read overflows; closed and a few thousand deep, the read takes it and
+     * the scan overflows.
+     */
+    @Test
+    public void aFileNestedTooDeepIsNotValidAndTheStoreStarts(@TempDir File dir) throws Exception {
+        File f = BedModelStore.fileFor(dir);
+        f.getParentFile().mkdirs();
+        List<String> files = new ArrayList<>(Arrays.asList("[".repeat(20000)));
+        for (int d = 2000; d <= 5000; d += 250) {
+            files.add("{\"deep\":" + "[".repeat(d) + "]".repeat(d) + "}");
+        }
+        for (String text : files) {
+            Files.write(f.toPath(), text.getBytes(StandardCharsets.UTF_8));
+            BedModelStore.State s = new BedModelStore(dir, null).state();
+            assertTrue(s.exists && s.model == null && s.error != null, text.length() + " chars: " + s.error);
+        }
     }
 
     /** U2: N1 and the needle below, in and above their knees, on the tilted plane, each at its own tip. */
