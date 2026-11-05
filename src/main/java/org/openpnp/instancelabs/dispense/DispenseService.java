@@ -552,14 +552,28 @@ public final class DispenseService {
         return m115;
     }
 
-    /** BR-02: M115, and where it names the host watchdog its M990 report (a trip on record); null without a nozzle. */
+    /**
+     * BR-02: M115, and where it names the host watchdog its M990 report (a trip on record); null without a nozzle.
+     * BR-92: it also says whether the controller's idle timeout switches the screw's motor off (unread: it does).
+     */
     private List<String> watchdogAtConnect(Machine machine) throws Exception {
         if (!(machine instanceof ReferenceMachine) || nozzle == null) {
+            controllerReset.firmwareAtConnect(null, unavailableReason != null ? unavailableReason
+                    : "no dispenser nozzle");
             return null;
         }
-        OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
-        DriverGcodeChannel ch = new DriverGcodeChannel(mapper.getDriver());
-        List<String> m115 = ch.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
+        DriverGcodeChannel ch;
+        List<String> m115;
+        try {
+            OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
+            ch = new DriverGcodeChannel(mapper.getDriver());
+            m115 = ch.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
+        }
+        catch (Exception e) {
+            controllerReset.firmwareAtConnect(null, String.valueOf(e.getMessage()));
+            throw e;
+        }
+        controllerReset.firmwareAtConnect(m115, null);
         readWatchdogTripAtConnect(ch, m115);
         return m115;
     }
@@ -704,7 +718,8 @@ public final class DispenseService {
     private void journalReset(ControllerReset.Event e) {
         try {
             String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
-                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code) ? "INFO" : "WARN";
+                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code) || ControllerReset.EVENT_IDLE_CUT
+                            .equals(e.code) || ControllerReset.EVENT_IDLE_HOLD.equals(e.code) ? "INFO" : "WARN";
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
         catch (SQLException ex) {
@@ -715,8 +730,8 @@ public final class DispenseService {
 
     /**
      * BR-02: what earlier engines journaled about controller resets and the screw's motor (the newest of each kind),
-     * so a restart keeps the screw count's epoch, an unknown position and the controller's idle clock. Unreadable, it
-     * counts as an unread connect: unknown until a home.
+     * so a restart keeps the screw count's epoch, an unknown position and the controller's idle clock (and, BR-92,
+     * whether its firmware cuts the motor when idle). Unreadable, it counts as an unread connect: unknown until a home.
      */
     private List<ControllerReset.Event> resetHistory(boolean dbExisted) {
         List<ControllerReset.Event> h = new ArrayList<>();
@@ -737,7 +752,8 @@ public final class DispenseService {
             for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
                     ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH, ControllerReset.EVENT_MOTOR_OFF,
                     ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_WATCHDOG_TRIP,
-                    ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED)) {
+                    ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED,
+                    ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_IDLE_HOLD)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }

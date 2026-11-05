@@ -57,7 +57,10 @@ public class RecordingGcodeServer implements AutoCloseable {
     public volatile SimPaste paste;
     /** The needle (N2) Z of a raw Z: the DispenseSimMachine's see-saw (z2 = 63 − z1). */
     public volatile DoubleUnaryOperator pasteNeedleZ = (z) -> 63 - z;
-    /** The M115 firmware name; "GcodeServer (RecordingGcodeServer)" makes SimGuard take this for the simulator. */
+    /**
+     * The M115 firmware name (null: no FIRMWARE_NAME line); "GcodeServer (RecordingGcodeServer)" makes SimGuard take
+     * this for the simulator.
+     */
     public volatile String firmwareName = "Marlin (RecordingGcodeServer)";
     /** Wait before the "ok" of lines starting with a prefix, e.g. "G28" -> 3000 (a slow home). */
     public final Map<String, Long> delayBeforeOkMs = new java.util.concurrent.ConcurrentHashMap<>();
@@ -178,7 +181,10 @@ public class RecordingGcodeServer implements AutoCloseable {
                         reply.append(sensed).append('\n');
                     }
                     if (line.startsWith("M115")) {
-                        reply.append("FIRMWARE_NAME:").append(firmwareName).append('\n');
+                        String name = firmwareName;
+                        if (name != null) {
+                            reply.append("FIRMWARE_NAME:").append(name).append('\n');
+                        }
                         if (hostWatchdogCapability) {
                             reply.append("Cap:HOST_WATCHDOG:1\n");
                         }
