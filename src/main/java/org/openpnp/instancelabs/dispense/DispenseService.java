@@ -1550,6 +1550,19 @@ public final class DispenseService {
         for (DispenseConfig.ParkedTip p : before.parkedTips.values()) {
             token = Math.max(token, measuredStamp(p.needleAnchor, p.needleZOffsetSetAtMs, p.needleLanding) + 1);
         }
+        // and later than the bed model's tip end and K, which a writer's clock may stamp up to a minute ahead (BR-98
+        // review 3 MINOR A): stamped after the token, they would still prove moves for the needle put on now
+        BedModel bed = bedModel.state().model;
+        if (bed != null) {
+            for (BedModel.Tool t : bed.tools()) {
+                if ("needle".equals(t.moves) && t.tipEndAtMs != null) {
+                    token = Math.max(token, t.tipEndAtMs + 1);
+                }
+            }
+            if (bed.seesawAtMs != null) {
+                token = Math.max(token, bed.seesawAtMs + 1);
+            }
+        }
         DispenseConfig c = before.copy();
         c.needleChangedAtMs = token;
         writeConfig(c); // a fact: never refused, so never held back by a check of other settings

@@ -572,6 +572,42 @@ public class BedGuardSimTest {
     }
 
     /**
+     * A tip end and K stamped ahead of the engine's clock (a writer's clock may run up to a minute ahead) and the
+     * needle changed before that time: the change is stamped later than both, so moves wait for the new needle's
+     * (review 3 MINOR A). Each stamp is the later one once.
+     */
+    @Test
+    public void aNeedleChangeIsLaterThanRecordsStampedAhead() throws Exception {
+        for (long[] ahead : new long[][] {{50000, 40000}, {40000, 50000}}) { // the tip end's and K's lead, ms
+            after(); // a fresh SIM for each
+            start(BedFixture.text());
+            long now = System.currentTimeMillis();
+            JsonObject needle = BedFixture.json().getAsJsonArray("tools").get(1).getAsJsonObject();
+            needle.getAsJsonObject("tipEnd").addProperty("atMs", now + ahead[0]);
+            needle.add("measured", record(now + ahead[0]));
+            ok("PUT", "/api/bed/tools/needle", needle.toString(), UI);
+            JsonObject seesaw = BedFixture.json().getAsJsonObject("seesaw");
+            seesaw.add("measured", record(now + ahead[1]));
+            ok("PUT", "/api/bed/seesaw", seesaw.toString(), UI);
+            ok("POST", "/api/needle/changed", "{\"why\":\"bed test\"}", UI);
+            sim.server.mark();
+            JsonObject r = call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1}", UI);
+            assertEquals(409, status, body);
+            assertEquals("measurement-needed", r.get("error").getAsString(), body);
+            assertTrue(r.get("why").getAsString().contains("needle's tip end"), body);
+            assertTrue(r.get("why").getAsString().contains("K, the needle's length"), body);
+            assertEquals(List.of(), motionSent(), "nothing sent");
+        }
+    }
+
+    /** A new measurement record stamped {@code atMs}, naming a new journal row as its evidence. */
+    JsonObject record(long atMs) throws Exception {
+        svc.getDb().event(null, "INFO", "PROBE", "a bench measurement");
+        return new JsonParser().parse("{\"how\":\"bench\",\"by\":\"Process\",\"atMs\":" + atMs + ",\"errMm\":0.05,"
+                + "\"evidence\":\"event:" + svc.getDb().recentEvents(1).get(0).get("id") + "\"}").getAsJsonObject();
+    }
+
+    /**
      * While the hooked moves wait for the new needle's measurements, what measures them still runs (review 2 item 7):
      * the tip picture moves N2 over the bottom camera and stores its photo, which is then the new tip end's evidence;
      * Home sends G28; STOP answers 200. None is hooked: the gate in a shared pre-check would refuse them all.
