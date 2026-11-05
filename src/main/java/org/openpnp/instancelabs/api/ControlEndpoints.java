@@ -40,7 +40,8 @@ import com.google.gson.JsonObject;
  * X/Y only with both nozzles at travel height (their safe zones); a Z press puts BOTH nozzles where OpenPnP's
  * transforms say and holds each to its floor at its own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed
  * surface under it (it may touch: the by-hand probe), the needle with a current frame not below the surface where its
- * tip lands (N2 + its landing and trim; contact = surface + offset) nor its I4 floor, without one not below its safe
+ * tip lands (N2 + its landing and trim; contact = surface + offset) nor the one under N2, nor its I4 floor, without one
+ * not below its safe
  * zone; over the height switch (BR-94: the circle around its place; the needle where its tip lands) neither below its
  * safe zone, whatever its floor. Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel
  * height). A STOP ends either at once; a move that saw one answers 409.</p>
@@ -278,9 +279,17 @@ final class ControlEndpoints {
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
             double floor = needle ? needleFloor(n, tip[0], tip[1]) : n1Floor(tip[0], tip[1]);
+            double[] where = tip;
+            if (needle) { // N2 and its tip can lie over different surfaces: the higher floor holds (NaN: no floor there)
+                double underN2 = needleFloor(n, at.getX(), at.getY());
+                if (Double.isNaN(floor) || underN2 > floor) {
+                    floor = underN2;
+                    where = new double[] {at.getX(), at.getY()};
+                }
+            }
             if (Double.isFinite(floor) && at.getZ() < floor - 1e-9) {
                 throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over (%.1f, %.1f), "
-                        + "below its floor %.2f (%s)%s", name(n), at.getZ(), tip[0], tip[1], floor,
+                        + "below its floor %.2f (%s)%s", name(n), at.getZ(), where[0], where[1], floor,
                         needle ? needleFloorWhy() : plain(N1_BELOW_SURFACE_MM) + " mm below the probed surface under it",
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
@@ -325,7 +334,7 @@ final class ControlEndpoints {
 
     private String needleFloorWhy() {
         DispenseService svc = ctx.svcOrNull();
-        return svc != null && needleFrameCurrent(svc) ? "the surface where its tip lands, or its I4 floor"
+        return svc != null && needleFrameCurrent(svc) ? "the surface under its tip or under N2, or its I4 floor"
                 : "its safe zone: its Z frame is not set for this needle, or this home's Z check failed";
     }
 

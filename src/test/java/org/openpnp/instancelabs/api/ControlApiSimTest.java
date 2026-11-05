@@ -314,6 +314,28 @@ public class ControlApiSimTest {
         ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-0.05}", UI));
     }
 
+    /**
+     * The other way round (Backend, round 2's note 3): N2 over a raised surface, its tip 11 mm on over the blank. The
+     * floor under N2 still holds: the higher of the two floors, as the rule before round 2 held N2's.
+     */
+    @Test
+    public void theNeedlesFloorUnderN2StillHoldsWhereItIsHigherThanTheTips() throws Exception {
+        needleFrameAndBlank();
+        ok(call("PUT", "/api/surfaces/raised", "{\"points\":[[95,30,8.5],[105,30,8.5],[95,50,8.5],[105,50,8.5]]}",
+                UI));
+        landing(11);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        for (int i = 0; i < 30 && loc(sim.n2).getZ() > 6.0 + 1e-6; i++) {
+            ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":" + Math.max(-2, 6.0 - loc(sim.n2).getZ()) + "}",
+                    UI));
+        }
+        assertEquals(6.0, loc(sim.n2).getZ(), 1e-6);
+        Res r = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1.5}", UI);
+        refused(409, "below its floor 5.91", r);
+        assertTrue(r.body.contains("over (100.0, 40.0)"), "under N2: " + r);
+        assertEquals(6.0, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+    }
+
     /** The mounted tip lands {@code dx} mm from N2 in X: a landing set under N2's head offset now. */
     void landing(double dx) throws Exception {
         DispenseConfig c = svc.getConfig();
