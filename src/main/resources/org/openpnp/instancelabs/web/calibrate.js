@@ -807,7 +807,7 @@
     // the places the engine takes shots on (shotsRun): the sinks, the blank (a reference) and a coupon; its zones refuse the
     // others ("takes no paste"); a cup first
     const coupons = ((S.config || {}).padCalibration || {}).couponPlaces || ['coupon1', 'coupon2'];
-    const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace),
+    const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace) || d.wasteLocationName || 'waste',
       (nm) => IL.isSinkPlace(nm, d) || nm === (d.blankLocationName || 'blank') || coupons.includes(nm));
     IL.show($('shots-noplace'), !names.length);
     const place = $('shots-place').value;
