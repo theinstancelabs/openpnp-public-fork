@@ -572,11 +572,11 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   G-code batch, a pressure hold, a pad calibration), another move still running; X/Y while either nozzle is below
   its safe zone; the camera's `dz`; a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
   always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current frame (anchored and
-  touched off since the needle change, and no failed Z check of this home), not below the surface under it + its
-  offset nor its I4 floor, without one not below its safe zone; over the height switch (BR-94: its place's circle of
-  `outputZones.heightSwitchRadiusMm`; the needle where its tip lands, N2 + its landing and trim) neither tool below its
-  safe zone, whatever its floor, also through the see-saw (only the measure presses it); OpenPnP's soft limits. 404 for
-  an unknown place.
+  touched off since the needle change, and no failed Z check of this home), not below the surface where its tip
+  lands (N2 + its landing and trim) + its offset nor its I4 floor, without one not below its safe zone; over the
+  height switch (BR-94: its place's circle of `outputZones.heightSwitchRadiusMm`; the needle where its tip lands)
+  neither tool below its safe zone, whatever its floor, also through the see-saw (only the measure presses it);
+  OpenPnP's soft limits. 404 for an unknown place.
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
   `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
   ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.

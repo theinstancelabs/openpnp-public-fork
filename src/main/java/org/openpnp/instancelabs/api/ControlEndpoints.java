@@ -39,11 +39,11 @@ import com.google.gson.JsonObject;
  * again on OpenPnP's machine thread; one press at most {@value #MAX_XY_MM} mm in X/Y and {@value #MAX_Z_MM} mm in Z;
  * X/Y only with both nozzles at travel height (their safe zones); a Z press puts BOTH nozzles where OpenPnP's
  * transforms say and holds each to its floor at its own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed
- * surface under it (it may touch: the by-hand probe), the needle with a current frame not below the surface under it
- * (contact = surface + offset) nor its I4 floor, without one not below its safe zone; over the height switch (BR-94:
- * the circle around its place; the needle where its tip lands) neither below its safe zone, whatever its floor.
- * Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel height). A STOP ends either at once;
- * a move that saw one answers 409.</p>
+ * surface under it (it may touch: the by-hand probe), the needle with a current frame not below the surface where its
+ * tip lands (N2 + its landing and trim; contact = surface + offset) nor its I4 floor, without one not below its safe
+ * zone; over the height switch (BR-94: the circle around its place; the needle where its tip lands) neither below its
+ * safe zone, whatever its floor. Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel
+ * height). A STOP ends either at once; a move that saw one answers 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
@@ -266,21 +266,21 @@ final class ControlEndpoints {
                 continue; // going up (or not moving): always allowed, also out of a spot below a floor that rose
             }
             double low = safeLow(n);
-            // the needle where its tip lands (N2 + its landing and trim), as the measure and I12 aim
+            // the needle where its tip lands (N2 + its landing and trim), as the measure and I12 aim: over the switch
+            // and for its floor (over a surface's edge N2 and the tip lie over different surfaces)
             DispenseService svc = ctx.svcOrNull();
-            double[] tip = isNeedle(n) && svc != null ? svc.needleXY(at.getX(), at.getY())
-                    : new double[] {at.getX(), at.getY()};
+            boolean needle = svc != null && n == svc.getDispenserNozzle();
+            double[] tip = needle ? svc.needleXY(at.getX(), at.getY()) : new double[] {at.getX(), at.getY()};
             if (Double.isFinite(low) && at.getZ() < low - 1e-6 && overHeightSwitch(tip[0], tip[1])) {
                 throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over the height "
                         + "switch (%.1f, %.1f), below its safe zone %.2f: only its measure presses it (POST "
                         + "/api/height-switch/measure)%s", name(n), at.getZ(), tip[0], tip[1], low,
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
-            boolean needle = isNeedle(n);
-            double floor = needle ? needleFloor(n, at.getX(), at.getY()) : n1Floor(at.getX(), at.getY());
+            double floor = needle ? needleFloor(n, tip[0], tip[1]) : n1Floor(tip[0], tip[1]);
             if (Double.isFinite(floor) && at.getZ() < floor - 1e-9) {
                 throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over (%.1f, %.1f), "
-                        + "below its floor %.2f (%s)%s", name(n), at.getZ(), at.getX(), at.getY(), floor,
+                        + "below its floor %.2f (%s)%s", name(n), at.getZ(), tip[0], tip[1], floor,
                         needle ? needleFloorWhy() : plain(N1_BELOW_SURFACE_MM) + " mm below the probed surface under it",
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
@@ -302,8 +302,9 @@ final class ControlEndpoints {
     }
 
     /**
-     * The needle: with its frame current (anchored and touched off since the last needle change), not below the
-     * surface under it (needle contact = surface + offset) nor its I4 floor; without, not below its safe zone.
+     * The needle with its tip landing at (x, y): with its frame current (anchored and touched off since the last needle
+     * change), not below the surface there (needle contact = surface + offset) nor its I4 floor; without, not below its
+     * safe zone (also with the engine gone).
      */
     private double needleFloor(HeadMountable needle, double x, double y) {
         DispenseService svc = ctx.svcOrNull();
@@ -324,7 +325,7 @@ final class ControlEndpoints {
 
     private String needleFloorWhy() {
         DispenseService svc = ctx.svcOrNull();
-        return svc != null && needleFrameCurrent(svc) ? "the surface under it, or its I4 floor"
+        return svc != null && needleFrameCurrent(svc) ? "the surface where its tip lands, or its I4 floor"
                 : "its safe zone: its Z frame is not set for this needle, or this home's Z check failed";
     }
 

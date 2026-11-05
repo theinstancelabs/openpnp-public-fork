@@ -282,20 +282,49 @@ public class ControlApiSimTest {
     public void overTheHeightSwitchTheNeedleIsCheckedWhereItsTipLands() throws Exception {
         needleFrameAndBlank();
         ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        landing(11);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":89,\"y\":100}", UI));
+        refused(409, "over the height switch (100.0, 100.0)", call("POST", "/api/jog",
+                "{\"tool\":\"needle\",\"dz\":-1}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"place\":\"height-switch\"}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI));
+    }
+
+    /**
+     * BR-49's needle floor is taken where its tip lands too (N2 + the landing + trim), not at N2: N2 over the blank
+     * (its floor 2.91), the tip 11 mm on over a raised surface (8.5): the floor is that surface's, 8.5 - 2.59 = 5.91,
+     * and a press to Z 4.5, which the floor under N2 let through, is refused naming it and where the tip lands.
+     */
+    @Test
+    public void theNeedlesFloorIsTheSurfaceWhereItsTipLands() throws Exception {
+        needleFrameAndBlank();
+        ok(call("PUT", "/api/surfaces/raised", "{\"points\":[[108,30,8.5],[120,30,8.5],[108,50,8.5],[120,50,8.5]]}",
+                UI));
+        landing(11);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        for (int i = 0; i < 30 && loc(sim.n2).getZ() > 6.0 + 1e-6; i++) {
+            ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":" + Math.max(-2, 6.0 - loc(sim.n2).getZ()) + "}",
+                    UI));
+        }
+        assertEquals(6.0, loc(sim.n2).getZ(), 1e-6);
+        Res r = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1.5}", UI);
+        refused(409, "below its floor 5.91", r);
+        assertTrue(r.body.contains("over (111.0, 40.0)"), "where its tip lands: " + r);
+        assertEquals(6.0, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-0.05}", UI));
+    }
+
+    /** The mounted tip lands {@code dx} mm from N2 in X: a landing set under N2's head offset now. */
+    void landing(double dx) throws Exception {
         DispenseConfig c = svc.getConfig();
         DispenseConfig.NeedleLanding l = new DispenseConfig.NeedleLanding();
-        l.dxMm = 11;
+        l.dxMm = dx;
         double[] ho = svc.headOffsetNow();
         l.headOffsetXMm = ho[0];
         l.headOffsetYMm = ho[1];
         l.setAtMs = System.currentTimeMillis();
         c.needleLanding = l;
         svc.updateConfig(c);
-        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":89,\"y\":100}", UI));
-        refused(409, "over the height switch (100.0, 100.0)", call("POST", "/api/jog",
-                "{\"tool\":\"needle\",\"dz\":-1}", UI));
-        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"place\":\"height-switch\"}", UI));
-        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI));
     }
 
     /** #19 review of BR-49, MINOR 7: a real unhomed state (STOP, then Start), not a faked flag. */
