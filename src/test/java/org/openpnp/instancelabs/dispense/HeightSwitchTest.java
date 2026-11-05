@@ -71,11 +71,16 @@ public class HeightSwitchTest {
 
         /** How far past raw Z {@code ref} the tool went (mm; 0 when never). */
         double past(double ref) {
+            return past(ref, down);
+        }
+
+        /** How far past raw Z {@code ref} the tool went in direction {@code dir} (−1: as raw Z falls; mm, 0: never). */
+        double past(double ref, int dir) {
             double worst = 0;
             for (String l : lines) {
                 Matcher m = Z.matcher(l);
                 if (l.startsWith("G1") && m.find()) {
-                    worst = Math.max(worst, down * (Double.parseDouble(m.group(1)) - ref));
+                    worst = Math.max(worst, dir * (Double.parseDouble(m.group(1)) - ref));
                 }
             }
             return worst;
@@ -217,6 +222,26 @@ public class HeightSwitchTest {
         HeightSwitch.Result r = HeightSwitch.measure(io, plan("n1", -1, 13.0, 11.0, 5));
         assertTrue(r.refused && r.why.contains("still pressed 0.40 mm above") && r.why.contains("sticks"), r.why);
         assertEquals("G1 Z31.500 F600", sw.lines.get(sw.lines.size() - 2), sw.lines.toString());
+    }
+
+    /**
+     * No line goes past travel Z (31.5) in the tool's up direction: on the see-saw N1 past it lowers the needle, the
+     * needle past it lowers N1. A start 0.5 mm below travel put the 1 mm lift past it; 0.1 mm below, the 0.40 back move
+     * and the fine descent's start too. They stop at travel Z, and the trip is found as far from it.
+     */
+    @Test
+    public void noLineGoesPastTravelZWithAStartCloseBelowIt() throws Exception {
+        for (double gap : new double[] {0.5, 0.1}) {
+            for (int down : new int[] {-1, 1}) {
+                double start = 31.5 + down * gap, trip = start + down * 0.1;
+                FakeSwitch sw = new FakeSwitch(trip, down);
+                HeightSwitch.Result r = HeightSwitch.measure(sw, plan(down < 0 ? "n1" : "needle", down, start,
+                        start + down * 2.0, 5));
+                assertEquals(0, sw.past(31.5, -down), 1e-9, "never past travel Z (start " + start + "): " + sw.lines);
+                assertTrue(r.accepted, r.why);
+                assertEquals(trip, r.tripRawZ, 0.025);
+            }
+        }
     }
 
     /** Review MAJOR 3: no step past the floor, also when the window is not a whole number of coarse steps. */

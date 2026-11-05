@@ -20,11 +20,12 @@ import java.util.regex.Pattern;
  * start (N1 0.25 mm, the needle 0.10) to the first step that reads pressed, 0.40 mm back (still pressed there: the
  * switch sticks or the tool is caught, refused), then a fine descent of 0.025 mm from 0.30 above that step to one fine
  * step past it: the trip is the first fine step that reads pressed, so the tool goes at most one coarse and one fine
- * step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. Every step is
- * a move, M400 and 50 ms before its read. Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's other side) as
- * it rises ({@link Plan#down}). Travel Z at the end, also after a refusal and after a failure (a reply with no level
- * twice, a line that timed out: the tool goes up, Z only, before the failure is thrown); a STOP's abort ends it where
- * it is.</p>
+ * step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. No move goes
+ * above travel Z (the back move, the fine start and the lift stop there): past it the see-saw lowers the other tool.
+ * Every step is a move, M400 and 50 ms before its read. Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's
+ * other side) as it rises ({@link Plan#down}). Travel Z at the end, also after a refusal and after a failure (a reply
+ * with no level twice, a line that timed out: the tool goes up, Z only, before the failure is thrown); a STOP's abort
+ * ends it where it is.</p>
  */
 public final class HeightSwitch {
     /** The named location of the switch's top centre ({@code PUT /api/locations/height-switch {x, y}}). */
@@ -222,25 +223,27 @@ public final class HeightSwitch {
                 r.why = String.format(Locale.ROOT, "no trip between Z %.3f and Z %.3f", from, p.zFloor);
                 return;
             }
-            io.send(move(zc - p.down * BACK_MM, 600));
+            double back = up(p, zc, BACK_MM);
+            io.send(move(back, 600));
             io.send("M400");
             io.send("G4 P200");
             if (read(io) != r.idleLevel) {
                 r.refused = true;
                 r.why = String.format(Locale.ROOT, "still pressed %.2f mm above the coarse trip (Z %.3f): the switch "
-                        + "sticks or the tool is caught", BACK_MM, zc);
+                        + "sticks or the tool is caught", Math.abs(zc - back), zc);
                 return;
             }
             // one fine step past the coarse trip: a press that does not repeat (a bounce, noise) goes no deeper
             double end = p.down < 0 ? Math.max(zc - FINE_MM, p.zFloor) : Math.min(zc + FINE_MM, p.zFloor);
-            Double t = descend(io, p, zc - p.down * FINE_FROM_MM, end, FINE_MM, r.idleLevel);
+            double fine = up(p, zc, FINE_FROM_MM);
+            Double t = descend(io, p, fine, end, FINE_MM, r.idleLevel);
             if (t == null) {
                 r.why = String.format(Locale.ROOT, "the fine descent from Z %.3f found no trip (the coarse one did at Z "
-                        + "%.3f)", zc - p.down * FINE_FROM_MM, zc);
+                        + "%.3f)", fine, zc);
                 return;
             }
             r.trips.add(t);
-            from = round(t - p.down * LIFT_MM);
+            from = round(up(p, t, LIFT_MM));
             io.send(move(from, 600));
             io.send("M400");
         }
@@ -262,6 +265,15 @@ public final class HeightSwitch {
             }
         }
         return null;
+    }
+
+    /**
+     * {@code mm} above {@code z} in the tool's up direction, at most travel Z: on the see-saw past it the other tool
+     * goes down (N1 rising past it lowers the needle, the needle rising past it lowers N1).
+     */
+    private static double up(Plan p, double z, double mm) {
+        double u = z - p.down * mm;
+        return p.down < 0 ? Math.min(u, p.travelZ) : Math.max(u, p.travelZ);
     }
 
     /** Travel Z, Z only: the end of every measure. */
