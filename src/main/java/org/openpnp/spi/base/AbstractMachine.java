@@ -471,62 +471,74 @@ public abstract class AbstractMachine extends AbstractModelObject implements Mac
         }
     }
 
+    /**
+     * Instance Labs: the listeners now, copied under the set's lock (in its order). Iterated without it, a listener
+     * another thread added or removed meanwhile (the engine's start, a pressure hold, a home's cut-off) threw
+     * ConcurrentModificationException out of the firing: a task's busy notice failed that task before it ran, a Stop
+     * threw before it switched anything off.
+     */
+    private List<MachineListener> listenersNow() {
+        synchronized (listeners) {
+            return new ArrayList<>(listeners);
+        }
+    }
+
     public void fireMachineHeadActivity(Head head) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineHeadActivity(this, head);
         }
     }
 
     public void fireMachineTargetedUserAction(HeadMountable hm, boolean jogging) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineTargetedUserAction(this, hm, jogging);
         }
     }
 
     public void fireMachineActuatorActivity(Actuator actuator) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineActuatorActivity(this, actuator);
         }
     }
 
     public void fireMachineEnabled() {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineEnabled(this);
         }
     }
 
     public void fireMachineEnableFailed(String reason) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineEnableFailed(this, reason);
         }
     }
 
     public void fireMachineAboutToBeDisabled(String reason) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineAboutToBeDisabled(this, reason);
         }
     }
 
     public void fireMachineDisabled(String reason) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineDisabled(this, reason);
         }
     }
 
     public void fireMachineDisableFailed(String reason) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineDisableFailed(this, reason);
         }
     }
 
     public void fireMachineHomed(boolean isHomed) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineHomed(this, isHomed);
         }
     }
 
     public void fireMachineBusy(boolean busy) {
-        for (MachineListener listener : listeners) {
+        for (MachineListener listener : listenersNow()) {
             listener.machineBusy(this, busy);
         }
     }
