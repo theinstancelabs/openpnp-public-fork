@@ -270,6 +270,7 @@ final class CalibrationEndpoints {
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, res -> Views.map("analysis", res.analysis,
                 "previousOffsetMm", res.previousOffsetMm, "newOffsetMm", res.newOffsetMm, "applied", res.applied, "run",
                 Views.run(res.run, false)), Views.map("kind", "needle touch-off", "apply", apply, "pitchMm",
-                        req.pitchMm, "startGapMm", req.startGapMm, "steps", req.steps));
+                        req.pitchMm, "startGapMm", req.startGapMm, "steps", req.steps, "dotsLaid", req.steps
+                                + NeedleTouchOff.CHECK_DOTS));
     }
 }

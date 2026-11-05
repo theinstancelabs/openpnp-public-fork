@@ -139,6 +139,7 @@ public final class ApiServer {
         new PhotoEndpoints(context).register(this);
         new SimEndpoints(context).register(this);
         new BoardImportEndpoints(context, dispense).register(this);
+        new HeightSwitchEndpoints(context).register(this);
         server.setExecutor(executor);
         server.createContext("/", this::handle);
         server.start();

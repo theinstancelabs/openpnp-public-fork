@@ -126,7 +126,7 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
      read-modify-write script) replaces it silently. Gone: nothing more is done (a machine il_deploy enabled is
      STOPped), the hold is set, exit 5. A claim gone at the hand-back is said on stderr and in the journal, sets the
      hold and makes the exit code non-zero; someone else's Holder is never overwritten.
-   - **Switch.** It stops OpenPnP gracefully (`POST /api/stop`, waits until the machine is disabled, then
+   - **Switch.** It stops OpenPnP gracefully (the planned stop below, waits until the machine is disabled, then
      stops the service). It snapshots `state/config` to `snapshots/<ts>-pre-<tag>/` (`dispense.db`, `-wal` and
      `-shm` are copied together). It records the new build in `deployed.json` as **pending** (with the snapshot,
      the previous version and the records before it) and writes the Deployed line `<tag> being installed over
@@ -180,7 +180,7 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
         position (no home). A build before BR-44 failed the enable on the dead port (`enable: HTTP 409 ... IO Error`,
         no home). A deploy restarts OpenPnP, so its enable always connects afresh.
      6. Homed and not busy.
-     7. `POST /api/stop`, and the STOP is confirmed (below).
+     7. The planned stop (below), confirmed as a STOP.
    - **On failure it rolls back.** It STOPs (only if the STOP is safe; otherwise it leaves OpenPnP running,
      sets the hold and records the new build as installed but NOT verified), restores the snapshot (keeping the
      abandoned state as `snapshots/<ts>-abandoned-<tag>/`) and switches back. The restore and the switch are one
@@ -256,8 +256,9 @@ Exit codes:
   deploy time too. `--version TAG` overrides only the bad list, never eligibility.
 - Never while someone holds the machine. Any doubt counts as held: a missing or doubled Holder line, `none`,
   `free`, `Nobody?`, bold markers, a `wants` note.
-- Never STOPs during a home: a STOP inside G28 hangs the controller until a power cycle. One rule for every
-  STOP (deploys, the exception path, the unit's ExecStop, the test service manager):
+- Never STOPs during a home: a STOP inside G28 hangs the controller until a power cycle. One rule for every real
+  STOP (failures, the exception path, the unit's ExecStop, the test service manager, a stop where no planned stop can be
+  used); a planned stop is refused by OpenPnP itself while anything works, a home included:
   - `machine.homing` true (BR-44: from the start of any home, the web's, the engine's or OpenPnP's own Home button,
     until it ends; `ReferenceMachine.isHoming`): wait, whatever else the status shows (an engine run past its home
     phase, the pressure held: OpenPnP's Home button does not check the web's pressure hold, and the valve-off lines
@@ -277,7 +278,30 @@ Exit codes:
   - OpenPnP not answering at all (connection refused): nothing to stop.
 - Never homes a controller that shows the power-cycle signature. It reports `controller was reset; a person
   must check the machine` and sets the hold.
-- Always `POST /api/stop` before stopping the process. SIGTERM saves nothing and sends no Stop, and the
+- **The deployer's own stops are planned (BR-75):** the health check's last stop, its stop of a machine left enabled
+  and the stop before the switch use `POST /api/stop/planned`: OpenPnP's STOP without the screw's motor-off line
+  (`M18 B`), so the screw keeps its timing through a deploy; it also closes the controller link. It is confirmed as a
+  STOP (below); a 200 whose lines went unanswered (`linesFailed`: the valve or pump may be on) is a failure, and in
+  the health check a machine problem (nothing restarts and homes unattended); so is a request that timed out (it
+  may have run: no second stop blind), and in the health check a 200 that sent nothing (`linesSent` empty, "machine
+  was already stopped") after a refusal of the same stop: #41 answers 409 when its task outlives its 20 s wait, its
+  lines out and their acks lost.
+  - Before the switch the machine is off already (the idle check), so neither stop sends a line; the planned one
+    guards the race of someone pressing Start after the idle check: `409 locked`, nothing sent, instead of a STOP on
+    their session. The unit's ExecStop then finds the machine stopped and sends nothing; SIGTERM sends nothing either.
+  - A refusal is never answered with a real STOP before the switch. `409 locked` ends the deploy or rollback at once,
+    `409 refused` (something works) is asked again every 5 s for `--stop-timeout`, then it ends: exit 3 `not idle`,
+    nothing changed, no hold, a later run deploys. Here only, a refusal while `/api/status` shows the machine
+    stopped and idle and nobody holding the lock is nothing to stop: #41 refuses without its engine (a failed engine
+    start) or a machine before it looks.
+  - In the health check (OpenPnP it just started, and homed) `409 locked` fails the step at once, as someone else's
+    session (`claim-lost`, left alone, as before); `409 refused` is asked again every 5 s for `--stop-timeout` first,
+    and only one that lasts fails it, as a machine problem, which the deploy's failure path handles like any other
+    (its STOP if safe, the previous build back unchecked, the hold).
+  - No planned stop to use (a build before BR-75: 404 `no such endpoint`; no connection to the API, any transport
+    error but a timeout): the stop as before BR-75 decides. That is the first deploy over an older build, and a
+    rollback to one. Failures and the exception path STOP for real, as does the unit's ExecStop (`stop-openpnp`).
+- Always a stop through the API before stopping the process. SIGTERM saves nothing and sends no Stop, and the
   outputs keep their state. A STOP is confirmed only when `/api/status` shows the machine disabled, the dispense
   engine idle and the pressure hold off: `MachineEndpoints.stop` disables the machine, but the engine's abort sends
   its valve-and-pump-off lines only after the move in progress (a 10 s prime), and with the plain GcodeDriver the
@@ -401,7 +425,9 @@ python3 -m unittest discover -s infra/deploy/tests -t infra/deploy
 - `tests/fake_openpnp.py` is a fake OpenPnP API with configurable failures: version, enable, reset, no S/N,
   home, slow home, stop, busy, run (with its phase; a STOP ends it, `run_abort_s` later), pressure (a STOP vents
   it; `vent-fail`), crash, engine (not started), unavailable, machine-500, home-404, axes left out or without a
-  driver coordinate, and failures for one build only. Its status has the real shape: `run.finishedAtMs`,
+  driver coordinate, and failures for one build only; BR-75's planned stop (refused while anything works or for
+  the first `planned_refusals` calls; `old-stop`: a build before it, 404; `lock-at-planned-stop`), and a STOP's
+  `M18 B` on an open link recorded as `{"screw": "M18 B"}`. Its status has the real shape: `run.finishedAtMs`,
   `lastRun.endedAtMs`, `padCalibration.endedAtMs`, the pressure hold's start value, `machine.zCheck.homeAtMs`
   and the dispense config's times (needle, XY trim, anchor, tip, seat, places, surfaces, purge row, start angle,
   controller connected). It answers as the real server does:

@@ -119,14 +119,15 @@
 .bi-foot > .btn--lg { min-width: 160px; justify-content: center; }
 .bi-foot .spacer { flex: 1 1 0; }
 
-/* the preview's parts: no pad type hatched, not dispensed dimmed (the hit rects of boardview's part layer) */
-#board-import-preview .pv.pv--art .pv-l-parts rect.pv-part.bi-part--block { fill: url(#bi-hatch-block); stroke: var(--pv-o-block); stroke-width: 1px; vector-effect: non-scaling-stroke; }
-#board-import-preview .pv.pv--art .pv-l-parts rect.pv-part.bi-part--wait { fill: url(#bi-hatch-wait); stroke: var(--pv-o-check); stroke-width: 1px; vector-effect: non-scaling-stroke; }
-#board-import-preview .pv.pv--art .pv-l-parts rect.pv-part.bi-part--dim { fill: var(--pv-bg); fill-opacity: .5; }
-#board-import-preview .bi-hatch--block .bi-hatch__bg { fill: rgba(180, 35, 24, .12); }
-#board-import-preview .bi-hatch--block .bi-hatch__line { stroke: var(--pv-o-block); stroke-opacity: .85; }
-#board-import-preview .bi-hatch--wait .bi-hatch__bg { fill: rgba(176, 111, 0, .10); }
-#board-import-preview .bi-hatch--wait .bi-hatch__line { stroke: #b06f00; stroke-opacity: .9; }
+/* hatched parts (boardimport.js hatch: the upload preview, Designs › Set up): no pad type or another tip red, a dose to
+   find amber, not dispensed dimmed (the hit rects of boardview's part layer; each picture's own patterns fill them) */
+.pv.pv--art .pv-l-parts rect.pv-part.bi-part--block { stroke: var(--pv-o-block); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.pv.pv--art .pv-l-parts rect.pv-part.bi-part--wait { stroke: var(--pv-o-check); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+.pv.pv--art .pv-l-parts rect.pv-part.bi-part--dim { fill: var(--pv-bg); fill-opacity: .5; }
+.bi-hatch--block .bi-hatch__bg { fill: rgba(180, 35, 24, .12); }
+.bi-hatch--block .bi-hatch__line { stroke: var(--pv-o-block); stroke-opacity: .85; }
+.bi-hatch--wait .bi-hatch__bg { fill: rgba(176, 111, 0, .10); }
+.bi-hatch--wait .bi-hatch__line { stroke: #b06f00; stroke-opacity: .9; }
 
 /* ================================================================ Board step: upload, board pictures, Camera is on FID1 */
 .bf-boards { display: flex; flex-direction: column; gap: 8px; min-width: 0; }

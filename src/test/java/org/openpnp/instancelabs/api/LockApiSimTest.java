@@ -209,6 +209,8 @@ public class LockApiSimTest {
                 .getAsString());
         assertError(409, "locked", post("/api/machine/home", "{\"wait\":true}", null));
         assertError(409, "locked", call("PUT", "/api/config", "{}", null));
+        // BR-77: the start-angle measure is a guarded write too
+        assertError(409, "locked", post("/api/screw/start-angle/measure", "{\"mode\":\"halves\"}", null));
         // data writes and GETs never need it
         assertEquals(200, call("GET", "/api/status", null, UI).status);
         // its own API calls pass with its token

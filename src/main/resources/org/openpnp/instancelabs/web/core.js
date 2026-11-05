@@ -700,6 +700,11 @@
     out.cam = all.find((t) => t.kind === 'camera') || null;
     return out;
   };
+  /** A cup, as the engine reads a place's name (OutputZones.CUP): "cup" or "scale" as a part of it ("cup2", "scale-1"; not "cupboard"). */
+  IL.isCupPlace = (name) => /(^|[-_])(cup|scale)([-_0-9]|$)/i.test(String(name || ''));
+  /** A place where paste may go with nothing under it (OutputZones.isSinkPlace): the waste, the towel or a cup. */
+  IL.isSinkPlace = (name, d) => !!name && (String(name).toLowerCase() === String((d && d.wasteLocationName) || 'waste').toLowerCase()
+    || /^towel$/i.test(name) || IL.isCupPlace(name));
   /** mm from the dispenser needle (N2) to the waste place in X/Y, or null if either is unknown. */
   IL.wasteDistance = function (status) {
     const s = status || S.status;
@@ -832,6 +837,12 @@
     const h = lk.holder;
     return IL.holderName(h) + ' has the machine' + (isNum(h.sinceMs) ? ' (since ' + IL.fmtTime(h.sinceMs - S.skewMs) + ')' : '') + ': Take control to use it.';
   };
+  /** BR-93: the link to the controller is lost (its USB device gone, or a read or write failed): the engine's why (with its
+   *  time) and its next step, as given; null while the link holds. */
+  IL.linkLostReason = function (status) {
+    const l = (((status || S.status) || {}).machine || {}).linkLost;
+    return l ? cap(l.why || 'the link to the controller was lost') + '. ' + cap(l.next || 'once the board is back on USB: Stop, then Start, then Home as after a reset') + '.' : null;
+  };
   /**
    * Why a control is locked now, or null. need: {connected, homed, idle (default true), pressureOff (default true),
    * engine, homes (the task homes by itself: it waits while N1 is low), held (default true: an agent's lock locks it)}.
@@ -847,6 +858,8 @@
     const held = (n.connected || n.homed || n.engine || n.homes) && n.held !== false ? IL.heldReason(s) : null;
     if (held) return held;
     const m = s.machine || {}, d = s.dispense || {}, pr = s.pressure || {};
+    // only what reaches the controller: saves that write data ({engine} alone) never touch it
+    if ((n.connected || n.homed || n.homes) && m.linkLost) return IL.linkLostReason(s);
     if (n.idle && IL.taskRunning(s)) {
       const lab = s.run && s.run.running ? s.run.label : 'task';
       return lab === 'board' ? 'Locked while the board runs' : 'Locked while the ' + (lab === 'z check' ? 'Z check' : lab) + ' runs';
@@ -1279,7 +1292,9 @@
     } else {
       add({ key: 'regulator', code: 'I6', title: 'Regulator', state: 'need', value: 'read gauge', short: 'read gauge',
         detail: 'Set the regulator to ' + psi + ' psi for profile ' + (prof.name || '') + ' (no sensor).',
-        fixes: [{ view: 'pressure', label: 'Pressure on to read the gauge' }, { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
+        // BR-03's pump only (I12): the valve stays closed and nothing moves; before it, the Pressure panel
+        fixes: [IL.hasPumpOnly(s) ? { fix: 'pressure-pump', label: 'Pump on to read the gauge' } : { view: 'pressure', label: 'Pressure on to read the gauge' },
+          { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
     }
 
     // 5 Pad types (PLAN); with the profile check, padprofile.js words it (PROFILE_CALIBRATION_DESIGN.md §13.2, H-P1)
@@ -2318,6 +2333,13 @@
         IL.setText(conn, 'No machine');
         IL.setText(homed, 'Not homed');
         homedVisible(false);
+      } else if (m.linkLost) {
+        // BR-93: OpenPnP may still read enabled; nothing reaches the controller until Stop, then Start reconnects
+        setCell(mc, 'block', undefined, IL.linkLostReason(s));
+        IL.setText(conn, 'Controller lost');
+        IL.setText(homed, 'Position unknown');
+        homedVisible(false);
+        showStart = !m.enabled;
       } else if (!m.enabled) {
         setCell(mc, 'block', undefined, 'OpenPnP is stopped: connect, then home');
         IL.setText(conn, 'Not connected');
@@ -3157,10 +3179,12 @@
     run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status)),
     ok: (r) => (r && (r.note || r.lastEvent)) || 'Pressure switching on',
   });
-  // BR-03: the pump only, the valve stays closed (read the gauge), anywhere; offered only by a backend with I12
+  // BR-03: the pump only, the valve stays closed (read the gauge), anywhere; only a backend with I12 has it (its own gate:
+  // a backend without it would open the valve wherever the needle is)
   IL.fix('pressure-pump', {
-    gate: (s) => (s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
-      : IL.lockReason(s, { connected: true, engine: true })),
+    gate: (s) => (!IL.hasPumpOnly(s) ? 'This OpenPnP has no pump-only start (I12)'
+      : s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
+        : IL.lockReason(s, { connected: true, engine: true })),
     run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status, true)),
     ok: (r) => (r && (r.note || r.lastEvent)) || 'Pump on, valve closed: read the gauge',
   });

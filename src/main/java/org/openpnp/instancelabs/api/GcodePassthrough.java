@@ -78,6 +78,8 @@ final class GcodePassthrough {
         final boolean homed;
         /** The web STOP's reason once pressed. */
         volatile String stoppedBy;
+        /** BR-97: the controller's Z its levelling lines were walked from (null: no levelling). */
+        Double levelFromZ;
 
         Batch(MachineLock.Holder holder, boolean homed) {
             this.holder = holder;
@@ -174,7 +176,7 @@ final class GcodePassthrough {
         }
         try {
             if (levelling) {
-                checkLevelling(m, d, svc, raw, lines, holder, what);
+                b.levelFromZ = checkLevelling(m, d, svc, raw, lines, holder, what);
             }
             Runnable hook = submitHook;
             if (hook != null) {
@@ -210,9 +212,9 @@ final class GcodePassthrough {
      * {@link PassthroughLines#level}, within 32 mm of where the position became unknown
      * (the engine's {@code ControllerReset#levelReference}, on record: a reference it cannot write sends nothing, 409):
      * a refused one sends nothing, else the call is journaled first (events {@code Z_LEVEL}: the holder, the lines, the
-     * reason); a failed write sends nothing either (409).
+     * reason); a failed write sends nothing either (409). Returns the Z the lines were walked from.
      */
-    private void checkLevelling(Machine m, GcodeDriver d, DispenseService svc, List<String> raw,
+    private double checkLevelling(Machine m, GcodeDriver d, DispenseService svc, List<String> raw,
             List<PassthroughLines.Line> lines, MachineLock.Holder holder, String what) throws ApiException {
         resyncNow(m, d); // never OpenPnP's belief: a connect whose read got no answer leaves it as it was (review)
         double z = zNow(m, d);
@@ -253,19 +255,44 @@ final class GcodePassthrough {
             throw ApiException.refused("the levelling call could not be journaled (events Z_LEVEL: " + e.getMessage()
                     + "), so nothing was sent: every Z move while not homed goes on record first");
         }
+        return first;
     }
 
     /** The controller axis Z's coordinate as OpenPnP knows it (raw mm): the controller's own once re-read. */
     private static double zNow(Machine m, GcodeDriver d) throws ApiException {
+        return zAxis(m, d).getDriverLengthCoordinate().convertToUnits(LengthUnit.Millimeters).getValue();
+    }
+
+    private static ReferenceControllerAxis zAxis(Machine m, GcodeDriver d) throws ApiException {
         for (Axis a : m.getAxes()) {
             if (a instanceof ReferenceControllerAxis && ((ReferenceControllerAxis) a).getDriver() == d
                     && "Z".equalsIgnoreCase(((ReferenceControllerAxis) a).getLetter())) {
-                return ((ReferenceControllerAxis) a).getDriverLengthCoordinate().convertToUnits(LengthUnit.Millimeters)
-                        .getValue();
+                return (ReferenceControllerAxis) a;
             }
         }
         throw ApiException.refused("OpenPnP's G-code driver has no Z axis: Z cannot be levelled through the "
                 + "passthrough");
+    }
+
+    /**
+     * BR-97 review 3: a home whose G28 ran but that ended unhomed, or a power cycle, between the checks and the first
+     * line leaves OpenPnP's homed state as it was; the controller's Z (M400, M114) must still be the one the lines were
+     * walked from. On the machine thread; a failed read is a reason too (nothing was sent).
+     */
+    private static String levelStartMoved(Machine m, GcodeDriver d, double from, long timeoutMs) {
+        double z;
+        try {
+            d.sendCommand("M400", timeoutMs);
+            z = d.getReportedLocation(timeoutMs).getCoordinate(zAxis(m, d), LengthUnit.Millimeters);
+            d.receiveResponses(); // its answers are not the first line's replies
+        }
+        catch (Exception e) {
+            return "Z could not be re-read before the first line (" + MachineEndpoints.rootMessage(e) + "): none of "
+                    + "its lines was sent; press STOP if the machine may still move";
+        }
+        return Math.abs(z - from) <= 0.01 ? null : String.format(Locale.ROOT, "Z moved after the lines were checked "
+                + "(raw Z %.2f then, %.2f now: a home, a jog or a power cycle ran meanwhile): walk again from the Z "
+                + "now", from, z);
     }
 
     /** How a batch ended: {@link #status} "ok", "lock-lost", "stopped", "controller-error" or "controller-timeout". */
@@ -302,6 +329,7 @@ final class GcodePassthrough {
         String confirm = d.getCommand(null, GcodeDriver.CommandType.COMMAND_CONFIRM_REGEX);
         confirm = confirm == null ? "^ok.*" : confirm;
         String error = d.getCommand(null, GcodeDriver.CommandType.COMMAND_ERROR_REGEX);
+        boolean zChecked = b.levelFromZ == null;
         for (int i = 0; i < lines.size(); i++) {
             PassthroughLines.Line l = lines.get(i);
             if (l.empty) {
@@ -318,12 +346,20 @@ final class GcodePassthrough {
                 }
                 // checked right before the send (#19 review MINOR 5): a take or STOP meanwhile sends nothing more
                 String stop = stopReason(m, b);
+                if (stop == null && !zChecked) {
+                    zChecked = true;
+                    String moved = levelStartMoved(m, d, b.levelFromZ, timeoutMs);
+                    stop = stopReason(m, b); // a STOP or a take during the re-read's round trips names itself
+                    if (stop == null) {
+                        stop = moved;
+                    }
+                }
                 if (stop != null) {
                     return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i,
                             l.text, null, stop);
                 }
+                d.sendCommand(l.text, timeoutMs); // nothing between the last check and the write
                 log(who, ">", l.text);
-                d.sendCommand(l.text, timeoutMs);
                 DispenseService engine = ctx.svcOrNull();
                 if (engine != null) {
                     engine.noteControllerLine(l.text); // BR-02: M18 B switches the screw's motor off, G1 B turns it
@@ -426,12 +462,16 @@ final class GcodePassthrough {
     }
 
     /** Why the batch must send nothing more ("lock-lost: ..." for a revoked holder), or null. */
-    private static String stopReason(Machine m, Batch b) {
+    private String stopReason(Machine m, Batch b) {
         if (b.holder != null && b.holder.revoked) {
             return "lock-lost: the lock was taken or ran out";
         }
         if (b.stoppedBy != null) {
             return b.stoppedBy;
+        }
+        if (ctx.switchOff.inProgress()) {
+            // OpenPnP's own Stop, from its announce: its M410 may cut a move short, so no line goes after it
+            return "OpenPnP is switching the machine off";
         }
         if (!m.isEnabled()) {
             return "the machine was switched off";

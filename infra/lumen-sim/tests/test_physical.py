@@ -376,11 +376,12 @@ class ZRelease(unittest.TestCase):
         self.assertAlmostEqual(head(b)["physical"]["Z"], 31.1, places=6)
 
     def test_m112_releases_z(self):
-        b = homed(z_drop={"z": -0.4})
-        b.write("M112\n")
-        b.run(1.0)
-        self.assertTrue(state(b)["halted"])
-        self.assertAlmostEqual(head(b)["physical"]["Z"], 31.1, places=6)
+        with within(self, 5):
+            b = homed(z_drop={"z": -0.4})
+            b.write("M112\n")
+            b.run(1.0)
+            self.assertTrue(state(b)["halted"])
+            self.assertAlmostEqual(head(b)["physical"]["Z"], 31.1, places=6)
 
     def test_a_home_after_the_drop_puts_z_back(self):
         b = homed(z_drop={"z": -0.4})
