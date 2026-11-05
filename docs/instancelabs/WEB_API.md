@@ -581,27 +581,31 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked, served while anyone holds the
   machine; nothing moves. `w` at or above the frame's width is the whole frame; `settleMs` is top and bottom's.
   - `after=<epoch ms>` (BR-102, all four cameras): a frame taken after that time; the client sends the last frame's
-    `X-Frame-At-Ms`, so N distinct frames are N calls (no `n=`). It waits at most `usbCameras.frameWaitMs` (5 s), then
-    504 `no-new-frame`; a time further ahead than that is 504 at once; not a number is 400. Without `after`: a frame
-    taken after the request came.
+    `X-Frame-At-Ms`, so N distinct frames are N calls (no `n=`). Machine and gauge wait at most
+    `usbCameras.frameWaitMs` (5 s) for it, then 504 `no-new-frame`; top and bottom sleep until that time, then take a
+    frame (503 when none comes within 10 s). A time further ahead than `frameWaitMs` is 504 at once (all four); not a
+    number is 400. Without `after`: a frame taken after the request came.
 - **The USB cameras (BR-102)**, "machine" (the front view of the whole machine) and "gauge" (the regulator
   close-up): opened by the engine itself, not through OpenPnP's machine.xml (OpenPnP's vision never sees them), and
   listed only while their setting is there (below; no defaults). One capture per camera, shared by every client:
   opened at the first frame request in the setting's mode, its first 2 frames dropped (a grab right after an open was
   corrupt), released `usbCameras.idleReleaseMs` (30 s) after the last frame request, so Process's bench tools and the
-  laptop previews can open the device when nobody views it (the first frame after a release waits for the open). A
-  frame is read only while a request waits for one newer than the last (decoding follows the requests, not the
-  camera's rate) and encoded once per requested width. Device work runs on the camera's own thread: nothing of the
-  engine waits on a camera, a request at most `frameWaitMs`. `present: false` with `why`, and frame.jpg 503
-  `{error: "camera-unavailable", reason, why}`, when it is `refused: …` (the rules below), `not plugged in: <device> is
-  gone`, `busy: <program> (pid N) has it open` (from /proc; else `busy: another program has it open`), `the camera
-  stopped giving pictures (…)` (a device that vanishes mid-stream is closed), or `the camera did not take MJPG
-  1280x720 (it gave …)` (never streamed in another mode). The next request tries again. 404 while its setting is
-  absent.
+  laptop previews can open the device when nobody views it (the first frame after a release waits for the open; the
+  last frame read is kept, and a request it serves gets it without an open). A frame is read only while a request
+  waits for one newer than the last (decoding follows the requests, not the camera's rate), timed at its read's start
+  (the picture is exposed after it), and encoded once per requested width. Device work runs on the camera's own
+  thread: nothing of the engine waits on a camera, a request at most `frameWaitMs`. `present: false` with `why`, and
+  frame.jpg 503 `{error: "camera-unavailable", reason, why}`, when it is `refused: …` (the rules below), `not plugged
+  in: <device> is gone`, `busy: <program> (pid N) has it open` (from /proc, looked up when the open's failure changes,
+  not at every poll; nobody found: `could not open (busy, or no access)`), `the camera stopped giving pictures (…)` (a
+  device that vanishes mid-stream is closed), or `the camera did not take MJPG 1280x720 (it gave …)` (never streamed
+  in another mode). The next request tries again: a camera listed busy stays so until a frame request opens it, so
+  clients keep polling frame.jpg. 404 while its setting is absent.
   - Settings (`PUT /api/config`, the engine's top-level config): `usbCameras: {machine: {device, fourcc, width,
-    height} | null, gauge: … | null, idleReleaseMs: 30000 (5000..600000), frameWaitMs: 5000 (500..30000)}`, merged one
-    level deep: `{"usbCameras":{"gauge":{…}}}` keeps the machine camera, `{"usbCameras":{"gauge":null}}` takes the
-    gauge off the list; a camera is set whole (`fourcc` defaults to `MJPG`). The machine's: machine
+    height} | null, gauge: … | null, idleReleaseMs: 30000 (5000..600000), frameWaitMs: 5000 (500..30000)}` (a file's
+    `"usbCameras": null` loads as these defaults), merged one level deep: `{"usbCameras":{"gauge":{…}}}` keeps the
+    machine camera, `{"usbCameras":{"gauge":null}}` takes the gauge off the list; a camera is set whole (`fourcc`
+    defaults to `MJPG`). The machine's: machine
     `/dev/v4l/by-id/usb-Image+_Galyimage_Live_camera_HU123456798765432-video-index0` MJPG 1920×1080, gauge
     `/dev/v4l/by-id/usb-Image+_Galyimage_Live_Camera_HU20260807-video-index0` MJPG 1280×720.
   - Rules (Infra 11-05 01:4x), checked at the write for each camera it sets or changes (400 `usbCameras.<id>: …`) and
@@ -613,11 +617,13 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
     the fixtures dir `<config dir>/instancelabs/sim-cameras/` (a relative path is taken in it; links are followed and
     must stay in it), its bytes starting FF D8, at most 20 MB. So no settings write makes the camera route serve
     another file. The repo's test stills: `src/test/resources/usbcameras/{machine,gauge}.jpg` (320×180, 256×144).
-  - Tests: `UsbCamerasTest` (12, on fake frame sources: busy naming the holder, missing, the idle release, the mode
-    asked, the first frames dropped, `after=` and its 504, a hanging open costing only the wait, one encode per frame
-    and width, a device vanishing mid-stream; the rules) and `CameraViewSimTest` (4, the SIM through `file:` stills:
-    the route, the list, `after=`, the write's 400s, the loader's refusal; top and bottom's `X-Frame-At-Ms` and
-    `after=`). No test opens a real camera: the V4L2 path (`UsbCameras.openV4l2`) is first run on the machine.
+  - Tests: `UsbCamerasTest` (16, on fake frame sources whose first 2 frames after an open are corrupt: busy naming the
+    holder, missing, the idle release (and a frame read after the idle time still served), the mode asked, the first
+    frames dropped, `after=` and its 504, the frame time, a hanging open costing only the wait, one encode per frame and
+    width, a device vanishing mid-stream; the rules, the 20 MB still, the mode check `modeRefusal`) and
+    `CameraViewSimTest` (5, the SIM through `file:` stills: the route, the list, `after=`, the write's 400s, the
+    loader's refusal, a stored `"usbCameras": null`; top and bottom's `X-Frame-At-Ms` and `after=`). No test opens a
+    real camera: the V4L2 path (`UsbCameras.openV4l2`) is first run on the machine.
   - Cost, measured (`UsbCamerasTest#measureTheCpuOfFourCamerasAtTwoFramesASecond`, run with `-Dil.measure=true`;
     11-05, 12 cores): the UI's view, 4 cameras × 2/s at `w=640`, on fake sources of the real sizes (three 1920×1080,
     one 1280×720): **17.9 % of one core** with each frame decoded from JPEG as from the camera (22 ms CPU a frame:

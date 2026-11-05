@@ -55,7 +55,7 @@ final class UsbCameras {
     static final int DROP_AFTER_OPEN = 2;
     /** Encodings kept per frame (the UI's tile width and a whole frame, typically). */
     static final int WIDTHS_KEPT = 4;
-    static final long MAX_STILL_BYTES = 20L << 20;
+    static final int MAX_STILL_BYTES = 20 << 20;
     /** One name in /dev/v4l/by-id: printable ASCII (udev escapes the rest), no slash, not "." or "..". */
     private static final Pattern BY_ID = Pattern.compile("/dev/v4l/by-id/(?!\\.\\.?$)[\\x21-\\x7e&&[^/]]+");
     private static final String FILE = "file:";
@@ -249,8 +249,11 @@ final class UsbCameras {
         }
     }
 
-    /** The JPEG a {@code file:} device names: resolved in the fixtures dir, links followed, still in it; else why. */
-    private static Path stillFile(String device, File fixtures) throws Refused {
+    /**
+     * The bytes of the JPEG a {@code file:} device names, read once (the bytes checked are the bytes served): resolved
+     * in the fixtures dir, links followed, still in it; else why.
+     */
+    private static byte[] stillFile(String device, File fixtures) throws Refused {
         Path dir, f;
         try {
             dir = fixtures.toPath().toRealPath();
@@ -262,18 +265,17 @@ final class UsbCameras {
         if (!f.startsWith(dir) || f.equals(dir) || !Files.isRegularFile(f)) {
             throw new Refused(device + ": file: devices are JPEG files in " + fixtures + " only");
         }
+        byte[] jpg;
         try (InputStream in = Files.newInputStream(f)) {
-            if (Files.size(f) > MAX_STILL_BYTES || !isJpeg(in.readNBytes(2))) {
-                throw new Refused(device + " is not a JPEG still (its bytes must start FF D8; at most 20 MB)");
-            }
-        }
-        catch (Refused e) {
-            throw e;
+            jpg = in.readNBytes(MAX_STILL_BYTES + 1);
         }
         catch (IOException e) {
             throw new Refused(device + ": " + e.getMessage());
         }
-        return f;
+        if (jpg.length > MAX_STILL_BYTES || !isJpeg(jpg)) {
+            throw new Refused(device + " is not a JPEG still (its bytes must start FF D8; at most 20 MB)");
+        }
+        return jpg;
     }
 
     private static boolean isJpeg(byte[] b) {
@@ -290,8 +292,7 @@ final class UsbCameras {
         if (why != null) {
             throw new Refused("refused: " + why);
         }
-        byte[] jpg = Files.readAllBytes(stillFile(c.device, fixtures));
-        BufferedImage img = isJpeg(jpg) ? decode(jpg) : null; // the bytes read, not only those checked
+        BufferedImage img = decode(stillFile(c.device, fixtures));
         if (img == null) {
             throw new Refused(c.device + " is not a JPEG still");
         }
@@ -338,12 +339,10 @@ final class UsbCameras {
             cap.set(Videoio.CAP_PROP_FRAME_WIDTH, c.width);
             cap.set(Videoio.CAP_PROP_FRAME_HEIGHT, c.height);
             cap.set(Videoio.CAP_PROP_BUFFERSIZE, 1);
-            int v = (int) cap.get(Videoio.CAP_PROP_FOURCC);
-            String got = new String(new char[] {(char) (v & 0xff), (char) (v >> 8 & 0xff), (char) (v >> 16 & 0xff),
-                    (char) (v >> 24 & 0xff)}) + " " + (int) cap.get(Videoio.CAP_PROP_FRAME_WIDTH) + "x"
-                    + (int) cap.get(Videoio.CAP_PROP_FRAME_HEIGHT);
-            if (!got.equals(c.mode())) {
-                throw new Refused("the camera did not take " + c.mode() + " (it gave " + got + "): not streamed");
+            String why = modeRefusal(c, (int) cap.get(Videoio.CAP_PROP_FOURCC),
+                    (int) cap.get(Videoio.CAP_PROP_FRAME_WIDTH), (int) cap.get(Videoio.CAP_PROP_FRAME_HEIGHT));
+            if (why != null) {
+                throw new Refused(why);
             }
         }
         catch (IOException | RuntimeException e) {
@@ -380,6 +379,17 @@ final class UsbCameras {
                 cap.release();
             }
         };
+    }
+
+    /**
+     * Why the mode the opened camera reports (OpenCV's fourcc code, low byte first, and size) is not the setting's,
+     * or null. A camera that refuses MJPG keeps YUYV, which overloads hub 3-1: never streamed.
+     */
+    static String modeRefusal(DispenseConfig.UsbCamera c, int fourcc, int width, int height) {
+        String got = new String(new char[] {(char) (fourcc & 0xff), (char) (fourcc >> 8 & 0xff),
+                (char) (fourcc >> 16 & 0xff), (char) (fourcc >> 24 & 0xff)}) + " " + width + "x" + height;
+        return got.equals(c.mode()) ? null
+                : "the camera did not take " + c.mode() + " (it gave " + got + "): not streamed";
     }
 
     /** "name (pid N)" of a process other than this one with the device open (from /proc/<pid>/fd), or null. */
@@ -456,11 +466,18 @@ final class UsbCameras {
         private Thread thread;
         /** The last thread started: the next one waits for it to release the device. */
         private Thread last;
+        /** Kept over an idle release: the request it was read for may wake after the release. */
         private Frame latest;
-        /** The last failure for the list (not "gone": that is read from the path), null after a frame. */
+        /**
+         * The last failure for the list (not "gone": that is read from the path), null after a frame: a camera listed
+         * busy stays so until a frame request opens it, so clients keep polling frame.jpg.
+         */
         private String lastWhy;
         private int attempts, failedAttempt;
         private String failedWhy;
+        /** The last attempt whose open failed (not gone) and its message: /proc is scanned when the failure changes. */
+        private int openFailedAttempt;
+        private String openFailure;
         private long askedAtMs, idleMs;
         /** The {@code after} of each waiting request. */
         private final List<Long> waiting = new ArrayList<>();
@@ -494,7 +511,7 @@ final class UsbCameras {
         synchronized Frame await(long after, long deadline, long idleMs) throws ApiException, InterruptedException {
             this.idleMs = idleMs;
             askedAtMs = System.currentTimeMillis();
-            if (thread == null) {
+            if (thread == null && (latest == null || latest.at <= after)) { // a frame kept over a release: no open
                 if (stopped) {
                     throw cameraUnavailable("the " + id + " camera's settings changed: ask again");
                 }
@@ -541,13 +558,13 @@ final class UsbCameras {
                     src.read();
                 }
                 while (awaitDemand(attempt)) {
-                    BufferedImage img = src.read();
-                    publish(img, System.currentTimeMillis());
+                    long at = System.currentTimeMillis(); // the read's start: its frame is exposed after it
+                    publish(src.read(), at);
                 }
             }
             catch (Throwable t) {
                 String gone = gone(cam);
-                end(attempt, gone != null ? gone : describe(t, opened), gone == null);
+                end(attempt, gone != null ? gone : describe(t, opened, attempt), gone == null);
             }
             finally {
                 if (src != null) {
@@ -562,15 +579,26 @@ final class UsbCameras {
         }
 
         /** Why the open or a read failed: the mode refused, busy (naming the holder), or no more frames. */
-        private String describe(Throwable t, boolean opened) {
+        private String describe(Throwable t, boolean opened, int attempt) {
             if (t instanceof Refused) {
                 return t.getMessage();
             }
             if (opened) {
                 return "the camera stopped giving pictures (" + (t.getMessage() != null ? t.getMessage() : t) + ")";
             }
+            String failure = String.valueOf(t.getMessage());
+            synchronized (this) {
+                boolean same = openFailedAttempt == attempt - 1 && failure.equals(openFailure);
+                openFailedAttempt = attempt;
+                openFailure = failure;
+                if (same) {
+                    // polled while busy: the holder found at the attempt before. shortcut: a program that took the
+                    // device over since keeps the old name until an open; scan on every poll if that misleads
+                    return failedWhy;
+                }
+            }
             String holder = holderOf(Paths.get(cam.device));
-            return "busy: " + (holder != null ? holder + " has it open" : "another program has it open");
+            return holder != null ? "busy: " + holder + " has it open" : "could not open (busy, or no access)";
         }
 
         /**
@@ -623,8 +651,8 @@ final class UsbCameras {
                 failedAttempt = attempt;
                 failedWhy = why;
                 lastWhy = listed ? why : null;
+                latest = null;
             }
-            latest = null;
             if (thread == Thread.currentThread()) {
                 thread = null;
             }

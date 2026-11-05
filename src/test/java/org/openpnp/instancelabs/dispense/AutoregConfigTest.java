@@ -174,6 +174,11 @@ public class AutoregConfigTest {
         assertEquals(1, c.vacuumProbe.alternates);
         assertEquals(2.5, c.vacuumProbe.startAboveMm, 0, "a partial object keeps the other defaults");
         assertNotNull(c.vacuumProbe.boardSpots);
+        // BR-102: every settings write validates usbCameras, so a null one refused them all
+        c = DispenseConfig.fromJson("{\"usbCameras\": null}");
+        assertNull(c.usbCameras.gauge, "no camera listed");
+        assertEquals(30_000, c.usbCameras.idleReleaseMs);
+        assertEquals(new ArrayList<>(), c.validate());
         // copy() round trip with every new field set
         DispenseConfig a = new DispenseConfig();
         a.homeBeforeRun = "always";

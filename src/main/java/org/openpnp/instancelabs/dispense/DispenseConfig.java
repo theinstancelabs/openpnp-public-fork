@@ -797,6 +797,9 @@ public class DispenseConfig {
         if (c.padCalibration.couponSizeMm == null) {
             c.padCalibration.couponSizeMm = new PadCalibrationSettings().couponSizeMm;
         }
+        if (c.usbCameras == null) {
+            c.usbCameras = new UsbCameraSettings();
+        }
         c.migrate();
         return c;
     }

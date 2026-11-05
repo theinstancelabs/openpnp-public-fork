@@ -33,6 +33,7 @@ import org.openpnp.model.Configuration;
 import org.openpnp.spi.Camera;
 
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -250,6 +251,19 @@ public class CameraViewSimTest {
         assertFalse(machine.get("present").getAsBoolean());
         assertTrue(why(machine).startsWith("refused: ") && why(machine).contains("simulated"), why(machine));
         refused(503, "simulated", get("/api/cameras/machine/frame.jpg"));
+    }
+
+    @Test
+    public void aSettingsFileWithUsbCamerasNullTakesTheWrite() throws Exception {
+        // edited by hand: "usbCameras": null refused every settings write (validate), and this one with a 500
+        JsonObject file = new JsonParser().parse(svc.getConfig().toJson()).getAsJsonObject();
+        file.add("usbCameras", JsonNull.INSTANCE);
+        Path f = DispenseConfig.fileFor(sim.configDir).toPath();
+        Files.createDirectories(f.getParent());
+        Files.write(f, file.toString().getBytes(StandardCharsets.UTF_8));
+        svc = DispenseService.start(Configuration.get());
+        ok(put("{\"usbCameras\":{\"gauge\":{\"device\":\"" + GAUGE_BY_ID + "\",\"width\":1280,\"height\":720}}}"));
+        assertEquals(1280, listed("gauge").get("width").getAsInt());
     }
 
     @Test

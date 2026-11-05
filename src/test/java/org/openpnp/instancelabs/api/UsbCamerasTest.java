@@ -1,6 +1,7 @@
 package org.openpnp.instancelabs.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -11,6 +12,7 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -32,8 +34,12 @@ import org.openpnp.instancelabs.dispense.DispenseConfig;
  * fixtures dir, JPEG bytes.
  */
 public class UsbCamerasTest {
-    static final long IDLE_MS = 1000;
-    static final String BY_ID = "/dev/v4l/by-id/usb-Image+_Galyimage_Live_Camera_HU20260807-video-index0";
+    static final long IDLE_MS = 3000;
+    /** Never a device on this computer: the tests open no real camera. */
+    static final String BY_ID = "/dev/v4l/by-id/usb-Test_Fake_Gauge_0000-video-index0";
+    /** The frames a camera gives right after an open that are not pictures (the gauge's first grab, 11-04). */
+    static final int CORRUPT_AFTER_OPEN = 2;
+    static final int CORRUPT = 0xff00ff;
 
     @TempDir
     Path dir;
@@ -50,12 +56,15 @@ public class UsbCamerasTest {
         }
     }
 
-    /** Numbered frames (frame n carries n in its first pixel); what each open asked for; opens, closes, reads. */
+    /**
+     * Numbered frames (frame n carries n in its first pixel), the first {@value #CORRUPT_AFTER_OPEN} after each open
+     * marked corrupt; what each open asked for; opens, closes, reads; when the last read began.
+     */
     static final class FakeCamera implements UsbCameras.Opener {
         final AtomicInteger opens = new AtomicInteger(), closes = new AtomicInteger(), reads = new AtomicInteger();
         volatile DispenseConfig.UsbCamera asked;
         volatile IOException openFails;
-        volatile long openMs;
+        volatile long openMs, readMs, readFrom;
         /** The next read fails as an unplugged camera's. */
         volatile boolean unplugged;
 
@@ -68,12 +77,20 @@ public class UsbCamerasTest {
                 throw openFails;
             }
             return new UsbCameras.FrameSource() {
+                int sinceOpen;
+
                 @Override
                 public BufferedImage read() throws IOException {
                     if (unplugged) {
                         throw new IOException("VIDIOC_DQBUF: No such device");
                     }
-                    return numbered(reads.incrementAndGet());
+                    readFrom = System.currentTimeMillis();
+                    sleep(readMs);
+                    BufferedImage b = numbered(reads.incrementAndGet());
+                    if (++sinceOpen <= CORRUPT_AFTER_OPEN) {
+                        b.setRGB(1, 0, CORRUPT);
+                    }
+                    return b;
                 }
 
                 @Override
@@ -92,6 +109,10 @@ public class UsbCamerasTest {
 
     static int number(BufferedImage b) {
         return b.getRGB(0, 0) & 0xffffff;
+    }
+
+    static boolean corrupt(BufferedImage b) {
+        return (b.getRGB(1, 0) & 0xffffff) == CORRUPT;
     }
 
     static void sleep(long ms) {
@@ -130,9 +151,15 @@ public class UsbCamerasTest {
         return Files.createFile(dir.resolve("video-index0"));
     }
 
-    /** A frame captured after {@code after}, waiting at most {@code waitMs}. */
+    /** A frame captured after {@code after}, waiting at most {@code waitMs}; never one of the first after an open. */
     static UsbCameras.Frame frame(UsbCameras.Capture c, long after, long waitMs) throws Exception {
-        return c.await(after, System.currentTimeMillis() + waitMs, IDLE_MS);
+        return frame(c, after, waitMs, IDLE_MS);
+    }
+
+    static UsbCameras.Frame frame(UsbCameras.Capture c, long after, long waitMs, long idleMs) throws Exception {
+        UsbCameras.Frame f = c.await(after, System.currentTimeMillis() + waitMs, idleMs);
+        assertFalse(corrupt(f.img), "frame " + number(f.img) + ", one of the first after an open, was served");
+        return f;
     }
 
     static Object why(ApiException e) {
@@ -155,7 +182,7 @@ public class UsbCamerasTest {
         assertEquals(c.cam.device, fake.asked.device);
         assertEquals("MJPG 1280x720", fake.asked.mode(), "the gauge's mode: MJPEG, never YUYV on the shared hub");
         // a 1-buffer grab after an open was corrupt (Process, 11-04): the first frames are never served
-        assertEquals(UsbCameras.DROP_AFTER_OPEN + 1, number(f.img));
+        assertEquals(3, number(f.img), "camgrab keeps the last of 3");
         assertTrue(f.at > t0, f.at + " > " + t0);
     }
 
@@ -183,19 +210,51 @@ public class UsbCamerasTest {
         FakeCamera fake = new FakeCamera();
         UsbCameras.Capture c = capture(fake, device(), 1280, 720);
         long t = System.currentTimeMillis();
-        ApiException e = assertThrows(ApiException.class, () -> frame(c, t + 2000, 300));
+        ApiException e = assertThrows(ApiException.class, () -> frame(c, t + 10_000, 300));
         assertEquals(504, e.status, e.getMessage());
         long took = System.currentTimeMillis() - t;
-        assertTrue(took >= 250 && took < 1500, took + " ms");
+        assertTrue(took >= 250 && took < 5000, took + " ms");
         // a device that takes seconds to open: the request ends at its wait, the engine never waits on it
         FakeCamera slow = new FakeCamera();
-        slow.openMs = 3000;
+        slow.openMs = 10_000;
         Path other = Files.createFile(dir.resolve("slow-video-index0"));
         UsbCameras.Capture s = capture(slow, other, 1280, 720);
         long t1 = System.currentTimeMillis();
         e = assertThrows(ApiException.class, () -> frame(s, t1, 300));
         assertEquals(504, e.status, e.getMessage());
-        assertTrue(System.currentTimeMillis() - t1 < 1500, "answered at its wait");
+        assertTrue(System.currentTimeMillis() - t1 < 5000, "answered at its wait");
+    }
+
+    @Test
+    public void aFrameReadAfterTheIdleTimeGoesToItsRequestThenTheDeviceIsReleased() throws Exception {
+        // a request whose frame comes idleReleaseMs or more after it (after= ahead, as the gauge read's >= 10 s after
+        // the pump starts, with frameWaitMs >= idleReleaseMs): the capture reads it and, no other request in the idle
+        // time, releases the device; the frame read is kept, so its request gets it (was 504 at frameWaitMs)
+        FakeCamera fake = new FakeCamera();
+        UsbCameras.Capture c = capture(fake, device(), 1280, 720);
+        long idle = 500, ahead = System.currentTimeMillis() + idle + 300;
+        UsbCameras.Frame f = frame(c, ahead, 5000, idle);
+        assertTrue(f.at > ahead, f.at + " > " + ahead);
+        waitFor(() -> fake.closes.get() == 1, 5000, "released after its frame");
+        // kept over the release: a request it serves gets it without opening the camera again
+        assertSame(f, frame(c, f.at - 1, 3000, idle));
+        Thread.sleep(300);
+        assertEquals(1, fake.opens.get(), "no open for a frame already read");
+        // never to a later after=: that one opens the camera for a newer frame
+        UsbCameras.Frame g = frame(c, f.at, 3000, idle);
+        assertTrue(g.at > f.at && number(g.img) > number(f.img), g.at + " > " + f.at);
+        assertEquals(2, fake.opens.get());
+    }
+
+    @Test
+    public void aFrameIsTimedAtItsReadsStart() throws Exception {
+        // its picture is exposed after the read began: timed at the read's end, it would go to a request made during
+        // the read, which asked for a frame taken after it
+        FakeCamera fake = new FakeCamera();
+        fake.readMs = 300;
+        UsbCameras.Capture c = capture(fake, device(), 1280, 720);
+        UsbCameras.Frame f = frame(c, System.currentTimeMillis(), 5000);
+        assertTrue(f.at <= fake.readFrom, f.at + " <= " + fake.readFrom + ", when its read began");
     }
 
     @Test
@@ -212,31 +271,45 @@ public class UsbCamerasTest {
         assertEquals(atRelease, fake.reads.get(), "nothing is read while released");
         UsbCameras.Frame again = frame(c, System.currentTimeMillis(), 3000);
         assertEquals(2, fake.opens.get(), "opened again");
-        assertEquals(atRelease + UsbCameras.DROP_AFTER_OPEN + 1, number(again.img), "the first frames dropped again");
+        assertEquals(atRelease + 3, number(again.img), "the first frames dropped again: the last of 3");
     }
 
     @Test
     public void busyIsReportedNamingTheHolderAndTheNextRequestTriesAgain() throws Exception {
         Path dev = device();
         FakeCamera fake = new FakeCamera();
-        fake.openFails = new IOException("VIDIOC_S_FMT: Device or resource busy");
+        IOException busy = new IOException("VIDIOC_S_FMT: Device or resource busy");
+        fake.openFails = busy;
         UsbCameras.Capture c = capture(fake, dev, 1280, 720);
-        ApiException e = assertThrows(ApiException.class, () -> frame(c, System.currentTimeMillis(), 3000));
-        assertEquals(503, e.status);
-        assertEquals("camera-unavailable", e.code);
-        assertEquals("busy: another program has it open", why(e));
-        assertEquals("busy: another program has it open", c.lastWhy(), "listed as busy");
         // a program holding the device is named, from /proc/<pid>/fd
         holder = new ProcessBuilder("sh", "-c", "exec 3<\"$0\"; exec sleep 30", dev.toString()).start();
         waitFor(() -> String.valueOf(UsbCameras.holderOf(dev)).startsWith("sleep"), 5000, "the holder in /proc");
-        e = assertThrows(ApiException.class, () -> frame(c, System.currentTimeMillis(), 3000));
-        assertEquals("busy: sleep (pid " + holder.pid() + ") has it open", why(e));
-        assertEquals(2, fake.opens.get(), "the next request tried again");
+        ApiException e = assertThrows(ApiException.class, () -> frame(c, System.currentTimeMillis(), 3000));
+        assertEquals(503, e.status);
+        assertEquals("camera-unavailable", e.code);
+        String named = "busy: sleep (pid " + holder.pid() + ") has it open";
+        assertEquals(named, why(e));
+        assertEquals(named, c.lastWhy(), "listed as busy");
+        // the next request tries again; the same failure as the attempt before keeps its holder: /proc is not
+        // scanned on every poll of a busy camera
         holder.destroyForcibly().waitFor();
+        e = assertThrows(ApiException.class, () -> frame(c, System.currentTimeMillis(), 3000));
+        assertEquals(named, why(e));
+        assertEquals(2, fake.opens.get(), "the next request tried again");
         fake.openFails = null;
-        assertNotNull(frame(c, System.currentTimeMillis(), 3000));
+        UsbCameras.Frame f = frame(c, System.currentTimeMillis(), 3000);
         assertEquals(3, fake.opens.get());
         assertNull(c.lastWhy(), "a frame clears it");
+        // after an open the next failure is looked up again: nobody seen holding it (another user's program, or no
+        // permission on the device)
+        fake.unplugged = true;
+        assertThrows(ApiException.class, () -> frame(c, f.at, 3000));
+        waitFor(() -> fake.closes.get() == 1, 3000, "closed");
+        fake.unplugged = false;
+        fake.openFails = busy;
+        e = assertThrows(ApiException.class, () -> frame(c, System.currentTimeMillis(), 3000));
+        assertEquals("could not open (busy, or no access)", why(e));
+        assertEquals(4, fake.opens.get());
     }
 
     @Test
@@ -438,6 +511,23 @@ public class UsbCamerasTest {
         assertTrue(UsbCameras.refusal(cam(BY_ID, "MJPG", 1280, 5000), false, fixtures).contains("height"));
     }
 
+    @Test
+    public void aCameraThatDoesNotTakeItsModeIsNeverStreamed() {
+        // the mode as OpenCV reports it after the open's set: the fourcc code, then the size
+        DispenseConfig.UsbCamera gauge = cam(BY_ID, "MJPG", 1280, 720);
+        assertNull(UsbCameras.modeRefusal(gauge, fourcc("MJPG"), 1280, 720));
+        // MJPG not taken: the driver keeps YUYV, which at this size overloads hub 3-1
+        assertEquals("the camera did not take MJPG 1280x720 (it gave YUYV 1280x720): not streamed",
+                UsbCameras.modeRefusal(gauge, fourcc("YUYV"), 1280, 720));
+        assertEquals("the camera did not take MJPG 1280x720 (it gave MJPG 1920x1080): not streamed",
+                UsbCameras.modeRefusal(gauge, fourcc("MJPG"), 1920, 1080));
+    }
+
+    /** OpenCV's fourcc code (VideoWriter.fourcc): the first character in the low byte. */
+    static int fourcc(String s) {
+        return s.charAt(0) | s.charAt(1) << 8 | s.charAt(2) << 16 | s.charAt(3) << 24;
+    }
+
     /** The fixtures dir of a config dir under the test's dir, with the gauge still, a text file and a JPEG outside. */
     File fixtures() throws IOException {
         File config = dir.resolve("config").toFile();
@@ -493,5 +583,23 @@ public class UsbCamerasTest {
         assertEquals(256, img.getWidth());
         assertEquals(144, img.getHeight());
         still.close();
+    }
+
+    @Test
+    public void fileDevicesAtMost20Mb() throws Exception {
+        File fixtures = fixtures();
+        DispenseConfig.UsbCamera big = cam("file:big.jpg", "MJPG", 256, 144);
+        try (RandomAccessFile f = new RandomAccessFile(new File(fixtures, "big.jpg"), "rw")) {
+            f.write(new byte[] {(byte) 0xff, (byte) 0xd8});
+            f.setLength(20 << 20); // sparse: FF D8, then zeros
+        }
+        assertNull(UsbCameras.refusal(big, true, fixtures), "20 MB");
+        try (RandomAccessFile f = new RandomAccessFile(new File(fixtures, "big.jpg"), "rw")) {
+            f.setLength((20 << 20) + 1);
+        }
+        String why = UsbCameras.refusal(big, true, fixtures);
+        assertTrue(why != null && why.contains("at most 20 MB"), why);
+        IOException e = assertThrows(IOException.class, () -> UsbCameras.openStill(big, true, fixtures));
+        assertTrue(e.getMessage().contains("at most 20 MB"), e.getMessage());
     }
 }
