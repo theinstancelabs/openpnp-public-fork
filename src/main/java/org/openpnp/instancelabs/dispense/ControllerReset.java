@@ -185,9 +185,11 @@ public final class ControllerReset {
      */
     private Double levelRefZ;
     /**
-     * A reference a lost link kept whose LEVEL_REF the journal thread could not write: written again before it counts.
+     * The LEVEL_REF row of the reference held that the journal does not have yet (a lost link's, queued or missed; a
+     * levelling call's, being written), or null: on record. Matched as itself, never by the Z its text keeps: a
+     * levelling call writes the reference again before it counts.
      */
-    private Double levelRefUnrecordedZ;
+    private Event levelRefRow;
     /** BR-93: the last lost link put on record (the driver's time of it), or null. */
     private Long linkLostAtMs;
     /** The changes made and not written yet (under this lock), in their order. */
@@ -425,7 +427,9 @@ public final class ControllerReset {
         record(EVENT_UNREAD, atMs, unknownWhy);
         if (ref != null) {
             // after its UNREAD row, which ends a reference read back: a restart keeps this one too
-            record(EVENT_LEVEL_REF, atMs, levelRefText(ref, "kept at the lost link: the reconnect decides"));
+            levelRefRow = new Event(EVENT_LEVEL_REF, atMs, levelRefText(ref, "kept at the lost link: the reconnect "
+                    + "decides"));
+            toWrite.add(levelRefRow);
         }
         Event off = new Event(EVENT_MOTOR_OFF, atMs, offText(atMs, "the link to the controller was lost: a reset "
                 + "switches it off"));
@@ -642,24 +646,37 @@ public final class ControllerReset {
                 if (toWrite.isEmpty()) {
                     return;
                 }
-                l = new ArrayList<>(toWrite);
-                toWrite.clear();
+                l = drained();
             }
-            if (journal != null) {
-                for (Event e : l) {
-                    try {
-                        journal.accept(e);
-                    }
-                    catch (IllegalStateException failed) {
-                        // a lost link's LEVEL_REF (the journal logged it): no call to refuse here; the next rows go on,
-                        // and the next levelling call writes the reference again before it counts
-                        if (EVENT_LEVEL_REF.equals(e.code)) {
-                            synchronized (this) {
-                                levelRefUnrecordedZ = parseLevelRef(e.message);
-                            }
+            write(l);
+        }
+    }
+
+    /** The changes not written yet, in their order (under this lock): the caller writes them under the write lock. */
+    private List<Event> drained() {
+        List<Event> l = new ArrayList<>(toWrite);
+        toWrite.clear();
+        return l;
+    }
+
+    /** Writes drained changes in their order (under the write lock). */
+    private void write(List<Event> l) {
+        for (Event e : l) {
+            try {
+                if (journal != null) {
+                    journal.accept(e);
+                }
+                if (EVENT_LEVEL_REF.equals(e.code)) {
+                    synchronized (this) {
+                        if (levelRefRow == e) {
+                            levelRefRow = null; // on record
                         }
                     }
                 }
+            }
+            catch (IllegalStateException failed) {
+                // a lost link's LEVEL_REF (the journal logged it): no call to refuse here; the next rows go on, and the
+                // next levelling call writes the reference again before it counts
             }
         }
     }
@@ -738,42 +755,52 @@ public final class ControllerReset {
      * position became unknown. Marlin's boot Z 0 after a detected reset; else {@code zNow}, taken at the first levelling
      * call since a possible reset, a home's start or a home (a lost link keeps it: the reconnect decides). One taken is
      * on record before it counts: when the journal throws, this throws (the call must send nothing) and none is taken.
+     * The reference and its row are one step in the journal's order: the call holds the journal's writer from its check
+     * to its row, after the rows of the changes made before it, so a reset or a home meanwhile goes on record after it.
      */
     public double levelReference(double zNow) {
-        Event e;
-        double ref;
-        boolean kept;
-        synchronized (this) {
-            if (levelRefZ != null && !levelRefZ.equals(levelRefUnrecordedZ)) {
-                return levelRefZ;
-            }
-            long now = clock.getAsLong();
-            kept = levelRefZ != null; // a lost link kept it, but its row missed the journal
-            if (!kept) {
-                levelRefZ = zNow; // at once: a link lost meanwhile keeps it on record too
-            }
-            ref = levelRefZ;
-            e = new Event(EVENT_LEVEL_REF, now, levelRefText(ref, kept ? "kept at a lost link, on record again at "
-                    + ZCheck.clock(now) : "taken at " + ZCheck.clock(now) + " by the first levelling call since a "
-                    + "possible reset, a home's start or a home"));
-        }
-        try {
-            writeNow(e);
-        }
-        catch (RuntimeException failed) {
+        long now = clock.getAsLong();
+        synchronized (writeLock) {
+            Event e;
+            double ref;
+            boolean kept;
+            List<Event> before;
             synchronized (this) {
-                if (!kept && levelRefZ != null && levelRefZ == ref) {
-                    levelRefZ = null; // not on record: the next call takes it again
+                if (levelRefZ != null && levelRefRow == null) {
+                    return levelRefZ;
+                }
+                kept = levelRefZ != null; // a lost link kept it, but its row is not on record
+                if (!kept) {
+                    levelRefZ = zNow; // at once: a link lost meanwhile keeps it on record too
+                }
+                ref = levelRefZ;
+                e = new Event(EVENT_LEVEL_REF, now, levelRefText(ref, kept ? "kept at a lost link, on record again at "
+                        + ZCheck.clock(now) : "taken at " + ZCheck.clock(now) + " by the first levelling call since a "
+                        + "possible reset, a home's start or a home"));
+                levelRefRow = e;
+                before = drained();
+            }
+            write(before);
+            try {
+                if (journal != null) {
+                    journal.accept(e);
                 }
             }
-            throw failed;
-        }
-        synchronized (this) {
-            if (kept && Double.valueOf(ref).equals(levelRefUnrecordedZ)) {
-                levelRefUnrecordedZ = null;
+            catch (RuntimeException failed) {
+                synchronized (this) {
+                    if (!kept && levelRefRow == e) {
+                        levelRefZ = null; // not on record, and nothing changed it since: the next call takes it again
+                    }
+                }
+                throw failed;
             }
+            synchronized (this) {
+                if (levelRefRow == e) {
+                    levelRefRow = null; // on record
+                }
+            }
+            return ref;
         }
-        return ref;
     }
 
     /** "levelling reference Z 31.5000 (why)": the replay reads the Z back ({@link #parseLevelRef}). */
@@ -791,14 +818,17 @@ public final class ControllerReset {
      * BR-97: a home starts (its G28 next): its G28 may move the controller's frame even if the home ends unhomed, so the
      * next levelling takes its reference afresh, also after a restart (journaled). Its row is written here, before the
      * G28: when the journal throws, this throws and the home must not start (unrecorded, a restart would bring back the
-     * reset's boot Z), and the reference stays.
+     * reset's boot Z), and the reference stays. The row and the reference's end are one step for a levelling call
+     * ({@link #levelReference} waits for the journal's writer).
      */
     public void homeStarted() {
         long now = clock.getAsLong();
-        writeNow(new Event(EVENT_HOME_STARTED, now, "a home started at " + ZCheck.clock(now) + ": its G28 may move "
-                + "the controller's Z frame, so the see-saw's levelling takes its reference afresh"));
-        synchronized (this) {
-            levelRefZ = null;
+        synchronized (writeLock) {
+            writeNow(new Event(EVENT_HOME_STARTED, now, "a home started at " + ZCheck.clock(now) + ": its G28 may "
+                    + "move the controller's Z frame, so the see-saw's levelling takes its reference afresh"));
+            synchronized (this) {
+                levelRefZ = null;
+            }
         }
     }
 
@@ -901,6 +931,7 @@ public final class ControllerReset {
         unknownWhy = why;
         countEpochMs = later(countEpochMs, atMs);
         levelRefZ = null; // BR-97: maybe a new frame (a detected reset then sets its boot Z)
+        levelRefRow = null; // a missed row ends with it: the boot Z set next is on record by the reset's own row
     }
 
     /** A change to journal: written after the lock is released, after the changes made before it. */
