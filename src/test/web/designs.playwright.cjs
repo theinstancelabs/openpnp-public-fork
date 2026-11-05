@@ -15,7 +15,9 @@
  * pad calibration of the groups to calibrate (its own Start: nothing pressed); a doses row is done only when no dose is
  * missing (a group that waits for the tip's dots or a by-hand dose says so; stubbed: a fresh SIM tip is measured); a
  * refusal stays with its design; a file dropped on the open dialog keeps Designs' Save, even over another page; the menu
- * line follows a design saved in Run's Board step in this tab; (6) a ready design: Make a board opens Run › Start with it chosen; (7) nothing moves (only
+ * line follows a design saved in Run's Board step in this tab; (6) a ready design: Make a board opens Run › Start with it chosen;
+ * a failed read of the list keeps the cards Start and Designs have and says so in one wording everywhere (no "look at the
+ * machine" after a read), and with no list left Start and Designs say so with Try again, Start not reading again by itself; (7) nothing moves (only
  * uploads, the apply and the test's own set-up writes are sent), no JavaScript errors, no native dialogs. Designs are
  * routed by their board file's path: names repeat, and every board saved from one KiCad file shows the same upload.
  * Self-contained: it marks chip-0603 characterized (SIM only, as the sim acceptance and pad-profile do), uploads its own
@@ -525,6 +527,9 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       chosen: ((document.querySelector('#rs-designs .design[aria-pressed="true"]') || {}).dataset || {}).board || null, start: (document.getElementById('rs-start-why') || {}).textContent || null })));
     ST.okTipFile = null;
 
+    // one wording for a failed read of the list (#48's re-checks): kept cards, or none
+    const KEPT = 'These are the designs from before. Could not read them again: ', NONE = 'Could not read the designs: ';
+    const noAdvice = (t) => !!t && !/outcome unknown|look at the machine/i.test(t);   // a read changes nothing on the machine
     // ---- (6c) Run reads the list again on every entry: a read that fails then keeps the cards Start has (no error box
     // instead of them; the re-check of (6b)'s fix)
     await page.evaluate(() => IL.go('#machine'));
@@ -538,7 +543,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       note: ((document.querySelector('#rs-designs .rf-note') || {}).textContent || ''), first: !!document.querySelector('#rs-designs > .rf-note:first-child') })))));
     check('(6c) a failed read of the list on entering Run: Start keeps its design cards, no error box instead', !!c6.err && c6.cards > 0 && !c6.box, c6);
     check('(6c) and says above them that the list could not be read again, then the reason (the re-checks\' MINORs)', c6.first
-      && /^Could not read the designs again, so these are the ones from before\. /.test(c6.note) && c6.note.endsWith(c6.err || '\u0000'), c6);
+      && c6.note === KEPT + c6.err, c6);
     await page.unroute('**/api/boards', fail6);
     // the next good read takes the note away (a note shown always, or never cleared, fails here)
     await page.evaluate(() => IL.go('#machine'));
@@ -547,6 +552,68 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     const c6d = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
       cards: document.querySelectorAll('#rs-designs .design[data-board]').length, note: !!document.querySelector('#rs-designs .rf-note') })))));
     check('(6c) the next good read: the cards without the note', !c6d.err && c6d.cards > 0 && !c6d.note, c6d);
+
+    // ---- (6d) a read with no answer at all (status 0) keeps every list it had and says so in the same words: Start, Run's
+    // Board step and Designs (whose error box once replaced its cards)
+    const lost = (route) => (route.request().method() === 'GET' ? route.abort('failed') : route.fallback());
+    await page.evaluate(() => IL.go('#machine'));
+    await page.route('**/api/boards', lost);
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+    const d6 = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
+      cards: document.querySelectorAll('#rs-designs .design[data-board]').length, note: ((document.querySelector('#rs-designs .rf-note') || {}).textContent || '') })))));
+    check('(6d) no answer: Start keeps its cards under "' + KEPT + '<reason>", and no "look at the machine"', d6.cards > 0 && d6.note === KEPT + d6.err && noAdvice(d6.note), d6);
+    await page.evaluate(() => IL.go('#run/board'));
+    const hint6 = await page.waitForFunction(() => { const h = document.getElementById('board-hint'); return h && !h.closest('[hidden]') && IL.run.boardsErr ? h.textContent : null; },
+      null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+    check('(6d) and Run\'s Board step says the same', hint6 === KEPT + d6.err, { hint6, err: d6.err });
+    await page.evaluate(() => IL.go('#designs'));
+    const des6 = await page.waitForFunction(() => { const n = document.querySelector('#designs-list .designs-note, #designs-list .notebox--block');
+      return n ? { note: n.textContent, box: n.classList.contains('notebox--block'), first: n === document.getElementById('designs-list').firstElementChild,
+        cards: document.querySelectorAll('#designs-list a.design').length } : null; }, null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
+    check('(6d) and Designs keeps its cards under the same words, first (no error box instead of them)', !!des6 && !des6.box && des6.first && des6.cards > 0
+      && des6.note === KEPT + d6.err, des6);
+    await page.unroute('**/api/boards', lost);
+    await page.evaluate(() => IL.go('#machine'));
+    await page.evaluate(() => IL.go('#designs'));
+    const des6b = await page.waitForFunction(() => !document.querySelector('#designs-list .designs-note, #designs-list .notebox--block')
+      && document.querySelectorAll('#designs-list a.design').length > 0, null, { timeout: 15000 }).then(() => true, () => false);
+    check('(6d) the next good read on Designs: its cards without the note', des6b, null);
+
+    // ---- (6e) a tab whose first read of the list gets no answer: Start and Designs say "Could not read the designs:
+    // <reason>" with Try again; Start does not read again on every render meanwhile (it once looped on a failing read)
+    const tab = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    tab.on('pageerror', (e) => jsErrors.push('tab 2: ' + String(e)));
+    tab.on('dialog', (d) => { dialogs.push(d.type() + ': ' + d.message()); d.dismiss().catch(() => {}); });
+    let failing = true, reads6 = 0;
+    await tab.route('**/api/boards', (route) => { if (route.request().method() !== 'GET') return route.fallback(); reads6++; return failing ? route.abort('failed') : route.fallback(); });
+    const boxOf = (sel) => tab.waitForFunction((q) => { const b = document.querySelector(q); return b && !b.closest('[hidden]')
+      ? { text: (b.querySelector(':scope > span') || b).textContent, retry: !!b.querySelector('button.list-retry'), err: (window.IL && IL.run && IL.run.boardsErr) || null } : null; }, sel, { timeout: 20000 })
+      .then((h) => h.jsonValue(), () => null);
+    await tab.goto(BASE + '#run');
+    const e6 = await boxOf('#rs-designs .notebox--block');
+    check('(6e) a first read with no answer: Start says "' + NONE + '<reason>", no "look at the machine", and offers Try again', !!e6 && !!e6.err
+      && e6.text === NONE + e6.err && noAdvice(e6.text) && e6.retry, e6);
+    const before6 = reads6;
+    await tab.waitForTimeout(2000);
+    check('(6e) and Start reads the list no more by itself (no read on every render)', reads6 - before6 <= 1, { before: before6, after: reads6 });
+    await tab.evaluate(() => IL.go('#designs'));
+    const e6d = await boxOf('#designs-list .notebox--block');
+    check('(6e) Designs says the same, with Try again', !!e6d && !!e6 && e6d.text === NONE + e6.err && e6d.retry, { e6d, err: e6 && e6.err });
+    failing = false;
+    if (e6d && e6d.retry) await tab.click('#designs-list .notebox--block button.list-retry');
+    const ok6d = await tab.waitForFunction(() => !document.querySelector('#designs-list .notebox--block') && document.querySelectorAll('#designs-list a.design').length > 0,
+      null, { timeout: 15000 }).then(() => true, () => false);
+    check('(6e) Designs\' Try again reads the list: its cards', ok6d, null);
+    failing = true;
+    await tab.evaluate(() => IL.go('#run'));
+    const e6r = await boxOf('#rs-designs .notebox--block');
+    failing = false;
+    if (e6r && e6r.retry) await tab.click('#rs-designs .notebox--block button.list-retry');
+    const ok6r = await tab.waitForFunction(() => !document.querySelector('#rs-designs .notebox--block') && document.querySelectorAll('#rs-designs .design[data-board]').length > 0,
+      null, { timeout: 15000 }).then(() => true, () => false);
+    check('(6e) Start\'s Try again reads the list: its cards', !!e6r && e6r.retry && ok6r, { e6r, ok6r });
+    await tab.close();
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------
     const allowed = ['POST /api/boards/import', 'POST /api/boards/import/save', 'POST /api/boards/import/attach', 'POST /api/pad-profile/apply', 'POST /api/package-mappings',

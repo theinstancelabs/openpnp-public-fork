@@ -63,6 +63,7 @@
 
 /* Designs (designflow.js; mockups `design-upload`, `design-setup`): a card per design, Set up's checklist and picture */
 .designs { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.designs > p { grid-column: 1 / -1; margin: 0; }
 .design { display: flex; flex-direction: column; gap: 4px; padding: 12px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--surface); }
 .design__t { font: 700 15px/1.25 var(--font-ui); }
 .design__s { font-size: 13px; color: var(--ink-2); }

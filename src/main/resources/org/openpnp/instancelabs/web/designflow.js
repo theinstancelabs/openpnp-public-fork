@@ -30,7 +30,7 @@
   function load() {
     if (D.loading) return D.loading;
     D.loading = (async () => {
-      try { D.boards = await IL.api('GET', '/api/boards'); D.err = null; } catch (e) { D.err = e.message || String(e); return; }
+      try { D.boards = await IL.api('GET', '/api/boards'); D.err = null; } catch (e) { D.err = IL.readErrorText(e); return; }
       await Promise.all(files().map((f) => readCheck(f.file)));
     })().finally(() => { D.loading = null; IL.render(); });
     return D.loading;
@@ -98,15 +98,17 @@
     const list = files();
     const key = [!!D.boards, D.err, list.map((f) => [f.name, f.file, stateOf(f).text, !!D.thumbs.get((f.art && f.art.id) + '|300')])];
     IL.keyed(n.list, JSON.stringify(key), () => {
-      if (D.err) return el('p', { class: 'notebox notebox--block', text: 'The designs could not be read: ' + D.err });
+      if (D.err && !D.boards) return el('p', { class: 'notebox notebox--block' }, el('span', { text: IL.listReadError(D.err) }), ' ', IL.retryButton(reload));
       if (!D.boards) return el('p', { class: 'muted', text: 'Reading the designs…' });
-      if (!list.length) return el('p', { class: 'notebox', text: 'No designs yet: upload one.' });
-      return list.map((f) => {
+      // a read again that fails keeps the cards it has, under a note (the next visit reads them again)
+      const note = D.err ? [el('p', { class: 'reason reason--need designs-note', text: IL.listReadError(D.err, true) })] : [];
+      if (!list.length) return note.concat(el('p', { class: 'notebox', text: 'No designs yet: upload one.' }));
+      return note.concat(list.map((f) => {
         const st = stateOf(f);
         return el('a', { class: 'design', href: routeOf(f), 'data-name': f.name, 'data-file': f.file, 'data-state': st.state, 'data-art': f.art && f.art.id ? f.art.id : null },
           pic(f, 300, 120), el('span', { class: 'design__t', text: title(f) }),
           el('span', { class: 'design__s' }, IL.glyph(GLYPH[st.state], 'xs'), el('span', { class: 'design__st', text: st.text })));
-      });
+      }));
     });
     IL.setText(n.count, D.boards ? IL.plural(list.length, 'design') : '');
   }
@@ -189,7 +191,7 @@
     const f = byKey(D.sel);
     IL.setText(n.name, f ? title(f) : '');
     const im = f && f.imported;
-    IL.keyed(n.meta, JSON.stringify([!!D.boards, D.err, f && f.file, im && im.atMs]), () => (!f ? el('span', { text: D.err ? 'The designs could not be read: ' + D.err
+    IL.keyed(n.meta, JSON.stringify([!!D.boards, D.err, f && f.file, im && im.atMs]), () => (!f ? el('span', { text: D.err ? IL.listReadError(D.err)
       : D.boards ? 'No such design: pick one in Designs.' : 'Reading the design…' })
       : [el('span', { text: im && im.atMs ? 'Uploaded ' + IL.fmtDateTime(IL.toClient(im.atMs)) + (im.sourceName ? ' from ' + im.sourceName : '') : 'Board file ' + String(f.file).split('/').pop() }),
         el('span', { text: 'top side' })]));
@@ -307,7 +309,7 @@
     const ready = !!st && st.state === 'ready';
     const tipRefs = [...new Set(g.tip.flatMap((x) => x.refs || []))];
     IL.setText(n.pTitle, !D.sel ? 'Designs' : ready ? 'Ready' : 'Set up the rest');
-    IL.setText(n.pLead, !D.sel ? 'Pick a design to see what it still needs.' : !st || !st.g ? st ? st.text : D.err ? 'The designs could not be read.' : 'Reading the design…'
+    IL.setText(n.pLead, !D.sel ? 'Pick a design to see what it still needs.' : !st || !st.g ? st ? st.text : D.err ? 'Could not read the designs.' : 'Reading the design…'
       : ready ? 'Every pad on the top has a dose. The steps not built yet are done by hand or later.'
         : 'This design waits on ' + [g.fix.length ? IL.plural(g.fix.length, 'pad group') : null, tipRefs.length ? 'another tip for ' + IL.boardImport.refList(tipRefs, 3) : null].filter(Boolean).join(' and ') + '.');
     const left = !st || !st.g || ready ? [] : [

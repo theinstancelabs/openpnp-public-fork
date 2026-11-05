@@ -1190,7 +1190,7 @@
     R.boardsLoading = true;
     R.boardsErr = null;
     IL.render();
-    try { R.boards = await IL.api('GET', '/api/boards'); } catch (e) { R.boardsErr = IL.errorText(e); }
+    try { R.boards = await IL.api('GET', '/api/boards'); } catch (e) { R.boardsErr = IL.readErrorText(e); }
     R.boardsLoading = false;
     syncSelect(true);
     IL.render();
@@ -1396,7 +1396,7 @@
       if (!i) continue;
       if (i.readOnly !== !!job) i.readOnly = !!job;
     }
-    const hint = R.boardsErr ? 'Could not list the boards: ' + R.boardsErr
+    const hint = R.boardsErr ? IL.listReadError(R.boardsErr, !!R.boards)
       : job ? 'Position from the OpenPnP job. Register board checks the fiducials again with the top camera.'
         : c ? 'Enter roughly where the board origin (its 0,0 corner) sits. After planning, Register board finds the fiducials with the top camera and probes this seat.' : 'Choose the board to dispense.';
     IL.setText($('board-hint'), hint);
@@ -3067,7 +3067,7 @@
     if (FLOW_VIEWS.includes(step)) { IL.runFlow.panel(parts, s, true, step); return; }
     renderSteps(parts.top, s, step);
     if (step === 'board') {
-      if (!R.boards && !R.boardsLoading) loadBoards();
+      if (!R.boards && !R.boardsLoading && !R.boardsErr) loadBoards();   // after a failed read: its refresh button
       parts.body.append(buildBoard(plan()));
       parts.foot.append(buildBoardFoot());
       syncSelect(true);

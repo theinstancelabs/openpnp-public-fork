@@ -251,7 +251,7 @@
   }
   function renderStart(s) {
     const n = F.n;
-    if (!R.boards && !R.boardsLoading) R.flow.loadBoards();
+    if (!R.boards && !R.boardsLoading && !R.boardsErr) R.flow.loadBoards();   // a failed read waits for Try again (it once read on every render)
     const e = chosen(), p = planOf(e);
     IL.setText(n.title, e ? e.name : 'Choose a design');
     const last = s && s.lastRun && e && p && s.lastRun.boardName === p.boardName && s.lastRun.endedAtMs ? 'last pasted ' + IL.fmtDateTime(IL.toClient(s.lastRun.endedAtMs)) : null;
@@ -260,8 +260,8 @@
     const list = entries();
     IL.keyed(n.designs, JSON.stringify([list.map((x) => [x.key, x.name, x.x.art && x.x.art.id]), R.form.sel, !!p, [...F.thumbs.keys()].length, R.boardsErr, !R.boards]), () => {
       // a read again on entering Run that fails keeps the list it has (the next entry reads it again)
-      if (R.boardsErr && !R.boards) return el('p', { class: 'notebox notebox--block', text: 'The boards could not be read: ' + R.boardsErr });
-      if (!R.boards) return el('p', { class: 'muted', text: 'Reading the boards…' });
+      if (R.boardsErr && !R.boards) return el('p', { class: 'notebox notebox--block' }, el('span', { text: IL.listReadError(R.boardsErr) }), ' ', IL.retryButton(() => R.flow.loadBoards()));
+      if (!R.boards) return el('p', { class: 'muted', text: 'Reading the designs…' });
       const cards = list.map((x) => {
         const on = x.key === R.form.sel;
         const b = el('button', { type: 'button', class: 'design', 'data-board': x.key, 'data-focus-key': 'design:' + x.key, 'aria-pressed': on ? 'true' : 'false', title: x.x.file || x.name },
@@ -271,7 +271,7 @@
         b.addEventListener('click', () => choose(x, b));
         return b;
       });
-      const note = R.boardsErr ? [el('p', { class: 'reason reason--need rf-note', text: 'Could not read the designs again, so these are the ones from before. ' + R.boardsErr })] : [];
+      const note = R.boardsErr ? [el('p', { class: 'reason reason--need rf-note', text: IL.listReadError(R.boardsErr, true) })] : [];
       return note.concat(cards, el('a', { class: 'design design--new', id: 'rs-new-design', href: '#designs' }, IL.icon('i-plus'), 'New design'));
     });
     // Load side 1
