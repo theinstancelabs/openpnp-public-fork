@@ -524,10 +524,21 @@
   };
   /** A failed read of the designs list, in the same words everywhere: over the designs read before (kept), or none. */
   IL.listReadError = (reason, kept) => (kept ? 'These are the designs from before. Could not read them again: ' : 'Could not read the designs: ') + reason;
-  /** Retry under a failed read of a list (as Records' and Setup's): reads it again, nothing else. */
+  /**
+   * Retry under a failed read of a list (as Records' and Setup's): reads it again, nothing else. The page swaps the box
+   * for "Reading…" meanwhile, so a pressed Retry hands its focus to the Retry shown after the read (keyboard users).
+   */
   IL.retryButton = function (read, key) {
-    const b = el('button', { type: 'button', class: 'btn btn--sm list-retry', 'data-focus-key': 'retry:' + key }, IL.icon('i-refresh'), 'Retry');
-    b.addEventListener('click', () => read());
+    const fk = 'retry:' + key;
+    const b = el('button', { type: 'button', class: 'btn btn--sm list-retry', 'data-focus-key': fk }, IL.icon('i-refresh'), 'Retry');
+    b.addEventListener('click', async () => {
+      const had = document.activeElement === b;
+      await read();
+      if (had) requestAnimationFrame(() => requestAnimationFrame(() => {
+        const n = document.querySelector('[data-focus-key="' + fk + '"]');
+        if (n && !n.closest('[hidden]')) n.focus({ preventScroll: true });
+      }));
+    });
     return b;
   };
 

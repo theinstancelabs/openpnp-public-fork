@@ -17,7 +17,8 @@
  * refusal stays with its design; a file dropped on the open dialog keeps Designs' Save, even over another page; the menu
  * line follows a design saved in Run's Board step in this tab; (6) a ready design: Make a board opens Run › Start with it chosen;
  * a failed read of the list keeps the cards Start and Designs have and says so in one wording everywhere (no "look at the
- * machine" after a read), and with no list left Start and Designs say so with Try again, Start not reading again by itself; (7) nothing moves (only
+ * machine" after a read), with Retry on Start, Designs and Set up (a Retry pressed from the keyboard keeps the focus);
+ * nothing reads the list again by itself but OpenPnP answering again (online); (7) nothing moves (only
  * uploads, the apply and the test's own set-up writes are sent), no JavaScript errors, no native dialogs. Designs are
  * routed by their board file's path: names repeat, and every board saved from one KiCad file shows the same upload.
  * Self-contained: it marks chip-0603 characterized (SIM only, as the sim acceptance and pad-profile do), uploads its own
@@ -605,12 +606,14 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     tab.on('request', (r) => { if (r.method() !== 'GET' && new URL(r.url()).pathname.startsWith('/api/')) writes.push(r.method() + ' ' + new URL(r.url()).pathname); });
     let failing = true, reads6 = 0;
     await tab.route('**/api/boards', (route) => { if (route.request().method() !== 'GET') return route.fallback(); reads6++; return failing ? route.abort('failed') : route.fallback(); });
-    // settled: no read of the list for 800 ms (an aborted or answered read ends within ms), so the page shows its outcome
-    const settle = async () => { let n; do { n = reads6; await tab.waitForTimeout(800); } while (n !== reads6); };
+    // settled: no read of the list for 800 ms (an aborted or answered read ends within ms), so the page shows its outcome;
+    // at most ~10 s (a page that reads on every render never settles: its own check then fails, no hang)
+    const settle = async () => { for (let i = 0; i < 12; i++) { const n = reads6; await tab.waitForTimeout(800); if (n === reads6) return; } };
     const shown6 = (sel) => tab.evaluate((q) => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => { const b = document.querySelector(q);
       r(b && !b.closest('[hidden]') ? { text: (b.querySelector(':scope > span') || b).textContent, retry: !!b.querySelector('button.list-retry') } : null); }))), sel);
     await tab.goto(BASE + '#run');
-    await tab.waitForFunction(() => !!(window.IL && IL.run && IL.run.boardsErr), null, { timeout: 20000 }).catch(() => null);
+    // the first status answer (online) comes before the count: its own read and the menu's are not "by itself"
+    await tab.waitForFunction(() => !!(window.IL && IL.S && IL.S.online === true && IL.run && IL.run.boardsErr), null, { timeout: 20000 }).catch(() => null);
     await settle();
     const reason6 = await tab.evaluate(() => IL.run.boardsErr);
     const e6 = await shown6('#rs-designs .notebox--block');
@@ -620,10 +623,12 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     await tab.waitForTimeout(2000);
     check('(6e) and nothing reads the list again by itself (Start once read it on every render)', reads6 === before6, { before: before6, after: reads6 });
     before6 = reads6;
-    if (e6 && e6.retry) await tab.click('#rs-designs .notebox--block button.list-retry');
+    if (e6 && e6.retry) { await tab.focus('#rs-designs .notebox--block button.list-retry'); await tab.keyboard.press('Enter'); }
     await settle();
     const e6b = await shown6('#rs-designs .notebox--block');
     check('(6e) Start\'s Retry reads the list again (no answer again: the same words)', reads6 > before6 && !!e6b && e6b.text === NONE + reason6, { reads: reads6 - before6, e6b });
+    const focus6 = await tab.evaluate(() => { const a = document.activeElement; return a && a !== document.body ? a.outerHTML.slice(0, 120) : null; });
+    check('(6e) and a Retry pressed from the keyboard leaves the focus on the Retry shown after the read', /list-retry/.test(focus6 || ''), focus6);
     await tab.evaluate((k) => IL.go('#designs/setup/' + k), late ? encodeURIComponent(late.file) : 'none');
     await settle();
     const set6 = await shown6('#design-meta');
@@ -654,8 +659,9 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     await tab.evaluate(() => IL.emit('online', true));
     await settle();
     const n6b = await shown6('#rs-designs .rf-note');
-    check('(6e) OpenPnP answering again (online) reads both lists again (Start\'s and Designs\'): Start\'s note goes', !!n6 && reads6 - before6 >= 2 && !n6b,
-      { note: n6, after: n6b, reads: reads6 - before6 });
+    const cards6 = await tab.evaluate(() => document.querySelectorAll('#rs-designs .design[data-board]').length);
+    check('(6e) OpenPnP answering again (online) reads both lists again (Start\'s and Designs\'): Start\'s note goes, its cards stay', !!n6
+      && reads6 - before6 >= 2 && !n6b && cards6 > 0, { note: n6, after: n6b, reads: reads6 - before6, cards6 });
     await tab.close();
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------

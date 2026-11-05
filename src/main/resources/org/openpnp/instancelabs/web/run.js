@@ -1396,7 +1396,7 @@
       if (!i) continue;
       if (i.readOnly !== !!job) i.readOnly = !!job;
     }
-    const hint = R.boardsErr ? IL.listReadError(R.boardsErr, !!R.boards)
+    const hint = R.boardsErr ? IL.listReadError(R.boardsErr, !!b && ((b.files || []).length + (b.job || []).length) > 0)
       : job ? 'Position from the OpenPnP job. Register board checks the fiducials again with the top camera.'
         : c ? 'Enter roughly where the board origin (its 0,0 corner) sits. After planning, Register board finds the fiducials with the top camera and probes this seat.' : 'Choose the board to dispense.';
     IL.setText($('board-hint'), hint);

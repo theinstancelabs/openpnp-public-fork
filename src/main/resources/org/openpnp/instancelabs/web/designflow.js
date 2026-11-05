@@ -100,12 +100,12 @@
     const list = files();
     const key = [!!D.boards, D.err, list.map((f) => [f.name, f.file, stateOf(f).text, !!D.thumbs.get((f.art && f.art.id) + '|300')])];
     IL.keyed(n.list, JSON.stringify(key), () => {
-      if (D.err && !D.boards) return el('p', { class: 'notebox notebox--block' }, el('span', { text: IL.listReadError(D.err) }), ' ', IL.retryButton(reload, 'designs'));
+      if (D.err && !list.length) return el('p', { class: 'notebox notebox--block' }, el('span', { text: IL.listReadError(D.err) }), ' ', IL.retryButton(reload, 'designs'));
       if (!D.boards) return el('p', { class: 'muted', text: 'Reading the designs…' });
+      if (!list.length) return el('p', { class: 'notebox', text: 'No designs yet: upload one.' });
       // a read again that fails keeps the cards it has, under a note (the next visit reads them again)
-      const note = D.err ? [el('p', { class: 'reason reason--need designs-note' }, el('span', { text: IL.listReadError(D.err, list.length > 0) }), ' ',
+      const note = D.err ? [el('p', { class: 'reason reason--need designs-note' }, el('span', { text: IL.listReadError(D.err, true) }), ' ',
         IL.retryButton(reload, 'designs-note'))] : [];
-      if (!list.length) return note.concat(el('p', { class: 'notebox', text: 'No designs yet: upload one.' }));
       return note.concat(list.map((f) => {
         const st = stateOf(f);
         return el('a', { class: 'design', href: routeOf(f), 'data-name': f.name, 'data-file': f.file, 'data-state': st.state, 'data-art': f.art && f.art.id ? f.art.id : null },
