@@ -127,7 +127,12 @@ public class BedApiSimTest {
 
     /** A new measurement's own journal row (as a probe or camera run writes one), to name as evidence. */
     String evidence() throws Exception {
-        svc.getDb().event(null, "INFO", "PROBE", "a bench measurement");
+        return evidence(System.currentTimeMillis());
+    }
+
+    /** The same, written at {@code ts}. */
+    String evidence(long ts) throws Exception {
+        svc.getDb().event(null, "INFO", "PROBE", "a bench measurement", ts);
         return "event:" + svc.getDb().recentEvents(1).get(0).get("id");
     }
 
@@ -216,6 +221,13 @@ public class BedApiSimTest {
         assertEquals("a-reel", row.getAsJsonObject("after").get("id").getAsString());
         call("POST", "/api/bed/objects", "{\"name\":\"x\",\"outline\":{\"box\":[1,1,2,2]},\"topZ\":3}", UI);
         assertEquals(400, status, "an added object has no top by a person's word: " + body);
+        // name, id and kind as the file holds them: exact JSON strings, never trimmed, no number or null (review 3
+        // NIT 4)
+        for (String b : new String[] {"\"name\":5", "\"name\":null", "\"name\":\"x\",\"id\":\"a-reel-2 \"",
+            "\"name\":\"x\",\"id\":null", "\"name\":\"x\",\"kind\":\" movable\""}) {
+            call("POST", "/api/bed/objects", "{" + b + ",\"outline\":{\"box\":[1,1,2,2]}}", UI);
+            assertEquals(400, status, b + ": " + body);
+        }
         // raise the holder's top, grow its outline: a person's word
         JsonObject h = new JsonParser().parse(objectWith("holder-left", "topZ", "15")).getAsJsonObject();
         ok("PUT", "/api/bed/objects/holder-left", h.toString());
@@ -358,6 +370,17 @@ public class BedApiSimTest {
         n1 = n1.replaceAll("event:\\d+", evidence());
         ok("POST", "/api/bed/objects/blank-front/cleared", "{" + camera + "," + n1 + "}");
         assertNull(object("blank-front"), "cleared");
+        // put down again under the same id (ids come from names) and set to removed by a PUT: a new object whose
+        // removal is not on record, so the old one's removal and clearing measurements do not clear it (review 3)
+        ok("POST", "/api/bed/objects", "{\"name\":\"the front blank\",\"id\":\"blank-front\",\"outline\":{\"box\":"
+                + "[60,120,160,200]}}");
+        JsonObject again = object("blank-front");
+        again.remove("stateLabel");
+        again.addProperty("state", "removed");
+        ok("PUT", "/api/bed/objects/blank-front", again.toString());
+        refused(409, "refused", "POST /api/bed/objects/blank-front/removed", call("POST",
+                "/api/bed/objects/blank-front/cleared", "{" + camera + "," + n1 + "}", UI));
+        assertEquals("removed", object("blank-front").get("state").getAsString());
     }
 
     /** Tools, the plane and the see-saw: growing a layer is a person's word; the rest needs a new record. */
@@ -428,8 +451,7 @@ public class BedApiSimTest {
     @Test
     public void aRecordsTimesAreBounded() throws Exception {
         start(true);
-        String early = evidence();
-        Thread.sleep(5);
+        String early = evidence(System.currentTimeMillis() - 1000);
         ok("POST", "/api/needle/changed", "{\"why\":\"bed test\"}");
         JsonObject needle = BedFixture.json().getAsJsonArray("tools").get(1).getAsJsonObject();
         needle.getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis());
@@ -449,6 +471,12 @@ public class BedApiSimTest {
         needle.add("measured", rec);
         refused(400, "bad-request", "later than now + 1 min", call("PUT", "/api/bed/tools/needle", needle.toString(),
                 UI));
+        // the change's own journal row is bookkeeping, not a measurement (review 3 MINOR B)
+        Object change = svc.getDb().query("SELECT id FROM events WHERE code = ? AND message LIKE 'needle changed%' "
+                + "ORDER BY id DESC LIMIT 1", DispenseService.TIP_EVENT).get(0).get("id");
+        needle.getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis());
+        needle.add("measured", new JsonParser().parse(record("bottom camera", "event:" + change)));
+        refused(409, "measurement-needed", "a TIP row", call("PUT", "/api/bed/tools/needle", needle.toString(), UI));
         assertEquals(v, version(), "nothing written");
         // evidence from since the change: both written
         needle.getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis());

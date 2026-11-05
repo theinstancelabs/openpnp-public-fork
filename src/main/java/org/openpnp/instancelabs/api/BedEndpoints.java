@@ -32,11 +32,11 @@ import com.google.gson.JsonPrimitive;
  * <p>A person's word may add an object (it blocks its outline at every height until measured), mark one moved or
  * removed, grow an outline or a tool layer, raise a top. Anything that frees space needs a new measurement record (a
  * later {@code atMs} than the stored one, a non-empty {@code how}, {@code evidence} naming journal events or photos
- * that exist, none older than the stored record and no bed-model or motion row) where that part keeps its records: a
- * lower or newly measured top, a smaller top error or a touchable top ({@code measured.top}); a smaller outline or
- * margin, or an unmeasured object becoming measured ({@code measured.xy}); any change of the bed plane or the bed's
- * smaller outline ({@code bed.plane}); any see-saw change ({@code seesaw.measured}); a smaller, higher or moved tool
- * layer, a changed tipEnd (its atMs too) or moves ({@code tools[].measured}). A removed object stops blocking only
+ * that exist, none older than the stored record and no bed-model, motion or tip row) where that part keeps its
+ * records: a lower or newly measured top, a smaller top error or a touchable top ({@code measured.top}); a smaller
+ * outline or margin, or an unmeasured object becoming measured ({@code measured.xy}); any change of the bed plane or the
+ * bed's smaller outline ({@code bed.plane}); any see-saw change ({@code seesaw.measured}); a smaller, higher or moved
+ * tool layer, a changed tipEnd (its atMs too) or moves ({@code tools[].measured}). A removed object stops blocking only
  * through {@code /cleared} with both of Process's measurements since it was removed: the top camera against the stored
  * empty-bed picture of that spot (the engine's fixed threshold, no person judging) and N1 lowered to its floor at 3
  * points inside the outline with no contact (N1 cannot touch the bare bed). A smaller Z margin or a deeper contact
@@ -86,11 +86,11 @@ final class BedEndpoints {
                         + "name and outline, then its top with PUT /api/bed/objects/{id} and a measurement record");
             }
         }
-        String name = Json.str(b, "name", null);
+        String name = text(b, "name", null);
         if (name == null || !b.has("outline")) {
             throw ApiException.badRequest("'name' and 'outline' are required");
         }
-        String id = Json.str(b, "id", null);
+        String id = text(b, "id", null);
         if (id != null && m.object(id) != null) {
             throw new ApiException(409, "exists", "an object '" + id + "' is in the model already");
         }
@@ -98,7 +98,7 @@ final class BedEndpoints {
         o.addProperty("id", id != null ? id : unique(m, name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-")
                 .replaceAll("^-|-$", "")));
         o.addProperty("name", name);
-        o.addProperty("kind", Json.str(b, "kind", "movable"));
+        o.addProperty("kind", text(b, "kind", "movable"));
         if (b.has("role")) {
             o.add("role", b.get("role"));
         }
@@ -406,8 +406,9 @@ final class BedEndpoints {
 
     /**
      * Null when {@code e} names journal events ({@code event:<id>}) or photos ({@code photo:<id>}) that all exist, each
-     * a measurement's own (#66 review MINOR c): no bed-model or motion row, none older than {@code notBefore} (the
-     * time of {@code since}; null: any).
+     * a measurement's own (#66 review MINOR c): no bed-model, motion or tip row (a needle's change, mount, trims and
+     * landings are bookkeeping; review 3 MINOR B), none older than {@code notBefore} (the time of {@code since}; null:
+     * any).
      */
     private String evidence(JsonElement e, Long notBefore, String since) throws SQLException {
         List<String> items = new ArrayList<>();
@@ -450,7 +451,8 @@ final class BedEndpoints {
             if (at == null) {
                 return "'" + x + "' is not a journal event or photo that exists (event:<id>, photo:<id>)";
             }
-            if (code != null && (BedModelStore.EVENT.equals(code) || code.startsWith("MOTION_"))) {
+            if (code != null && (BedModelStore.EVENT.equals(code) || code.startsWith("MOTION_")
+                    || DispenseService.TIP_EVENT.equals(code))) {
                 return "'" + x + "' is a " + code + " row, not a measurement's";
             }
             if (notBefore != null && at < notBefore) {
@@ -460,13 +462,20 @@ final class BedEndpoints {
         return null;
     }
 
-    /** When {@code id} was last marked removed (its {@value BedModelStore#EVENT} row), or null. */
+    /**
+     * When {@code id} was last marked removed (its {@value BedModelStore#EVENT} row), or null; null too when an object
+     * of that id was cleared since: one put down again under the id is a new object (review 3).
+     */
     private Long removedAt(String id) throws SQLException, ApiException {
-        String route = "POST /api/bed/objects/" + id + "/removed";
+        String route = "POST /api/bed/objects/" + id + "/";
         for (Map<String, Object> e : ctx.svc().getDb().query("SELECT ts, message FROM events WHERE code = ? ORDER BY "
                 + "id DESC", BedModelStore.EVENT)) {
             JsonElement m = new JsonParser().parse(String.valueOf(e.get("message")));
-            if (m.isJsonObject() && route.equals(Json.str(m.getAsJsonObject(), "what", null))) {
+            String what = m.isJsonObject() ? Json.str(m.getAsJsonObject(), "what", null) : null;
+            if ((route + "cleared").equals(what)) {
+                return null;
+            }
+            if ((route + "removed").equals(what)) {
                 return ((Number) e.get("ts")).longValue();
             }
         }
@@ -542,6 +551,22 @@ final class BedEndpoints {
     // ------------------------------------------------------------------------------------------
     // The tree
     // ------------------------------------------------------------------------------------------
+
+    /**
+     * {@code key} as the model holds text (BedModel's rule, review 3 NIT 4): an exact JSON string, not empty; never
+     * trimmed, and a number or null is no text (400). {@code def} when the key is left out.
+     */
+    private static String text(JsonObject o, String key, String def) throws ApiException {
+        JsonElement e = o.get(key);
+        if (e == null) {
+            return def;
+        }
+        if (!e.isJsonPrimitive() || !e.getAsJsonPrimitive().isString() || e.getAsString().isEmpty()) {
+            throw ApiException.badRequest("'" + key + "' must be text: a JSON string, not empty, as the model keeps it "
+                    + "(never trimmed)");
+        }
+        return e.getAsString();
+    }
 
     private static boolean number(JsonObject o, String key) {
         JsonElement e = o.get(key);
