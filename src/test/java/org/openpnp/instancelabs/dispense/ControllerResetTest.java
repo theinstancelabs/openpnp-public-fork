@@ -861,6 +861,50 @@ public class ControllerResetTest {
     }
 
     /**
+     * BR-97 follow-up review: a lost link's LEVEL_REF that cannot be written (on the journal thread) loses no row after
+     * it, and the next levelling call writes the kept reference again before it counts; while it cannot, the call is
+     * refused, so a restart mid-walk never counts the 32 mm afresh.
+     */
+    @Test
+    public void aLostLinksReferenceThatMissedTheJournalIsWrittenAgainFirst() {
+        boolean[] full = {false};
+        ControllerReset r = new ControllerReset(() -> now, false, false, null, e -> {
+            if (full[0] && ControllerReset.EVENT_LEVEL_REF.equals(e.code)) {
+                throw new IllegalStateException("disk full");
+            }
+            journal.add(e);
+        });
+        now = 1000;
+        assertEquals(20.0, r.levelReference(20), 1e-9);
+        full[0] = true;
+        now = 2000;
+        r.linkLost(2000, "the link ended");
+        r.flush(); // the journal thread's write: its LEVEL_REF fails, nothing escapes, the rows after it go on
+        assertEquals(ControllerReset.EVENT_MOTOR_OFF, journal.get(journal.size() - 1).code, codes().toString());
+        assertThrows(IllegalStateException.class, () -> r.levelReference(5), "the kept reference is not on record");
+        full[0] = false;
+        assertEquals(20.0, r.levelReference(5), 1e-9, "written again, then it counts");
+        int rows = journal.size();
+        assertEquals(20.0, r.levelReference(5), 1e-9);
+        assertEquals(rows, journal.size(), "once on record it is not written again");
+        assertEquals(20.0, run(false, false).levelReference(5), 1e-9, "a restart keeps it");
+    }
+
+    /**
+     * BR-97 follow-up review: a reference taken while a lost link's rows still wait for the journal thread is written
+     * after them, so the replay sees it last.
+     */
+    @Test
+    public void aReferenceTakenBeforeALostLinksRowsAreWrittenComesAfterThem() {
+        ControllerReset r = run(false, false);
+        now = 1000;
+        r.linkLost(1000, "the link ended"); // no reference yet: its rows wait for the journal thread
+        assertEquals(5.0, r.levelReference(5), 1e-9);
+        r.flush();
+        assertEquals(5.0, run(false, false).levelReference(9), 1e-9, "on record after the loss's rows");
+    }
+
+    /**
      * The home after a detected reset moves the Z frame (K by twice the shift): it says so once, also when the reset was
      * homed only after an engine restart; an ordinary home does not. A connect whose position was not read may have been
      * a reset (I11 counts it so): its home moves the frame too (#11 review 11-04, the conservative side).

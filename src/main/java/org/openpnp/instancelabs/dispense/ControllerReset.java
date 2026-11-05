@@ -184,6 +184,10 @@ public final class ControllerReset {
      * it, and so does a lost link (BR-93).
      */
     private Double levelRefZ;
+    /**
+     * A reference a lost link kept whose LEVEL_REF the journal thread could not write: written again before it counts.
+     */
+    private Double levelRefUnrecordedZ;
     /** BR-93: the last lost link put on record (the driver's time of it), or null. */
     private Long linkLostAtMs;
     /** The changes made and not written yet (under this lock), in their order. */
@@ -647,7 +651,13 @@ public final class ControllerReset {
                         journal.accept(e);
                     }
                     catch (IllegalStateException failed) {
-                        // a lost link's LEVEL_REF (the journal logged it): no call to refuse here; the next rows go on
+                        // a lost link's LEVEL_REF (the journal logged it): no call to refuse here; the next rows go on,
+                        // and the next levelling call writes the reference again before it counts
+                        if (EVENT_LEVEL_REF.equals(e.code)) {
+                            synchronized (this) {
+                                levelRefUnrecordedZ = parseLevelRef(e.message);
+                            }
+                        }
                     }
                 }
             }
@@ -731,27 +741,39 @@ public final class ControllerReset {
      */
     public double levelReference(double zNow) {
         Event e;
+        double ref;
+        boolean kept;
         synchronized (this) {
-            if (levelRefZ != null) {
+            if (levelRefZ != null && !levelRefZ.equals(levelRefUnrecordedZ)) {
                 return levelRefZ;
             }
-            levelRefZ = zNow; // at once: a link lost meanwhile keeps it on record too
             long now = clock.getAsLong();
-            e = new Event(EVENT_LEVEL_REF, now, levelRefText(zNow, "taken at " + ZCheck.clock(now) + " by the first "
-                    + "levelling call since a possible reset, a home's start or a home"));
+            kept = levelRefZ != null; // a lost link kept it, but its row missed the journal
+            if (!kept) {
+                levelRefZ = zNow; // at once: a link lost meanwhile keeps it on record too
+            }
+            ref = levelRefZ;
+            e = new Event(EVENT_LEVEL_REF, now, levelRefText(ref, kept ? "kept at a lost link, on record again at "
+                    + ZCheck.clock(now) : "taken at " + ZCheck.clock(now) + " by the first levelling call since a "
+                    + "possible reset, a home's start or a home"));
         }
         try {
             writeNow(e);
         }
         catch (RuntimeException failed) {
             synchronized (this) {
-                if (levelRefZ != null && levelRefZ == zNow) {
+                if (!kept && levelRefZ != null && levelRefZ == ref) {
                     levelRefZ = null; // not on record: the next call takes it again
                 }
             }
             throw failed;
         }
-        return zNow;
+        synchronized (this) {
+            if (kept && Double.valueOf(ref).equals(levelRefUnrecordedZ)) {
+                levelRefUnrecordedZ = null;
+            }
+        }
+        return ref;
     }
 
     /** "levelling reference Z 31.5000 (why)": the replay reads the Z back ({@link #parseLevelRef}). */
