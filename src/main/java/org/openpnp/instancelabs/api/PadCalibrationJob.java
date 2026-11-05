@@ -136,13 +136,13 @@ final class PadCalibrationJob {
     /** §22.2: a tip wider than the 22G's bore is counted with the bench mass x 1.5 until it is weighed. */
     static final double WIDE_BORE_MM = 0.41, WIDE_BORE_MASS = 1.5;
 
-    /** What the operator asked for (POST body, or the preview's query). */
     /** BR-103: a caller's expected landing (mm from N2's head offset) and its evidence. */
     static final class ExpectedLanding {
         double dxMm, dyMm;
         String evidence;
     }
 
+    /** What the operator asked for (POST body, or the preview's query). */
     static final class Request {
         String planId;
         String boardFile;
@@ -608,10 +608,6 @@ final class PadCalibrationJob {
     }
 
     /**
-     * Check where it lands (§22.3): the band of the calibration area it reserves, E (the setup's own landing under N2's
-     * head offset now, else 0, 0) and the search R; the blank's surface probed first when it is stale.
-     */
-    /**
      * The search the band is sized for: ±R, grown by an expected Y shift nothing aims with (BR-103), so the locator's
      * dot and the lines laid from it stay inside the band.
      */
@@ -619,6 +615,10 @@ final class PadCalibrationJob {
         return searchMm + (expectedFromRequest ? Math.abs(expected[1]) : 0);
     }
 
+    /**
+     * Check where it lands (§22.3): the band of the calibration area it reserves, E (the setup's own landing under N2's
+     * head offset now, else 0, 0) and the search R; the blank's surface probed first when it is stale.
+     */
     private void planLanding(DispenseConfig c) throws Exception {
         area = c.calibrationArea.effective(c);
         landingArea = area == null ? null : area.copy();

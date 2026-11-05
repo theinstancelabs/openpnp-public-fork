@@ -472,7 +472,8 @@ Changed routes:
   e.g. from its end measured from below: R = 2 mm around it, the band grown by |dyMm| (nothing aims with it, so the
   dot lands there). The result's `coarse` is then the miss against the expectation, so the landing is still
   `expected` + trim + `coarse` + `residual`. 400 with `wide`, outside the landing check, beyond ±9 mm or without `evidence`; 409 when the
-  setup has a landing of its own (the check already searches ±2 mm around that). The preview's `landing` adds
+  setup has a landing of its own (the check already searches around that: ±2 mm, ±6 mm for a bent tip without its
+  bend recorded). The preview's `landing` adds
   `expectedFrom` (`the request: <evidence>`, else null); a locator dot at the band's centre, then the profile's purge dots and a row of 8 dots
   at uneven gaps, fitted (`P/LandingFit`). The preview adds `landing: {searchMm, wide, expected, bandMm, band: {x0, x1,
   y0, y1}, frames, problem}` and the sentence `Lays one dot, then 8 purge dots and 8 dots in a row on the blank (X

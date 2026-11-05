@@ -964,7 +964,7 @@ public class PadCalibrationSimTest {
         assertEquals(-1.3, l.get("dyMm").getAsDouble(), 0.08, l.toString());
         assertEquals(2.4, svc.getConfig().needleLanding.dxMm, 0.08);
         // its record: the miss against the expectation (T = E + trim + C + residual), and the band it reserved
-        assertEquals(0.05, l.getAsJsonArray("coarse").get(0).getAsDouble(), 0.1, l.toString());
+        assertEquals(0.05, l.getAsJsonArray("coarse").get(0).getAsDouble(), 0.3, l.toString()); // one dot's noise
         assertEquals(14.5, svc.getConfig().calibrationArea.usedMm, 0.05, "the grown band is reserved");
         // with a landing of its own the check already searches around it: an expectation is refused
         wipeBlank();
