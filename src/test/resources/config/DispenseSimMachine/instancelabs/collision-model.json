@@ -17,7 +17,7 @@
   "bed": {
     "note": "outline (guess): stops short of N1's tip at the homing corner",
     "outline": {"box": [-20, -60, 450, 490]},
-    "plane": {"how": "n1-touch-on:blank-front (guess)", "points": [[60, 120, -3.0], [300, 120, -2.96], [300, 300, -2.89], [60, 300, -2.93]],
+    "plane": {"note": "points and errMm (guess)", "how": "n1-touch-on:blank-front (guess)", "points": [[60, 120, -3.0], [300, 120, -2.96], [300, 300, -2.89], [60, 300, -2.93]],
               "homeAtMs": 0, "by": "fixture", "atMs": 0, "errMm": 0.05, "evidence": "event:1"},
     "reach": {"headX": [0, 408], "headY": [0, 487], "cameraXEnd": 413}
   },
@@ -32,12 +32,12 @@
      "measured": {"xy": {"how": "camera-edges", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
                   "top": {"how": "n1-press", "by": "fixture", "atMs": 0, "errMm": 0.05, "evidence": "event:1"}},
      "state": "measured", "invalidatedBy": ["moved", "touched"]},
-    {"id": "blank-front", "name": "the front blank", "kind": "movable", "role": "blank", "note": "place (guess); top from N1's contact ~5.3",
+    {"id": "blank-front", "name": "the front blank", "kind": "movable", "role": "blank", "note": "place (guess); top 8.3 from N1's contact ~5.3 on the guessed plane (guess)",
      "outline": {"box": [60, 120, 160, 200]}, "topZ": 8.3, "marginMm": 1.0, "noPaste": false, "surface": "blank-front", "touchable": true,
      "measured": {"xy": {"how": "camera-edges", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
                   "top": {"how": "n1-touch", "by": "fixture", "atMs": 0, "errMm": 0.025, "rawZ": 5.3, "homeAtMs": 0, "evidence": "event:1"}},
      "state": "measured", "invalidatedBy": ["moved", "touched"]},
-    {"id": "nano-tile", "name": "the Nano tile", "kind": "movable", "role": "board", "note": "Process's BR-81 polygon; top from N1's contact ~10.7",
+    {"id": "nano-tile", "name": "the Nano tile", "kind": "movable", "role": "board", "note": "Process's BR-81 polygon; top 13.6 from N1's contact ~10.7 on the guessed plane (guess)",
      "outline": {"polygon": [[462.2, 276.8], [305.3, 278.7], [304.1, 129.7], [461.0, 127.8]]}, "topZ": 13.6, "marginMm": 1.0,
      "noPaste": false, "surface": "board", "touchable": true,
      "measured": {"xy": {"how": "camera-fiducials", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
@@ -62,7 +62,8 @@
     {"id": "camera", "moves": "fixed", "note": "size and height (guess)",
      "layers": [{"name": "camera and light", "at": "head", "outline": {"circle": [0, 0, 20]}, "bottomZ": 40}]}
   ],
-  "seesaw": {"endStopsRaw": [0, 63], "restRaw": null,
+  "seesaw": {"note": "end stops, knees, gains: Process's desk answers 11-04 (gain to confirm); K 64.875 Process 11-04; homeRepeatMm and errMm 0.05 (guess)",
+             "endStopsRaw": [0, 63], "restRaw": null,
              "n1": {"kneeRaw": 31.5, "mmPerRaw": 1.0}, "needle": {"kneeRaw": 31.5, "mmPerRaw": 1.0},
              "K": {"raw": 64.875, "homeAtMs": 0, "surface": "blank-front"},
              "homeRepeatMm": 0.1,
