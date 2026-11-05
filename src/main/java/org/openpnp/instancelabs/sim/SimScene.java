@@ -104,7 +104,8 @@ public final class SimScene {
         public double openAir = -1_550_000;
         /** Seal drop deciles (offline parse of runs/serial.log); each spot draws its own drop from them. */
         public double[] sealDrops = {257000, 271000, 290000, 303000, 316000, 329000, 350000, 370000, 404000};
-        public double partialBandMm = 0.03;
+        /** Half the first touch this far above the contact (old scenes); 0: open air down to it (INF-15). */
+        public double partialBandMm = 0;
         public double leakDrop = 15000;
         public double offValue = 0;
         public double tauS = 0.3, sealTauS = 0.03, releaseTauS = 0.4;
