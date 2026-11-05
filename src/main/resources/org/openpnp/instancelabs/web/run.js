@@ -552,7 +552,7 @@
     if (partialDecision(s)) return 'stopped';
     return 'idle';
   }
-  /** The board chosen in the Board step when it is not the plan's (picked, or "Use this board" after an upload), else null. */
+  /** The board chosen in the Board step when it is not the plan's (picked, or "Use this design" after an upload), else null. */
   function otherBoard(p) {
     const sel = selectedBoard();
     const src = (p && p.source) || {};

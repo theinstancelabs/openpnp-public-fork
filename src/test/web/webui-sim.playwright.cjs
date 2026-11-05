@@ -400,11 +400,14 @@ async function runFirstDots(page, n) {
     // ---- BR-82: the recipe's own lift and the pause after it (the 25G's 3 mm + 0.5 s), then back to the defaults -----
     {
       const prof = async () => (await (await page.request.get(BASE + 'api/status')).json()).dispense.profile;
-      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked. */
+      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked. The error shows
+       *  on input, Save's lock at the next render frame (and the value before may have shown the same error): a refused
+       *  value waits for both, else the read can come between them (#78's queue run, 11-05 13:06Z) */
       const typeIn = async (id, v, refused) => {
         await page.fill('#' + id, '');
         await page.locator('#' + id).pressSequentially(v);
-        await page.waitForFunction(([i, r]) => document.getElementById(i + '-err').hidden === !r, [id, refused], { timeout: 5000 }).catch(() => {});
+        await page.waitForFunction(([i, r]) => document.getElementById(i + '-err').hidden === !r && (!r || document.getElementById('btn-pf-save').disabled),
+          [id, refused], { timeout: 5000 }).catch(() => {});
         return page.evaluate((i) => { const m = document.getElementById(i + '-err'); return { err: m.hidden ? '' : m.textContent, save: document.getElementById('btn-pf-save').disabled }; }, id);
       };
       const fp0 = (await prof()).fingerprint;
@@ -790,17 +793,24 @@ async function runFirstDots(page, n) {
       await waitStatus(page, (s) => s.dispense.locations.blank && s.dispense.locations.blank.x === 150, 10000);
       // ---- the places' "Used for" and Scale shots' picker follow #12's paste zones: paste only on the sinks (the waste,
       // the towel, a cup: "cup" or "scale" as a part of the name), the coupons and the probed blank; every other place is
-      // moves and Z only. Extra places stubbed into the status (nothing is saved); "backup" and "cupboard" are not cups
+      // moves and Z only. Extra places stubbed into the status (nothing is saved); "backup" and "cupboard" are not cups.
+      // A place with its own probed surface ("blank2") takes a touch-off's or dot ladder's dots on it (OutputZones: a
+      // program's own surface; the board's too), unless the surface cannot be fitted ("blank3")
       {
         const coupon = await page.evaluate(() => (((IL.S.config || {}).padCalibration || {}).couponPlaces || ['coupon1'])[0]);
-        const extra = ['backup', 'cup1', 'cupboard', 'scale-2', 'towel', coupon, 'park'];
-        let noWaste = false;
+        const extra = ['backup', 'cup1', 'cupboard', 'scale-2', 'towel', coupon, 'park', 'blank2', 'blank3', 'board'];
+        const flat = { points: [{ x: 0, y: 0, z: 10 }, { x: 10, y: 0, z: 10 }, { x: 0, y: 10, z: 10 }], setAtMs: Date.now(), note: null, boundToBoard: false,
+          simulated: true, plane: { a: 10, b: 0, c: 0, slopeMmPerMm: 0, maxResidualMm: 0, minZ: 10, maxZ: 10, residuals: [0, 0, 0] } };
+        const blank3 = { points: [{ x: 0, y: 0, z: 10 }], setAtMs: Date.now(), note: null, boundToBoard: false, simulated: true, plane: null, error: 'at least 3 points' };
+        let noWaste = false, noneForShots = false;
         await page.route('**/api/status', async (route) => {
           try {
             const res = await route.fetch();
             const body = await res.json();
             extra.forEach((n, i) => { body.dispense.locations[n] = { x: 200 + 8 * i, y: 200, z: 10 }; });
             if (noWaste) delete body.dispense.locations[body.dispense.wasteLocationName || 'waste'];
+            if (noneForShots) [body.dispense.blankLocationName || 'blank', coupon].forEach((n) => delete body.dispense.locations[n]);
+            body.dispense.surfaces = Object.assign({ board: flat }, body.dispense.surfaces, { blank2: flat, blank3 });
             await route.fulfill({ response: res, json: body });
           } catch (e) { /* unrouted while it was being answered */ }
         });
@@ -809,8 +819,8 @@ async function runFirstDots(page, n) {
         extra, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
         const wantUse = { waste: 'prime, test dot, pressure on', blank: 'touch-off, dot ladder', cup1: 'scale shots', 'scale-2': 'scale shots',
           towel: 'drool while pressure is on', [coupon]: 'pad calibration coupon', backup: 'moves and Z only: no paste', cupboard: 'moves and Z only: no paste',
-          park: 'moves and Z only: no paste' };
-        check('places: "Used for" follows the paste zones of #12 (sinks, coupons, the blank; the others moves and Z only)', !!uses
+          park: 'moves and Z only: no paste', blank2: 'touch-off, dot ladder', blank3: 'moves and Z only: no paste', board: 'touch-off, dot ladder' };
+        check('places: "Used for" follows the paste zones of #12 (sinks, coupons, the blank, a place\'s own fitted surface; the others moves and Z only)', !!uses
           && Object.entries(wantUse).every(([n, u]) => uses[n] === u), { uses, wantUse });
         await page.evaluate(() => IL.go('#calibrate/shots'));
         const shots = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
@@ -830,6 +840,22 @@ async function runFirstDots(page, n) {
         // a chosen place: no "No cup place yet", and its own row in the list (the re-check's NIT on a7919144f0: a place row never shown passed)
         check('Scale shots with the waste chosen: no "No cup place yet", the list has the waste\'s place row', !!shots2 && !shots2.banner
           && /Place “waste”/.test(shots2.pre), shots2 && { banner: shots2.banner, pre: shots2.pre });
+        // the waste was the picker's own choice for want of a cup: a cup added later takes over; a place the operator chose
+        // stays when another cup comes, also the very place the picker had chosen (#51's re-check NIT: the preselect stuck)
+        const chosenOnce = (cup) => page.waitForFunction((c) => { const sel = document.getElementById('shots-place');
+          return sel && [...sel.options].some((o) => o.value === c) ? sel.value : null; }, cup, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        extra.push('cup1');
+        const cupLater = await chosenOnce('cup1');
+        check('Scale shots: a cup place added after the waste was chosen for want of one is chosen', cupLater === 'cup1', cupLater);
+        await page.selectOption('#shots-place', 'towel');
+        await page.selectOption('#shots-place', 'cup1');
+        extra.push('cup0');   // sorts first: the cup the picker would choose now
+        const kept = [await chosenOnce('cup0')];
+        extra.push('cup2');   // and once more: the kept choice did not become the picker's own
+        kept.push(await chosenOnce('cup2'));
+        check('Scale shots: the place the operator chose stays as cup places are added, also the one the picker had chosen',
+          kept.every((v) => v === 'cup1'), kept);
+        for (const n of ['cup0', 'cup1', 'cup2']) extra.splice(extra.indexOf(n), 1);
         // no sink at all (no cup, waste or towel): nothing is chosen, never the blank or a coupon by default; Run asks for a cup
         // place (the re-check's MINOR on e25fbf864a: the engine takes shots on the blank, 30 whole turns)
         extra.splice(extra.indexOf('towel'), 1);
@@ -845,12 +871,19 @@ async function runFirstDots(page, n) {
         // and it says why: no cup place (the banner, Run's reason), with no place of the blank in its list (the re-check's MINOR on 7e8eb5a59d)
         check('Scale shots with no sink place: "No cup place yet" and Run asks for a cup place; its list names no place (not the blank)', !!shots3
           && shots3.banner && /cup place/.test(shots3.why) && !/Place “blank”/.test(shots3.pre), shots3 && { why: shots3.why, pre: shots3.pre, banner: shots3.banner });
+        // places, but none the engine takes shots on (no sink, blank or coupon): the picker names what is missing (#51's NIT)
+        noneForShots = true;
+        const shots4 = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
+          return sel && ![...sel.options].some((o) => o.value === 'blank') ? [...sel.options].map((o) => [o.value, o.textContent]) : null; },
+        null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        check('Scale shots with places but none it takes shots on: its one option says "No cup place yet", not "No places yet"',
+          JSON.stringify(shots4) === JSON.stringify([['', 'No cup place yet']]), shots4);
         await page.unroute('**/api/status');
       }
       await nav(page, 'calibrate');
       await page.evaluate(() => IL.go('#calibrate/touch-off'));
       await page.waitForSelector('#to-pitch', { state: 'visible', timeout: 15000 });
-      // the card chose the only place there was before (the waste): the operator picks the blank
+      // the card's own pick moves to the blank once it is a place; the operator picks it too, as a person would
       await page.waitForFunction(() => [...document.getElementById('to-place').options].some((o) => o.value === 'blank'), null, { timeout: 10000 });
       await page.selectOption('#to-place', 'blank');
       const pf = await page.evaluate(() => ({ ph: document.getElementById('to-pitch').placeholder, unit: document.querySelector('#to-pitch-wrap .unit').textContent,

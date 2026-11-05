@@ -40,6 +40,7 @@ public final class FlatVacuum {
         sc.vacuum.tauS = 0;
         sc.vacuum.sealTauS = 0;
         sc.vacuum.releaseTauS = 0;
+        sc.vacuum.partialBandMm = 0; // no half seal above the Z: N1's first touch (BR-100) is the typed Z
         sc.validate();
         return sc;
     }

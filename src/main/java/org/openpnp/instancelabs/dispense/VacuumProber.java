@@ -14,13 +14,16 @@ import org.pmw.tinylog.Logger;
  * The automatic N1 vacuum contact probe of one or more points: the bench method (tools/probe.py) with
  * two corrections measured in the bench log. At each spot N1 goes to travel Z, over the spot, down to
  * the approach height; pump and valve on, settle, an open-air baseline (5 reads); coarse 0.25 mm steps
- * until the 3-read mean falls below baseline - max(40000, 15 % of |baseline|). Then, unlike the bench:
- * back to the last open coarse step until the seal lets go (the bench's fine pass started right after
- * the seal and reported contact up to 0.3 mm high, 29 of 156 passes at their first step; one step
- * higher when that step itself holds a partial seal), and a fine pass of 0.025 mm steps below it whose
- * contact needs two sealed steps in a row (partial seals reach the threshold's size). A fine miss re-probes once from the start; the coarse contact is never
- * accepted. Every point ends with the bench's lift and vent: {@code G1 Z<travel> F600, M400, M107 P1,
- * M107 P0}, also after a refusal or an error inside it; only a STOP sends nothing but the I1 shutdown.
+ * until the 3-read mean falls 40000 below the baseline: N1's first touch, probe.py's ONSET (BR-100: the
+ * 15 % seal used before came 0.025-0.175 mm lower on the real machine, as the sprung tip's seal builds).
+ * Then, unlike the bench: back to the last open coarse step until the seal lets go (the bench's fine
+ * pass started right after the seal and reported contact up to 0.3 mm high, 29 of 156 passes at their
+ * first step; one step higher when that step itself still draws), and a fine pass of 0.025 mm steps
+ * below it whose contact is the first of two sealed steps in a row, then the steps above it read again
+ * from the seal (a lagging line can show a touching step open). A fine miss re-probes once from
+ * the start; the coarse contact is never accepted. Every point ends with the bench's lift and vent:
+ * {@code G1 Z<travel> F600, M400, M107 P1, M107 P0}, also after a refusal or an error inside it; only a
+ * STOP sends nothing but the I1 shutdown.
  *
  * <p>Every line goes through {@link Io} (the executor's probe gate: the probe allowlist and the abort
  * flag). Contact Z is the N1 Z of the contact step: N1's OpenPnP Z is its raw Z (z1). X/Y move only at
@@ -107,9 +110,13 @@ public final class VacuumProber {
         public int xyFeedMmMin = 6000;
         public int baselineReads = 5;
         public int stepReads = 3;
+        /** N1's first touch: a 3-read mean this far below open air (probe.py's ONSET; BR-100: not its 15 % seal). */
         public int minDropCounts = 40000;
-        public double dropFraction = 0.15;
         public long releaseTimeoutMs = 1500;
+        /** Fine steps a lagging line can hide below the first touch (Process: lag <= 1 s, ~4 steps). */
+        public int maxLagSteps = 4;
+        /** A mean further above open air is a fault read, not the line's overshoot after a seal (journal max +26 k). */
+        public int maxOvershootCounts = 50000;
         public int maxSpreadCounts = 15000;
         public int maxDeltaFirstCounts = 50000;
         public int maxDeltaMemoryCounts = 60000;
@@ -587,7 +594,7 @@ public final class VacuumProber {
             firstBaseline = base;
         }
         p.baseline = base;
-        p.drop = Math.max(s.minDropCounts, s.dropFraction * Math.abs(base));
+        p.drop = s.minDropCounts;
         p.threshold = base - p.drop;
     }
 
@@ -616,27 +623,23 @@ public final class VacuumProber {
     }
 
     /**
-     * Back to the last open coarse step until the seal lets go (|mean - baseline| < drop / 2 within
-     * {@link Settings#releaseTimeoutMs}), then the fine pass below it: the first step whose mean and the
-     * next step's mean are both sealed. Null when the fine pass finds no such pair.
+     * Back to the last open coarse step until the seal lets go (the mean less than drop / 2 below the
+     * baseline within {@link Settings#releaseTimeoutMs}), then the fine pass below it: the first step whose
+     * mean and the next step's mean are both sealed, unless a step above it stays sealed when read again
+     * ({@link #settledAbove}). Null when the fine pass finds no such pair.
      *
-     * <p>The last "open" coarse step often reads a partial seal already: in 101 of 155 bench probes
-     * (runs/serial.log) its mean was more than drop / 2 below the baseline (median 169 k counts against
-     * a ~230 k threshold), and it never comes back to the baseline there. So when it does not let go
-     * within the wait, N1 waits once more one coarse step higher, and the fine pass starts below that
-     * step; only a seal that holds there too is refused. The fine pass may then find the contact at or
-     * above the last open coarse step: that step's partial seal was the surface. Real N1 seals build up
-     * over Z and time (real machine 2026-10-29, board 3: open at 5.40, 1.78 M at 5.375, sealed at
-     * 5.325 / 5.30 on the fine pass, while the quick coarse reads at 5.25 stayed just above the
-     * threshold), so a contact above that step is the surface, not drift.</p>
+     * <p>The last open coarse step can read a near touch (up to 34 k below open air on the real machine,
+     * 20 k or more at 10 of 161 points) and then never comes back within drop / 2 there. So when it does
+     * not let go within the wait, N1 waits once more one coarse step higher, and the fine pass starts
+     * below that step; only a seal that holds there too is refused.</p>
      */
     private Double releaseAndFine(Point p, Window w, double zc) throws Exception {
         double zo = p.lastOpenZ;
-        if (!released(p, w, zo)) {
+        if (!released(p, w, zo, p.drop / 2)) {
             double up = round4(zo + s.coarseStepMm);
             p.notes.add(String.format(Locale.ROOT, "%s: still drawing at Z %.3f after %.1f s (a partial seal at the "
                     + "last open step): let go at Z %.3f", spotName(p), zo, s.releaseTimeoutMs / 1000.0, up));
-            if (!released(p, w, up)) {
+            if (!released(p, w, up, p.drop / 2)) {
                 throw refused(String.format(Locale.ROOT, "PROBE: N1 did not let go of the surface within %.1f s after "
                         + "the touch at X %.2f, Y %.2f: check the N1 tip and tubing, then try again",
                         s.releaseTimeoutMs / 1000.0, p.x, p.y));
@@ -656,7 +659,7 @@ public final class VacuumProber {
             boolean sealed = step(p, z, w) < p.threshold;
             if (sealed && prevSealed) {
                 p.fine = true;
-                return prevZ;
+                return settledAbove(p, w, prevZ);
             }
             if (confirming) {
                 return null;
@@ -666,8 +669,41 @@ public final class VacuumProber {
         }
     }
 
-    /** Moves to {@code z} and reads until the seal let go there, at most {@link Settings#releaseTimeoutMs}. */
-    private boolean released(Point p, Window w, double z) throws Exception {
+    /**
+     * BR-100: N1's line lags a seal by ~0.3-1 s (tools/tilesetup.py), so the quick reads of a fine step can
+     * show a touching step open. The steps above the contact are read again, each entered from one step
+     * higher as every fine step, with the line still drawing from the seal below: a step that does not let
+     * go by the touch threshold within {@link Settings#releaseTimeoutMs} is the contact, and the step above
+     * it is read next. An open step lets go within ~0.5 s; the release height let go already. A seal that
+     * holds above the {@link Settings#maxLagSteps} steps a lag can hide (a blocked tip, something lifted with
+     * N1) is refused, never taken as a surface up to 0.575 mm high.
+     */
+    private double settledAbove(Point p, Window w, double contact) throws Exception {
+        double z = contact;
+        for (int hidden = 0; round4(z + s.fineStepMm) < p.releaseZ - 1e-9; hidden++) {
+            double up = round4(z + s.fineStepMm);
+            moveZ(round4(up + s.fineStepMm), s.zProbeFeedMmMin, w);
+            if (released(p, w, up, p.drop)) {
+                return z;
+            }
+            if (hidden == s.maxLagSteps) {
+                throw refused(String.format(Locale.ROOT, "PROBE: N1 did not let go of the surface within %.1f s after "
+                        + "the touch at X %.2f, Y %.2f: check the N1 tip and tubing, then try again",
+                        s.releaseTimeoutMs / 1000.0, p.x, p.y));
+            }
+            z = up;
+        }
+        return z;
+    }
+
+    /**
+     * Moves to {@code z} and reads until the mean is less than {@code within} below the baseline (the seal let
+     * go there), at most {@link Settings#releaseTimeoutMs}. Above the baseline is let go too: the real line
+     * overshoots open air for ~1.5 s after a seal lets go (+20-26 k at 78 of 167 journal touches); more than
+     * {@link Settings#maxOvershootCounts} above it is a fault read (a stray FF FF FF reply), never taken as let
+     * go; still so at the timeout, it is refused (the pump off, the sensor not answering), never read as a seal.
+     */
+    private boolean released(Point p, Window w, double z, double within) throws Exception {
         moveZ(z, s.zProbeFeedMmMin, w);
         sync();
         long t0 = s.clock.getAsLong();
@@ -675,10 +711,15 @@ public final class VacuumProber {
             double m = mean(reads(s.stepReads));
             p.readings.add(new double[] {z, m});
             report(p);
-            if (Math.abs(m - p.baseline) < p.drop / 2) {
+            if (p.baseline - m < within && m - p.baseline < s.maxOvershootCounts) {
                 return true;
             }
             if (s.clock.getAsLong() - t0 >= s.releaseTimeoutMs) {
+                if (m - p.baseline >= s.maxOvershootCounts) {
+                    throw refused(String.format(Locale.ROOT, "PROBE: N1's vacuum read %.0f k above open air for %.1f s "
+                            + "at X %.2f, Y %.2f: the N1 pump is off or the vacuum sensor does not answer. Check N1, "
+                            + "then try again", (m - p.baseline) / 1000, s.releaseTimeoutMs / 1000.0, p.x, p.y));
+                }
                 return false;
             }
         }

@@ -1659,10 +1659,13 @@
   function usedFor(name, d) {
     if (name === (d.wasteLocationName || 'waste')) return 'prime, test dot, pressure on';
     if (name === (d.blankLocationName || 'blank')) return 'touch-off, dot ladder';
-    // #12's paste zones: the other sinks and the coupons take paste; every other place none
+    // #12's paste zones: the other sinks, the coupons and a place's own probed surface take paste; every other place none
     if (IL.isCupPlace(name)) return 'scale shots';
     if (IL.isSinkPlace(name, d)) return 'drool while pressure is on';
     if ((((S.config || {}).padCalibration || {}).couponPlaces || ['coupon1', 'coupon2']).includes(name)) return 'pad calibration coupon';
+    // a touch-off or dot ladder at a place lays its dots on the fitted surface of that name (OutputZones: a program's own
+    // surface; the board's too, until BR-81 refuses a paste place that lies on a board, by position, whatever its name)
+    if (((d.surfaces || {})[name] || {}).plane) return 'touch-off, dot ladder';
     return 'moves and Z only: no paste';
   }
   function placeRow(name) {

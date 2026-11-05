@@ -368,6 +368,11 @@ public final class SimPaste {
     private boolean dotOpen, forwardSeen, pressured;
     private double extruded;
     private long dotStartCount;
+    private long dotPrimeSteps; // the steps of this dot a fresh tip's fill took (INF-06 §8)
+    private double dotStartS;
+    private int dotOffset; // the screw's phase when the dot began (a STOP in its dwell may jump it)
+    private String dotTip; // the tip fill the dot began under: its contact history
+    private final Map<String, ContactHistory> contacts = new HashMap<>(); // per tip fill: a needle change is fresh
     private double dotX, dotY, dotZ;
     /** Paste hanging on the tip (mg): what a dot did not take. */
     private double bead;
@@ -654,6 +659,7 @@ public final class SimPaste {
         logicalB += deg;
         long c1 = count(); // the motor turns whole steps
         idleCheck(p);
+        double t0 = store.timeS();
         store.advance(moveSeconds(Math.abs(deg), feedPerMin / 60, accel));
         lastMotionS = store.timeS();
         if (p == null || c1 == c0) {
@@ -665,6 +671,10 @@ public final class SimPaste {
             pressured = false;
             extruded = 0;
             dotStartCount = c0;
+            dotPrimeSteps = 0;
+            dotStartS = t0;
+            dotOffset = offset(p);
+            dotTip = fill(sc);
             dotX = posX;
             dotY = posY;
             dotZ = posZ;
@@ -676,6 +686,7 @@ public final class SimPaste {
                 from += Math.round(store.prime(fill == null ? fill(sc) : fill, p.primeTurns,
                         (c1 - c0) / (double) STEPS_PER_REV) * STEPS_PER_REV);
             }
+            dotPrimeSteps += from - c0;
             extruded += flowMg(p, from, c1, offset(p));
             pressured = true;
         }
@@ -705,6 +716,10 @@ public final class SimPaste {
         boolean pr = pressured;
         extruded = 0;
         pressured = false;
+        if (p != null && p.perContact && pr) { // INF-06 §2b: the contact history decides, not the angle ripple
+            ex = contacts.computeIfAbsent(dotTip, k -> new ContactHistory()).dot(p, dotStartCount + dotPrimeSteps,
+                    count(), dotOffset, inContact(sc, p), dotStartS, store.timeS());
+        }
         if (p == null || !pr || ex <= 1e-9) {
             return; // net zero, or no pressure: no paste
         }
@@ -720,7 +735,7 @@ public final class SimPaste {
         store.dotAt(t);
         lastDot = null;
         // refused and empty contacts are still dots of the session: "12 empty, then normal" (INF-06 §5)
-        if (p.wholeTurnsOnly && !wholeTurns(net) && measured(sc, p, n)) {
+        if (p.wholeTurnsOnly && !p.perContact && !wholeTurns(net) && measured(sc, p, n)) {
             store.refused();
             if (!unmodelledWarned) {
                 unmodelledWarned = true;
@@ -775,6 +790,17 @@ public final class SimPaste {
         store.add(d);
         lastDot = d;
         lastDotTouchZ = touchZ;
+    }
+
+    /**
+     * The needle within the gap where this dot's paste lands, the landing scatter left out (air or contact). At a
+     * region's edge closeDot's scattered landing may still find air and keep the paste on the bead: mass is conserved.
+     */
+    private boolean inContact(SimScene sc, SimScene.Paste p) {
+        double x = dotX + p.n2OffsetMm[0] + p.landingBiasMm[0], y = dotY + p.n2OffsetMm[1] + p.landingBiasMm[1];
+        double touchZ = sc.contactZ(sc.regionAt(x, y), x, y)
+                + (p.needleZOffsetMm != null ? p.needleZOffsetMm : configNeedleZOffsetMm.getAsDouble());
+        return dotZ - touchZ <= p.maxGapMm + GAP_TOLERANCE_MM;
     }
 
     /** The hop after a dot of mass m: a thread with probability threadShare, falling to 0 at threadZeroMg. */
@@ -879,6 +905,88 @@ public final class SimPaste {
     static boolean wholeTurns(long net) {
         long rem = Math.floorMod(net + WHOLE_TURN_TOLERANCE_STEPS, STEPS_PER_REV);
         return net >= STEPS_PER_REV - WHOLE_TURN_TOLERANCE_STEPS && rem <= 2 * WHOLE_TURN_TOLERANCE_STEPS;
+    }
+
+    /**
+     * INF-06 §2b, rule (a) (Process 11-05, from the W1 weighings R1, R2b and S0b): the mass of each contact by the
+     * contact history ({@link SimScene.Paste#perContact}). The screw pushes mRevMg / 3 on each live quarter and nothing
+     * on the dead one. Paste pushed in the air joins the bead held at the tip. After holdArmAirDeg of rotation in the
+     * air (or holdArmAirS in the air, when set) the next contact holds its first quarter too; then the bead drains
+     * evenly over the next half turn of contact rotation while new paste passes straight through (the 18:46 map: a
+     * dead quarter right after a live one lays nothing). A contact ending inside the half turn leaves the rest to the
+     * next one. Unverified (Process): the arming rotation (only dead air quarters were measured), a live quarter
+     * turned in the air, and the bead's even drain.
+     */
+    static final class ContactHistory {
+        static final long HOLD = STEPS_PER_REV / 4, WINDOW = STEPS_PER_REV / 2;
+        static final double STEPS_PER_PHYSICAL_DEG = STEPS_PER_REV / 360.0;
+        double pool, rate;
+        boolean armed;
+        long held, windowLeft, airSteps;
+        Double lastContactS;
+
+        /** One dot's net rotation from..to (counts) with the pressure on: what its contact lays (0 in the air). */
+        double dot(SimScene.Paste p, long from, long to, int off, boolean contact, double startS, double endS) {
+            if (to <= from) {
+                return 0;
+            }
+            if (!contact) {
+                pool += push(p, from, to, off);
+                airSteps += to - from;
+                armed |= airSteps >= Math.round(p.holdArmAirDeg * STEPS_PER_PHYSICAL_DEG);
+                return 0;
+            }
+            if (p.holdArmAirS != null && (lastContactS == null || startS - lastContactS >= p.holdArmAirS)) {
+                armed = true;
+            }
+            double laid = 0;
+            for (long s = from; s < to;) {
+                if (armed) {
+                    long n = Math.min(to - s, HOLD - held);
+                    pool += push(p, s, s + n, off);
+                    held += n;
+                    s += n;
+                    if (held == HOLD) {
+                        armed = false;
+                        held = 0;
+                        open();
+                    }
+                }
+                else if (windowLeft > 0) {
+                    long n = Math.min(to - s, windowLeft);
+                    double out = Math.min(pool, rate * n);
+                    pool -= out;
+                    laid += push(p, s, s + n, off) + out;
+                    windowLeft -= n;
+                    s += n;
+                }
+                else { // what an air rotation pushed without arming, or a window left, goes with this contact
+                    laid += pool + push(p, s, to, off);
+                    pool = 0;
+                    s = to;
+                }
+            }
+            lastContactS = endS;
+            airSteps = 0;
+            return laid;
+        }
+
+        private void open() {
+            windowLeft = WINDOW;
+            rate = pool / WINDOW;
+        }
+
+        /** The screw's push from count a to b (a <= b) at the physical offset: mRevMg / 3 a live quarter. */
+        static double push(SimScene.Paste p, long a, long b, int off) {
+            long k = off - Math.round(p.deadQuarterDeg * STEPS_PER_PHYSICAL_DEG);
+            return p.mRevMg / (3.0 * HOLD) * ((b - a) - (deadBelow(b + k) - deadBelow(a + k)));
+        }
+
+        /** Steps u in [0, t) in the dead quarter [0, HOLD) of their turn; a difference counts any [a, b). */
+        static long deadBelow(long t) {
+            long rev = STEPS_PER_REV;
+            return Math.floorDiv(t, rev) * HOLD + Math.min(Math.floorMod(t, rev), HOLD);
+        }
     }
 
     /**

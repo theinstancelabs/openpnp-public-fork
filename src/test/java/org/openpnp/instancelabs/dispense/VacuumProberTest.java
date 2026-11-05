@@ -105,19 +105,22 @@ public class VacuumProberTest {
     /**
      * The controller: G-code position, pump and valve, and VAC1 as a first-order lag toward its target
      * (open air, a seal at Z <= the contact Z of the tip's X/Y, half a seal within the partial band above
-     * it, a leak at a leaky spot, 0 with the vacuum off): {@code tauOn} after the valve opens, almost
-     * instant sealing, {@code releaseTau} when a seal lets go. Scripted readings, when queued, are
-     * returned instead (the model runs on underneath).
+     * it (none by default), or the drop {@code seal} gives by depth, a leak at a leaky spot, 0 with the vacuum
+     * off): {@code tauOn} after the valve opens, {@code sealTau} when a seal forms (almost instant by
+     * default), {@code releaseTau} when a seal lets go. Scripted readings, when queued, are returned
+     * instead (the model runs on underneath).
      */
     static class VacChannel implements GcodeChannel {
         final List<String> sent = new ArrayList<>();
         long now = 1_000_000;
         double x = 300, y = 200, z = 31.5;
         boolean pump, valve;
-        double openAir = -1_550_000, sealDrop = 300_000, leakDrop = 15_000, partialBand = 0.03;
-        double tauOnMs = 150, releaseTauMs = 400;
+        double openAir = -1_550_000, sealDrop = 300_000, leakDrop = 15_000, partialBand;
+        double tauOnMs = 150, sealTauMs = 1, releaseTauMs = 400;
         /** Contact Z of the tip at (x, y); NaN = a hole (no contact). */
         java.util.function.BiFunction<Double, Double, Double> contact = (a, b) -> 4.52;
+        /** The drop at a depth d = contact Z - Z (d < 0 above it) instead of the step seal; null = the step. */
+        java.util.function.DoubleUnaryOperator seal;
         final List<double[]> leaky = new ArrayList<>();
         final Deque<Integer> script = new ArrayDeque<>();
         /** Real readings by N1 Z and the read's index at that Z (null = the model); used with the vacuum on. */
@@ -153,6 +156,9 @@ public class VacuumProberTest {
                     return openAir - leakDrop;
                 }
             }
+            if (seal != null) {
+                return openAir - seal.applyAsDouble(cz - z);
+            }
             if (z <= cz + 1e-9) {
                 return openAir - sealDrop;
             }
@@ -168,7 +174,7 @@ public class VacuumProberTest {
             if (Math.abs(t - target) < 1e-9) {
                 return;
             }
-            tau = outputs ? (t == 0 ? 1 : tauOnMs) : t < target ? 1 : releaseTauMs;
+            tau = outputs ? (t == 0 ? 1 : tauOnMs) : t < target ? sealTauMs : releaseTauMs;
             v0 = v;
             t0 = now;
             target = t;
@@ -417,6 +423,8 @@ public class VacuumProberTest {
         assertFalse(p.retried);
         int releaseMeans = (int) p.readings.stream().filter(v -> Math.abs(v[0] - 4.75) < 1e-9).count() - 1;
         assertTrue(releaseMeans >= 1);
+        int againMeans = (int) p.readings.stream().filter(v -> Math.abs(v[0] - 4.525) < 1e-9).count() - 1;
+        assertTrue(againMeans >= 1, "the step above the contact read again");
         List<String> want = new ArrayList<>();
         want.add("M204 S2000");
         want.addAll(ControllerCommands.VAC1_INIT);
@@ -444,6 +452,11 @@ public class VacuumProberTest {
                 want.addAll(read());
             }
         }
+        // the step above the contact again, entered from above with the line still drawing, until it lets go
+        want.addAll(Arrays.asList(z(4.55, 300), z(4.525, 300), "M400"));
+        for (int i = 0; i < 3 * againMeans; i++) {
+            want.addAll(read());
+        }
         want.addAll(END);
         assertEquals(want, rig.ch.sent);
         assertEquals(want, rig.r.streamedLines, "every line went through the gate and was recorded");
@@ -467,11 +480,14 @@ public class VacuumProberTest {
         return r;
     }
 
-    /** runs/serial.log, 10-27 17:45:36 (PDT): baseline, coarse 7.00 .. 5.50, then the bench's fine step 5.80. */
+    /**
+     * runs/serial.log, 10-27 17:45:36 (PDT): baseline, coarse 7.00 .. 5.75 (the first touch, 179 k; the bench went on
+     * to 5.50), then the bench's fine step 5.80, read right after its lift.
+     */
     static final int[] BENCH_BASELINE = {-1510474, -1510063, -1510830, -1511146, -1509613};
     static final int[][] BENCH_COARSE = {{-1512699, -1510124, -1510675}, {-1511575, -1510854, -1511414},
         {-1511146, -1510565, -1510723}, {-1512298, -1510614, -1510477}, {-1511274, -1513807, -1512548},
-        {-1642357, -1686132, -1740297}, {-1801253, -1807065, -1817441}};
+        {-1642357, -1686132, -1740297}};
     static final int[] BENCH_FINE_580 = {-1819075, -1812462, -1812395};
 
     @Test
@@ -492,6 +508,7 @@ public class VacuumProberTest {
         rig.ch.openAir = -1510425;
         rig.ch.sealDrop = 304219;
         rig.ch.releaseTauMs = 400;
+        rig.ch.partialBand = 0.03;
         rig.ch.contact = (a, b) -> 5.73; // 5.75 within the 0.03 mm partial band: it reads a partial seal
         VacuumProber.Window w = window(rig, 4.50, null); // start 7.000, approach 8.000 as on the bench
         VacuumProber.Target t = target(1, 289.0, 268.0, null, null);
@@ -499,28 +516,27 @@ public class VacuumProberTest {
         VacuumProber.Point p = pts.get(0);
         assertTrue(rig.ch.sent.contains("G1 X313.1780 Y331.9100 F6000"), "the bench's raw X/Y");
         assertEquals(-1510425, p.baseline, 1);
-        assertEquals(226564, p.drop, 1);
-        assertEquals(5.50, p.coarseZ, 1e-9, "5.50 sealed");
-        assertEquals(5.75, p.lastOpenZ, 1e-9, "5.75 read open (mean -1.690 M against a threshold of -1.737 M)");
+        assertEquals(40000, p.drop, 1);
+        assertEquals(5.75, p.coarseZ, 1e-9, "5.75 read 179 k below open air: the first touch");
+        assertEquals(6.00, p.lastOpenZ, 1e-9);
         assertEquals("contact", p.state);
-        assertTrue(p.z < 5.75 && p.z >= 5.50, "contact below 5.75: " + p.z);
-        assertEquals(5.725, p.z, 1e-9, "the first step at or below the 5.73 surface, confirmed by the next");
-        assertTrue(p.z <= 5.80 - 0.075 + 1e-9, "not the bench's 5.80");
-        // the reads at 5.75 after the seal: the bench's still-sealed 5.80 values first, then a partial seal that
-        // never lets go there (as 5.75 read during the descent: -1.64 .. -1.74 M); it lets go at 6.00
-        List<double[]> at575 = new ArrayList<>();
+        assertEquals(5.75, p.z, 1e-9,
+                "the partial seal at 5.75 (the first touch), confirmed by 5.725; not the bench's 5.80");
+        // the reads at 6.00 after the touch: the bench's still-sealed 5.80 values first (the bench took them for
+        // contact), then the line lets go there
+        List<double[]> at600 = new ArrayList<>();
         for (double[] r : p.readings) {
-            if (Math.abs(r[0] - 5.75) < 1e-9) {
-                at575.add(r);
+            if (Math.abs(r[0] - 6.0) < 1e-9) {
+                at600.add(r);
             }
         }
-        assertTrue(at575.size() >= 3, "coarse, still sealed, still drawing");
-        assertTrue(at575.get(1)[1] < p.threshold, "right after the lift the seal still holds");
-        assertTrue(Math.abs(at575.get(at575.size() - 1)[1] - p.baseline) > p.drop / 2, "a partial seal at 5.75");
+        assertTrue(at600.size() >= 3, "coarse, still sealed, let go");
+        assertTrue(at600.get(1)[1] < p.threshold, "right after the lift the seal still holds");
+        assertTrue(Math.abs(at600.get(at600.size() - 1)[1] - p.baseline) < p.drop / 2, "let go at 6.00");
         assertEquals(6.00, p.releaseZ, 1e-9);
-        assertTrue(p.notes.stream().anyMatch(n -> n.contains("still drawing at Z 5.750")), p.notes.toString());
         int fine = rig.ch.sent.lastIndexOf(z(6.0, 300));
-        assertEquals(z(5.975, 300), rig.ch.sent.get(fine + 2 + 9), "the fine pass starts below the step that let go");
+        assertEquals(z(5.975, 300), rig.ch.sent.subList(fine + 1, rig.ch.sent.size()).stream()
+                .filter(l -> l.startsWith("G1")).findFirst().get(), "the fine pass starts below the step that let go");
         assertSafe(rig.ch.sent, w.floorZ, w.travelZ);
         assertEquals(END, rig.ch.sent.subList(rig.ch.sent.size() - 4, rig.ch.sent.size()));
     }
@@ -577,8 +593,11 @@ public class VacuumProberTest {
 
     @Test
     public void contactNeedsTwoSealedStepsInARow() throws Exception {
-        // a partial seal at one fine step (a transient bump), then open, then the real contact
+        // a partial seal at one fine step (a transient bump), then open, then the real contact. The line lets go of the
+        // bump before the next step's reads: with the 0.4 s release lag a 300 k bump still reads 210 k there, which the
+        // 40 k touch takes, as probe.py's ONSET would (BR-100; no such bump in 162 real points)
         Rig rig = new Rig();
+        rig.ch.releaseTauMs = 1;
         rig.ch.contact = (a, b) -> 4.52;
         rig.ch.onLine = l -> {
             if (l.equals("G1 Z4.6500 F300")) {
@@ -596,7 +615,10 @@ public class VacuumProberTest {
     @Test
     public void aPartialSealAtTheLastOpenStepLetsGoOneStepHigher() throws Exception {
         Rig rig = new Rig();
-        rig.ch.contact = (a, b) -> 4.73; // the coarse 4.75 lies in the partial band: open by the threshold
+        rig.ch.contact = (a, b) -> 4.73;
+        // the coarse 4.75 reads a near touch, 25 k (the real last open steps read up to 34 k): open by the 40 k touch,
+        // and after the seal it never comes back within 20 k there
+        rig.ch.seal = d -> d >= 0 ? 300_000 : d >= -0.03 ? 25_000 : 0;
         VacuumProber.Point p = rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)).get(0);
         assertEquals(4.50, p.coarseZ, 1e-9);
         assertEquals(4.75, p.lastOpenZ, 1e-9);
@@ -616,42 +638,46 @@ public class VacuumProberTest {
     }
 
     /**
-     * The real machine, 2026-10-29 03:04 (board 3 at board X 8, Y 8; the PROBE record's 3-read means): N1 seals
-     * over Z and time. The coarse 5.25 read 1.872 M (threshold 1.886 M: open), 5.00 sealed; 5.25 never let go
-     * (1.89 M), 5.50 did; the fine pass from 5.50 crossed the threshold at 5.325. The contact is 5.325, above the
-     * last open coarse step: that step's partial seal was the surface.
+     * The real machine, 2026-10-29 03:05 (board 3 at board X 8, Y 8; the PROBE record's last pass, whose baseline the
+     * record keeps): open air down to 5.50, 199 k at 5.25, 399 k at 5.00; the fine pass read 9 k, 1 k and 12 k from
+     * 5.475 to 5.425, then 50 k at 5.40, 171 k, 245 k and 274 k: N1's seal builds over Z. The first touch is 5.40;
+     * the 15 % seal (246 k) came at 5.325.
      */
     @Test
-    public void aRealProgressiveSealAboveTheLastOpenStepIsTheContact() throws Exception {
+    public void aRealSealBuildingOverZTouchesAtItsFirstStep() throws Exception {
         Rig rig = new Rig();
-        double[][] fine = {{5.475, -1660997}, {5.45, -1653637}, {5.425, -1659869}, {5.4, -1680617},
-            {5.375, -1783311}, {5.35, -1883822}, {5.325, -1907489}, {5.3, -1936089}, {5.275, -1962524}};
+        double[][] fine = {{5.475, -1649427}, {5.45, -1641561}, {5.425, -1652310}, {5.4, -1690501},
+            {5.375, -1811344}, {5.35, -1885404}, {5.325, -1914027}, {5.3, -1940616}};
+        int[] release525 = {-1928803, -1897523, -1903902, -1905552, -1906302, -1905845, -1907106};
+        java.util.Map<Double, Integer> visits = new java.util.HashMap<>();
         rig.ch.byZ = (z, n) -> {
+            int visit = n == 0 ? visits.merge(z, 1, Integer::sum) : visits.get(z);
             if (z > 7.0 + 1e-9) {
                 return -1640380; // the baseline at the approach
             }
             if (Math.abs(z - 5.25) < 1e-9) {
-                return n < 3 ? -1872480 : -1894062; // the coarse step, then the release reads
+                // the coarse step, then the release means
+                return visit == 1 ? -1839350 : release525[Math.min(n / 3, release525.length - 1)];
             }
             if (Math.abs(z - 5.5) < 1e-9) {
-                return n < 3 ? -1675510 : -1747519; // open on the way down, let go after the seal
+                return visit > 1 && n < 3 ? -1745796 : -1638289; // after the seal one mean still drawing, else open air
             }
             for (double[] f : fine) {
                 if (Math.abs(z - f[0]) < 1e-9) {
                     return (int) f[1];
                 }
             }
-            return z <= 5.0 + 1e-9 ? -2049344 : z < 5.25 ? -1990000 : -1675000;
+            // open air above 5.50 (7.0 .. 5.75 read -1.638 .. -1.640 M), sealed below
+            return z > 5.5 ? -1638700 : z <= 5.0 + 1e-9 ? -2039134 : -1990000;
         };
         VacuumProber.Window w = window(rig, 4.50, 5.50);
         VacuumProber.Point p = rig.prober().probe(Arrays.asList(example()), w).get(0);
-        assertEquals(5.00, p.coarseZ, 1e-9);
-        assertEquals(5.25, p.lastOpenZ, 1e-9, "1.872 M against a threshold of 1.886 M");
-        assertEquals(5.50, p.releaseZ, 1e-9, "5.25 never let go");
-        assertTrue(p.notes.stream().anyMatch(n -> n.contains("still drawing at Z 5.250")), p.notes.toString());
+        assertEquals(5.25, p.coarseZ, 1e-9, "199 k: the first touch");
+        assertEquals(5.50, p.lastOpenZ, 1e-9);
+        assertEquals(5.50, p.releaseZ, 1e-9, "let go at 5.50 after one mean still drawing (105 k)");
         assertEquals("contact", p.state);
         assertFalse(p.retried, "no fine miss");
-        assertEquals(5.325, p.z, 1e-9, "the first of the two sealed fine steps");
+        assertEquals(5.40, p.z, 1e-9, "50 k at 5.40, confirmed by 5.375; the 15 % seal came at 5.325");
         assertSafe(rig.ch.sent, w.floorZ, w.travelZ);
         assertEquals(END, rig.ch.sent.subList(rig.ch.sent.size() - 4, rig.ch.sent.size()));
     }
@@ -664,6 +690,98 @@ public class VacuumProberTest {
                 () -> rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)));
         assertEquals("PROBE: N1 did not let go of the surface within 1.5 s after the touch at X 303.81, Y 122.62: "
                 + "check the N1 tip and tubing, then try again", e.getMessage());
+        assertEquals(END, rig.ch.sent.subList(rig.ch.sent.size() - 4, rig.ch.sent.size()));
+    }
+
+    /**
+     * After a seal lets go, the real line overshoots open air (less vacuum) for ~1.5 s: 78 of 167 journal touches read
+     * over +20 k there (10-31 13:59: -84, +13, +24, +25, +25, +24, +17 k). A reading above open air is never a seal.
+     * The series below is 13:59's with its second mean raised to +21 k and its tail held over +20 k.
+     */
+    @Test
+    public void theLineOvershootingOpenAirAfterTheSealIsLetGo() throws Exception {
+        Rig rig = new Rig();
+        rig.ch.releaseTauMs = 1; // the model lets go at once: the journal's series below is the release at 4.75
+        int[] postLift = {-84_000, 21_000, 24_000, 25_000, 25_000, 24_000, 22_000, 21_000, 21_000};
+        java.util.Map<Double, Integer> visits = new java.util.HashMap<>();
+        rig.ch.byZ = (z, n) -> {
+            int visit = n == 0 ? visits.merge(z, 1, Integer::sum) : visits.get(z);
+            return Math.abs(z - 4.75) < 1e-9 && visit > 1
+                    ? (int) rig.ch.openAir + postLift[Math.min(n / 3, postLift.length - 1)] : null;
+        };
+        VacuumProber.Point p = rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)).get(0);
+        assertEquals(4.75, p.lastOpenZ, 1e-9);
+        assertEquals(4.75, p.releaseZ, 1e-9, "let go at its second mean, +21 k");
+        assertTrue(p.notes.stream().noneMatch(x -> x.contains("still drawing")), String.valueOf(p.notes));
+        assertEquals("contact", p.state);
+        assertEquals(4.50, p.z, 1e-9);
+    }
+
+    /**
+     * A stray FF FF FF reply (-1) in the first mean after the lift lifts that mean ~0.4 M above open air while the line
+     * still draws: it is a fault read, not let go, or the fine pass would start in the seal and touch 4.725.
+     */
+    @Test
+    public void aFaultReadFarAboveOpenAirIsNotLetGo() throws Exception {
+        Rig rig = new Rig();
+        java.util.Map<Double, Integer> visits = new java.util.HashMap<>();
+        rig.ch.byZ = (z, n) -> {
+            int visit = n == 0 ? visits.merge(z, 1, Integer::sum) : visits.get(z);
+            return Math.abs(z - 4.75) < 1e-9 && visit > 1 && n == 0 ? -1 : null;
+        };
+        VacuumProber.Point p = rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)).get(0);
+        assertEquals(4.75, p.releaseZ, 1e-9);
+        assertEquals("contact", p.state);
+        assertEquals(4.50, p.z, 1e-9, "the fine pass starts once the line let go");
+    }
+
+    /**
+     * The sensor answers FF FF FF from the re-read on (the contact 4.65, 4 steps under the release height 4.75): a
+     * fault, refused at the first step's timeout, never read as a seal that climbs to 4.725.
+     */
+    @Test
+    public void aFaultFromTheReReadOnIsRefused() throws Exception {
+        Rig rig = new Rig();
+        rig.ch.contact = (a, b) -> 4.66;
+        boolean[] fault = {false};
+        java.util.Map<Double, Integer> visits = new java.util.HashMap<>();
+        rig.ch.byZ = (z, n) -> {
+            int visit = n == 0 ? visits.merge(z, 1, Integer::sum) : visits.get(z);
+            fault[0] |= Math.abs(z - 4.675) < 1e-9 && visit > 1;
+            return fault[0] ? -1 : null;
+        };
+        DispenseService.RunRefusedException e = assertThrows(DispenseService.RunRefusedException.class,
+                () -> rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)));
+        assertEquals("PROBE: N1's vacuum read 1550 k above open air for 1.5 s at X 303.81, Y 122.62: the N1 pump is "
+                + "off or the vacuum sensor does not answer. Check N1, then try again", e.getMessage());
+        List<String> l = rig.ch.sent;
+        assertFalse(l.subList(l.lastIndexOf(z(4.675, 300)), l.size()).contains(z(4.7, 300)),
+                "refused at 4.675, no climb");
+        assertEquals(END, rig.ch.sent.subList(rig.ch.sent.size() - 4, rig.ch.sent.size()));
+    }
+
+    /** A seal that holds above the contact (a blocked tip) is refused after the steps a 1 s lag can hide. */
+    @Test
+    public void aSealHoldingAboveTheContactIsRefused() throws Exception {
+        Rig rig = new Rig();
+        rig.ch.onLine = l -> {
+            if (l.equals(z(4.475, 300))) {
+                rig.ch.releaseTauMs = 100_000; // from the fine pass's second sealed step on, the line never lets go
+            }
+        };
+        DispenseService.RunRefusedException e = assertThrows(DispenseService.RunRefusedException.class,
+                () -> rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)));
+        assertEquals("PROBE: N1 did not let go of the surface within 1.5 s after the touch at X 303.81, Y 122.62: "
+                + "check the N1 tip and tubing, then try again", e.getMessage());
+        List<String> moves = new ArrayList<>();
+        for (String l : rig.ch.sent.subList(rig.ch.sent.indexOf(z(4.475, 300)) + 1, rig.ch.sent.size())) {
+            if (l.startsWith("G1 Z") && l.endsWith("F300")) {
+                moves.add(l);
+            }
+        }
+        assertEquals(Arrays.asList(z(4.55, 300), z(4.525, 300), z(4.575, 300), z(4.55, 300), z(4.6, 300),
+                z(4.575, 300), z(4.625, 300), z(4.6, 300), z(4.65, 300), z(4.625, 300)), moves,
+                "the 4 steps a 1 s lag can hide, then the one above them, each entered from above; never higher");
         assertEquals(END, rig.ch.sent.subList(rig.ch.sent.size() - 4, rig.ch.sent.size()));
     }
 
@@ -1159,6 +1277,79 @@ public class VacuumProberTest {
         ZCheck.Reference ref = new ZCheck.Reference();
         ref.z = 4.525;
         assertTrue(ZCheck.verdict(ref, p.z));
+    }
+
+    /**
+     * BR-100: the Z check of 11-05 00:34:48 (its PROBE record, baseline -1,701,117) refused "Z moved -0.15 mm" on a
+     * frame that had not moved. The blank's reference there, 5.375, is Process's first-touch onset (tools/probe.py
+     * ONSET: the first step 40 k below open air). That touch read open air down to 5.625 and 55 k at 5.375; the seal
+     * then built over 0.15 mm (112 k at 5.35, 277 k at 5.225), so the 15 % seal (255 k) came 6 fine steps lower.
+     * Where the probe reads at a Z that touch read, it gets that touch's reading; above 5.375, open air (every coarse
+     * step there read within 1.5 k of the baseline).
+     */
+    @Test
+    public void theZCheckOf0034ReadsTheOnsetNotThe15PercentSeal() throws Exception {
+        double[][] read = {{5.375, -1755881}, {5.35, -1813587}, {5.325, -1884719}, {5.3, -1905535},
+            {5.275, -1929330}, {5.25, -1952498}, {5.225, -1978542}, {5.2, -1994430}, {5.125, -1903823},
+            {4.875, -2031469}};
+        Rig rig = new Rig();
+        rig.ch.byZ = (z, n) -> {
+            for (double[] r : read) {
+                if (Math.abs(z - r[0]) < 1e-9) {
+                    return (int) r[1];
+                }
+            }
+            return z > 5.375 ? -1701117 : -2031469;
+        };
+        VacuumProber.Target t = target(1, 37.0, 124.0, null, null);
+        t.storedZ = 5.375;
+        VacuumProber.Point p = rig.prober().probe(Arrays.asList(t), window(rig, 9.0, null)).get(0);
+        assertEquals(5.375, p.z, 1e-9, "the first touch, where it touched at 23:59: not 5.225");
+        ZCheck.Reference ref = new ZCheck.Reference();
+        ref.z = 5.375;
+        assertTrue(ZCheck.verdict(ref, p.z));
+    }
+
+    /** BR-100: on an unmoved frame the Z check passes with a lagging vacuum: it touches where an instant one did. */
+    @Test
+    public void theZCheckPassesOnAnUnmovedFrameWithALaggingVacuum() throws Exception {
+        Rig instant = sprungSeal(1);
+        double stored = instant.prober().probe(Arrays.asList(example()), window(instant, 4.50, 4.50)).get(0).z;
+        Rig lagging = sprungSeal(500);
+        VacuumProber.Target t = example();
+        t.storedZ = stored;
+        double z = lagging.prober().probe(Arrays.asList(t), window(lagging, 9.0, null)).get(0).z;
+        ZCheck.Reference ref = new ZCheck.Reference();
+        ref.z = stored;
+        assertTrue(ZCheck.verdict(ref, z), "touched " + z + " where it touched " + stored);
+    }
+
+    /**
+     * BR-100, Process's acceptance test: N1's line lags a seal by ~0.3-1 s (tools/tilesetup.py), so a quick read after
+     * a fine step can show a touching step open. A vacuum with a 0.5 s lag reads the same Z as an instant one.
+     */
+    @Test
+    public void aVacuumWithAHalfSecondLagReadsTheSameZAsAnInstantOne() throws Exception {
+        Rig instant = sprungSeal(1);
+        Rig lagging = sprungSeal(500);
+        double zi = instant.prober().probe(Arrays.asList(example()), window(instant, 4.50, 4.50)).get(0).z;
+        double zl = lagging.prober().probe(Arrays.asList(example()), window(lagging, 4.50, 4.50)).get(0).z;
+        assertEquals(4.50, zi, 1e-9, "the first fine step at or below the 4.52 surface: 75 k");
+        assertEquals(zi, zl, 0.025 + 1e-9, "Process: within one fine step");
+        assertEquals(zi, zl, 1e-9, "the same step");
+    }
+
+    /**
+     * N1 on the blank as the 00:34:48 record shows it: 55 k at the first touch, ~25 k more per 0.025 mm, 300 k sealed;
+     * read noise as the open-air spread (+-1.5 k); the line lags a seal and its release by {@code tauMs}.
+     */
+    static Rig sprungSeal(double tauMs) {
+        Rig rig = new Rig();
+        rig.ch.seal = d -> d < -1e-9 ? 0 : Math.min(300_000, 55_000 + 1_000_000 * d);
+        rig.ch.noise = new int[] {1500, -1500, 700, -700, 0};
+        rig.ch.sealTauMs = tauMs;
+        rig.ch.releaseTauMs = tauMs;
+        return rig;
     }
 
     @Test

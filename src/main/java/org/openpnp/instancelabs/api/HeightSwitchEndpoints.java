@@ -67,15 +67,18 @@ final class HeightSwitchEndpoints {
     /** {@code dispense.heightSwitch} of the status, from the settings and memory only: it never sends G-code. */
     static Map<String, Object> status(DispenseService svc, DispenseConfig c) {
         DispenseConfig.HeightSwitchTrip n1 = c.heightSwitch.n1, needle = HeightSwitch.needleTrip(c);
-        // a sum of raw Z heights holds for the home both were measured under only, while it is this home
+        // a sum of raw Z heights holds for the home both were measured under only, while it is this home and the
+        // position is known (a reset or a lost link voids that home before the next one)
         Long home = svc.getHomeTracker().getLastHomeAtMs();
         String who = !thisHome(n1, home) ? "N1" : !thisHome(needle, home) ? "the needle" : null;
+        String why = svc.positionUnknownWhy();
+        if (why == null && who != null) {
+            why = who + " has no accepted trip on the height switch " + ("the needle".equals(who) && needle == null
+                    && c.heightSwitch.needle != null ? "since it was put on" : "in this home");
+        }
         HeightSwitch.Read last = svc.getLastHeightSwitchRead();
         return Views.map("place", c.location(HeightSwitch.PLACE), "n1", n1, "needle", needle, "kSwitch",
-                who == null ? Double.valueOf(n1.tripRawZ + needle.tripRawZ) : null, "kSwitchWhy",
-                who == null ? null : who + " has no accepted trip on the height switch " + ("the needle".equals(who)
-                        && needle == null && c.heightSwitch.needle != null ? "since it was put on" : "in this home"),
-                "lastRead",
+                why == null ? Double.valueOf(n1.tripRawZ + needle.tripRawZ) : null, "kSwitchWhy", why, "lastRead",
                 last == null ? null : lastRead(last));
     }
 
