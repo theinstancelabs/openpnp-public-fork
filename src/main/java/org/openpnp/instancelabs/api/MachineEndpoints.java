@@ -255,8 +255,13 @@ final class MachineEndpoints {
                 actions.add("planned stop: OpenPnP Stop, its DISABLE_COMMAND without the screw-off line: "
                         + (sent.isEmpty() ? "no line acknowledged" : String.join(", ", sent))
                         + (failed.isEmpty() ? "" : " (no ok for " + String.join(", ", failed) + ")")
-                        + "; the link closed, the screw's motor stays powered");
+                        + (ctx.linkLoss() != null // BR-93: lost while the lines went out, so it recorded the motor off
+                                ? "; the link was lost meanwhile: the screw's motor counts as off"
+                                : "; the link closed, the screw's motor stays powered"));
                 return null;
+            }
+            catch (ApiException e) {
+                return e; // the link's refusal, the same as before the checks
             }
             catch (Exception e) {
                 Logger.warn(e, "web planned stop failed");
@@ -281,6 +286,9 @@ final class MachineEndpoints {
         }
         if (out instanceof String) {
             throw refusedWhile((String) out);
+        }
+        if (out instanceof ApiException) {
+            throw (ApiException) out;
         }
         if (out instanceof Exception) {
             throw ApiException.refused("No planned stop: " + rootMessage((Exception) out) + ". The real STOP is "

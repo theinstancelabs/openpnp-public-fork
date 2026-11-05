@@ -259,11 +259,14 @@ public class PlannedStopSimTest {
             assertTrue(System.currentTimeMillis() < until, "the lost link never showed");
             Thread.sleep(20);
         }
+        java.util.concurrent.atomic.AtomicBoolean pastTheChecks = new java.util.concurrent.atomic.AtomicBoolean();
+        MachineEndpoints.plannedStopHook = () -> pastTheChecks.set(true);
         JsonObject r = call("POST", "/api/stop/planned", null);
         assertEquals(409, lastStatus, lastBody);
         String reason = r.get("reason").getAsString();
-        assertTrue(reason.contains("the link to the controller was lost at ") && reason.contains("restart il-openpnp"),
-                reason);
+        assertTrue(reason.startsWith("MACHINE: the link to the controller was lost at ")
+                && reason.contains("restart il-openpnp"), reason);
+        assertFalse(pastTheChecks.get(), "refused before the route's other checks and its task (review MINOR 2)");
         assertTrue(sim.machine.isEnabled(), "OpenPnP's Stop never ran");
     }
 
@@ -284,8 +287,38 @@ public class PlannedStopSimTest {
         };
         JsonObject r = call("POST", "/api/stop/planned", null);
         assertEquals(409, lastStatus, lastBody);
-        assertTrue(r.get("reason").getAsString().contains("the link to the controller was lost at "), lastBody);
+        // the same refusal as before the checks (review NIT 3), not a failure's "No planned stop: …"
+        assertTrue(r.get("reason").getAsString().startsWith("MACHINE: the link to the controller was lost at "),
+                lastBody);
         assertTrue(sim.machine.isEnabled(), "OpenPnP's Stop never ran");
+    }
+
+    /**
+     * BR-93 follow-up review MINOR 1: a link lost while the planned stop's lines go out (BR-93 records the screw's motor
+     * as off then) never answers that the motor stays powered. Still a 200 with the lines in linesFailed: they were
+     * sent, and the deployer fails on them.
+     */
+    @Test
+    public void aLinkLostDuringThePlannedStopClaimsNoPoweredMotor() throws Exception {
+        CountDownLatch m410 = new CountDownLatch(1);
+        sim.server.holdOkUntil.put("M410", m410);
+        sim.server.mark();
+        CompletableFuture<HttpResponse<String>> planned = http.sendAsync(request("POST", "/api/stop/planned", null),
+                HttpResponse.BodyHandlers.ofString());
+        long until = System.currentTimeMillis() + 10_000;
+        while (!sim.server.sinceMark().contains("M410")) {
+            assertTrue(System.currentTimeMillis() < until, "M410 never went out: " + sim.server.sinceMark());
+            Thread.sleep(10);
+        }
+        sim.server.dropLink(); // the controller leaves USB while M410 waits for its ok
+        m410.countDown();
+        HttpResponse<String> a = planned.get(60, TimeUnit.SECONDS);
+        assertEquals(200, a.statusCode(), a.body());
+        JsonObject r = new JsonParser().parse(a.body()).getAsJsonObject();
+        String actions = r.getAsJsonArray("actions").toString();
+        assertFalse(actions.contains("stays powered"), actions);
+        assertTrue(actions.contains("the link was lost meanwhile: the screw's motor counts as off"), actions);
+        assertTrue(r.getAsJsonArray("linesFailed").size() > 0, a.body());
     }
 
     /**
