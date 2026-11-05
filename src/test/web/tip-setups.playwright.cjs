@@ -587,20 +587,21 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     // the rows on screen: label and tip (the list of every tip has the 22G's calibrations of pad-profile too)
     const rows8 = () => page.evaluate(() => Array.from(document.querySelectorAll('#rec-pcals-t tbody tr')).filter((tr) => tr.querySelector('.rec-label__t'))
       .map((tr) => ({ t: tr.querySelector('.rec-label__t').textContent, tip: tr.cells[2].textContent })));
-    // the pressed tip's own list is on screen once that tip shows pressed and the count no longer says Loading (IL.render
-    // runs at the next frame: until then the rows from before the press are still there)
+    // the pressed tip's own list is on screen once that tip shows pressed and the count is read ("n pad calibrations": not
+    // Loading, not a failed read; IL.render runs at the next frame: until then the rows from before the press are still there)
     const listOf = (tip) => page.waitForFunction((k) => { const b = document.querySelector('#rec-pcals-tips button[aria-pressed="true"]'), x = document.getElementById('rec-pcals-sum');
-      return !!b && b.dataset.tip === k && !!x && !/Loading/.test(x.textContent); }, tip, { timeout: 15000 });
+      return !!b && b.dataset.tip === k && !!x && /^\d+ pad calibrations?$/.test(x.textContent); }, tip, { timeout: 15000 }).catch(() => null);
+    const sum8 = () => page.textContent('#rec-pcals-sum');
     await page.click('#rec-pcals-tips button[data-tip="' + k25 + '"]');
     await listOf(k25);
-    const r25 = await rows8();
+    const r25 = await rows8(), sum25 = await sum8();
     const keep = r25.some((x) => x.t === newLabel) && r25.every((x) => x.tip === '25G straight');
     await page.click('#rec-pcals-tips button[data-tip="ad22tta-b"]');
     await listOf('ad22tta-b');
-    const r22 = await rows8();
-    const hide = r22.every((x) => x.t !== newLabel && x.tip === '22G bent taper');
+    const r22 = await rows8(), sum22 = await sum8();
+    const hide = r22.length > 0 && r22.every((x) => x.t !== newLabel && x.tip === '22G bent taper');
     check('(8) the 25G straight filter shows only the 25G\'s calibrations, the new one among them; the 22G bent taper\'s only the 22G\'s', keep && hide,
-      { keep, hide, tips25: [...new Set(r25.map((x) => x.tip))], n25: r25.length, tips22: [...new Set(r22.map((x) => x.tip))], n22: r22.length });
+      { keep, hide, sum25, tips25: [...new Set(r25.map((x) => x.tip))], n25: r25.length, sum22, tips22: [...new Set(r22.map((x) => x.tip))], n22: r22.length });
     await page.click('#rec-pcals-tips button[data-tip="all"]');
     await page.waitForFunction((id) => !!document.querySelector('#rec-pcals-t tr button[data-focus-key="pcal:' + id + '"]'), c7.id, { timeout: 15000 });
     await page.evaluate((id) => IL.go('#records/calibrations/p' + id), c7.id);
