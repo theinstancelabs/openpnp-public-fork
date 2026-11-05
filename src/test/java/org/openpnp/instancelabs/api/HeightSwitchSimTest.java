@@ -576,8 +576,9 @@ public class HeightSwitchSimTest {
         }
         assertEquals(scene.tiltX, e.get("tiltXMmPerRawMm").getAsDouble(), 0.005);
         assertTrue(e.getAsJsonObject("clean").get("ok").getAsBoolean(), e.toString());
-        assertEquals(7, e.getAsJsonArray("photoIds").size());
-        assertEquals(e.getAsJsonArray("photoIds").get(2), e.getAsJsonObject("clean").get("photoId"), "raw 40.4's");
+        assertEquals(8, e.getAsJsonArray("photoIds").size());
+        assertEquals(e.getAsJsonArray("photoIds").get(7), e.getAsJsonObject("clean").get("photoId"), "the clean "
+                + "check's frame, the last");
         assertEquals(scene.camX, e.getAsJsonObject("cameraCalibration").get("x").getAsDouble(), 1e-9);
         assertTrue(e.get("forReview").getAsBoolean());
         String run = r.get("runId").getAsString();

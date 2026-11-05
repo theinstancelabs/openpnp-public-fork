@@ -5464,10 +5464,7 @@ public final class DispenseService {
         }
         DispenseConfig.NeedleEnd e = got.end;
         e.photoIds = ids;
-        int cleanAt = p.s.needleRawZ.indexOf(p.s.cleanRawZ);
-        if (e.clean != null && cleanAt >= 0 && cleanAt < ids.size()) {
-            e.clean.photoId = ids.get(cleanAt);
-        }
+        e.clean.photoId = ids.get(ids.size() - 1); // the clean check's frame, the last picture
         e.cameraCalibration = new DispenseConfig.CameraCalibration();
         e.cameraCalibration.x = at[0];
         e.cameraCalibration.y = at[1];

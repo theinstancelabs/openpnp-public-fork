@@ -466,7 +466,10 @@ public class DispenseConfig {
         public double maxKSpreadMm = 0.35;
         /** Check (e): the end at most this far from where the tip setup puts it (mm). */
         public double maxFromNominalMm = 2.0;
-        /** The clean check reads the centre frame at this raw Z (tipclean.md: np1.py's pose); one of needleRawZ. */
+        /**
+         * The clean check reads one more frame with the needle at this raw Z over B, the measure's last (tipclean.md:
+         * np1.py's pose), at that height's scale: one of needleRawZ.
+         */
         public double cleanRawZ = 40.4;
         /**
          * The clean check's limits per tip kind (the tip setup's key): Process's for the 25G plastic taper
@@ -559,7 +562,7 @@ public class DispenseConfig {
         public long setAtMs;
         /** The engine task that measured it. */
         public String runId;
-        /** The clean check on the centre frame at {@code needleEndMeasure.cleanRawZ}. */
+        /** The clean check on the measure's last frame, the needle at {@code needleEndMeasure.cleanRawZ} over B. */
         public CleanCheck clean;
         /** Recorded on its checks and used; Process reviews the records (nothing waits for that). */
         public boolean forReview = true;

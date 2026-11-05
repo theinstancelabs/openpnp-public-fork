@@ -130,11 +130,13 @@ public class NeedleEndMeasureTest {
         assertTrue(e.clean.spread < 0.35 && e.clean.red >= 0.45 && e.clean.peak >= 60, e.clean.spread + " "
                 + e.clean.red + " " + e.clean.peak);
         assertEquals("plastic-25g-taper", e.setupKey);
-        assertEquals(7, r.pictures.size(), "each height's centre frame");
-        assertEquals(42, cam.framesDone);
-        assertEquals(42, cam.framesPlanned);
+        assertEquals(8, r.pictures.size(), "each height's centre frame, then the clean check's");
+        assertTrue(r.pictures.get(7).caption.startsWith("The clean check's frame"), r.pictures.get(7).caption);
+        assertEquals(43, cam.framesDone);
+        assertEquals(43, cam.framesPlanned);
         assertTrue(cam.phases.get(0).startsWith("needle end: N1 at raw Z 19.000 (1 of 3)"), cam.phases.toString());
         assertEquals("needle end: the needle at raw Z 42.000 (4 of 4)", cam.phases.get(6));
+        assertEquals("needle end: the clean check, the needle at raw Z 40.400", cam.phases.get(7));
     }
 
     static final Pattern XY = Pattern.compile("G1 X(-?[\\d.]+) Y(-?[\\d.]+) F(\\d+)");
@@ -177,7 +179,7 @@ public class NeedleEndMeasureTest {
                 assertTrue(p.s.n1RawZ.contains(h[2]) || p.s.needleRawZ.contains(h[2]), "height " + h[2]);
             }
         }
-        assertEquals(42, frame);
+        assertEquals(43, frame, "the heights' 42 and the clean check's");
         // the steps: N1 ±5 mm, the needle ±1 mm around its B
         assertEquals(p.n1X + 5, cam.frames.get(1)[0], 1e-6);
         assertEquals(p.needleY - 1, cam.frames.get(22)[1], 1e-6);
@@ -320,6 +322,37 @@ public class NeedleEndMeasureTest {
         assertTrue(p.stream().anyMatch(x -> x.startsWith("needleEndMeasure.clean['plastic-25g-taper']: no spreadMax")
                 && x.contains("'spredMax' is no limit")), p.toString());
         assertEquals(p, file.copy().validate(), "a copy keeps them");
+    }
+
+    /**
+     * Review MINOR 8: the clean check reads one more frame, the measure's last: the needle at cleanRawZ over B
+     * (approached from (−0.5, −0.5)) after every other height, then only the lift. Paste that comes on after the heights'
+     * frames (a drip during the measure) is caught there.
+     */
+    @Test
+    public void theCleanCheckReadsTheLastFrame() throws Exception {
+        FromBelowScene sc = new FromBelowScene(13);
+        Camera cam = new Camera(sc) {
+            @Override
+            public DotImager.Frame capture() throws Exception {
+                sc.paste = frames.size() >= 42; // after the heights' 42 frames
+                return super.capture();
+            }
+        };
+        NeedleEndMeasure.Plan p = plan(sc, sc.endDx, sc.endDy);
+        NeedleEndMeasure.Result r = NeedleEndMeasure.measure(cam, p);
+        refused(r, NeedleEndMeasure.PASTE, "paste on the end: spread", cam);
+        assertEquals(43, cam.frames.size());
+        assertEquals(42.0, cam.frames.get(41)[2], 1e-9, "after the last height's frames");
+        double[] last = cam.frames.get(42);
+        assertEquals(p.needleX, last[0], 1e-9);
+        assertEquals(p.needleY, last[1], 1e-9);
+        assertEquals(40.4, last[2], 1e-9);
+        int dwell = cam.lines.lastIndexOf("G4 P300");
+        assertEquals(String.format(java.util.Locale.ROOT, "G1 X%.3f Y%.3f F3000", p.needleX - 0.5, p.needleY - 0.5),
+                cam.lines.get(dwell - 3), "approached from (-0.5, -0.5)");
+        assertEquals(java.util.Arrays.asList("G1 Z31.500 F1200", "M400"), cam.lines.subList(dwell + 1,
+                cam.lines.size()), "then only the lift");
     }
 
     /** A room-lit frame (the ring's glow not white): the clean check's light, the end not found (light or focus). */

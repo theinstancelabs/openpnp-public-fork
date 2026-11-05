@@ -27,12 +27,12 @@ import org.openpnp.instancelabs.vision.TipClean;
  * end, also after a refusal and a failure; a STOP's abort ends it where it is. The needle's valve and then its pump are
  * switched off before the first move, as for every height-switch measure.
  *
- * <p>Refused at the first check that fails, with its frame and the region searched drawn: (a) the end's top-hat peak
- * stands out of its window, (b) the frames follow the head's steps (and moved with them), (c) the first and last centre
- * frames agree, (e) the end lies near where the tip setup puts it, (d) K's spread over N1's heights, then tipclean.py's
- * check of the centre frame at the clean height: light, found or z failing is "the end was not found (light or focus)"
- * ({@link #NOT_FOUND}, measure again), spread or red failing is paste on the end ({@link #PASTE}, wipe the tip and
- * measure again).</p>
+ * <p>Refused at the first check that fails, with its frame and the region searched drawn: at each height (a) the end's
+ * top-hat peak stands out of its window, (b) the frames follow the head's steps (and moved with them), (c) the first and
+ * last centre frames agree, (e) the end lies near where the tip setup puts it; then tipclean.py's check of one more
+ * frame, the measure's last (the needle at the clean height over B): light, found or z failing is "the end was not
+ * found (light or focus)" ({@link #NOT_FOUND}, measure again), spread or red failing is paste on the end
+ * ({@link #PASTE}, wipe the tip and measure again); then (d) K's spread over N1's heights.</p>
  */
 public final class NeedleEndMeasure {
     /** The refusal codes and what each offers. */
@@ -90,7 +90,7 @@ public final class NeedleEndMeasure {
         public String runId;
         public DispenseConfig.NeedleEnd end;
         public DispenseConfig.CleanCheck clean;
-        /** On success each height's centre frame; on a refusal the one frame it failed in. */
+        /** On success each height's centre frame, then the clean check's; on a refusal the one frame it failed in. */
         public transient List<Picture> pictures = new ArrayList<>();
     }
 
@@ -143,8 +143,9 @@ public final class NeedleEndMeasure {
         Result r = new Result();
         DispenseConfig.NeedleEndSettings s = p.s;
         int[] done = {0};
-        int planned = STEPS.length * (s.n1RawZ.size() + s.needleRawZ.size());
+        int planned = STEPS.length * (s.n1RawZ.size() + s.needleRawZ.size()) + 1;
         List<Look> n1 = new ArrayList<>(), nd = new ArrayList<>();
+        Picture cleanPicture;
         try {
             // the passthrough may have left them on: valve, then pump, as STOP orders them, before anything moves
             io.send(ControllerCommands.VALVE_OFF);
@@ -155,6 +156,7 @@ public final class NeedleEndMeasure {
             for (int i = 0; i < s.needleRawZ.size(); i++) {
                 nd.add(look(io, p, r, true, i, done, planned));
             }
+            cleanPicture = clean(io, p, r, nd, done, planned);
         }
         catch (Refused e) {
             lift(io, p);
@@ -174,7 +176,7 @@ public final class NeedleEndMeasure {
         }
         lift(io, p);
         try {
-            finish(p, r, n1, nd);
+            finish(p, r, n1, nd, cleanPicture);
         }
         catch (Refused e) {
             // r says why
@@ -220,15 +222,7 @@ public final class NeedleEndMeasure {
         BufferedImage[] f = new BufferedImage[STEPS.length];
         double mmPerPx = 0;
         for (int k = 0; k < STEPS.length; k++) {
-            double x = bx + d * STEPS[k][0], y = by + d * STEPS[k][1];
-            io.send(xy(x - a, y - a, F_STEP));
-            io.send(xy(x, y, F_STEP));
-            io.send("M400");
-            io.send("G4 P" + s.settleMs);
-            DotImager.Frame fr = io.capture();
-            if (fr == null || fr.image == null) {
-                throw new IllegalStateException("the bottom camera gave no frame");
-            }
+            DotImager.Frame fr = frame(io, p, bx + d * STEPS[k][0], by + d * STEPS[k][1]);
             f[k] = fr.image;
             mmPerPx = fr.mmPerPxX;
             io.progress(null, ++done[0], planned);
@@ -326,18 +320,45 @@ public final class NeedleEndMeasure {
                         + "setup puts it (at most %.1f): another tip, a bent one, or not the end", at, from,
                         s.maxFromNominalMm), l.picture, "Far from the nominal end: " + at + " " + region, mmPerPx);
             }
-            if (Math.abs(l.rawZ - s.cleanRawZ) < 1e-9) {
-                clean(p, r, l, f[0], at);
-            }
         }
         return l;
     }
 
-    /** tipclean.py's check of the centre frame at the clean height, refused by its first failing check. */
-    private static void clean(Plan p, Result r, Look l, BufferedImage c0, String at) throws Refused {
+    /** One frame with the head at raw (x, y), approached from (−a, −a), after M400 and the dwell. */
+    private static DotImager.Frame frame(Io io, Plan p, double x, double y) throws Exception {
+        io.send(xy(x - p.s.approachMm, y - p.s.approachMm, F_STEP));
+        io.send(xy(x, y, F_STEP));
+        io.send("M400");
+        io.send("G4 P" + p.s.settleMs);
+        DotImager.Frame fr = io.capture();
+        if (fr == null || fr.image == null) {
+            throw new IllegalStateException("the bottom camera gave no frame");
+        }
+        return fr;
+    }
+
+    /**
+     * tipclean.py's check of one more frame, the measure's last (review MINOR 8: the nearest to the press): the needle
+     * at the clean height over its B with that height's scale; refused by its first failing check. Its picture, or null
+     * with no height at cleanRawZ (no verdict: {@link #finish} refuses).
+     */
+    private static Picture clean(Io io, Plan p, Result r, List<Look> nd, int[] done, int planned) throws Exception {
         DispenseConfig.NeedleEndSettings s = p.s;
+        Look l = null;
+        for (Look h : nd) {
+            l = Math.abs(h.rawZ - s.cleanRawZ) < 1e-9 ? h : l;
+        }
+        if (l == null) {
+            return null;
+        }
+        String at = String.format(Locale.ROOT, "the needle at raw Z %.3f", s.cleanRawZ);
+        io.progress("needle end: the clean check, " + at, done[0], planned);
+        io.send(z(s.cleanRawZ, F_DOWN));
+        io.send("M400");
+        DotImager.Frame fr = frame(io, p, p.needleX, p.needleY);
+        io.progress(null, ++done[0], planned);
         double bcx = s.centrePx.get(0), bcy = s.centrePx.get(1), k = l.fit.pxPerMm();
-        TipClean.Result t = TipClean.check(c0, k, bcx, bcy, s.kernelPx, p.clean);
+        TipClean.Result t = TipClean.check(fr.image, k, bcx, bcy, s.kernelPx, p.clean);
         DispenseConfig.CleanCheck c = new DispenseConfig.CleanCheck();
         c.ok = t.ok();
         c.failed = t.failed;
@@ -353,20 +374,22 @@ public final class NeedleEndMeasure {
         c.setupKey = p.setupKey;
         c.atMs = System.currentTimeMillis();
         r.clean = c;
-        l.picture = draw(l.picture, g -> {
+        BufferedImage pic = draw(fr.image, g -> {
             circle(g, Color.WHITE, t.endX, t.endY, p.clean.endMm * k);
             circle(g, Color.WHITE, t.endX, t.endY, p.clean.annulusMm * k);
         });
         if (!t.ok()) {
             boolean paste = "spread".equals(t.failed) || "red".equals(t.failed);
-            throw new Refused(r, paste ? PASTE : NOT_FOUND, t.why, l.picture,
+            throw new Refused(r, paste ? PASTE : NOT_FOUND, t.why, pic,
                     (paste ? "Paste on the end: " : "The end not found: ") + at + " (the end's 0.5 and 1.0 mm drawn)",
-                    l.mmPerPx);
+                    fr.mmPerPxX);
         }
+        return new Picture(pic, "The clean check's frame, the measure's last: " + at + ", clean (the end's 0.5 and 1.0 "
+                + "mm drawn)", fr.mmPerPxX);
     }
 
-    /** K, the tilt and the record, once every height passed. */
-    private static void finish(Plan p, Result r, List<Look> n1, List<Look> nd) throws Refused {
+    /** K, the tilt and the record, once every height passed; the clean check's picture last. */
+    private static void finish(Plan p, Result r, List<Look> n1, List<Look> nd, Picture cleanPicture) throws Refused {
         DispenseConfig.NeedleEndSettings s = p.s;
         if (r.clean == null) {
             // review MAJOR 1: no end without a clean verdict (the needle's press needs one)
@@ -416,13 +439,13 @@ public final class NeedleEndMeasure {
         r.pictures.clear();
         for (Look l : nd) {
             r.pictures.add(new Picture(l.picture, String.format(Locale.ROOT, "The needle's end from below at raw Z "
-                    + "%.3f: (%.3f, %.3f) mm from the head%s", l.rawZ, l.end[0], l.end[1], Math.abs(l.rawZ
-                            - s.cleanRawZ) < 1e-9 ? ", clean" : ""), l.mmPerPx));
+                    + "%.3f: (%.3f, %.3f) mm from the head", l.rawZ, l.end[0], l.end[1]), l.mmPerPx));
         }
         for (Look l : n1) {
             r.pictures.add(new Picture(l.picture, String.format(Locale.ROOT, "N1 from below at raw Z %.3f: %.3f px/mm",
                     l.rawZ, l.fit.pxPerMm()), l.mmPerPx));
         }
+        r.pictures.add(cleanPicture);
     }
 
     private static DispenseConfig.EndHeight height(Look l, double[] end) {
