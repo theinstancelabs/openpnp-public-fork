@@ -19,8 +19,8 @@ import java.util.regex.Pattern;
  * within {@code surfaceMarginMm} of its points), so I4 and I12 never disagree about a dot; a program is also allowed
  * the surfaces its own I4 scope names (a dot ladder at another place lays its dots on that place's surface). Every
  * other place (the park, feeder picks, camera places, the oven) and every other probed surface is outside; a refusal
- * there names it. Forbidden, whatever else covers it: the bottom camera (a circle of {@code forbidRadiusMm}) and the
- * configured circles. With the valve on the needle never crosses a forbidden zone. The pressure hold, which may drool
+ * there names it. Forbidden, whatever else covers it: the bottom camera (a circle of {@code forbidRadiusMm}), the
+ * height switch (BR-94: a circle of {@code heightSwitchRadiusMm} around its place, once set) and the configured circles. With the valve on the needle never crosses a forbidden zone. The pressure hold, which may drool
  * for minutes, opens the valve only over a sink: the waste, the towel, a cup, the purge row, the calibration area or a
  * coupon (never over a board or another surface: #12's final review). The refusals say what to do in their context:
  * the hold where the needle is ({@link #refusal}), its park ({@link #parkRefusal}), a program's line
@@ -108,6 +108,7 @@ public final class OutputZones {
     }
 
     public static final String BOTTOM_CAMERA = "bottom camera";
+    public static final String HEIGHT_SWITCH = "height switch";
 
     private final List<Zone> allow = new ArrayList<>();
     private final List<Zone> forbid = new ArrayList<>();
@@ -140,6 +141,10 @@ public final class OutputZones {
         if (bottomCameraXY != null) {
             z.forbid.add(Zone.circle(BOTTOM_CAMERA, "the " + BOTTOM_CAMERA, false, bottomCameraXY[0],
                     bottomCameraXY[1], s.forbidRadiusMm));
+        }
+        DispenseConfig.NamedLocation hs = c.location(HeightSwitch.PLACE);
+        if (hs != null) {
+            z.forbid.add(Zone.circle(HEIGHT_SWITCH, "the " + HEIGHT_SWITCH, false, hs.x, hs.y, s.heightSwitchRadiusMm));
         }
         if (s.forbid != null) {
             for (DispenseConfig.ForbidZone f : s.forbid) {
