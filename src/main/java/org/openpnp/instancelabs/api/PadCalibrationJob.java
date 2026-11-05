@@ -634,7 +634,11 @@ final class PadCalibrationJob {
             throw ApiException.badRequest("'mode' must be 'halves' (two rows of half-turn pairs) or 'quarters' (4 quarter "
                     + "turns per turn)");
         }
-        int n = halves ? count(q.pairs, 8, 4, 16, "pairs") : count(q.turns, 4, 2, 8, "turns");
+        if (halves && q.pairs != null && q.pairs < MIN_PAIRS) {
+            throw ApiException.badRequest("lay at least " + MIN_PAIRS + " pairs (8 by default): with " + q.pairs
+                    + " the error at each half is too uncertain, so the measure would mostly find no angle");
+        }
+        int n = halves ? count(q.pairs, 8, MIN_PAIRS, 16, "pairs") : count(q.turns, 4, 2, 8, "turns");
         if (q.targets.size() != 4 * n) {
             throw ApiException.badRequest(halves ? String.format(Locale.ROOT, "halves of %d pairs take %d targets (2 rows "
                     + "of %d pairs), not %d", n, 4 * n, n, q.targets.size()) : String.format(Locale.ROOT, "quarters of "
@@ -699,6 +703,12 @@ final class PadCalibrationJob {
             saBlocks.add(b);
         }
     }
+
+    /**
+     * BR-77 (Process 11-04 16:4x): the fewest half-turn pairs a halves measure lays. With 4 the small-sample error
+     * (95 % coverage) leaves the measure answering "none" 70 % of the time: dots and time for nothing.
+     */
+    static final int MIN_PAIRS = 6;
 
     private static int count(Integer v, int dflt, int min, int max, String name) throws ApiException {
         int n = v == null ? dflt : v;

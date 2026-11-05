@@ -220,6 +220,23 @@ public class StartAngleJobTest {
         assertEquals(2, steps.reqs.size(), "nothing ran");
     }
 
+    /**
+     * Process 11-04 16:4x: halves take at least 6 pairs. With 4 the error at each half is so uncertain that the measure
+     * answers "none" 70 % of the time (the honest 95 % coverage the small-n factors give): dots and time for nothing.
+     */
+    @Test
+    public void halvesNeedSixPairsAtLeast() throws Exception {
+        String throwaways = "\"throwaways\":[[285,262],[287.5,262],[290,262],[292.5,262]]";
+        for (int n : new int[] {4, 5}) {
+            assertBad("{\"mode\":\"halves\",\"pairs\":" + n + ",\"targets\":[" + spots(285, 245, 2 * n) + ","
+                    + spots(285, 253, 2 * n) + "]," + throwaways + "}", "lay at least 6 pairs (8 by default)");
+        }
+        assertEquals(0, steps.reqs.size(), "nothing ran");
+        PadCalibrationJobTest.Res six = t.call("POST", "/api/screw/start-angle/measure", "{\"mode\":\"halves\",\"pairs\":6,"
+                + "\"targets\":[" + spots(285, 245, 12) + "," + spots(285, 253, 12) + "]," + throwaways + ",\"wait\":true}");
+        assertEquals(200, six.status, six.toString());
+    }
+
     /** The purge spots of a step as {x, y, raise}. */
     static String purge(DoseBlocksRequest r) {
         List<String> l = new ArrayList<>();
