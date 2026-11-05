@@ -65,11 +65,16 @@ public class HeightSwitchTest {
 
         /** The deepest Z the tool reached, past the trip (mm; 0 when it never got there). */
         double deepestPast() {
+            return past(trip);
+        }
+
+        /** How far past raw Z {@code ref} the tool went (mm; 0 when never). */
+        double past(double ref) {
             double worst = 0;
             for (String l : lines) {
                 Matcher m = Z.matcher(l);
                 if (l.startsWith("G1") && m.find()) {
-                    worst = Math.max(worst, down * (Double.parseDouble(m.group(1)) - trip));
+                    worst = Math.max(worst, down * (Double.parseDouble(m.group(1)) - ref));
                 }
             }
             return worst;
@@ -189,14 +194,19 @@ public class HeightSwitchTest {
         assertEquals("G1 Z31.500 F600", sw.lines.get(sw.lines.size() - 2), sw.lines.toString());
     }
 
+    /** Review MAJOR 3: no step past the floor, also when the window is not a whole number of coarse steps. */
     @Test
-    public void noTripBeforeTheFloorIsNotAccepted() throws Exception {
+    public void noTripBeforeTheFloorIsNotAcceptedAndNoStepPassesTheFloor() throws Exception {
         FakeSwitch sw = new FakeSwitch(5.0, -1);
-        HeightSwitch.Result r = HeightSwitch.measure(sw, plan("n1", -1, 13.0, 11.0, 5));
+        HeightSwitch.Result r = HeightSwitch.measure(sw, plan("n1", -1, 13.0, 11.1, 5));
         assertFalse(r.accepted);
         assertFalse(r.refused);
-        assertTrue(r.why.contains("no trip between") && r.why.contains("13.000") && r.why.contains("11.000"), r.why);
-        assertTrue(sw.deepestPast() == 0 && Math.abs(sw.z - 31.5) < 1e-9, "never below the floor, back up");
+        assertTrue(r.why.contains("no trip between") && r.why.contains("13.000") && r.why.contains("11.100"), r.why);
+        assertEquals(0, sw.past(11.1), 1e-9, "never below N1's floor: " + sw.lines);
+        assertEquals(31.5, sw.z, 1e-9, "back up");
+        FakeSwitch needle = new FakeSwitch(60.0, 1);
+        HeightSwitch.measure(needle, plan("needle", 1, 51.0, 52.96, 5));
+        assertEquals(0, needle.past(52.96), 1e-9, "never past the needle's floor: " + needle.lines);
     }
 
     @Test

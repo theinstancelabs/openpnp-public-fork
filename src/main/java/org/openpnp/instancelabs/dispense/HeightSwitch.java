@@ -194,11 +194,14 @@ public final class HeightSwitch {
         }
     }
 
-    /** Steps from {@code from} toward {@code to} until the pin leaves its idle level: that step's Z, or null. */
+    /**
+     * Steps from {@code from} toward {@code to} until the pin leaves its idle level: that step's Z, or null. Never past
+     * {@code to}: the last step is {@code to} itself, shorter when the span is no whole number of steps.
+     */
     private static Double descend(Io io, Plan p, double from, double to, double step, int idle) throws Exception {
-        int n = (int) Math.round(Math.abs(to - from) / step);
+        int n = (int) Math.ceil(Math.abs(to - from) / step - 1e-9);
         for (int k = 0; k <= n; k++) {
-            double z = round(from + p.down * k * step);
+            double z = k == n ? to : round(from + p.down * k * step);
             io.send(move(z, 300));
             io.send("M400");
             io.send("G4 P50");
