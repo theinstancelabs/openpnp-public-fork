@@ -3703,7 +3703,8 @@ public final class DispenseService {
         requireAvailable();
         String blankName = req.locationName == null ? cfg.blankLocationName : req.locationName;
         DispenseConfig.NamedLocation blank = requireLocation(blankName);
-        RunResult r = newRun("touch-off", null, "blank", getCurrentCalibration().id, req.steps);
+        RunResult r = newRun("touch-off", null, "blank", getCurrentCalibration().id, req.steps
+                + NeedleTouchOff.CHECK_DOTS);
         TouchOffResult res = new TouchOffResult();
         res.run = r;
         return submitResult(r, res, () -> {
@@ -3743,8 +3744,9 @@ public final class DispenseService {
             }
             List<SpotDot> seen = s.imageSpots(specs, req.primeAtWaste, primeExtra, NeedleTouchOff.cutMm(dotMm),
                     req.pitchMm / 2);
-            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen, req.jumpRatio, steadyMm,
-                    c.profile.touchOffSkipDots);
+            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen.subList(0, req.steps), req.jumpRatio,
+                    steadyMm, c.profile.touchOffSkipDots);
+            NeedleTouchOff.checkLanding(res.analysis, seen, c.profile.touchOffSkipDots); // BR-89
             res.analysis.referenceFrom = referenceFrom;
             res.previousOffsetMm = c.needleZOffsetMm;
             java.util.Map<String, Object> det = new java.util.LinkedHashMap<>();
@@ -3755,9 +3757,10 @@ public final class DispenseService {
             det.put("blankPlaneMaxResidualMm", plane == null ? null : plane.maxAbsResidualMm);
             det.put("dotZ", specs.stream().map(x -> x.dispenseZ).collect(java.util.stream.Collectors.toList()));
             String details = new com.google.gson.Gson().toJson(det);
+            String moved = res.analysis.landingProblem;
             if (res.analysis.found()) {
                 res.newOffsetMm = c.needleZOffsetMm + res.analysis.contactGapMm;
-                if (apply) {
+                if (apply && moved == null) {
                     // under the needle the touch-off started with: a needle change meanwhile refuses it (§22.3)
                     NeedleFrameResult fr = setNeedleZOffset(res.newOffsetMm, "dot-ladder-touch-off", details,
                             c.needleChangedAtMs);
@@ -3765,11 +3768,13 @@ public final class DispenseService {
                     res.applied = true;
                 }
                 else {
-                    db.insertTouchOff("dot-ladder-touch-off (not applied)", res.newOffsetMm, c.needleZOffsetMm,
-                            details, null);
+                    // BR-89: a tip that may have moved invalidates both the measured Z and the landing: kept, not set
+                    db.insertTouchOff("dot-ladder-touch-off (not applied" + (apply ? ": " + moved : "") + ")",
+                            res.newOffsetMm, c.needleZOffsetMm, details, null);
                 }
             }
-            r.message = res.analysis.reason;
+            r.message = moved == null ? res.analysis.reason : res.analysis.reason + "; " + (res.analysis.found()
+                    ? "not applied: " : "") + moved;
             s.ok();
         });
     }
