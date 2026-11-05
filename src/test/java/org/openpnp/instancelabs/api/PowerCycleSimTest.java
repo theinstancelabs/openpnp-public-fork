@@ -1764,6 +1764,7 @@ public class PowerCycleSimTest {
         }
         assertFalse(sim.server.sinceMark().contains("G1 Z4 F300"), "nothing of the batch: " + sim.server.sinceMark());
         assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z moved after the lines were checked"), lastBody);
     }
 
     /** BR-97 review 4 (MAJOR): a web STOP while the Z re-read waits for its answer sends no line after it. */
@@ -1819,24 +1820,30 @@ public class PowerCycleSimTest {
         sim.server.holdOkUntil.put("G1 Z1 F300", hold);
         sim.server.delayBeforeOkMs.put("M410", 200L);
         sim.server.mark();
+        Thread[] stop = new Thread[1];
         Thread stopper = new Thread(() -> {
             try {
                 long t0 = System.currentTimeMillis();
                 while (!sim.server.sinceMark().contains("G1 Z1 F300") && System.currentTimeMillis() - t0 < 10000) {
                     Thread.sleep(5);
                 }
-                new Thread(() -> {
+                stop[0] = new Thread(() -> {
                     try {
                         sim.machine.setEnabled(false);
                     }
                     catch (Exception e) {
                         throw new IllegalStateException(e);
                     }
-                }).start();
-                Thread.sleep(300);
+                });
+                stop[0].start();
+                // the line's ok only once OpenPnP's Stop has announced itself (before its M410), however slow
+                ApiContext c = context();
+                while (!c.switchOff.inProgress() && System.currentTimeMillis() - t0 < 10000) {
+                    Thread.sleep(5);
+                }
             }
-            catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            catch (Exception e) {
+                throw new IllegalStateException(e);
             }
             finally {
                 hold.countDown();
@@ -1851,6 +1858,7 @@ public class PowerCycleSimTest {
             sim.server.delayBeforeOkMs.remove("M410");
         }
         stopper.join();
+        stop[0].join(10000);
         assertTrue(sim.server.sinceMark().contains("M410"), "OpenPnP's Stop ran: " + sim.server.sinceMark());
         assertFalse(sim.server.sinceMark().contains("G1 Z2 F300"), "no line after it: " + sim.server.sinceMark());
         assertEquals(409, lastStatus, lastBody);

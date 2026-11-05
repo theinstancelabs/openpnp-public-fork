@@ -280,11 +280,11 @@ final class GcodePassthrough {
             d.receiveResponses(); // its answers are not the first line's replies
         }
         catch (Exception e) {
-            return "Z could not be re-read before the first line (" + MachineEndpoints.rootMessage(e) + "): nothing "
-                    + "was sent";
+            return "Z could not be re-read before the first line (" + MachineEndpoints.rootMessage(e) + "): none of "
+                    + "its lines was sent; press STOP if the machine may still move";
         }
         return Math.abs(z - from) <= 0.01 ? null : String.format(Locale.ROOT, "Z moved after the lines were checked "
-                + "(raw Z %.2f then, %.2f now: a home or a power cycle ran meanwhile): walk again from the Z now", from,
+                + "(raw Z %.2f then, %.2f now: a home, a jog or a power cycle ran meanwhile): walk again from the Z now", from,
                 z);
     }
 
@@ -341,17 +341,18 @@ final class GcodePassthrough {
                 String stop = stopReason(m, b);
                 if (stop == null && !zChecked) {
                     zChecked = true;
-                    stop = levelStartMoved(m, d, b.levelFromZ, timeoutMs);
+                    String moved = levelStartMoved(m, d, b.levelFromZ, timeoutMs);
+                    stop = stopReason(m, b); // a STOP or a take during the re-read's round trips names itself
                     if (stop == null) {
-                        stop = stopReason(m, b); // a STOP or a take during the re-read's round trips
+                        stop = moved;
                     }
                 }
                 if (stop != null) {
                     return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i,
                             l.text, null, stop);
                 }
+                d.sendCommand(l.text, timeoutMs); // nothing between the last check and the write
                 log(who, ">", l.text);
-                d.sendCommand(l.text, timeoutMs);
                 DispenseService engine = ctx.svcOrNull();
                 if (engine != null) {
                     engine.noteControllerLine(l.text); // BR-02: M18 B switches the screw's motor off, G1 B turns it
