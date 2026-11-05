@@ -67,6 +67,11 @@ public class DispenseConfig {
     public OutputZoneSettings outputZones = new OutputZoneSettings();
     /** BR-94: each tool's last accepted trip on the bed's height switch ({@link HeightSwitch}); the measure sets it. */
     public HeightSwitchTrips heightSwitch = new HeightSwitchTrips();
+    /**
+     * BR-94: how far past its expected trip the needle may press the height switch (mm): Process's, no default
+     * (without it the needle's measure is refused).
+     */
+    public Double heightSwitchMaxPastTripMm = null;
 
     // --- named locations (x, y: N2 nozzle coordinates; z: surface Z in OpenPnP's frame, i.e. the
     // N1 nozzle Z touching that surface, the frame of OpenPnP's board Z) -------------------------
@@ -992,6 +997,11 @@ public class DispenseConfig {
         }
         if (pasteThicknessMm <= 0 || pasteDensityMgMm3 <= 0) {
             p.add("paste thickness and density must be > 0");
+        }
+        if (heightSwitchMaxPastTripMm != null && !(heightSwitchMaxPastTripMm > 0
+                && heightSwitchMaxPastTripMm <= HeightSwitch.MAX_WINDOW_MM)) {
+            p.add("heightSwitchMaxPastTripMm must be above 0 and at most " + HeightSwitch.MAX_WINDOW_MM + " mm (the "
+                    + "switch's longest window)");
         }
         validateRegistration(p);
         validatePadCalibration(p);

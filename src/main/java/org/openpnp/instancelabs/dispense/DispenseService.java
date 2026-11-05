@@ -5067,6 +5067,9 @@ public final class DispenseService {
             throw refused("the height switch's place is not set: PUT /api/locations/" + HeightSwitch.PLACE
                     + " {x, y}, the switch's top centre");
         }
+        if (needle && c.heightSwitchMaxPastTripMm == null) {
+            throw refused(HeightSwitch.NO_MAX_PAST_TRIP);
+        }
         if (needle && !tipClean) {
             throw refused("the needle presses the height switch only with a clean tip: paste must never touch it");
         }
@@ -5110,6 +5113,11 @@ public final class DispenseService {
         p.zStart = zStart != null ? zStart : last.tripRawZ - p.down * 1.0;
         p.zFloor = zFloor != null ? zFloor : last.tripRawZ + p.down * 0.5;
         p.coarseMm = needle ? 0.10 : 0.25;
+        if (needle && last != null && home != null && home.equals(last.homeAtMs)) {
+            // the trip this window expects: the needle's own of this home
+            p.expectedTrip = last.tripRawZ;
+            p.maxPastTripMm = c.heightSwitchMaxPastTripMm;
+        }
         p.presses = res.presses;
         p.zLimits = mapper.zSoftLimitsRaw();
         p.safeZone = mapper.zSafeZoneRaw();

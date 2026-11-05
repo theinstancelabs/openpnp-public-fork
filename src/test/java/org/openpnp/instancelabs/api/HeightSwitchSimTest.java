@@ -55,6 +55,9 @@ public class HeightSwitchSimTest {
         sim.enableAndHome(); // the service sees this home: its time is the trips' home
         sim.server.heightSwitchN1TripZ = N1_TRIP;
         sim.server.heightSwitchNeedleTripZ = NEEDLE_TRIP;
+        DispenseConfig c = svc.getConfig();
+        c.heightSwitchMaxPastTripMm = 0.5; // Process's first value (BR-94: the lever's differential x overtravel)
+        svc.updateConfig(c);
         ApiSettings s = new ApiSettings();
         s.port = 0;
         api = ApiServer.start(Configuration.get(), s);
@@ -393,6 +396,54 @@ public class HeightSwitchSimTest {
         List<String> l = sim.server.sinceMark();
         int valve = l.indexOf("M107 P3"), pump = l.indexOf("M107 P2"), move = l.indexOf(moves().get(0));
         assertTrue(valve >= 0 && valve < pump && pump < move, l.toString());
+    }
+
+    /**
+     * BR-94 needle aim: how far past its expected trip the needle may press the switch is Process's setting, with no
+     * default: without it the needle's measure is refused before anything is sent. PUT /api/config sets it (bounded).
+     */
+    @Test
+    public void theNeedleWaitsForProcessToSayHowFarPastTheTripTheSwitchMayBePressed() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        checkedLanding();
+        ok("PUT", "/api/config", "{\"heightSwitchMaxPastTripMm\":null}");
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5,\"tipClean\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Process sets how far past the trip the switch may be pressed"), lastBody);
+        assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "nothing sent");
+        for (String bad : new String[] {"0", "2.5"}) {
+            call("PUT", "/api/config", "{\"heightSwitchMaxPastTripMm\":" + bad + "}");
+            assertEquals(400, lastStatus, bad + " " + lastBody);
+        }
+        ok("PUT", "/api/config", "{\"heightSwitchMaxPastTripMm\":0.5}");
+        assertTrue(ok("POST", "/api/height-switch/measure",
+                "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5,\"tipClean\":true}").get("accepted").getAsBoolean());
+    }
+
+    /**
+     * BR-94 needle aim: a later needle measure expects its trip where its last one was; its descent stops
+     * heightSwitchMaxPastTripMm past that whatever its floor says, and no trip by then is refused, the needle raised.
+     */
+    @Test
+    public void theNeedlesDescentStopsMaxPastTripPastItsExpectedTrip() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        checkedLanding();
+        ok("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5,\"tipClean\":true}");
+        sim.server.heightSwitchNeedleTripZ = 50.0; // the tip misses the lever now
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"zStart\":42.5,\"zFloor\":44.5,\"tipClean\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("no trip by Z 43.5"), lastBody);
+        double deepest = 0;
+        for (String l : moves()) {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\bZ(-?\\d+(?:\\.\\d+)?)").matcher(l);
+            if (m.find()) {
+                deepest = Math.max(deepest, Double.parseDouble(m.group(1)));
+            }
+        }
+        assertTrue(deepest <= NEEDLE_TRIP + 0.5 + 1e-9, "never past the cap: " + moves());
+        assertEquals(31.5, sim.server.position('Z'), 1e-9);
     }
 
     /** The needle without the clean-tip word: refused before anything is sent (paste must never touch the switch). */

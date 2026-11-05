@@ -464,6 +464,49 @@ public class HeightSwitchTest {
     }
 
     /**
+     * BR-94 needle aim: the needle never goes more than heightSwitchMaxPastTripMm past the trip its window expects,
+     * whatever the window says; no trip by then is refused (not a 200 "no trip"), and it goes back up to travel Z. A
+     * trip inside the cap is measured as before; a start past the cap is refused before any line. N1 has no cap.
+     */
+    @Test
+    public void theNeedleNeverGoesMoreThanMaxPastTripPastTheExpectedTrip() throws Exception {
+        FakeSwitch miss = new FakeSwitch(60.0, 1); // the tip misses the lever: no trip in the window
+        HeightSwitch.Plan p = plan("needle", 1, 41.0, 43.0, 5);
+        p.expectedTrip = 42.0;
+        p.maxPastTripMm = 0.5;
+        HeightSwitch.Result r = HeightSwitch.measure(miss, p);
+        assertTrue(r.refused && !r.accepted, String.valueOf(r.why));
+        assertTrue(r.why.contains("no trip by Z 42.500") && r.why.contains("0.50 mm past the expected trip (Z 42.000)")
+                && r.why.contains("heightSwitchMaxPastTripMm"), r.why);
+        assertEquals(0, miss.past(42.5), 1e-9, "never past the cap: " + miss.lines);
+        assertEquals(31.5, miss.z, 1e-9, "back at travel Z");
+        FakeSwitch hit = new FakeSwitch(42.3, 1);
+        HeightSwitch.Result ok = HeightSwitch.measure(hit, p);
+        assertTrue(ok.accepted, ok.why);
+        assertEquals(42.3, ok.tripRawZ, 0.025);
+        assertEquals(0, hit.past(42.5), 1e-9, hit.lines.toString());
+        // a window floor nearer than the cap is kept; no trip by it is refused too (the estimate was wrong)
+        HeightSwitch.Plan near = plan("needle", 1, 41.0, 42.2, 5);
+        near.expectedTrip = 42.0;
+        near.maxPastTripMm = 0.5;
+        FakeSwitch miss2 = new FakeSwitch(60.0, 1);
+        HeightSwitch.Result r2 = HeightSwitch.measure(miss2, near);
+        assertTrue(r2.refused && r2.why.contains("no trip between Z 41.000 and Z 42.200"), r2.why);
+        assertEquals(0, miss2.past(42.2), 1e-9, miss2.lines.toString());
+        HeightSwitch.Plan late = plan("needle", 1, 42.6, 43.0, 5);
+        late.expectedTrip = 42.0;
+        late.maxPastTripMm = 0.5;
+        FakeSwitch none = new FakeSwitch(60.0, 1);
+        HeightSwitch.Result lr = HeightSwitch.measure(none, late);
+        assertTrue(lr.refused && lr.why.contains("the floor (Z 42.500) must lie below the start (Z 42.600)"), lr.why);
+        assertTrue(none.lines.isEmpty(), "nothing sent: " + none.lines);
+        // N1: no cap, a no-trip stays a 200 with its reason (unchanged)
+        FakeSwitch n1 = new FakeSwitch(5.0, -1);
+        HeightSwitch.Result nr = HeightSwitch.measure(n1, plan("n1", -1, 13.0, 11.1, 5));
+        assertFalse(nr.refused, nr.why);
+    }
+
+    /**
      * Review MINOR 5: a coarse press the fine pass does not see again (a bounce, noise) ends the fine pass one fine step
      * past the coarse trip, not 0.30 past it.
      */
@@ -692,7 +735,18 @@ public class HeightSwitchTest {
         assertTrue(c.validate().stream().anyMatch(x -> x.contains("heightSwitchRadiusMm")), c.validate().toString());
         c.outputZones.heightSwitchRadiusMm = 40;
         assertTrue(c.validate().stream().anyMatch(x -> x.contains("heightSwitchRadiusMm")), c.validate().toString());
+        c.outputZones.heightSwitchRadiusMm = 10;
         assertEquals("height-switch", HeightSwitch.PLACE);
+        // how far past the trip the needle may press the switch: Process's, no default; above 0 and at most the window
+        assertNull(old.heightSwitchMaxPastTripMm, "no default");
+        for (double bad : new double[] {0, -0.5, 2.5, Double.NaN}) {
+            c.heightSwitchMaxPastTripMm = bad;
+            assertTrue(c.validate().stream().anyMatch(x -> x.contains("heightSwitchMaxPastTripMm")), bad + " "
+                    + c.validate());
+        }
+        c.heightSwitchMaxPastTripMm = 0.5;
+        assertEquals(new ArrayList<>(), c.validate());
+        assertEquals(Double.valueOf(0.5), c.copy().heightSwitchMaxPastTripMm);
     }
 
     @Test
