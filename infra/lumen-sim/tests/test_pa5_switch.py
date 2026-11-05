@@ -6,6 +6,7 @@ import re
 import statistics
 import unittest
 
+from lumen_sim import machine
 from lumen_sim.bench import Bench
 
 # The real board's answer to M43 P5 (runs/serial.log, 11-02, nothing wired: 0), byte for byte
@@ -166,6 +167,38 @@ class Pa5Switch(unittest.TestCase):
                 to(b, z=round(z + 0.025, 3))
                 self.assertEqual([level(b), level(b)], [0, 0])
 
+    def test_after_a_back_off_and_a_lift_the_next_press_trips_at_its_own_point(self):
+        """The release point follows the head as it moves away: back at the switch, a press whose own point lies
+        behind the release point trips there, not a step late (the anchor once stayed: 9 of 40 seeds N1, 7 the
+        needle, read one step deep)."""
+        for tool, x, start, way in (("n1", 100, 12.2, -1), ("needle", 200, 51.8, 1)):
+            for seed in range(40):
+                with self.subTest(tool=tool, seed=seed):
+                    b = switch(homed(), repeat_sd_mm=0.01, seed=seed)
+                    to(b, x, 50, start)
+                    z = start
+                    while level(b) == 0:
+                        z = round(z + way * 0.025, 3)
+                        to(b, z=z)
+                    to(b, z=round(z - way * 0.025, 3))  # one step back: released
+                    to(b, z=round(start - way * 0.3, 3))  # lifted away
+                    z = start
+                    to(b, z=z)
+                    while level(b) == 0:
+                        z = round(z + way * 0.025, 3)
+                        to(b, z=z)
+                    self.assertLess(pa5(b)["depth_mm"], 0.025, "pressed at the first step past its own point")
+
+    def test_leaving_the_window_clears_the_release_point(self):
+        """Back in the window from the side, a press starts afresh where the head is."""
+        sw = machine.Pa5Switch([N1])
+        sw.observe(100, 50, 11.99)
+        sw.observe(100, 50, 12.001)  # released there
+        sw.offset = 0.01  # the next press's point, 12.01, behind the release point
+        self.assertEqual(sw.observe(100, 50, 12.001)[0], 0, "standing still: no new press")
+        sw.observe(95, 50, 12.001)
+        self.assertEqual(sw.observe(100, 50, 12.001)[0], 1)
+
     def test_a_new_press_needs_a_move_toward_the_switch(self):
         b = switch(homed(), repeat_sd_mm=0.01, seed=1)
         to(b, 100, 50, 11.9)
@@ -228,6 +261,41 @@ class Pa5Switch(unittest.TestCase):
         self.assertEqual(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": -0.6}, b.t)["ok"], True)
         self.assertEqual(errors(b), ["PA5 switch overtravel: n1 0.70 mm past its trip point (overtravel 0.50 mm)"])
 
+    def test_a_fault_mid_move_sees_the_head_where_it_is(self):
+        """A z_shift, a Z release after M112 (z_drop) and a home_offset while a move runs: the switch is read where
+        the head is then, not where the move began."""
+        for fault, then in (({"fault": "z_shift", "z": -0.4}, None), ({"fault": "z_drop", "z": -0.4}, "M112")):
+            with self.subTest(fault["fault"]):
+                b = switch(homed())
+                to(b, 100, 50, 11.8)  # pressed, 0.2 mm deep
+                b.send("G1 Z20 F60")  # 1 mm/s up: off the switch within 0.2 s
+                b.run(4.0)
+                self.assertTrue(b.sim.control(dict(fault, cmd="fault"), b.t)["ok"])
+                if then:
+                    b.send(then)
+                self.assertEqual(errors(b), [], "no overtravel: the head is ~4 mm above the switch")
+                self.assertFalse(pa5(b)["pressed"])
+        b = switch(homed())
+        to(b, 100, 50, 13)
+        b.send("G1 Z11.5 F6")  # 0.1 mm/s
+        b.run(12.0)            # past the trip, the move not ended
+        self.assertEqual(level(b), 1)
+        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "home_offset", "x": 0.1}, b.t)["ok"])
+        self.assertTrue(pa5(b)["pressed"], "a fault that moves no head keeps the press")
+
+    def test_the_state_is_right_once_the_switch_is_wired(self):
+        b = homed()
+        to(b, 100, 50, 11.9)
+        switch(b)
+        self.assertEqual((pa5(b)["level"], pa5(b)["pressed"], pa5(b)["depth_mm"]), (1, True, 0.1))
+
+    def test_a_wired_switch_reads_its_own_levels_whatever_the_pull(self):
+        """pressed_level and the other level are the switch's: M42's pull-up shows only with nothing wired."""
+        b = switch(homed())
+        to(b, 100, 50, 13)
+        b.send("M42 P53 T2")
+        self.assertEqual(level(b), 0)
+
     def test_the_pull_without_a_switch(self):
         """M42 P53 T2 (input pull-up) before the reads, as the route does: nothing wired reads 1; T3 pulls down, T0
         floats (0, as read 11-02); a power cycle resets the pin."""
@@ -267,6 +335,7 @@ class Pa5Switch(unittest.TestCase):
                              "seed": 0}, **bad)
                 reply = b.sim.control({"cmd": "set", "pa5_switch": spec}, b.t)
                 self.assertFalse(reply["ok"], reply)
+                self.assertRegex(reply["error"], r"^ValueError: (pa5_switch|a PA5 press|\w+ must be)", "a clean refusal")
                 self.assertEqual(pa5(b)["presses"], [N1, NEEDLE])
 
 

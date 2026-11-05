@@ -202,7 +202,7 @@ class Simulator:
             self._actions.append({"action": "power_cycle", "link": link, "down_s": down})
             return {"ok": True}
         if cmd == "set":
-            return self._set(req)
+            return self._set(req, t)
         if cmd == "stop":
             self._actions.append({"action": "stop"})
             return {"ok": True}
@@ -277,12 +277,12 @@ class Simulator:
             m.switches[2] += v["z"]
         else:                        # z_drop: how far the head moves each time the Z driver lets go
             m.z_drop = v["z"]
-        self.fw.pa5()  # the head moved under the switch (or off it)
+        self.fw.pa5(t)  # the head moved under the switch (or off it), where it is now (a move may run)
         # a homing move running toward a switch now ends where that switch triggers, and the firmware's wait with it
         self.fw.stepper.recheck_endstops(t)
         self.fw.wake(t)
 
-    def _set(self, req):
+    def _set(self, req, t):
         def integer(key):
             v = req[key]
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
@@ -323,6 +323,7 @@ class Simulator:
             self.machine.homing_move_delay_s = homing_delay
         if "pa5_switch" in req:
             self.machine.pa5 = pa5
+            self.fw.pa5(t)  # wired under the head: its state from where the head is
         return {"ok": True}
 
     @staticmethod

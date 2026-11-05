@@ -186,20 +186,22 @@ nothing.
   floating: 0, as the board read 11-02; a power cycle resets it to that). `set {"pa5_switch": {"presses": [{"tool": "n1",
   "x0": .., "y0": .., "x1": .., "y1": .., "trip_z": 12.0}, {"tool": "needle", ..., "trip_z": 52.0}], "overtravel_mm":
   0.5, "repeat_sd_mm": 0.003, "pressed_level": 1, "seed": 0}}` wires one (all but `presses` optional, these are the
-  defaults but `repeat_sd_mm`, 0); `null` removes it. Press windows are physical X/Y mm, edges included, the first
-  listed wins.
+  defaults but `repeat_sd_mm`, 0; `overtravel_mm` 0-10, `repeat_sd_mm` 0-1, `pressed_level` 0 or 1, `seed` an
+  integer); `null` removes it. Press windows are physical X/Y mm, edges included, the first listed wins.
 - `n1` presses it as Z falls to the trip point, `needle` as Z rises to it (the see-saw: needle contact raw Z = K - N1
-  contact). Each press trips at its own point, `trip_z` + N(0, `repeat_sd_mm`) from `seed`, and holds it until the tool
-  goes back past it or leaves the window; after a release no new press starts until the head moves toward the
-  switch past the release point (no chatter while it stands still). `pressed_level` is the pin's level pressed, the
-  other one released, whatever M42 set (the real polarity: Process's check on the machine).
+  contact). Each press trips at its own point, `trip_z` + N(0, `repeat_sd_mm`) from `seed`, and holds it until the
+  tool goes back past it or leaves the window; after a release no new press starts until the head moves toward the
+  switch again (no chatter while it stands still): the release point follows the head as it moves away, so back at the
+  switch the next press trips at its own point. `pressed_level` is the pin's level pressed, the other one released,
+  whatever M42 set (the real polarity: Process's check on the machine).
 - A press deeper than `overtravel_mm` past its point is reported once in `sim_errors` ("PA5 switch overtravel: n1 0.62
   mm past its trip point (overtravel 0.50 mm)", `line` null), seen at the end of each move (a quick stop's too), at
-  each read, at a Z release (`z_drop`) and at a physical fault. Not seen: an X/Y move that crosses a window deep and
-  ends outside it. The head is not stopped (no hard stop is modelled).
+  each read, at a Z release (`z_drop`) and at a physical fault (where the head is then, also mid-move), and when it is
+  wired under the head. Not seen: an X/Y move that crosses a window deep and ends outside it. The head is not stopped
+  (no hard stop is modelled).
 - The state's `pa5`: the settings, `level`, `pressed`, `tool`, `trip_z` and `depth_mm` (the deepest of this press),
-  `overtravels`, as of the last observation: the state request reads nothing. The switch is the machine's: it
-  outlives a power cycle and `clear`.
+  `overtravels`, as of the last observation (from its wiring on): the state request reads nothing. The switch is the
+  machine's: it outlives a power cycle and `clear`.
 
 **Homing (`G28`).**
 - It waits for motion, then homes X, then Y, then Z. Z homes at the safe point (0,0), then moves to Z 31.5. A and B

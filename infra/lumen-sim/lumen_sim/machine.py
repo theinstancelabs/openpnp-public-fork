@@ -25,7 +25,8 @@ class Pa5Switch:
         self.rng = random.Random(seed)
         self.offset = self.rng.gauss(0.0, self.sd)  # the next press's trip point, from its window's trip_z
         self.press = None  # {"tool", "trip", "depth", "reported"} while pressed
-        self.released = None  # (tool, z) of the last release: no new press until the head moves toward it past z
+        self.released = None  # (tool, z): no new press until the head moves toward the switch past z (the release
+        # point, then wherever the head went away to)
         self.level = 1 - pressed_level  # the last observation's
         self.overtravels = 0
 
@@ -47,7 +48,8 @@ class Pa5Switch:
             return 1 - self.pressed_level, None
         way = PA5_TOOLS[region["tool"]]
         if p is None and self.released and (z - self.released[1]) * way <= 1e-9:
-            return 1 - self.pressed_level, None  # not moved toward the switch since its release: no chatter
+            self.released = (region["tool"], z)  # not moved toward the switch since: no chatter; follows it away
+            return 1 - self.pressed_level, None
         trip = p["trip"] if p is not None else region["trip_z"] + self.offset
         depth = (z - trip) * way
         if depth < -1e-9:
@@ -56,7 +58,6 @@ class Pa5Switch:
             return 1 - self.pressed_level, None
         if p is None:
             p = self.press = {"tool": region["tool"], "trip": trip, "depth": 0.0, "reported": False}
-            self.released = None
         p["depth"] = max(p["depth"], depth)
         if p["depth"] <= self.overtravel + 1e-9 or p["reported"]:
             return self.pressed_level, None
