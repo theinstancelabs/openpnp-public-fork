@@ -546,29 +546,30 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   P1/P0`; still started and homed). `{lock, stopped: null | {label, who, what, mode: stop|outputs-off, actions (plain
   phrases for the user), detail (the lines sent), machineOff, confirmed}, atMs}`. A lapsed lease ends the same way. The user's hold never lapses.
 - `POST /api/gcode {lines[] ≤ 1000, timeoutMs? per line 1000..300000 = 60000, what? (required with Z moves while not
-  homed; one line of text: a control character is a 400)}` (the holder): on OpenPnP's
-  machine thread through its driver, one `ok` per line; `{results: [{line, replies[], ms}], ms, lock}`. Taken or
-  stopped while a line ran (its last line included): 409 `lock-lost` / `stopped` with that line in `results` marked
-  `interrupted: true` (its `ok` may be the STOP's flush, not the move's end: never take it as done). OpenPnP homed, or
-  no longer homed, since the lines were checked (a home or a Stop and Start before they went out): 409 `stopped`
-  before the next line (`… after the lines were checked: send them again`). Every line
-  is checked first (`PassthroughLines`): the bench tools' commands; X/Y/Z inside the soft limits; X/Y only once
-  homed; while not homed (BR-97: levelling the see-saw before a reset's Home) `G1` with Z as the only axis and `F` ≤
-  300 (not `G0`: it keeps `F` only while the firmware's `G0_FEEDRATE` is off), each line at most 1 mm from the Z before it (the first from the controller's Z, read first with M400 and
-  M114, never OpenPnP's belief), every target at most 5 mm from where the call began and 32 mm from where the
-  position became unknown: Marlin's boot Z 0 after a reset the engine detected (on record, so also after an OpenPnP
-  restart), else the Z of the first levelling call since a possible reset (a connect whose position was not read), the
-  start of a home through the API or the engine (its G28 may move the frame even if the home ends unhomed) or a home;
-  a Stop and Start keeps it (OpenPnP's own Home button is not seen starting: one that ends unhomed keeps it too); such a call needs `what` (400 without it)
-  and the dispense engine (409 without it: nothing would journal it), and is an `events` row `Z_LEVEL` (the holder's label,
-  as a reset home's attestation names it, the lines, `what`); on that line any other axis is refused, and in that call `M410` (it may end a move short, so the next
-  line would travel further: send it in a call of its own; the STOP is `POST /api/stop`); pump P2 /
-  valve P3 only full on; `M906 B` ≤ 670; `G4` ≤ 60 s; the bed's height switch on PA5 only (the HACK header's pin 3):
-  `M42 [I] P53 T0|T2|T3` (an input mode; `T2` its pull-up) and `M43 [I] P5` (its read: M43 numbers the pin by the
-  firmware's pin table, so not 53; send `M400` first, as M43 does not wait for moves); refused with the route to use:
-  `G28` (`POST /api/machine/home`), `G92` on X/Y/Z, bare `M18`/`M84`, `G91`, `M92`, EEPROM, `M112`/`M999`/`M997`,
-  `M990`, anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before
-  the next guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
+  homed; one line of text: a control character is a 400)}` (the holder): on OpenPnP's machine thread through its
+  driver, one `ok` per line; `{results: [{line, replies[], ms}], ms, lock}`. Taken or stopped while a line ran (its
+  last line included): 409 `lock-lost` / `stopped` with that line in `results` marked `interrupted: true` (its `ok`
+  may be the STOP's flush, not the move's end: never take it as done). OpenPnP homed, or no longer homed, since the
+  lines were checked (a home or a Stop and Start before they went out): 409 `stopped` before the next line (`… after
+  the lines were checked: send them again`). Every line is checked first (`PassthroughLines`): the bench tools'
+  commands; X/Y/Z inside the soft limits; X/Y only once homed; while not homed (BR-97: levelling the see-saw before a
+  reset's Home) `G1` with Z as the only axis and `F` ≤ 300 (not `G0`: it keeps `F` only while the firmware's
+  `G0_FEEDRATE` is off), each line at most 1 mm from the Z before it (the first from the controller's Z, read first
+  with M400 and M114, never OpenPnP's belief), every target at most 5 mm from where the call began and 32 mm from
+  where the position became unknown: Marlin's boot Z 0 after a reset the engine detected (on record, so also after an
+  OpenPnP restart), else the Z of the first levelling call since a possible reset (a connect whose position was not
+  read), the start of a home through the API or the engine (its G28 may move the frame even if the home ends unhomed)
+  or a home; a Stop and Start keeps it (OpenPnP's own Home button is not seen starting: one that ends unhomed keeps it
+  too); such a call needs `what` (400 without it) and the dispense engine (409 without it: nothing would journal it),
+  and is an `events` row `Z_LEVEL` (the holder's label, as a reset home's attestation names it, the lines, `what`); on
+  that line any other axis is refused, and in that call `M410` (it may end a move short, so the next line would travel
+  further: send it in a call of its own; the STOP is `POST /api/stop`); pump P2 / valve P3 only full on; `M906 B` ≤
+  670; `G4` ≤ 60 s; the bed's height switch on PA5 only (the HACK header's pin 3): `M42 [I] P53 T0|T2|T3` (an input
+  mode; `T2` its pull-up) and `M43 [I] P5` (its read: M43 numbers the pin by the firmware's pin table, so not 53; send
+  `M400` first, as M43 does not wait for moves); refused with the route to use: `G28` (`POST /api/machine/home`),
+  `G92` on X/Y/Z, bare `M18`/`M84`, `G91`, `M92`, EEPROM, `M112`/`M999`/`M997`, `M990`, anything else. After moves
+  OpenPnP's coordinates are re-read (M114) once the head is at rest, else before the next guarded write, a release or
+  a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
 
 ### 3.8 Jog, move-to and the cameras (BR-49, BR-53)
 
