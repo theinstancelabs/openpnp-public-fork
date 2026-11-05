@@ -468,11 +468,14 @@ class StopDuringHomingTest(SessionTest):
         self.assertEqual(sim["halt_reason"], "Homing Failed")
         m410 = [i for i, (t, d, l) in enumerate(io) if d == ">" and l == "M410"]
         self.assertEqual(len(m410), 1)
-        # Nothing answers after the M410, but a keepalive due within the quick stop's 1 s stepper clean still goes out:
-        # quick_stop() idles through it before G28 fails (run 42094793268: a busy line 41 ms after the M410)
+        # Nothing answers after the M410, but one keepalive due within the quick stop's 1 s stepper clean still goes
+        # out: quickstop_stepper()'s planner.synchronize() idles through it before G28 fails (run 42094793268: a busy
+        # line 41 ms after the M410); the keepalive interval (2 s) allows one, and nothing follows the kill
         t410 = io[m410[0]][0]
-        self.assertFalse([l for t, d, l in io[m410[0] + 1:] if d == "<" and not (
-            l == "echo:busy: processing" and t - t410 <= CLEANING_S + 0.05)], "the halted board answered")
+        after = [(t, l) for t, d, l in io[m410[0] + 1:] if d == "<"]
+        self.assertFalse([l for t, l in after if not (l == "echo:busy: processing" and t - t410 <= CLEANING_S + 0.25)],
+                         "the halted board answered")
+        self.assertLessEqual(len(after), 1, after)
         # BR-66 (PR #10): every DISABLE_COMMAND line still goes out, in order, although the halted board answers
         # none; after the M410's timeout each of the next lines waits at most 1 s (before #10: none was sent)
         sent = [lines_sent(io[m410[0] + 1:], l) for l in ("M107 P3", "M107 P2", "M107 P1", "M107 P0", "M18 B")]
