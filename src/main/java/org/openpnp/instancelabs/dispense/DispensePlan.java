@@ -132,6 +132,8 @@ public class DispensePlan {
     public String boardFingerprint;
     /** Identity of the board registration only (X/Y/rotation, side, fiducial transform): I4 surface tie. */
     public String boardRegistration;
+    /** BR-81: the id of the board registration the plan was made with, or null (its dots' outlines, I13 and I12). */
+    public String registrationId;
     /**
      * The board location's Z when planned (the board file seat's z or the job board's Z), null for a
      * plan without a board location: the frame reference of the board surface (I4) and of the needle
@@ -189,6 +191,7 @@ public class DispensePlan {
         sub.setupVersion = setupVersion;
         sub.boardToMachine = boardToMachine == null ? null : boardToMachine.clone();
         sub.boardFile = boardFile;
+        sub.registrationId = registrationId;
         sub.boardWidthMm = boardWidthMm;
         sub.boardHeightMm = boardHeightMm;
         sub.boardTransformStatus = boardTransformStatus;

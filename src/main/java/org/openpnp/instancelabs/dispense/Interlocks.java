@@ -144,6 +144,14 @@ public final class Interlocks {
         public boolean checkPlanSurface;
         /** Further surfaces the run dispenses on (the purge row on the blank) and their targets. */
         public final java.util.Map<String, List<double[]>> moreSurfaces = new java.util.LinkedHashMap<>();
+        /** BR-81: more places the run puts paste at, for I13 alone (a weigh coupon, the test dot's spot). */
+        public final List<String> pastePlaces = new java.util.ArrayList<>();
+        /**
+         * BR-81, a board run ({@link #checkPlanSurface}): its planned dots may lie on the board outlines recorded up to
+         * this time, its registration's last check (an outline recorded after it: the bed changed); null: the plan has
+         * no registration, and every outline refuses them.
+         */
+        public Long outlinesUpToMs;
 
         public static Scope noNeedle() {
             Scope s = new Scope();
@@ -478,18 +486,34 @@ public final class Interlocks {
     }
 
     /**
-     * I13 (BR-81): a paste place the run uses lies on a board on the bed ({@link BoardOutlines}): the waste, the test
-     * dot's spot, a cup or the blank it references or dispenses at, the purge row when it lays purge dots, the
-     * calibration area or a coupon when one of its dots lies in it (never a board run's: its dots are its board's).
+     * I13 (BR-81): a paste place the run uses lies on a board on the bed ({@link BoardOutlines}): a place it names (the
+     * waste, the test dot's spot, a cup, the blank, a ladder's place, a coupon), the purge row when it lays purge dots,
+     * the calibration area when one of its dots lies in it (never a board run's: its dots are its board's); and a board
+     * run's planned dot on an outline its registration did not know ({@link Scope#outlinesUpToMs}).
      */
     static void checkPlacesOnBoards(Inputs in, InterlockReport r) {
         Scope sc = in.scope == null ? new Scope() : in.scope;
-        for (BoardOutlines.Place p : BoardOutlines.of(in.cfg).placesOnBoards()) {
-            boolean uses = p.rect != null ? !sc.checkPlanSurface && dotIn(sc, p.rect)
+        BoardOutlines boards = BoardOutlines.of(in.cfg);
+        for (BoardOutlines.Place p : boards.placesOnBoards()) {
+            boolean uses = "calibration-area".equals(p.kind) ? !sc.checkPlanSurface && dotIn(sc, p.rect)
                     : "purge-row".equals(p.kind) ? in.purgeDots > 0
-                            : sc.referencePlaces.contains(p.place) || sc.dispensePlaces.contains(p.place);
+                            : sc.referencePlaces.contains(p.place) || sc.dispensePlaces.contains(p.place)
+                                    || sc.pastePlaces.contains(p.place);
             if (uses) {
                 r.add("I13", p.text);
+            }
+        }
+        double margin = in.cfg.outputZones != null ? in.cfg.outputZones.marginMm
+                : new DispenseConfig.OutputZoneSettings().marginMm;
+        for (int i = 0; sc.checkPlanSurface && i < sc.surfaceTargets.size(); i++) {
+            double[] d = sc.surfaceTargets.get(i);
+            String b = boards.on(d[0], d[1], margin, sc.outlinesUpToMs);
+            if (b != null) {
+                r.add("I13", String.format(Locale.ROOT, "the plan's dot at (%.1f, %.1f) lies on %s, %s", d[0], d[1], b,
+                        sc.outlinesUpToMs == null ? "and the plan has no board registration: register the board "
+                                + "(Register board)" : "recorded after the plan's board registration (the bed changed "
+                                        + "since): register the board again (Register board)"));
+                break;
             }
         }
     }

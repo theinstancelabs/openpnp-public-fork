@@ -13,8 +13,10 @@ import java.util.Map;
  * board is its outline ({@link BoardRegistration#boardRectMm}; for a record made before it, the smaller box of its
  * fiducials) through its affine, a parallelogram (the fit has scale and shear; a bottom-side board is mirrored by it).
  * A tile ({@link DispenseConfig#tiles}) is its own edge; its boards only name the nearest one, since places lie in the
- * gaps between them. A point is on a board within the margin ({@code outputZones.marginMm}) of its outline. Every
- * stored registration counts as on the bed: one that left it is forgotten (DELETE /api/board-registrations/{id}).
+ * gaps between them. A point is on a board within the margin ({@code outputZones.marginMm}) of its outline; a sink
+ * place (the waste, the towel, a cup) keeps its circle ({@code placeRadiusMm}) more, the room its pile and the hold's
+ * drool take (Process, 11-04). An outline that is not a number refuses every point. Every stored registration counts as
+ * on the bed: one that left it is forgotten (DELETE /api/board-registrations/{id}).
  */
 public final class BoardOutlines {
     /** A paste place on a board: the place, its kind, where it is (a box: {@link #rect}), the board and the text. */
@@ -136,17 +138,22 @@ public final class BoardOutlines {
 
     /** The board (x, y) lies on or within {@code margin} of: its name ("the Nano tile (board G3)"), or null. */
     public String on(double x, double y, double margin) {
-        return on(Collections.singletonList(new double[] {x, y}), margin);
+        return on(x, y, margin, null);
+    }
+
+    /** As above, among the outlines recorded after {@code afterMs} only (null: all of them). */
+    public String on(double x, double y, double margin, Long afterMs) {
+        return on(Collections.singletonList(new double[] {x, y}), margin, afterMs);
     }
 
     /** The board the box overlaps or comes within {@code margin} of (the calibration area, a coupon), or null. */
     public String on(double x0, double y0, double x1, double y1, double margin) {
-        return on(box(x0, y0, x1, y1), margin);
+        return on(box(x0, y0, x1, y1), margin, null);
     }
 
-    private String on(List<double[]> shape, double margin) {
+    private String on(List<double[]> shape, double margin, Long afterMs) {
         for (Outline o : outlines) {
-            if (distance(o.edge, shape) <= margin) {
+            if ((afterMs == null || o.atMs > afterMs) && !(distance(o.edge, shape) > margin)) {
                 return o.name(shape);
             }
         }
@@ -169,29 +176,37 @@ public final class BoardOutlines {
     }
 
     /**
-     * The paste places on a board, each once, within {@code outputZones.marginMm}: the waste, the towel, a cup and the
-     * blank, the test dot's spot (when the waste is not on one already), the purge row by its first spot on one (every
-     * spot counts, not only the unused ones), the calibration area and each coupon by their boxes.
+     * The paste places on a board, each once, within {@code outputZones.marginMm} (a sink: and its circle): the waste,
+     * the towel, a cup, the blank and any place with a probed surface of its own name (a dot ladder's, a touch-off's;
+     * not the board surface's), the test dot's spot (when the waste is not on one already), the purge row by its first
+     * spot on one (every spot counts, not only the unused ones), the calibration area and each coupon by their boxes.
      */
     public List<Place> placesOnBoards() {
         List<Place> l = new ArrayList<>();
         if (outlines.isEmpty()) {
             return l;
         }
-        double m = c.outputZones != null ? c.outputZones.marginMm : new DispenseConfig.OutputZoneSettings().marginMm;
+        DispenseConfig.OutputZoneSettings zs = c.outputZones != null ? c.outputZones
+                : new DispenseConfig.OutputZoneSettings();
+        double m = zs.marginMm, sink = zs.marginMm + zs.placeRadiusMm;
         for (Map.Entry<String, DispenseConfig.NamedLocation> e : c.locations.entrySet()) {
             String n = e.getKey();
             DispenseConfig.NamedLocation p = e.getValue();
-            String b = p == null || !(OutputZones.isSinkPlace(c, n) || n.equals(c.blankLocationName)) ? null
-                    : on(p.x, p.y, m);
+            boolean isSink = OutputZones.isSinkPlace(c, n);
+            boolean paste = isSink || n.equals(c.blankLocationName) || c.surface(n) != null
+                    && !n.equals(c.boardSurfaceName) && !isCoupon(n);
+            String b = p == null || !paste ? null : on(p.x, p.y, isSink ? sink : m);
             if (b != null) {
-                l.add(new Place(n, "place", p.x, p.y, null, b, String.format(Locale.ROOT, "%s (%.1f, %.1f) lies on %s: "
-                        + "set it again off the board (Machine › Places)", n.equals(c.wasteLocationName) ? "the waste"
-                                : "the place '" + n + "'", p.x, p.y, b)));
+                String where = !isSink || on(p.x, p.y, m) != null ? "lies on " + b : String.format(Locale.ROOT,
+                        "lies within %.1f mm of %s (its %.1f mm circle and the %.1f mm margin)", sink, b,
+                        zs.placeRadiusMm, m);
+                l.add(new Place(n, "place", p.x, p.y, null, b, String.format(Locale.ROOT, "%s (%.1f, %.1f) %s: set it "
+                        + "again off the board (Machine › Places)", n.equals(c.wasteLocationName) ? "the waste"
+                                : "the place '" + n + "'", p.x, p.y, where)));
             }
         }
         DispenseConfig.NamedLocation waste = c.location(c.wasteLocationName);
-        if (waste != null && on(waste.x, waste.y, m) == null) {
+        if (waste != null && on(waste.x, waste.y, sink) == null) {
             double x = waste.x + c.testDotOffsetXMm, y = waste.y + c.testDotOffsetYMm;
             String b = on(x, y, m);
             if (b != null) {
@@ -234,6 +249,12 @@ public final class BoardOutlines {
             }
         }
         return l;
+    }
+
+    /** A weigh coupon's place: listed by its box. */
+    private boolean isCoupon(String place) {
+        return c.padCalibration != null && c.padCalibration.couponPlaces != null
+                && c.padCalibration.couponPlaces.contains(place);
     }
 
     // --- plane geometry (machine mm) -------------------------------------------------------------

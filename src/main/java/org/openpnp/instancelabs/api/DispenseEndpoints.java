@@ -438,7 +438,9 @@ final class DispenseEndpoints {
         double rot = Json.num(b, "rotationDeg", defaultTestDotRotation(cfg));
         checkRotation(rot, maxDotRotation(cfg));
         DispenseConfig.NamedLocation waste = requireWaste(cfg);
-        startChecks(svc, DispenseService.shotsScope(cfg.wasteLocationName, true), "Test dot");
+        Interlocks.Scope scope = DispenseService.shotsScope(cfg.wasteLocationName, true);
+        scope.pastePlaces.add(TEST_DOT_LOCATION); // BR-81: its spot on a board is refused here (I13), like the others
+        startChecks(svc, scope, "Test dot");
         DispenseConfig.NamedLocation spot = new DispenseConfig.NamedLocation(waste.x + cfg.testDotOffsetXMm,
                 waste.y + cfg.testDotOffsetYMm, waste.z);
         DispenseConfig.NamedLocation cur = cfg.location(TEST_DOT_LOCATION);

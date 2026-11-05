@@ -3005,6 +3005,7 @@ public final class DispenseService {
         DispensePlan plan = newPlanner().planBoard(at, start[0], start[1]);
         plan.boardFingerprint = boardFingerprint(at);
         plan.boardRegistration = boardRegistration(at);
+        plan.registrationId = reg == null ? null : reg.id;
         db.insertPadPlan(plan);
         db.event(null, "INFO", "PLAN", plan.summary());
         return plan;
@@ -3138,6 +3139,10 @@ public final class DispenseService {
             sc.surfaceTargets.add(new double[] {d.xMm, d.yMm});
         }
         sc.checkPlanSurface = true;
+        // BR-81: its dots may lie on the outlines its registration knew at its last check
+        BoardRegistration reg = c.boardRegistrationById(plan.registrationId);
+        sc.outlinesUpToMs = reg == null ? null : reg.lastCheckedAtMs == null ? reg.atMs
+                : Math.max(reg.atMs, reg.lastCheckedAtMs);
         DispenseConfig.PurgeRow row = c.purgeRow;
         int purge = DoseBlocks.purgeSpotsNeeded(plan, c);
         if (purge > 0 && row.isDefined()) {
@@ -5558,6 +5563,7 @@ public final class DispenseService {
                     throw refused(why);
                 }
                 floorRef = place.z;
+                scope.pastePlaces.add(b.couponPlace); // BR-81: I13 names the coupon place
             }
             else if (scope.surfaceName == null || scope.surfaceName.equals(b.surfaceName)) {
                 scope.surfaceName = b.surfaceName;

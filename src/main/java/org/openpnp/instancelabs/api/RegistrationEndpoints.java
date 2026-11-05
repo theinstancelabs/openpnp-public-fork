@@ -510,8 +510,10 @@ final class RegistrationEndpoints {
         if (gone[0] == null) {
             throw ApiException.notFound("no board registration " + r.group(1));
         }
-        return Views.map("forgotten", Views.map("id", gone[0].id, "boardKey", gone[0].boardKey, "boardName",
-                gone[0].boardName));
+        Map<String, Object> forgotten = Views.map("id", gone[0].id, "boardKey", gone[0].boardKey, "boardName",
+                gone[0].boardName);
+        svc.getDb().event(null, "INFO", "REG", "forgotten (the board left the bed): " + Json.toJson(forgotten));
+        return Views.map("forgotten", forgotten);
     }
 
     /**
@@ -530,6 +532,7 @@ final class RegistrationEndpoints {
             live.tiles.put(r.group(1), t);
             return live;
         });
+        svc.getDb().event(null, "INFO", "TILE", "imported '" + r.group(1) + "': " + Json.toJson(t));
         return Views.map("tile", c.tiles.get(r.group(1)), "placesOnBoards", BoardOutlines.of(c).placesOnBoards());
     }
 
@@ -544,6 +547,7 @@ final class RegistrationEndpoints {
         if (!had[0]) {
             throw ApiException.notFound("no tile '" + r.group(1) + "'");
         }
+        svc.getDb().event(null, "INFO", "TILE", "removed '" + r.group(1) + "' (the tile left the bed)");
         return Views.map("removed", r.group(1));
     }
 
