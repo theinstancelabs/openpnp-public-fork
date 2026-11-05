@@ -989,4 +989,33 @@ public class HeightSwitchSimTest {
         assertNotNull(HeightSwitch.needleTrip(svc.getConfig()), "the new needle's trip counts though the clock is behind");
         assertFalse(heightSwitchStatus().get("kSwitch").isJsonNull(), "in this home, since the place was set");
     }
+
+    /**
+     * #78 merged with the aim: after a clock set back a needle's trip is stamped at its needle's token, ahead of the
+     * clock (#60 re-review MINOR 2), yet the switch's place set again must void it (re-review MINOR 1: another point of
+     * the lever trips at another height). N1's and the needle's trips at the new place then count at once.
+     */
+    @Test
+    public void aPlaceSetAgainAfterAClockSetBackStillVoidsTheTrips() throws Exception {
+        svc.setLocation(HeightSwitch.PLACE, 150, 200, 0);
+        assertTrue(svc.measureHeightSwitch("n1", 5, N1_TRIP + 1, N1_TRIP - 0.5).get(120, TimeUnit.SECONDS).accepted);
+        assertTrue(svc.measureHeightSwitch("needle", 5, NEEDLE_TRIP - 1, NEEDLE_TRIP + 0.5)
+                .get(120, TimeUnit.SECONDS).accepted);
+        DispenseConfig c = svc.getConfig();
+        c.heightSwitch.needle.atMs += 3_600_000; // measured before the clock was set back an hour
+        svc.updateConfig(c);
+        svc.recordNeedleChange("the needle came off", "test"); // its token an hour ahead of the clock
+        assertTrue(svc.measureHeightSwitch("needle", 5, NEEDLE_TRIP - 1, NEEDLE_TRIP + 0.5)
+                .get(120, TimeUnit.SECONDS).accepted);
+        assertEquals("trip", heightSwitchStatus().getAsJsonObject("needleWindow").get("from").getAsString());
+        svc.setLocation(HeightSwitch.PLACE, 153, 200, 0); // 3 mm along the lever
+        assertTrue(svc.measureHeightSwitch("n1", 5, N1_TRIP + 1, N1_TRIP - 0.5).get(120, TimeUnit.SECONDS).accepted);
+        JsonObject hs = heightSwitchStatus();
+        assertEquals("kSwitch", hs.get("needleWindow").isJsonNull() ? hs.get("needleWindowWhy").getAsString()
+                : hs.getAsJsonObject("needleWindow").get("from").getAsString(), "N1's trip at the new place counts, "
+                        + "the needle's from the place before does not: " + hs);
+        assertTrue(svc.measureHeightSwitch("needle", 5, NEEDLE_TRIP - 1, NEEDLE_TRIP + 0.5)
+                .get(120, TimeUnit.SECONDS).accepted);
+        assertFalse(heightSwitchStatus().get("kSwitch").isJsonNull(), "both trips at the new place count");
+    }
 }

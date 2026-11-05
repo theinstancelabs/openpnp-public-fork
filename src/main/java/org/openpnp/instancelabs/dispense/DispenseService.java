@@ -1568,6 +1568,14 @@ public final class DispenseService {
         DispenseConfig.NamedLocation l = new DispenseConfig.NamedLocation(x, y, z);
         l.setAtMs = from != null ? from.setAtMs : Long.valueOf(System.currentTimeMillis());
         l.homeAtMs = from != null ? from.homeAtMs : Long.valueOf(homeTracker.frameHomeAtMs());
+        if (HeightSwitch.PLACE.equals(name)) {
+            // BR-94: later than both trips, also after a clock set back (a needle's may carry its token, ahead of the
+            // clock): neither counts at the place set now (re-review MINOR 1)
+            for (DispenseConfig.HeightSwitchTrip t : java.util.Arrays.asList(c.heightSwitch.n1,
+                    c.heightSwitch.needle)) {
+                l.setAtMs = t == null ? l.setAtMs : Math.max(l.setAtMs, t.atMs + 1);
+            }
+        }
         c.locations.put(name, l);
         updateConfig(c);
     }
@@ -5311,7 +5319,7 @@ public final class DispenseService {
             throw refused(res.why);
         }
         if (res.accepted) {
-            recordHeightSwitch(needle, res, n1);
+            recordHeightSwitch(needle, res, n1, place.setAtMs);
         }
         s.ok();
     }
@@ -5638,10 +5646,11 @@ public final class DispenseService {
 
     /**
      * BR-94: an accepted measure is the tool's trip from now on, marked for review (no person's OK gates it); the
-     * needle's keeps K_switch with N1's trip of this home ({@code n1}), its later windows' K.
+     * needle's keeps K_switch with N1's trip of this home ({@code n1}), its later windows' K. {@code placeSetAtMs}: the
+     * set time of the place it pressed.
      */
     private synchronized void recordHeightSwitch(boolean needle, HeightSwitch.Result res,
-            DispenseConfig.HeightSwitchTrip n1) throws IOException {
+            DispenseConfig.HeightSwitchTrip n1, long placeSetAtMs) throws IOException {
         if (needle) {
             // a needle change during the measure (its token is the one it started with): not this needle's trip (#60
             // re-review)
@@ -5654,8 +5663,10 @@ public final class DispenseService {
         trip.presses = res.trips.size();
         trip.releases = new ArrayList<>(res.releases);
         trip.differentialMm = res.differentialMm;
-        // not before the needle's token (ahead of the clock after a clock set back), or needleTrip would void it
-        trip.atMs = needle && res.needleSinceMs != null ? Math.max(res.atMs, res.needleSinceMs) : res.atMs;
+        // later than its place's set time and not before the needle's token (either may be ahead of the clock after a
+        // clock set back), or counts or needleTrip would void it
+        long at = Math.max(res.atMs, placeSetAtMs + 1);
+        trip.atMs = needle && res.needleSinceMs != null ? Math.max(at, res.needleSinceMs) : at;
         trip.homeAtMs = res.homeAtMs;
         trip.forReview = true;
         DispenseConfig c = cfg.copy();
