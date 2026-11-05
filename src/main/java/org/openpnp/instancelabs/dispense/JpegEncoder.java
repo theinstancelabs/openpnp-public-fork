@@ -20,7 +20,8 @@ import org.pmw.tinylog.Logger;
 /**
  * The one JPEG encoder of camera frames and stored photos: ImageIO's writer at the given quality, else OpenCV's
  * {@code imencode} (bundled with OpenPnP; the deployed JVM has no ImageIO JPEG writer, 11-03: frames went out as
- * 1.4-1.8 MB PNGs and stored photos failed). Null when neither works; the caller decides (a frame falls back to PNG).
+ * 1.4-1.8 MB PNGs and stored photos failed. BR-105 found why: the JDK's JPEG plugin binds to the cameras' own libjpeg
+ * and ImageIO drops it). Null when neither works; the caller decides (a frame falls back to PNG).
  * In memory only (no temp file per frame); thread safe.
  */
 public final class JpegEncoder {

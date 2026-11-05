@@ -29,6 +29,11 @@ import javax.imageio.ImageReadParam;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 
+import org.opencv.core.Mat;
+import org.opencv.core.MatOfByte;
+import org.opencv.imgcodecs.Imgcodecs;
+import org.openpnp.util.OpenCvUtils;
+
 /**
  * The pictures (tip setups design §22.4). Every photo is re-encoded by the engine (JPEG quality 0.85, at
  * most 2048 px on the long side, no metadata) with a 320 px thumbnail, written through a temporary file
@@ -316,23 +321,19 @@ public final class PhotoStore {
         }
         try (ImageInputStream iis = ImageIO.createImageInputStream(new ByteArrayInputStream(bytes))) {
             Iterator<ImageReader> it = ImageIO.getImageReadersByFormatName(jpeg ? "jpeg" : "png");
-            if (!it.hasNext()) {
+            // null when it cannot be made: on the machine the JDK's JPEG plugin binds to the cameras' own libjpeg
+            // (openpnp-capture, global by JNA), fails, and ImageIO drops it (BR-105)
+            ImageReader r = it.hasNext() ? it.next() : null;
+            if (r == null) {
+                if (jpeg) {
+                    return jpegViaOpenCv(bytes);
+                }
                 throw notAnImage();
             }
-            ImageReader r = it.next();
             try {
                 r.setInput(iis, true, true);
                 int w = r.getWidth(0), h = r.getHeight(0);
-                if (w < MIN_SIDE_PX || h < MIN_SIDE_PX || w > MAX_SIDE_PX || h > MAX_SIDE_PX) {
-                    throw new EngineRefusal(400, "size", String.format(Locale.ROOT, "The picture is %d × %d px: at "
-                            + "least %d and at most 12,000 px a side.", w, h, MIN_SIDE_PX));
-                }
-                if ((long) w * h > MAX_PIXELS) {
-                    // its sides are within the limits: say the limit it breaks
-                    throw new EngineRefusal(400, "size", String.format(Locale.ROOT, "The picture is %d × %d px (%.0f "
-                            + "Mpx): at most %d Mpx. Send a smaller one (phones can share a reduced size).", w, h,
-                            w * (double) h / 1e6, MAX_PIXELS / 1_000_000));
-                }
+                checkSize(w, h);
                 ImageReadParam param = r.getDefaultReadParam();
                 int n = Math.max(1, Math.max(w, h) / LONG_SIDE_PX);
                 if (n > 1) {
@@ -358,6 +359,80 @@ public final class PhotoStore {
 
     private static EngineRefusal notAnImage() {
         return new EngineRefusal(400, "not-an-image", "This file is not a JPEG or PNG picture.");
+    }
+
+    /** 400 {@code size} unless both sides are 64 to 12,000 px and the picture at most 40 Mpx. */
+    private static void checkSize(int w, int h) {
+        if (w < MIN_SIDE_PX || h < MIN_SIDE_PX || w > MAX_SIDE_PX || h > MAX_SIDE_PX) {
+            throw new EngineRefusal(400, "size", String.format(Locale.ROOT, "The picture is %d × %d px: at "
+                    + "least %d and at most 12,000 px a side.", w, h, MIN_SIDE_PX));
+        }
+        if ((long) w * h > MAX_PIXELS) {
+            // its sides are within the limits: say the limit it breaks
+            throw new EngineRefusal(400, "size", String.format(Locale.ROOT, "The picture is %d × %d px (%.0f "
+                    + "Mpx): at most %d Mpx. Send a smaller one (phones can share a reduced size).", w, h,
+                    w * (double) h / 1e6, MAX_PIXELS / 1_000_000));
+        }
+    }
+
+    /**
+     * A JPEG through OpenCV's own libjpeg (BR-105): the size from its frame header first, then decoded reduced by 1, 2
+     * or 4 (OpenCV's steps within {@link #decode}'s subsampling), so its raster too stays under twice the stored size a
+     * side. EXIF orientation is ignored, as ImageIO does.
+     */
+    private static BufferedImage jpegViaOpenCv(byte[] bytes) {
+        int[] size = jpegSize(bytes);
+        if (size == null) {
+            throw notAnImage();
+        }
+        checkSize(size[0], size[1]);
+        int n = Math.max(1, Math.max(size[0], size[1]) / LONG_SIDE_PX);
+        int reduced = n >= 4 ? Imgcodecs.IMREAD_REDUCED_COLOR_4 : n >= 2 ? Imgcodecs.IMREAD_REDUCED_COLOR_2
+                : Imgcodecs.IMREAD_COLOR;
+        nu.pattern.OpenCV.loadLocally();
+        MatOfByte buf = new MatOfByte(bytes);
+        Mat m = Imgcodecs.imdecode(buf, reduced | Imgcodecs.IMREAD_IGNORE_ORIENTATION);
+        try {
+            if (m.empty()) {
+                throw notAnImage();
+            }
+            return OpenCvUtils.toBufferedImage(m);
+        }
+        finally {
+            buf.release();
+            m.release();
+        }
+    }
+
+    /** A JPEG's width and height from its frame header (SOF0-15), or null without one before the scan. */
+    static int[] jpegSize(byte[] b) {
+        int i = 2;
+        while (i + 3 < b.length) {
+            if ((b[i] & 0xff) != 0xFF) {
+                return null;
+            }
+            int m = b[i + 1] & 0xff;
+            if (m == 0xFF) { // fill byte
+                i++;
+                continue;
+            }
+            if (m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { // markers without a length
+                i += 2;
+                continue;
+            }
+            if (m == 0xD9 || m == 0xDA) {
+                return null;
+            }
+            if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+                if (i + 8 >= b.length) {
+                    return null;
+                }
+                return new int[] {(b[i + 7] & 0xff) << 8 | (b[i + 8] & 0xff),
+                    (b[i + 5] & 0xff) << 8 | (b[i + 6] & 0xff)};
+            }
+            i += 2 + ((b[i + 2] & 0xff) << 8 | (b[i + 3] & 0xff));
+        }
+        return null;
     }
 
     /** The picture scaled down (never up) so its long side is at most {@code longSide} px. */

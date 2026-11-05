@@ -14,13 +14,21 @@ import java.awt.image.BufferedImage;
 import java.awt.image.IndexColorModel;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
 import java.util.zip.CRC32;
 
+import javax.imageio.IIOException;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.spi.IIORegistry;
+import javax.imageio.spi.ImageReaderSpi;
 
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.padprofile.Tip;
@@ -161,9 +169,121 @@ public class PhotoStoreTest {
         }
     }
 
+    interface Body {
+        void run() throws Exception;
+    }
+
+    /**
+     * BR-105, as on the machine: the cameras' library (openpnp-capture, loaded by JNA with global symbols) carries its
+     * own libjpeg, so the JDK's JPEG plugin binds to it and fails when it is made ("Wrong JPEG library version");
+     * ImageIO then drops it for good. The first reader asked for fails (ImageIO gives null), after it there is none.
+     */
+    static void withImageIoJpegReaderBroken(Body body) throws Exception {
+        IIORegistry reg = IIORegistry.getDefaultInstance();
+        ImageReaderSpi real = ImageIO.getImageReadersByFormatName("jpeg").next().getOriginatingProvider();
+        ImageReaderSpi broken = new ImageReaderSpi() {
+            {
+                names = real.getFormatNames();
+                inputTypes = STANDARD_INPUT_TYPE;
+                vendorName = "test";
+                version = "1";
+            }
+
+            @Override
+            public boolean canDecodeInput(Object source) {
+                return true;
+            }
+
+            @Override
+            public ImageReader createReaderInstance(Object extension) throws IOException {
+                throw new IIOException("Wrong JPEG library version: library is 62, caller expects 80");
+            }
+
+            @Override
+            public String getDescription(Locale locale) {
+                return "the JDK's JPEG reader bound to the cameras' libjpeg";
+            }
+        };
+        reg.deregisterServiceProvider(real, ImageReaderSpi.class);
+        reg.registerServiceProvider(broken, ImageReaderSpi.class);
+        try {
+            body.run();
+        }
+        finally {
+            reg.deregisterServiceProvider(broken, ImageReaderSpi.class);
+            reg.registerServiceProvider(real, ImageReaderSpi.class);
+        }
+    }
+
+    /** A JPEG of only its frame header (SOF0): {@code w} × {@code h} px (nothing to decode). */
+    static byte[] jpegHeader(int w, int h) {
+        return new byte[] {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xC0, 0, 17, 8, (byte) (h >> 8), (byte) h,
+            (byte) (w >> 8), (byte) w, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, (byte) 0xFF, (byte) 0xD9};
+    }
+
+    /** BR-105: "the result photos of the locator step were not stored: This file is not a JPEG or PNG picture." */
+    @Test
+    public void aJpegIsTakenWhenTheCamerasLibraryBrokeImageIosJpegReader() throws Exception {
+        byte[] jpg = encode(picture(300, 200, BufferedImage.TYPE_INT_RGB), "jpg");
+        byte[] phone = withExif(encode(picture(640, 480, BufferedImage.TYPE_INT_RGB), "jpg"));
+        List<Photo> kept = new ArrayList<>();
+        PhotoStore[] s = new PhotoStore[1];
+        try (DispenseDb db = DispenseDb.inMemory()) {
+            s[0] = store(db);
+            withImageIoJpegReaderBroken(() -> {
+                kept.add(s[0].store(upload(jpg))); // the reader that fails when made
+                kept.add(s[0].store(upload(phone))); // then none at all
+                kept.add(s[0].store(upload(withOrientation6(jpg))));
+            });
+        }
+        assertEquals(300, kept.get(0).widthPx);
+        assertEquals(200, kept.get(0).heightPx);
+        assertEquals(640, kept.get(1).widthPx);
+        assertEquals(480, kept.get(1).heightPx);
+        assertEquals(300, kept.get(2).widthPx, "EXIF orientation not applied, as ImageIO reads it");
+        assertEquals(200, kept.get(2).heightPx);
+        assertEquals(300, stored(s[0], kept.get(0)).getWidth(), "a JPEG the store wrote");
+        assertFalse(hasApp1(Files.readAllBytes(s[0].file(kept.get(1)).toPath())), "no EXIF (APP1) segment");
+    }
+
+    @Test
+    public void withoutImageIosJpegReaderTheSizeIsStillReadFromTheHeaderAndALargeJpegDecodedSubsampled()
+            throws Exception {
+        byte[] big = encode(picture(6000, 4000, BufferedImage.TYPE_3BYTE_BGR), "jpg");
+        byte[] small = encode(picture(40, 40, BufferedImage.TYPE_INT_RGB), "jpg");
+        byte[] fakeJpeg = Arrays.copyOf(new byte[] {(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, 0x00, 0x01}, 500);
+        try (DispenseDb db = DispenseDb.inMemory()) {
+            PhotoStore s = store(db);
+            withImageIoJpegReaderBroken(() -> {
+                EngineRefusal e = assertThrows(EngineRefusal.class, () -> s.store(upload(jpegHeader(20000, 100))));
+                assertEquals(400, e.status);
+                assertEquals("The picture is 20000 × 100 px: at least 64 and at most 12,000 px a side.",
+                        e.getMessage());
+                assertEquals("The picture is 40 × 40 px: at least 64 and at most 12,000 px a side.",
+                        assertThrows(EngineRefusal.class, () -> s.store(upload(small))).getMessage());
+                assertEquals(400, assertThrows(EngineRefusal.class, () -> s.store(upload(jpegHeader(7000, 6000))))
+                        .status);
+                BufferedImage decoded = PhotoStore.decode(big);
+                assertEquals(3000, decoded.getWidth(), "subsampled by 2: never the full 6000 x 4000 raster");
+                assertEquals(2000, decoded.getHeight());
+                assertEquals("not-an-image", assertThrows(EngineRefusal.class, () -> s.store(upload(fakeJpeg))).code);
+            });
+            assertEquals(0, db.photos(null, null, null, null, true, 100).size());
+        }
+    }
+
     /** A JPEG with an EXIF APP1 segment (a phone's location) right after its SOI. */
     static byte[] withExif(byte[] jpeg) {
-        byte[] exif = "Exif\0\0GPS 37.7749 N 122.4194 W".getBytes(StandardCharsets.ISO_8859_1);
+        return withApp1(jpeg, "Exif\0\0GPS 37.7749 N 122.4194 W".getBytes(StandardCharsets.ISO_8859_1));
+    }
+
+    /** A JPEG whose EXIF says "turn it 90°" (orientation 6), as a phone held upright writes it. */
+    static byte[] withOrientation6(byte[] jpeg) {
+        return withApp1(jpeg, new byte[] {'E', 'x', 'i', 'f', 0, 0, 'I', 'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0,
+            1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0});
+    }
+
+    static byte[] withApp1(byte[] jpeg, byte[] exif) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(jpeg, 0, 2);
         out.write(0xFF);
