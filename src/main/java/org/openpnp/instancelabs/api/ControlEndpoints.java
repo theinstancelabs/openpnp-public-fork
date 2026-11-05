@@ -152,10 +152,27 @@ final class ControlEndpoints {
      */
     private CollisionCheck.Options jogOptions(Machine m, HeadMountable hm, String tool, Location to) throws Exception {
         CollisionCheck.Options o = CollisionCheck.Options.strict(null);
-        if ("camera".equals(tool) || !Double.isFinite(surfaceUnder(to.getX(), to.getY()))) {
+        DispenseService svc = ctx.svcOrNull(); // an X/Y jog has not been through requireFloors
+        if (svc == null || "camera".equals(tool) || !Double.isFinite(surfaceUnder(svc, to.getX(), to.getY()))) {
             return o;
         }
-        double floor = isNeedle(hm) ? needleFloor(hm, to.getX(), to.getY()) : n1Floor(to.getX(), to.getY());
+        double floor;
+        try {
+            if (hm == svc.getDispenserNozzle()) { // as requireFloors: at its tip and under N2, the higher holds
+                double[] tip = svc.needleXY(to.getX(), to.getY());
+                floor = needleFloor(svc, hm, tip[0], tip[1]);
+                double underN2 = needleFloor(svc, hm, to.getX(), to.getY());
+                if (Double.isNaN(floor) || underN2 > floor) {
+                    floor = underN2;
+                }
+            }
+            else {
+                floor = n1Floor(svc, to.getX(), to.getY());
+            }
+        }
+        catch (ApiException e) {
+            return o; // no floor at all (no lower safe zone on Z): no exemption, the strict check
+        }
         if (Double.isFinite(floor)) {
             o.jogTool = tool;
             o.jogFloorRaw = ctx.bed.rawTarget(m, hm, new Location(LengthUnit.Millimeters, to.getX(), to.getY(), floor,
