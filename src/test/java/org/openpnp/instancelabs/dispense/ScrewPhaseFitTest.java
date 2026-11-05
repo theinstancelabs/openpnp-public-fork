@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.TreeMap;
 
 import org.junit.jupiter.api.Test;
 
@@ -66,7 +69,7 @@ public class ScrewPhaseFitTest {
         assertEquals(-0.26220, h.rows.get(0).x, 1e-4);
         assertEquals(0.14415, h.rows.get(1).x, 1e-4);
         assertEquals(297.9, h.rows.get(0).startDeg, 1e-9);
-        assertTrue(h.peakSeDeg < 2.5, "± 0.02 on areas of 1 (about 2.0): " + h.peakSeDeg);
+        assertTrue(h.peakSeDeg < 2.5, "± 0.02 on areas of 1 (about 1.6): " + h.peakSeDeg);
         // any start and peak, across 0
         for (double p : new double[] {0, 46, 135.5, 270, 359}) {
             for (double peak : new double[] {3, 120, 299}) {
@@ -106,17 +109,19 @@ public class ScrewPhaseFitTest {
                 + "blob) at 298°: left out, 6 dots joined to a neighbour (a thread or one blob) at 118°: left out]",
                 joined.why.toString());
         // a noisy measure (± 0.25 on areas of 1): the peak's standard error, √(x₂²se₁² + x₁²se₂²)/k², decides; each
-        // half's error is its trimmed mean's, the winsorized SD·√n/(n − 2) (0.2673·√8/6 here: xSe 0.0891)
-        ScrewPhaseFit.Halves low = noisy(0.7);
-        assertEquals(11.45, low.peakSeDeg, 0.01);
-        assertEquals(0.0891, low.rows.get(0).xSe, 1e-4);
+        // half's error is its trimmed mean's, the winsorized SD·√n/(n − 2) × the factor of 8 dots (0.2673·√8/6·1.18
+        // here: xSe 0.1051)
+        ScrewPhaseFit.Halves low = noisy(0.7, 0.25);
+        assertEquals(13.52, low.peakSeDeg, 0.01);
+        assertEquals(0.1051, low.rows.get(0).xSe, 1e-4);
         assertEquals(ScrewPhaseFit.LOW, low.confidence);
-        assertEquals("the peak's standard error is 11.5° (high at most 10°)", low.why.get(0));
+        assertEquals("the peak's standard error is 13.5° (high at most 10°)", low.why.get(0));
         assertEquals(179.1, low.featureDeg(), 1e-9);
-        assertEquals(13.36, noisy(0.6).peakSeDeg, 0.01);
-        assertEquals(ScrewPhaseFit.HIGH, noisy(0.85).confidence, "SE 9.4°, every half's dots within 1.5× its median");
-        assertEquals(80.18, noisy(0.1).peakSeDeg, 0.01);
-        assertEquals("no ripple: a whole-turn recipe needs no start angle", noisy(0.1).why.get(0));
+        assertEquals(15.77, noisy(0.6, 0.25).peakSeDeg, 0.01);
+        assertEquals(ScrewPhaseFit.HIGH, noisy(0.85, 0.2).confidence, "SE 8.9°, every half's dots within 1.5× its "
+                + "median");
+        assertEquals(94.61, noisy(0.1, 0.25).peakSeDeg, 0.01);
+        assertEquals("no ripple: a whole-turn recipe needs no start angle", noisy(0.1, 0.25).why.get(0));
     }
 
     /**
@@ -166,7 +171,7 @@ public class ScrewPhaseFitTest {
         assertEquals(clean.peakSeDeg, h.peakSeDeg, 1e-9, "nor the error");
         assertEquals(ScrewPhaseFit.HIGH, h.confidence, h.why.toString());
         // two blobs in the half at 298° (3× and 1.7×): the second is left after the trim and moves the peak ~6° with an
-        // error of ~7.7° that would read high: low, and said
+        // error of ~9° that would read high: low, and said
         List<ScrewPhaseFit.Dot> two = new ArrayList<>(r1);
         two.set(0, new ScrewPhaseFit.Dot(298, 3 * r1.get(0).areaMm2));
         two.set(4, new ScrewPhaseFit.Dot(298, 1.7 * r1.get(4).areaMm2));
@@ -186,7 +191,15 @@ public class ScrewPhaseFitTest {
             few.add(new ScrewPhaseFit.Dot(298, a));
             few.add(new ScrewPhaseFit.Dot(118, a));
         }
-        assertEquals(0.17008, ScrewPhaseFit.halves(few, 298, r2, 28).rows.get(0).xSe, 1e-5, "√2·0.1528·√3/1/2.2");
+        double se = ScrewPhaseFit.halves(few, 298, r2, 28).rows.get(0).xSe;
+        assertEquals(0.08674, se, 1e-5, "√2·0.1528·√3/1·0.51/2.2");
+        // the same spread around 0.7 (three copies of 0.7 do not average to 0.7 exactly): the same error, by A + B
+        List<ScrewPhaseFit.Dot> shifted = new ArrayList<>();
+        for (double a : new double[] {0.6, 0.7, 0.9}) {
+            shifted.add(new ScrewPhaseFit.Dot(298, a));
+            shifted.add(new ScrewPhaseFit.Dot(118, a));
+        }
+        assertEquals(se * 2.2 / 1.4, ScrewPhaseFit.halves(shifted, 298, r2, 28).rows.get(0).xSe, 1e-9);
     }
 
     /** No angle from a dot the camera could not measure, or from a dot that did not start where the plan put it. */
@@ -215,20 +228,55 @@ public class ScrewPhaseFitTest {
         assertEquals(270, ScrewPhaseFit.norm(-90), 0);
     }
 
-    /** Rows of 8 pairs from 298 and 28 with x at the peak 179.1 and amplitude a, ± 0.25 on each dot. */
-    static ScrewPhaseFit.Halves noisy(double a) {
+    /** Rows of 8 pairs from 298 and 28 with x at the peak 179.1 and amplitude a, ± e on each dot. */
+    static ScrewPhaseFit.Halves noisy(double a, double e) {
         List<List<ScrewPhaseFit.Dot>> rows = new ArrayList<>();
         for (double s : new double[] {298, 28}) {
             double x = -(2 * a / Math.PI) * Math.sin(Math.toRadians(s - 179.1));
             List<ScrewPhaseFit.Dot> l = new ArrayList<>();
             for (int i = 0; i < 8; i++) {
-                double e = i % 2 == 0 ? 0.25 : -0.25;
-                l.add(new ScrewPhaseFit.Dot(s, 1 + x + e));
-                l.add(new ScrewPhaseFit.Dot((s + 180) % 360, 1 - x - e));
+                l.add(new ScrewPhaseFit.Dot(s, 1 + x + (i % 2 == 0 ? e : -e)));
+                l.add(new ScrewPhaseFit.Dot((s + 180) % 360, 1 - x - (i % 2 == 0 ? e : -e)));
             }
             rows.add(l);
         }
         return ScrewPhaseFit.halves(rows.get(0), 298, rows.get(1), 28);
+    }
+
+    /**
+     * The error covers the truth at few dots (review 11-04): over seeded runs of normal scatter (cv 0.12) at a 0.3
+     * ripple, 1.96·xSe holds the model's x in 90 to 98 % of the rows at 3, 4, 5 and 8 dots per half (too wide an error
+     * refuses good measures).
+     */
+    @Test
+    public void halvesErrorCoversTheTruthAtFewDots() {
+        Random rnd = new Random(20261104);
+        Map<Integer, Double> covered = new TreeMap<>();
+        for (int n : new int[] {3, 4, 5, 8}) {
+            int in = 0, runs = 4000;
+            for (int k = 0; k < runs; k++) {
+                List<List<ScrewPhaseFit.Dot>> rows = new ArrayList<>();
+                double[] x = new double[2];
+                for (int j = 0; j < 2; j++) {
+                    double s = j == 0 ? 298 : 28;
+                    x[j] = -(2 * 0.3 / Math.PI) * Math.sin(Math.toRadians(s - 179.1));
+                    List<ScrewPhaseFit.Dot> l = new ArrayList<>();
+                    for (int i = 0; i < n; i++) {
+                        l.add(new ScrewPhaseFit.Dot(s, (1 + x[j]) * (1 + 0.12 * rnd.nextGaussian())));
+                        l.add(new ScrewPhaseFit.Dot((s + 180) % 360, (1 - x[j]) * (1 + 0.12 * rnd.nextGaussian())));
+                    }
+                    rows.add(l);
+                }
+                ScrewPhaseFit.Halves h = ScrewPhaseFit.halves(rows.get(0), 298, rows.get(1), 28);
+                for (int j = 0; j < 2; j++) {
+                    in += Math.abs(h.rows.get(j).x - x[j]) <= 1.96 * h.rows.get(j).xSe ? 1 : 0;
+                }
+            }
+            covered.put(n, Math.round(in / (2.0 * runs) * 1000) / 1000.0);
+        }
+        for (double c : covered.values()) {
+            assertTrue(c >= 0.9 && c <= 0.98, "dots per half = share of rows 1.96·xSe holds: " + covered);
+        }
     }
 
     @Test

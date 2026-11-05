@@ -32,6 +32,12 @@ public final class ScrewPhaseFit {
      */
     static final double OUTLIER_SHARE = 1.5;
     static final int MIN_FOUND_PER_HALF = 3;
+    /**
+     * Halves: a half's error × this by its dots (3-16, the last above) so 1.96 errors hold a row's x 95 % of the time
+     * (Monte Carlo of the formula on normal scatter, seed 20261104, 2·10⁶ rows per count; the bias alone is 1.59 at 4).
+     */
+    static final double[] SE_FACTOR = {0, 0, 0, 0.51, 3.19, 1.66, 1.36, 1.24, 1.18, 1.14, 1.12, 1.10, 1.08, 1.07, 1.07,
+            1.06, 1.05};
     /** Quarters (Process 11-04): dead at or below 0.2 of the largest mean, a dip at or below 0.5; a live cv above 0.15. */
     static final double DEAD_SHARE = 0.2, DIP_SHARE = 0.5, LIVE_CV_MAX = 0.15;
     static final int MIN_DOTS_PER_ANGLE = 2;
@@ -325,7 +331,7 @@ public final class ScrewPhaseFit {
     /**
      * The trimmed mean's standard error (Tukey-McLaughlin): the winsorized SD (min and max replaced by their
      * neighbours: a blob does not widen it)·√n/(n − 2); the sample SD in its place when winsorizing leaves no spread
-     * (3 dots, or ties).
+     * (3 dots, or ties); times the small-sample factor.
      */
     private static double trimmedSe(List<Double> l) {
         int n = l.size();
@@ -333,8 +339,9 @@ public final class ScrewPhaseFit {
         java.util.Collections.sort(w);
         w.set(0, w.get(1));
         w.set(n - 1, w.get(n - 2));
-        double sd = Math.sqrt(var(w));
-        return (sd > 0 ? sd : Math.sqrt(var(l))) * Math.sqrt(n) / (n - 2);
+        // the ends, not the SD, say "no spread": three copies of 0.7 do not average to 0.7 exactly
+        double sd = Math.sqrt(var(w.get(0) < w.get(n - 1) ? w : l));
+        return sd * Math.sqrt(n) / (n - 2) * SE_FACTOR[Math.min(n, SE_FACTOR.length - 1)];
     }
 
     private static double mean(List<Double> l) {
