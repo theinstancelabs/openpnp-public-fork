@@ -400,11 +400,14 @@ async function runFirstDots(page, n) {
     // ---- BR-82: the recipe's own lift and the pause after it (the 25G's 3 mm + 0.5 s), then back to the defaults -----
     {
       const prof = async () => (await (await page.request.get(BASE + 'api/status')).json()).dispense.profile;
-      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked. */
+      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked. The error shows
+       *  on input, Save's lock at the next render frame (and the value before may have shown the same error): a refused
+       *  value waits for both, else the read can come between them (#78's queue run, 11-05 13:06Z) */
       const typeIn = async (id, v, refused) => {
         await page.fill('#' + id, '');
         await page.locator('#' + id).pressSequentially(v);
-        await page.waitForFunction(([i, r]) => document.getElementById(i + '-err').hidden === !r, [id, refused], { timeout: 5000 }).catch(() => {});
+        await page.waitForFunction(([i, r]) => document.getElementById(i + '-err').hidden === !r && (!r || document.getElementById('btn-pf-save').disabled),
+          [id, refused], { timeout: 5000 }).catch(() => {});
         return page.evaluate((i) => { const m = document.getElementById(i + '-err'); return { err: m.hidden ? '' : m.textContent, save: document.getElementById('btn-pf-save').disabled }; }, id);
       };
       const fp0 = (await prof()).fingerprint;
