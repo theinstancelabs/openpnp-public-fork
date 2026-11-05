@@ -20,8 +20,9 @@ import java.util.regex.Pattern;
  * the surfaces its own I4 scope names (a dot ladder at another place lays its dots on that place's surface). Every
  * other place (the park, feeder picks, camera places, the oven) and every other probed surface is outside; a refusal
  * there names it. Forbidden, whatever else covers it: the bottom camera (a circle of {@code forbidRadiusMm}), the
- * height switch (BR-94: a circle of {@code heightSwitchRadiusMm} around its place, once set) and the configured circles. With the valve on the needle never crosses a forbidden zone. The pressure hold, which may drool
- * for minutes, opens the valve only over a sink: the waste, the towel, a cup, the purge row, the calibration area or a
+ * height switch (BR-94: a circle of {@code heightSwitchRadiusMm} around its place, once set) and the configured
+ * circles. With the valve on the needle never crosses a forbidden zone. The pressure hold, which may drool for minutes,
+ * opens the valve only over a sink: the waste, the towel, a cup, the purge row, the calibration area or a
  * coupon (never over a board or another surface: #12's final review). The refusals say what to do in their context:
  * the hold where the needle is ({@link #refusal}), its park ({@link #parkRefusal}), a program's line
  * ({@link #lineRefusal}) and move ({@link #crossing}).

@@ -65,7 +65,7 @@ public class DispenseConfig {
     public CleanPadCheck cleanPadCheck = new CleanPadCheck();
     /** BR-03: where the valve and the screw may switch on ({@link OutputZones}). */
     public OutputZoneSettings outputZones = new OutputZoneSettings();
-    /** BR-94: each tool's last accepted trip on the bed's height switch ({@link HeightSwitch}); set by the measure only. */
+    /** BR-94: each tool's last accepted trip on the bed's height switch ({@link HeightSwitch}); the measure sets it. */
     public HeightSwitchTrips heightSwitch = new HeightSwitchTrips();
 
     // --- named locations (x, y: N2 nozzle coordinates; z: surface Z in OpenPnP's frame, i.e. the

@@ -85,7 +85,7 @@ public final class HeightSwitch {
         public String why;
     }
 
-    /** −1 when the tool goes down as raw Z falls (N1), +1 as it rises (the needle): its mapper 1 mm lower at (x, y, z). */
+    /** −1 when the tool goes down as raw Z falls (N1), +1 as it rises (the needle): its mapper 1 mm lower at (x, y). */
     public static int down(RawMapper m, double x, double y, double z) throws Exception {
         return (int) Math.signum(m.toRaw(x, y, z - 1).z - m.toRaw(x, y, z).z);
     }
@@ -130,7 +130,7 @@ public final class HeightSwitch {
         return r;
     }
 
-    /** Why the plan's window is refused before any line (the order is wrong, wider than 2 mm, above travel), or null. */
+    /** Why the plan's window is refused before any line (the wrong order, wider than 2 mm, above travel), or null. */
     static String windowProblem(Plan p) {
         double span = p.down * (p.zFloor - p.zStart);
         if (!(span > 0)) {

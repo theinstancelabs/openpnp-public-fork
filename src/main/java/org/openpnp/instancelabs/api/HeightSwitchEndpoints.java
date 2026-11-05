@@ -26,8 +26,9 @@ final class HeightSwitchEndpoints {
     }
 
     /**
-     * POST /api/height-switch/measure {tool: "n1" | "needle", presses? (1..20, 5), zStart?, zFloor? (raw Z), tipClean?}:
-     * waits for the measure and answers its result; a refused, stopped or failed one answers 409 with its reason.
+     * POST /api/height-switch/measure {tool: "n1" | "needle", presses? (1..20, 5), zStart?, zFloor? (raw Z),
+     * tipClean?}: waits for the measure and answers its result; a refused, stopped or failed one answers 409 with its
+     * reason.
      */
     Object measure(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();

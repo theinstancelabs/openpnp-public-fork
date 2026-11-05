@@ -251,7 +251,8 @@ public class HeightSwitchTest {
      */
     @Test
     public void theConfigKeepsEachToolsTripAndAnOldFileLoads() {
-        DispenseConfig old = DispenseConfig.fromJson("{\"schemaVersion\": 4, \"outputZones\": {\"forbidRadiusMm\": 15}}");
+        DispenseConfig old = DispenseConfig.fromJson("{\"schemaVersion\": 4, \"outputZones\": {\"forbidRadiusMm\": "
+                + "15}}");
         assertNull(old.heightSwitch.n1);
         assertNull(old.heightSwitch.needle);
         assertEquals(10, old.outputZones.heightSwitchRadiusMm, 0);
