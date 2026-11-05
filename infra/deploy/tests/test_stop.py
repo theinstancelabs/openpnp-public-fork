@@ -93,7 +93,9 @@ class Decisions(unittest.TestCase):
         ok, detail = d.stop_machine()
         self.assertFalse(ok, detail)
         self.assertEqual(api.posts, [])
-        self.assertFalse(d.stop_after_failure(), "a live but slow OpenPnP is not killed without a STOP")
+        ok, why = d.stop_after_failure()
+        self.assertFalse(ok, "a live but slow OpenPnP is not killed without a STOP")
+        self.assertIn("its STOP was not confirmed (", why)
         self.assertFalse(self.svc.stopped)
 
     def test_non_200_is_unknown_and_waits(self):
@@ -428,11 +430,35 @@ class PlannedStop(unittest.TestCase):
     def test_a_stopped_machine_that_still_works_is_not_stopped(self):
         for over in ({"pressure": {"on": True, "state": "on"}}, {"dispense": {"busy": True}},
                      {"lock": {"holder": {"kind": "user", "who": "user", "label": "User"}}},
-                     {"run": {"running": True, "kind": "program"}}, {"machine": {"busy": True, "enabled": False}}):
+                     {"run": {"running": True, "kind": "program"}}, {"machine": {"busy": True, "enabled": False}},
+                     {"machine": {"busy": False, "enabled": False, "linkLost": {"why": "lost", "next": "Stop"}}}):
             with self.subTest(over):
                 api = PlannedApi(lambda n: self.ENGINE_REFUSED, st=lambda n: self.off(**over))
                 self.assertIsNone(self.deployer(api).planned_stop(off_is_done=True)[0])
                 self.assertNotIn("/api/stop", api.calls)
+
+    def test_before_the_switch_already_stopped_after_a_refusal_is_a_stop(self):
+        """The idle check found the machine off, so a refused try had nothing on to switch off: 'already stopped'
+        after it is a stop (in the health check it is not: PLANNED_MAY_HAVE_RUN)."""
+        stopped = (200, dict(PLANNED_OK[1], linesSent=[], actions=["machine was already stopped"]))
+        api = PlannedApi(lambda n: REFUSED if n == 1 else stopped, st=lambda n: status(busy=True))
+        self.assertEqual(self.deployer(api).planned_stop(off_is_done=True), (True, il_deploy.STOP_DONE))
+        api = PlannedApi(lambda n: REFUSED if n == 1 else stopped)
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIs(ok, False)
+        self.assertTrue(detail.startswith(il_deploy.PLANNED_MAY_HAVE_RUN), detail)
+
+    def test_a_lasting_refusal_names_a_first_one_that_differs(self):
+        """A task that outlived its wait, then refusals that last: the hold note says one may have run."""
+        ran = (409, {"error": "refused", "reason": "the planned stop has not ended after 20 s: the machine may still "
+                                                    "be switching off. The real STOP is POST /api/stop"})
+        api = PlannedApi(lambda n: ran if n == 1 else REFUSED)
+        ok, detail = self.deployer(api).planned_stop()
+        self.assertIsNone(ok)
+        self.assertIn("a G-code batch", detail)
+        self.assertIn("has not ended after 20 s", detail)
+        api = PlannedApi(lambda n: REFUSED)
+        self.assertEqual(self.deployer(api).planned_stop()[1].count("a G-code batch"), 1, "the same one once")
 
     def test_a_planned_stop_that_times_out_is_a_failure(self):
         """It may have run: no second stop blind (the old stop's fallback STOPs without its home check)."""

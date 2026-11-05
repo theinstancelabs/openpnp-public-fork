@@ -5,7 +5,8 @@ Deletes every unexpired artifact named --name (openpnp-build) of a run that ende
 --keep-run's own (the run that just released): every run's jobs download their own build within the run, and
 nothing reads an older run's (the deployer uses releases; release-fast reads only the queue run's gate-needs). A run
 still going keeps its build, and so does one that failed or timed out: `gh run rerun --failed` reuses the first
-attempt's build (it expires after a day). Any API error keeps that artifact. Exit 1 if the listing or a delete failed.
+attempt's build (it expires after a day). A cancelled run's build goes, so it is re-run whole (`gh run rerun <id>`), as
+is any run more than a day old. Any API error keeps that artifact. Exit 1 if the listing or a delete failed.
 """
 import argparse
 import json

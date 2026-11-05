@@ -113,6 +113,7 @@ class Health(HealthLab, unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("machine", "stop"), rep)
         self.assertIn("has not ended after 20 s", rep["failure"])
+        self.assertIn(il_deploy.PLANNED_MAY_HAVE_RUN, rep["failure"])
         self.assertNotIn(("POST", "/api/stop"), self.posts())
 
     def test_already_stopped_after_a_refused_stop_that_ran_at_the_enable_step_is_the_machines(self):
@@ -122,6 +123,7 @@ class Health(HealthLab, unittest.TestCase):
         self.assertFalse(rep["ok"])
         self.assertEqual((rep["kind"], rep["failure"][:8]), ("machine", "enable: "), rep)
         self.assertIn("has not ended after 20 s", rep["failure"])
+        self.assertIn(il_deploy.PLANNED_MAY_HAVE_RUN, rep["failure"])
 
     def planned_stop_times_out(self):
         """POST /api/stop/planned gets no answer in time (the lock guard's resync can hold a request ~90 s)."""
@@ -156,6 +158,96 @@ class Health(HealthLab, unittest.TestCase):
             rep = self.check()
         self.assertEqual((rep["kind"], rep["failure"][:8]), ("claim-lost", "enable: "), rep)
 
+    LINK_LOST = {"atMs": 1, "why": "the link to the controller was lost at 15:07 (the controller left USB)",
+                 "next": "once the board is back on USB: Stop, then Start, then Home as after a reset"}
+
+    def lost_link_check(self, enabled):
+        """BR-93: with machine.linkLost set the check sends nothing: its planned stop answers 200 on a lost link
+        (nothing reaches the controller), Start would connect again and clear it, and the home after it would home a
+        controller that may have reset. Kind link-lost: left as it is for a person."""
+        self.start(link_lost=self.LINK_LOST)
+        self.fake.enabled = enabled
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["failure"][:8]), ("link-lost", "enable: "), rep)
+        self.assertIn("the controller left USB", rep["failure"])
+        self.assertIn("Stop, then Start", rep["failure"])
+        self.assertEqual(self.posts(), [], "no stop, no enable, no home")
+
+    def test_a_lost_link_is_not_started_or_homed(self):
+        self.lost_link_check(enabled=False)
+
+    def test_a_lost_link_of_an_enabled_machine_is_not_stopped_started_or_homed(self):
+        self.lost_link_check(enabled=True)
+
+    def after(self, path):
+        """The POSTs after the first POST to path."""
+        posts = self.posts()
+        return posts[posts.index(("POST", path)) + 1:]
+
+    def test_a_link_lost_after_the_enable_is_not_homed_or_stopped(self):
+        """Nothing reaches a lost link, and the recovery's restart would clear linkLost: OpenPnP is left as it is, for
+        a person (kind link-lost, handled like a home that never ends)."""
+        self.start(jar_fail=["link-lost-after-enable"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "axes"), rep)
+        self.assertIn("the controller left USB", rep["failure"])
+        self.assertEqual(self.after("/api/machine/enable"), [], "no home, no stop")
+
+    def test_a_link_lost_after_the_home_is_not_stopped(self):
+        self.start(jar_fail=["link-lost-after-home"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "homed"), rep)
+        self.assertEqual(self.after("/api/machine/home"), [], "no stop")
+
+    def test_a_link_lost_at_the_last_stop_is_the_link_s(self):
+        """#53's planned stop answers 200 on a lost link: the link is read again after it."""
+        self.start(jar_fail=["link-lost-at-planned-stop"])
+        rep = self.check()
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "stop"), rep)
+
+    def link_s(self, fail, step, path):
+        """The check fails at step on a link lost meanwhile: kind link-lost, nothing sent after path (no STOP)."""
+        self.start(jar_fail=[fail])
+        rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", step), rep)
+        self.assertIn("the controller left USB", rep["failure"])
+        self.assertEqual(self.after(path), [], "no STOP")
+        return rep["failure"]
+
+    def test_a_home_refused_on_a_link_lost_just_before_it_is_the_link_s(self):
+        """#53 refuses a home on a lost link (409 "MACHINE: <why>: <next>"): not a machine problem to STOP."""
+        self.assertIn("HTTP 409: MACHINE: ", self.link_s("link-lost-at-home", "home", "/api/machine/home"))
+
+    def test_a_home_that_failed_on_a_link_lost_during_it_is_the_link_s(self):
+        self.assertIn("IO Error on reading", self.link_s("link-lost-during-home", "home", "/api/machine/home"))
+
+    def test_a_start_that_failed_on_a_link_lost_as_it_connected_is_the_link_s(self):
+        """Not the build's: the rollback's check would Start and home the previous build unattended."""
+        failure = self.link_s("link-lost-at-enable", "enable", "/api/machine/enable")
+        self.assertIn("could not start the machine", failure)
+
+    def test_a_link_lost_after_the_homed_read_gets_no_stop(self):
+        """The read before the last stop finds it: no planned stop is sent to a lost link."""
+        self.link_s("link-lost-after-homed", "stop", "/api/machine/home")
+
+    def test_no_answer_on_the_link_after_the_last_stop_is_no_pass(self):
+        """#53's planned stop answers 200 on a lost link: only a read after it shows the stop reached the controller."""
+        self.start(jar_fail=["link-lost-at-planned-stop"])
+        get = il_deploy.Api.get
+
+        def no_answer_after_the_stop(api, path, timeout=10):
+            if path == "/api/machine" and ("POST", "/api/stop/planned") in self.posts():
+                raise il_deploy.ApiTimeout(f"GET {path}: no answer within {timeout:g} s")
+            return get(api, path, timeout)
+        with mock.patch.object(il_deploy.Api, "get", no_answer_after_the_stop):
+            rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "stop"), rep)
+        self.assertIn("no answer within 10 s", rep["failure"])
+
     def test_a_locked_answer_is_proof_enough(self):
         """409 locked is someone else's session even if the status read after it fails."""
         self.start(jar_fail=["lock-at-planned-stop"])
@@ -180,6 +272,30 @@ class Health(HealthLab, unittest.TestCase):
         self.assertEqual(posts[0], ("POST", "/api/stop/planned"), "BR-75: planned, as every stop of the check's own")
         self.assertNotIn(("POST", "/api/stop"), posts)
         self.assertEqual([r for r in self.lab.requests() if "screw" in r], [], "no M18 B")
+
+    def test_a_link_lost_at_the_enable_steps_planned_stop_gets_no_start(self):
+        """An enabled machine is stopped first. #53's planned stop answers 200 on a lost link and the Start after it
+        would clear machine.linkLost: read again after it, no Start, no home."""
+        self.start(jar_fail=["link-lost-at-planned-stop"])
+        self.fake.enable()
+        rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "enable"), rep)
+        self.assertEqual(self.after("/api/stop/planned"), [], "no Start, no home")
+
+    def test_no_answer_after_the_enable_steps_planned_stop_gets_no_start(self):
+        """Fail closed there too: the Start would clear a loss nothing read."""
+        self.start()
+        self.fake.enable()
+        get = il_deploy.Api.get
+
+        def no_answer_after_the_stop(api, path, timeout=10):
+            if path == "/api/machine" and ("POST", "/api/stop/planned") in self.posts():
+                raise il_deploy.ApiTimeout(f"GET {path}: no answer within {timeout:g} s")
+            return get(api, path, timeout)
+        with mock.patch.object(il_deploy.Api, "get", no_answer_after_the_stop):
+            rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "enable"), rep)
+        self.assertEqual(self.after("/api/stop/planned"), [], "no Start, no home")
 
     def test_an_enabled_machine_whose_lock_is_taken_is_left_alone(self):
         """Someone starts the machine (and so holds the lock) just before the check reads it: their session, never
@@ -621,6 +737,15 @@ class Health(HealthLab, unittest.TestCase):
         h = self.lab.holder()
         self.assertTrue(h.idle, h.value)
         self.assertIn("released by Infra resume", h.value)
+
+    def test_health_cli_link_lost_keeps_the_holder(self):
+        """BR-93: a lost link is left for a person, held as a machine problem is."""
+        self.start(jar_fail=["link-lost-after-enable"])
+        self.assertEqual(self.lab.main("health", "--sha7", SHA[:7]), 1)
+        self.assertEqual(json.loads(self.lab.last_out)["kind"], "link-lost")
+        h = self.lab.holder()
+        self.assertFalse(h.idle, h.value)
+        self.assertIn("a person must check the machine", h.value)
 
     def test_health_cli_refuses_when_busy(self):
         self.start(fail=["run"])

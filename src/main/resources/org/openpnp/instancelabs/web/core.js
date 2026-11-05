@@ -515,6 +515,34 @@
     }
     return msg;
   };
+  /** errorText for a read (GET): it changed nothing on the machine, so no "Outcome unknown"; a bare HTTP status is named. */
+  IL.readErrorText = function (e) {
+    if (!e) return '';
+    let t = String(e.message || e).trim();
+    if (e.status > 0 && !(e.data && (e.data.reason || e.data.message))) t = 'HTTP ' + t;   // "502 Bad Gateway", or "502 " over HTTP/2
+    return /[.!?]$/.test(t) ? t : t + '.';
+  };
+  /** A failed read of the designs list, in the same words everywhere: over the designs read before (kept), or none. */
+  IL.listReadError = (reason, kept) => (kept ? 'These are the designs from before. Could not read them again: ' : 'Could not read the designs: ') + reason;
+  /**
+   * Retry under a failed read of a list (as Records' and Setup's): reads it again, nothing else. The page swaps the box
+   * for "Reading…" meanwhile, so a pressed Retry hands its focus to the Retry shown after the read (keyboard users),
+   * unless the focus went elsewhere meanwhile (a field, a dialog).
+   */
+  IL.retryButton = function (read, key) {
+    const fk = 'retry:' + key;
+    const b = el('button', { type: 'button', class: 'btn btn--sm list-retry', 'data-focus-key': fk }, IL.icon('i-refresh'), 'Retry');
+    b.addEventListener('click', async () => {
+      const had = document.activeElement === b;
+      await read();
+      if (had) requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (document.activeElement && document.activeElement !== document.body) return;
+        const n = document.querySelector('[data-focus-key="' + fk + '"]');
+        if (n && !n.closest('[hidden]')) n.focus({ preventScroll: true });
+      }));
+    });
+    return b;
+  };
 
   // ================================================================================== store
   const S = {

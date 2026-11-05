@@ -1190,7 +1190,7 @@
     R.boardsLoading = true;
     R.boardsErr = null;
     IL.render();
-    try { R.boards = await IL.api('GET', '/api/boards'); } catch (e) { R.boardsErr = IL.errorText(e); }
+    try { R.boards = await IL.api('GET', '/api/boards'); } catch (e) { R.boardsErr = IL.readErrorText(e); }
     R.boardsLoading = false;
     syncSelect(true);
     IL.render();
@@ -1396,7 +1396,7 @@
       if (!i) continue;
       if (i.readOnly !== !!job) i.readOnly = !!job;
     }
-    const hint = R.boardsErr ? 'Could not list the boards: ' + R.boardsErr
+    const hint = R.boardsErr ? IL.listReadError(R.boardsErr, !!b && ((b.files || []).length + (b.job || []).length) > 0)
       : job ? 'Position from the OpenPnP job. Register board checks the fiducials again with the top camera.'
         : c ? 'Enter roughly where the board origin (its 0,0 corner) sits. After planning, Register board finds the fiducials with the top camera and probes this seat.' : 'Choose the board to dispense.';
     IL.setText($('board-hint'), hint);
@@ -3140,6 +3140,8 @@
   // STOP makes an open run confirm moot: close it (Recovery takes over)
   IL.on('stop', () => { if (R.dlg) R.dlg.close('stop'); });
   IL.on('online', () => { if (R.dlg) IL.safe(() => updateDialog(S.status), 'run confirm'); });
+  // a list read that failed (OpenPnP away, the page loaded during its restart): read again once it answers
+  IL.on('online', (on) => { if (on && R.boardsErr) loadBoards(); });
   IL.on('taskend', (run) => {
     // Register board ended: the new plan (the same physical board), and its result card on the Register step
     if (run && run.label === 'board registration' && IL.planMatches(run.planId)) {

@@ -112,9 +112,12 @@ browser keeps them. A value left in
 
 ### Network and data
 - `IL.api(method, path, body?, {timeoutMs?})` → parsed JSON; throws `IL.ApiError {status, data, code, message}`.
-  `status 0` = no answer (`code` `timeout` / `network`): show `Outcome unknown: look at the machine.`, never re-send.
-  Default timeout 10 s (status 2.5 s, STOP 2 s are internal).
-- `IL.errorText(e)` one line incl. interlock violations.
+  `status 0` = no answer (`code` `timeout` / `network`): after an action show `Outcome unknown: look at the machine.`,
+  never re-send. Default timeout 10 s (status 2.5 s, STOP 2 s are internal).
+- `IL.errorText(e)` one line incl. interlock violations (for actions). `IL.readErrorText(e)` for a read (GET): no
+  "Outcome unknown" (a read changes nothing), a bare HTTP status named. A failed read of the designs list says
+  `IL.listReadError(reason, kept)` everywhere (Start, Run's Board step, Designs and Set up), with `IL.retryButton(read,
+  key)` (Retry); after a failed read only Retry, the next visit or OpenPnP answering again (`online`) reads it again.
 - `IL.pollNow()` poll at once (after an action). `IL.render()` schedule one render (coalesced per frame).
 - `IL.setPlan(plan)` (after `POST /api/plan`; remembers `il.planId`), `IL.clearPlan()`, `IL.loadPlan(id)`,
   `IL.planRefresh({quiet})`, `IL.planRefreshSoon()` (300 ms debounce; marks `planPending`). Core re-reads the plan by

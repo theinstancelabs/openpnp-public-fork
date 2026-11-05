@@ -126,6 +126,55 @@ public class PassthroughLinesTest {
         refused("M42 P5 T2");
     }
 
+    /**
+     * BR-97: while not homed the see-saw is levelled by Z alone (the PM 16:4x, Process's numbers): G1 with Z as its
+     * only axis and F at most 300; X/Y, any other axis on that line, G91, G92 Z and G28 stay refused.
+     */
+    @Test
+    public void whileNotHomedZAloneLevelsTheSeeSaw() {
+        PassthroughLines.Line l = PassthroughLines.check("G1 Z1 F300", LIMITS, false);
+        assertNull(l.refusal, l.refusal);
+        assertEquals(1.0, l.levelZ, 1e-9);
+        assertTrue(l.motion && l.frame);
+        assertEquals(-0.5, PassthroughLines.check("g1 z-0.5 f120", LIMITS, false).levelZ, 1e-9);
+        // BR-97 review: G0 keeps F only while marlin-lumen's G0_FEEDRATE stays commented out: G1 alone levels
+        assertTrue(refused("G0 Z1 F300", false).contains("G1"), refused("G0 Z1 F300", false));
+        assertNull(ok("G0 Z1 F300").levelZ, "homed: G0 as before");
+        assertNull(ok("G1 Z1 F300").levelZ, "homed: an ordinary move");
+        assertNull(PassthroughLines.check("G1 B90 F600", LIMITS, false).levelZ);
+        assertTrue(refused("G1 X1 Z1 F300", false).contains("home"));
+        assertTrue(refused("G1 Z1 B30 F300", false).contains("Z alone"));
+        assertTrue(refused("G1 Z1 A5 F300", false).contains("Z alone"));
+        assertTrue(refused("G1 Z1 F600", false).contains("300"));
+        assertTrue(refused("G1 Z1", false).contains("300"), "F is required");
+        assertTrue(refused("G0 Z10", false).contains("home"));
+        refused("G91", false);
+        refused("G92 Z0", false);
+        refused("G28 Z", false);
+    }
+
+    /** BR-97: a levelling move: ≤ 1 mm from the Z before it, ≤ 5 mm from the call's start, ≤ 32 mm from the first's. */
+    @Test
+    public void aLevellingMoveStaysNearWhereItBegan() {
+        assertNull(PassthroughLines.level(0, 1, 0, 0));
+        assertNull(PassthroughLines.level(0.3, 1.3, 0, 0), "1 mm, give or take the floating point");
+        assertNull(PassthroughLines.level(4, 5, 0, 0));
+        assertNull(PassthroughLines.level(30, 31, 27, 0));
+        assertTrue(PassthroughLines.level(0, 1.5, 0, 0).contains("1 mm"));
+        assertTrue(PassthroughLines.level(5, 6, 0, 0).contains("5 mm"));
+        assertTrue(PassthroughLines.level(-5, -6, 0, 0).contains("5 mm"));
+        assertTrue(PassthroughLines.level(32, 33, 30, 0).contains("32 mm"));
+        assertTrue(PassthroughLines.level(-32, -33, -30, 0).contains("32 mm"));
+    }
+
+    /** #50 re-review NIT: a command number past an int is a refused line, not an exception, and says so. */
+    @Test
+    public void aHugeCommandNumberIsRefusedAsALine() {
+        assertTrue(refused("M99999999999").contains("command number too long"), refused("M99999999999"));
+        assertTrue(refused("G99999999999999999999 X1").contains("command number too long"));
+        assertTrue(refused("X1").contains("not a G or M command"), refused("X1"));
+    }
+
     @Test
     public void aQuickStopLeavesOpenPnpsPositionStale() {
         // #19 review MINOR 6: an M410 can stop a move short: OpenPnP must re-read where the head is

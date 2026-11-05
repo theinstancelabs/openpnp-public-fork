@@ -223,6 +223,26 @@ class Idle(unittest.TestCase):
         st["machine"]["homing"] = False
         self.assertEqual(il_deploy.api_busy_reasons(st), [])
 
+    def test_a_lost_controller_link_is_not_idle(self):
+        """BR-93: no deploy while machine.linkLost is set (the restart would clear it and the health check home a
+        controller that may have reset); its why and next step are named. Not explained: taken as lost."""
+        lost = {"atMs": 1, "why": "the link to the controller was lost at 15:07 (the controller left USB)",
+                "next": "once the board is back on USB: Stop, then Start, then Home as after a reset"}
+        st = {"machine": {"busy": False, "enabled": False, "linkLost": lost}}
+        self.assertEqual(il_deploy.api_busy_reasons(st), [f"the controller link is lost (machine.linkLost): "
+                                                          f"{lost['why']}; {lost['next']}"])
+        for v in (None, "lost", 1, {}):
+            with self.subTest(v):
+                st["machine"]["linkLost"] = v
+                self.assertEqual(bool(il_deploy.api_busy_reasons(st)), v is not None)
+        del st["machine"]["linkLost"]  # a build before BR-93
+        self.assertEqual(il_deploy.api_busy_reasons(st), [])
+
+    def test_a_lost_controller_link_through_the_api(self):
+        self.start_fake(link_lost={"atMs": 1, "why": "the link to the controller was lost at 15:07", "next": "Stop"})
+        r = self.reasons()
+        self.assertTrue(any("machine.linkLost" in x for x in r), r)
+
     def test_recent_activity_in_openpnp(self):
         for key, word in (("last_run_ended_s_ago", "run"), ("run_finished_s_ago", "run"),
                           ("pad_cal_ended_s_ago", "pad calibration"), ("pressure_event_s_ago", "pressure")):
@@ -316,7 +336,19 @@ class Idle(unittest.TestCase):
             self.assertIn(p, il_deploy.STATUS_FIELDS)
         self.start_fake(fail=["old-status"])
         st = il_deploy.Api(self.lab.port).get("/api/status")[1]
-        self.assertEqual(sorted(il_deploy.status_field_problems(st)), sorted(br44))
+        # and BR-93's machine.linkLost, which came after
+        self.assertEqual(sorted(il_deploy.status_field_problems(st)), sorted(br44 + ["machine.linkLost"]))
+
+    def test_status_fields_of_br93(self):
+        """BR-93's machine.linkLost is read by every idle and health check, and absent counts as no loss (a build
+        before #53): a rename would turn the guard off silently, so the e2e checks it on the real jar."""
+        self.assertIn("machine.linkLost", il_deploy.STATUS_FIELDS)
+        self.start_fake()
+        st = il_deploy.Api(self.lab.port).get("/api/status")[1]
+        self.assertIsNone(st["machine"]["linkLost"])
+        self.assertEqual(il_deploy.status_field_problems(st), [])
+        del st["machine"]["linkLost"]
+        self.assertEqual(il_deploy.status_field_problems(st), ["machine.linkLost"])
 
     def test_status_fields_inside_places_and_surfaces_and_behind_nulls(self):
         """A place or surface without setAtMs is a rename (status_field_problems). What a null 'key?' or an empty map

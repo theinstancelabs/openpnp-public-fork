@@ -857,8 +857,10 @@ async function runFirstDots(page, n) {
         hint: document.querySelector('#to-pitch-wrap .field__h').textContent }));
       check('touch-off: a Pitch field (mm, placeholder 1.6, "at least the dot + 0.4 mm")', pf.ph === '1.6' && pf.unit === 'mm' && pf.hint === 'at least the dot + 0.4 mm', pf);
       // the place chosen shows at the next render (the old line already ended "1.6 mm apart")
-      await waitText(page, 'to-plan', /on “blank” at gaps .* · 1\.6 mm apart$/, 10000).catch(() => {});
-      check('touch-off plan line: "· 1.6 mm apart" (the engine\'s pitch for a half-turn dot)', /^6 dots on “blank” at gaps 0\.125, .* · one profile dot each · 1\.6 mm apart$/.test(await textOf(page, 'to-plan')),
+      await waitText(page, 'to-plan', /on “blank”.* · 1\.6 mm apart$/, 10000).catch(() => {});
+      // BR-89: the run lays the ladder's 6, then 2 check dots at its first counted dot's gap (here the first dot's) after an empty space
+      check('touch-off plan line: the 6 dots and the 2 check dots after them (8), "· 1.6 mm apart" (the engine\'s pitch for a half-turn dot)',
+        /^8 dots on “blank”: 6 at gaps 0\.125, .*, then 2 check dots at 0\.125 mm after an empty space · one profile dot each · 1\.6 mm apart$/.test(await textOf(page, 'to-plan')),
         await textOf(page, 'to-plan'));
       // 1.0 mm leaves no room between half-turn dots: the engine's 400 is the field's error, and nothing moves
       await page.fill('#to-pitch', '1.0');
@@ -914,6 +916,25 @@ async function runFirstDots(page, n) {
       await press2(page, '#btn-to-run');
       await waitText(page, 'toast', /^Touch-off started, dots 1\.6 mm apart: /, 10000).catch(() => {});
       check('touch-off started: the toast names the 202\'s pitch', /^Touch-off started, dots 1\.6 mm apart: the result is shown only\.$/.test(await textOf(page, 'toast')), await textOf(page, 'toast'));
+      // every "head | line" the page renders for the touch-off that started after t0, until it ends (one render draws both)
+      const liveOf = async (t0) => {
+        await page.evaluate(() => { window.__toLive = []; });
+        return page.waitForFunction((t) => {
+          const seen = window.__toLive;
+          const r = IL.S.status && IL.S.status.run;
+          const h = document.querySelector('#to-live .cal-live__h'), d = document.querySelector('#to-live .cal-live__d');
+          const x = h && /^Running · dot \d+ of \d+/.test(h.textContent) ? h.textContent.replace(/ · [\d:]+$/, '') + ' | ' + (d ? d.textContent : '') : null;
+          if (x && seen[seen.length - 1] !== x) seen.push(x);
+          return r && r.label === 'needle touch-off' && r.startedAtMs > t && !r.running ? seen : null;
+        }, t0, { timeout: 240000, polling: 100 }).then((h) => h.jsonValue(), () => null);
+      };
+      // BR-89: after the ladder's 6 the run lays its 2 check dots at 0.125 mm: while they go down the live line names them,
+      // never the ladder's last gap, and once all 8 are laid it says only what the run does (the camera's look after)
+      const liveLines = await liveOf(t9);
+      const ll = liveLines || [];
+      check('touch-off run: the live line names the 2 check dots at their gap (0.125 mm) while they go down, never the ladder\'s last gap; once all 8 are laid only what the run does',
+        ll.some((x) => /^Running · dot [78] of 8 \| check dot at gap 0\.125 mm · /.test(x)) && !ll.some((x) => /dot [78] of 8 \| gap /.test(x))
+        && ll.some((x) => /after images/.test(x)) && ll.filter((x) => /after images/.test(x)).every((x) => /\| after images$/.test(x)), ll);
       const tr = await waitStatus(page, (x) => x.run && x.run.label === 'needle touch-off' && !x.run.running && x.run.startedAtMs > t9, 240000);
       check('touch-off run: OK without a contact (no paste in this SIM scene), nothing recorded', tr.run.status === 'OK'
         && /^no dot at the largest gap: /.test(tr.run.message || '') && (await touchOffs()).length === rows0, { status: tr.run.status, message: tr.run.message });
@@ -923,6 +944,27 @@ async function runFirstDots(page, n) {
       check('touch-off that recorded nothing: "Finished hh:mm · no contact found: nothing recorded" with the run\'s message word for word',
         nc.shown && /^Finished \d\d:\d\d · no contact found: nothing recorded$/.test(nc.head) && nc.detail === tr.run.message, nc);
       await page.screenshot({ path: path.join(OUT, 'touchoff-nothing-recorded.png') });
+      // the page's request belongs to its own run even when the page never draws it (the operator on another screen for the
+      // whole run); a touch-off another tab or client starts next is not this page's: its live line says only what the run
+      // does, never the gaps or check dots of the page's request (binding it only while Calibrate draws the run would)
+      await page.fill('#to-steps', '3');
+      const t10 = Date.now() + (await page.evaluate(() => IL.S.skewMs));
+      await press2(page, '#btn-to-run');
+      await page.evaluate(() => IL.go('#records'));
+      // back only once the page's own status shows that run ended and the machine free: Calibrate never draws it running
+      // (where a binding made only while drawing would still take it), and the next POST finds the engine idle
+      const unseen = await page.waitForFunction((t) => { const st = IL.S.status, r = st && st.run;
+        return r && r.label === 'needle touch-off' && r.startedAtMs > t && !r.running && !(st.machine && st.machine.busy) ? r : null; },
+      t10, { timeout: 240000, polling: 100 }).then((h) => h.jsonValue(), () => null);
+      await page.evaluate(() => IL.go('#calibrate/touch-off'));
+      await page.waitForSelector('#to-plan', { state: 'visible', timeout: 15000 });
+      const t11 = Date.now() + (await page.evaluate(() => IL.S.skewMs));
+      const other = await page.request.post(BASE + 'api/calibrations/touch-off', { data: { startGapMm: 0.3, stepMm: 0.05, steps: 3, locationName: 'blank' } });
+      const otherLines = other.status() === 202 ? await liveOf(t11) : null;
+      check('touch-off: after one of this page\'s that it never drew (on Records the whole run), another client\'s touch-off shows only its phase, never this page\'s gaps or check dots',
+        !!unseen && unseen.status === 'OK' && other.status() === 202 && !!otherLines && otherLines.length > 0 && otherLines.every((x) => !/\| (gap|check dot) /.test(x)),
+        { unseen: unseen && unseen.status, status: other.status(), otherLines });
+      await page.fill('#to-steps', '6');
       // the result table of a recorded touch-off (a row added to the answer: this scene draws no paste): the dots after
       // the contact that the camera could not measure read "not measured" with the engine's note, "no dot" only for none
       const fake = { id: 990001, created_at: tr.run.startedAtMs - 120000, method: 'dot-ladder-touch-off (not applied)', z_offset_mm: -2.5275, previous_offset_mm: -2.59, operator: null,
@@ -1621,6 +1663,33 @@ async function runFirstDots(page, n) {
         await page.click('#btn-settings');
         const c = await waitStatus(page, (x) => x.dispense.homeBeforeRun === v, 10000).then(() => true, () => false);
         check('Settings: "Before Register board, Probe and Run" saves ' + v, c);
+      }
+      // 11b. The advanced JSON editor: keys the engine stamps are read-only there and never sent, the tip's dose anchor (BR-85)
+      // and the switch's measures (BR-94) too (#60's review: editing them got the server's 400 instead), and the paste's
+      // load time inside `paste`, which the server merges one level deep (#64's review)
+      {
+        await page.evaluate(() => { const d = document.getElementById('set-advanced'); if (d && !d.open) d.open = true; });
+        const orig = await page.waitForFunction(() => { const t = document.getElementById('set-json'); return t && t.value.trim().startsWith('{') ? t.value : null; },
+          null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        let sj = null, restored = false;
+        if (orig) {
+          await page.evaluate(() => { const t = document.getElementById('set-json'); const cfg = JSON.parse(t.value);
+            cfg.doseAnchor = { test: 1 }; cfg.heightSwitch = { test: 1 }; cfg.paste = Object.assign({}, cfg.paste, { loadedAtMs: 12345 });
+            t.value = JSON.stringify(cfg, null, 2); t.dispatchEvent(new Event('input', { bubbles: true })); });
+          sj = await page.waitForFunction(() => { const lis = [...document.querySelectorAll('#set-json-diff li')];
+            const row = (k) => lis.find((li) => (li.querySelector('code') || {}).textContent === k);
+            const a = row('doseAnchor'), b = row('heightSwitch'), pl = row('paste.loadedAtMs'), h = document.querySelector('#set-json-diff .su-diff__h');
+            return a && b ? { anchorRo: a.classList.contains('su-diff--ro'), switchRo: b.classList.contains('su-diff--ro'),
+              pasteRo: !!pl && pl.classList.contains('su-diff--ro'), head: h ? h.textContent : '' } : null; },
+          null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+          // Reload: only stamped keys were changed, so nothing is kept and the editor is clean again for later steps
+          restored = await page.click('#btn-settings-json-reload', { timeout: 5000 }).then(() => page.waitForFunction(() =>
+            !document.getElementById('set-json').classList.contains('input--dirty'), null, { timeout: 10000 })).then(() => true, () => false);
+          await page.evaluate(() => { document.getElementById('set-advanced').open = false; });
+        }
+        check('Settings › advanced JSON: the dose anchor, the switch\'s measures and the paste\'s load time are read-only and not sent (the engine stamps them)',
+          !!sj && sj.anchorRo && sj.switchRo && sj.pasteRo && /^0 changed keys will be sent/.test(sj.head), sj || { orig: !!orig });
+        check('Settings › advanced JSON: Reload leaves the editor clean again (only stamped keys were changed: nothing kept)', restored, { restored });
       }
 
       // 12. A fiducial not found (FID2 hidden in the scene): the REG fixes, then a plan without fiducial correction

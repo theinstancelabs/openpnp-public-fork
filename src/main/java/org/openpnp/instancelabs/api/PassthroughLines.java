@@ -11,11 +11,11 @@ import java.util.regex.Pattern;
 
 /**
  * BR-72: the lines the G-code passthrough sends (Process's BR-72 list: what the bench tools send). Hard limits only:
- * the machine's soft limits, X/Y/Z moves once homed, the pump and the valve only full on (plan §4.2a), the screw
- * current ≤ its rated 670 mA; never BR-03's dispensing zones (the tools dispense over pads on purpose). Lines that
- * would leave OpenPnP's state wrong (a home, a frame shift on X/Y/Z, all motors off, relative mode) or reach into the
- * firmware (EEPROM, steps per unit, kill) are refused with the engine's route to use; anything not listed: "ask
- * Backend".
+ * the machine's soft limits, X/Y moves once homed (Z before it only to level the see-saw: BR-97), the pump and the
+ * valve only full on (plan §4.2a), the screw current ≤ its rated 670 mA; never BR-03's dispensing zones (the tools
+ * dispense over pads on purpose). Lines that would leave OpenPnP's state wrong (a home, a frame shift on X/Y/Z, all
+ * motors off, relative mode) or reach into the firmware (EEPROM, steps per unit, kill) are refused with the engine's
+ * route to use; anything not listed: "ask Backend".
  */
 final class PassthroughLines {
     private PassthroughLines() {
@@ -31,9 +31,20 @@ final class PassthroughLines {
      * variant's Arduino pin), M43 the same pin P5 (its entry in the firmware's pin table). The same counts give BR-48's
      * PC0 as M42 P44 and M43 P29, which Process checked on the machine 11-02.
      */
-    static final double SWITCH_PIN_M42 = 53;
-    static final double SWITCH_PIN_M43 = 5;
+    static final double SWITCH_PIN_M42 = org.openpnp.instancelabs.dispense.HeightSwitch.M42_PIN;
+    static final double SWITCH_PIN_M43 = org.openpnp.instancelabs.dispense.HeightSwitch.M43_PIN;
     static final double MAX_SCREW_MA = 670;
+    /**
+     * BR-97 (Process's numbers, the PM 16:4x): while not homed the see-saw is levelled by Z alone, at most 1 mm per
+     * line, 5 mm per call (the caller looks between calls) and 32 mm from where the position became unknown (the
+     * see-saw's 0-63: levelling from either end needs up to 31.5), at F 300 or slower.
+     */
+    static final double LEVEL_STEP_MM = 1;
+    static final double LEVEL_CALL_MM = 5;
+    static final double LEVEL_RANGE_MM = 32;
+    static final double LEVEL_MAX_F = 300;
+    /** What a reported Z may differ from its target by (M114 prints a few decimals). */
+    private static final double LEVEL_TOL_MM = 1e-4;
     private static final Pattern WORD = Pattern.compile("([A-Z])\\s*([-+]?(?:\\d+\\.?\\d*|\\.\\d+))?\\s*");
 
     /** One checked line: {@link #refusal} null when it may be sent as {@link #text}. */
@@ -48,14 +59,21 @@ final class PassthroughLines {
         final boolean sync;
         /** Moves an axis or sets its position: OpenPnP's coordinates must be re-read afterwards. */
         final boolean frame;
+        /** BR-97: the Z target of a Z-only move while not homed (levelling the see-saw), else null. */
+        final Double levelZ;
 
         Line(String text, String refusal, boolean empty, boolean motion, boolean sync, boolean frame) {
+            this(text, refusal, empty, motion, sync, frame, null);
+        }
+
+        Line(String text, String refusal, boolean empty, boolean motion, boolean sync, boolean frame, Double levelZ) {
             this.text = text;
             this.refusal = refusal;
             this.empty = empty;
             this.motion = motion;
             this.sync = sync;
             this.frame = frame;
+            this.levelZ = levelZ;
         }
     }
 
@@ -83,6 +101,10 @@ final class PassthroughLines {
         Matcher head = Pattern.compile("^([GM])(\\d+)").matcher(s);
         if (!head.find()) {
             return no(s, "not a G or M command: ask Backend");
+        }
+        // at most 9 digits: a longer number would overflow the int below (#50 re-review NIT)
+        if (head.group(2).length() > 9) {
+            return no(s, "command number too long (at most 9 digits)");
         }
         String word = head.group(1) + Integer.parseInt(head.group(2));
         String rest = s.substring(head.end());
@@ -128,7 +150,28 @@ final class PassthroughLines {
         // M410 flushes queued moves (none pending after it) and may stop one short: OpenPnP re-reads the position
         boolean quickStop = "M410".equals(word);
         return new Line(text, null, false, motion, "M400".equals(word) || quickStop,
-                motion || "G92".equals(word) || quickStop);
+                motion || "G92".equals(word) || quickStop, motion && !homed ? p.get('Z') : null);
+    }
+
+    /**
+     * BR-97: why a levelling move from Z {@code from} to {@code to} may not go out, or null. {@code first}: the Z where
+     * this call began; {@code ref}: where the position became unknown (the engine's ControllerReset.levelReference).
+     */
+    static String level(double from, double to, double first, double ref) {
+        if (Math.abs(to - from) > LEVEL_STEP_MM + LEVEL_TOL_MM) {
+            return String.format(Locale.ROOT, "Z %s is %s mm from Z %s before it: at most %s mm per line while not "
+                    + "homed", plain(to), plain(Math.abs(to - from)), plain(from), plain(LEVEL_STEP_MM));
+        }
+        if (Math.abs(to - first) > LEVEL_CALL_MM + LEVEL_TOL_MM) {
+            return String.format(Locale.ROOT, "Z %s is more than %s mm from Z %s, where this call began: look, then "
+                    + "send the next call", plain(to), plain(LEVEL_CALL_MM), plain(first));
+        }
+        if (Math.abs(to - ref) > LEVEL_RANGE_MM + LEVEL_TOL_MM) {
+            return String.format(Locale.ROOT, "Z %s is more than %s mm from Z %s, where the position became unknown "
+                    + "(after a reset the controller's boot Z 0, else where the levelling began; the see-saw's whole "
+                    + "travel is 63 mm)", plain(to), plain(LEVEL_RANGE_MM), plain(ref));
+        }
+        return null;
     }
 
     private static String render(Map<Character, Double> p) {
@@ -290,13 +333,19 @@ final class PassthroughLines {
         if (bad != null) {
             return bad;
         }
+        // BR-97: before the home only the see-saw's levelling moves Z (its walk: level())
+        boolean levelling = !homed && p.containsKey('Z');
         for (char axis : new char[] {'X', 'Y', 'Z', 'A', 'B'}) {
             Double v = p.get(axis);
             if (v == null) {
                 continue;
             }
-            if (!homed && "XYZ".indexOf(axis) >= 0) {
-                return "X, Y and Z move only once homed: home with POST /api/machine/home and your token";
+            if (!homed && (axis == 'X' || axis == 'Y')) {
+                return "X and Y move only once homed: home with POST /api/machine/home and your token (before it a "
+                        + "line may move Z alone, to level the see-saw)";
+            }
+            if (levelling && axis != 'Z') {
+                return "while not homed a line moves Z alone (levelling the see-saw): " + axis + " waits for the home";
             }
             double[] lim = limits.get(axis);
             if (lim != null && (!Double.isNaN(lim[0]) && v < lim[0] || !Double.isNaN(lim[1]) && v > lim[1])) {
@@ -304,8 +353,17 @@ final class PassthroughLines {
                         Double.isNaN(lim[0]) ? "-" : plain(lim[0]), Double.isNaN(lim[1]) ? "-" : plain(lim[1]));
             }
         }
+        // G0 keeps F only while marlin-lumen's G0_FEEDRATE stays commented out (BR-97 review)
+        if (levelling && "G0".equals(word)) {
+            return "while not homed Z moves by G1 alone (levelling the see-saw: G1 Z1 F300): a G0 may run at the "
+                    + "firmware's own speed, not F";
+        }
         Double f = p.get('F');
-        return f != null && f <= 0 ? "F must be positive" : null;
+        if (f != null && f <= 0) {
+            return "F must be positive";
+        }
+        return levelling && (f == null || f > LEVEL_MAX_F) ? "a Z move while not homed (levelling the see-saw) needs F "
+                + "at most " + plain(LEVEL_MAX_F) + " (G1 Z1 F300)" : null;
     }
 
     /** Null when every parameter is one of {@code letters} (with a value when {@code valued}). */

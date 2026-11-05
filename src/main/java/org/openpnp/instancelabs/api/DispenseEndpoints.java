@@ -62,12 +62,12 @@ final class DispenseEndpoints {
     /**
      * Settings that only their own endpoints may change: the needle's (they record a needle_touchoff row), and since
      * the tip setups (§22.1) the mounted tip, what the other tips keep, and where the needle lands with its trim; the
-     * mounted tip's dose anchor (BR-85).
+     * mounted tip's dose anchor (BR-85); the tools' height-switch trips (BR-94).
      */
     static final java.util.Set<String> PROTECTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "needleZOffsetMm", "needleZOffsetSetAtMs", "needleZOffsetHomeAtMs", "needleChangedAtMs", "needleAnchor",
             "surfaces", "schemaVersion", "boardRegistrations", "newSeatAtMs", "tip", "parkedTips", "needleLanding",
-            "needleXyTrim", "zFrameMovedAtMs", "doseAnchor"));
+            "needleXyTrim", "zFrameMovedAtMs", "doseAnchor", "heightSwitch"));
     /** Protected settings that Register board and POST /api/board/new-seat stamp (not the needle's). */
     static final java.util.Set<String> REGISTRATION_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "boardRegistrations", "newSeatAtMs"));
@@ -219,6 +219,7 @@ final class DispenseEndpoints {
         d.put("refuseFlaggedPads", cfg.refuseFlaggedPads);
         d.put("homeBeforeRun", cfg.homeBeforeRun);
         d.put("newSeatAtMs", cfg.newSeatAtMs);
+        d.put("heightSwitch", HeightSwitchEndpoints.status(svc, cfg));
         d.put("pasteVersion", ctx.paste.version());
         RunResult last = svc.getLastRun();
         Map<String, Object> lastView = Views.run(last, false);
@@ -867,6 +868,9 @@ final class DispenseEndpoints {
         if ("zFrameMovedAtMs".equals(key)) {
             return "'zFrameMovedAtMs' is stamped by the engine at the home after a controller reset (BR-02): record the "
                     + "needle frame again to clear I4";
+        }
+        if ("heightSwitch".equals(key)) {
+            return "The tools' height-switch trips are recorded by POST /api/height-switch/measure.";
         }
         if ("doseAnchor".equals(key)) {
             return "The tip's dose anchor is set with PUT /api/tip-setups/{key}/dose-anchor.";

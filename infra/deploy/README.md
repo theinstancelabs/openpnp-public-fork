@@ -54,7 +54,7 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
      may be at the machine: `run`, `deploy` and `rollback` set the hold and exit **5** (`health` and `resume` set it
      too). Once per exit (`<root>/openpnp-exit.json`); a start the serial lock refused (75) is not one.
    - **Idle check.** All of these must hold:
-     - STATE.md has exactly one `- **Holder:**` line, its value starts with `nobody`, nobody `wants` the
+     - STATE.md has exactly one `- **Holder:**` line, its value starts with `nobody` (`**nobody**` or `_nobody_` too), nobody `wants` the
        machine, and there are no notes (sub-bullets) under it: a note is for the next taker to read first;
      - no hold latch is set;
      - the serial flock can be taken, or only the OpenPnP service holds it;
@@ -198,8 +198,9 @@ rolls back by itself if the check fails, and records what runs in STATE.md. Pyth
        only if the previous build passes. If the previous build fails too, the machine is suspect: nothing goes
        on the bad list, the hold is set, and the previous build stays pending (deploys refused) until a health
        check passes.
-     - **A home that never ends** (or that OpenPnP timed out on), or **the claim lost**: OpenPnP is left alone
-       (running), the build stays installed but NOT verified, the hold is set.
+     - **A home that never ends** (or that OpenPnP timed out on), **the claim lost**, or **a lost controller
+       link** (BR-93, kind `link-lost`): OpenPnP is left alone (running), the build stays installed but NOT
+       verified, the hold is set.
    - **At the end** it writes the `- **Deployed on the machine:**` line in STATE.md's `## Code` section,
      records the build as verified with a manifest of the config (file hashes, without `log/` and `-shm`)
      as the baseline for a later rollback, and puts OpenPnP back as it was (running or stopped). The Holder:
@@ -255,7 +256,8 @@ Exit codes:
 - Never deploys a build that is not green, or whose sha is not on `il/integration`. It re-checks GitHub at
   deploy time too. `--version TAG` overrides only the bad list, never eligibility.
 - Never while someone holds the machine. Any doubt counts as held: a missing or doubled Holder line, `none`,
-  `free`, `Nobody?`, bold markers, a `wants` note.
+  `free`, `Nobody?`, `~~nobody~~`, a `wants` note. Emphasis around `nobody` is not doubt (11-04: a bold release
+  refused a deploy).
 - Never STOPs during a home: a STOP inside G28 hangs the controller until a power cycle. One rule for every real
   STOP (failures, the exception path, the unit's ExecStop, the test service manager, a stop where no planned stop can be
   used); a planned stop is refused by OpenPnP itself while anything works, a home included:
@@ -276,6 +278,20 @@ Exit codes:
     homing yet; a STOP then may meet the G28 that follows (WEB_API.md names this window). So busy and a run in its
     `home: ...` phase are waited out as before;
   - OpenPnP not answering at all (connection refused): nothing to stop.
+- Never stops, starts or homes a machine whose controller link is lost (BR-93: `machine.linkLost` in `/api/status`
+  and `/api/machine`, absent before BR-93, null while the link is fine, anything else counts as lost): the idle
+  check is not idle, so no deploy (its restart would clear it). The stop before the switch reads it again after its
+  planned stop: lost, or no answer, is not idle (exit 3, OpenPnP left running, nothing changed). The recovery's
+  service stop after a failed check reads it after its STOP: lost leaves OpenPnP alone (held, nothing put back or
+  restarted, the build not marked bad). The health check reads it before its stop of an enabled machine and after
+  it (before the Start), before its home, and before and after its last stop (#53's planned stop answers 200 on a
+  lost link: nothing reaches the controller; after one that passed, a read without an answer counts as lost),
+  and at every step that fails after the status step (a Start, home or read that failed on a link lost meanwhile:
+  #53's 409 `MACHINE: …`, `homing failed: … IO Error …`, homed reading false). Set at any of them, the check fails
+  with kind `link-lost`, handled like a home that never ends: no STOP (nothing reaches the controller), no config put
+  back (the config from before the deploy lacks the engine's journal rows of the loss), no restart (it clears
+  linkLost, as a connect does; a STOP does not); OpenPnP is left running with the loss showing, the build installed
+  but not verified, the hold set, the build not marked bad.
 - Never homes a controller that shows the power-cycle signature. It reports `controller was reset; a person
   must check the machine` and sets the hold.
 - **The deployer's own stops are planned (BR-75):** the health check's last stop, its stop of a machine left enabled
@@ -531,10 +547,10 @@ test_3's two health checks 8 s each).
 - **test_2:** lumen-sim power-cycled, a third build: `run` exits 5 after reading X/Y/Z 0, B 720. Nothing moves
   (no G0/G1/G28), the previous build runs again unchecked, the new build is not marked bad, and the hold is set
   until `resume`. The deploy restarts OpenPnP, so BR-44's reconnect of a kept-alive link plays no part here.
-- **test_3 (BR-44):** `health --no-claim` on that build connects it (boot position: no home; its STOP keeps the link
-  open), lumen-sim is power-cycled again, and a second `health --no-claim` finds Start connecting again ("the
-  kept-alive link to the controller is dead: connecting again", one more connect line, read by the serial step instead
-  of the kept-open fallback) and the reset controller, never homed. Nothing moves.
+- **test_3 (BR-44, BR-93):** `health --no-claim` on that build connects it (boot position: no home; its STOP keeps the
+  link open). lumen-sim is power-cycled again: the kept-open link dies, BR-93 (#53) shows it as `machine.linkLost`, and
+  a second `health --no-claim` is refused (exit 3, not idle) with no Start (no new connect line). Nothing moves. The
+  reconnect itself is the operator's Stop and Start (Backend's PowerCycleSimTest).
 - BR-44's fields on the real build (in `assert_status_fields`): `dispense.state` `running`, `startError` null,
   `machine.homing` false, and the pressure hold's first stamp within `STARTUP_STAMP_S` of `server.startedAtMs`
   (`results.json` keeps the gap, `measured`).
