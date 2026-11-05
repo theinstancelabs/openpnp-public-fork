@@ -694,7 +694,7 @@ under `followPx` and `n1StepMm` × 18 under `n1SearchPx`), `centrePx` [957.5, 53
 raw frame in OpenPnP's frame, which the bottom camera's flip-x turns over its x-axis), `centrePxCameraXy` [217.129,
 152.319] (the bottom camera's location in OpenPnP that `centrePx` was fitted at), `minPeakToSd` 10 (Process 11-05:
 real ends 15-45 times, noise about 6), `maxResidualPx` 1.0, `maxDriftPx` 1.0, `maxKSpreadMm` 0.35, `maxFromNominalMm`
-2.0 (the follow-up's checks), `maxKFromSwitchMm` 0.5 (the press in the home of its own trip), `cleanRawZ` 40.4 (one of
+2.0 (the follow-up's checks), `maxKFromSwitchMm` 0.5 (the press in the home of its own trip; at most 1.0, the window from K), `cleanRawZ` 40.4 (one of
 `needleRawZ`), `clean` {tip setup key: limits}: per tip kind, only the 25G plastic taper's (`plastic-25g-taper`:
 `rimMin` 60, `rimRgLow` 0.20, `rimRgHigh` 0.45, `peakMin` 60, `kLow` 14.0, `kHigh` 16.3, `spreadMax` 0.35, `redMin`
 0.45, `endMm` 0.5, `annulusMm` 1.0, `redMm` 0.35, `findMm` 2.0; `red` holds for a red 25G only). A tip kind without its

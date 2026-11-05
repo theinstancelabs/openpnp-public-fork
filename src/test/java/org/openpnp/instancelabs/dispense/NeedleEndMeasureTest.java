@@ -452,6 +452,26 @@ public class NeedleEndMeasureTest {
     }
 
     /**
+     * Re-review NIT 1: a fresh K by parallax stands at most maxKFromSwitchMm from its K_switch, so that limit is above
+     * 0 and at most the window from K, 1.0 mm (a PUT of 100 would turn the check off).
+     */
+    @Test
+    public void maxKFromSwitchIsAtMostTheWindowFromK() {
+        DispenseConfig.NeedleEndSettings s = new DispenseConfig.NeedleEndSettings();
+        for (double bad : new double[] {1.01, 100, 0, Double.NaN}) {
+            s.maxKFromSwitchMm = bad;
+            List<String> p = new ArrayList<>();
+            s.validate(p);
+            assertTrue(p.stream().anyMatch(x -> x.contains("maxKFromSwitchMm must be above 0 and at most 1.0 mm")),
+                    bad + ": " + p);
+        }
+        s.maxKFromSwitchMm = HeightSwitch.K_WINDOW_MM;
+        List<String> p = new ArrayList<>();
+        s.validate(p);
+        assertEquals(new ArrayList<String>(), p);
+    }
+
+    /**
      * Review MINOR 5: the clean check's found and z failing through the end measure are "the end was not found (light
      * or focus)", measure again, never paste: a peak under its limit, then a scale outside its range.
      */

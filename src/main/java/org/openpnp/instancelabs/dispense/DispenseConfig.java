@@ -488,7 +488,8 @@ public class DispenseConfig {
         public double maxFromNominalMm = 2.0;
         /**
          * A press in the home of the needle's own trip: a fresh kParallax at most this far from that trip's K_switch
-         * (mm), else no window (review MINOR 2: a slipped tip, N1's template on its holder). Process's, to tune.
+         * (mm), else no window (review MINOR 2: a slipped tip, N1's template on its holder). Process's, to tune: at
+         * most the window from K ({@link HeightSwitch#K_WINDOW_MM}).
          */
         public double maxKFromSwitchMm = 0.5;
         /**
@@ -539,8 +540,12 @@ public class DispenseConfig {
                         + "fitted at");
             }
             if (!(minPeakToSd > 0 && maxResidualPx > 0 && maxDriftPx > 0 && maxKSpreadMm > 0
-                    && maxFromNominalMm > 0 && maxKFromSwitchMm > 0)) {
+                    && maxFromNominalMm > 0)) {
                 p.add("needleEndMeasure: the checks' limits must be above 0");
+            }
+            if (!(maxKFromSwitchMm > 0 && maxKFromSwitchMm <= HeightSwitch.K_WINDOW_MM)) {
+                p.add("needleEndMeasure.maxKFromSwitchMm must be above 0 and at most " + HeightSwitch.K_WINDOW_MM
+                        + " mm (the window from K)");
             }
             if (needleRawZ != null && !needleRawZ.contains(cleanRawZ)) {
                 p.add("needleEndMeasure.cleanRawZ must be one of needleRawZ (the clean check reads that height's frame)");
