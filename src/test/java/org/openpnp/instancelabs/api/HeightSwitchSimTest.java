@@ -1019,4 +1019,42 @@ public class HeightSwitchSimTest {
                 .get(120, TimeUnit.SECONDS).accepted);
         assertFalse(heightSwitchStatus().get("kSwitch").isJsonNull(), "both trips at the new place count");
     }
+
+    /**
+     * #110 review MINOR 1: the switch's place set again while N1's press waits for its final lift's M400. Its trip is
+     * of the place before (3 mm along the lever trips some 0.5 mm away): nothing is recorded, as counted at the new
+     * place it would put the needle's K_switch that far off.
+     */
+    @Test
+    public void aPlaceSetDuringThePressKeepsNoTrip() throws Exception {
+        svc.setLocation(HeightSwitch.PLACE, 150, 200, 0);
+        String lift = "G1 Z31.500 F600";
+        CountDownLatch first = new CountDownLatch(1), second = new CountDownLatch(1), m400 = new CountDownLatch(1);
+        try {
+            long before = count(lift);
+            sim.server.holdOkUntil.put(lift, first);
+            Future<HeightSwitch.Result> f = svc.measureHeightSwitch("n1", 5, N1_TRIP + 1, N1_TRIP - 0.5);
+            waitFor(() -> count(lift) == before + 1);
+            sim.server.holdOkUntil.put(lift, second);
+            first.countDown();
+            waitFor(() -> count(lift) == before + 2); // the final lift
+            long m400s = count("M400");
+            sim.server.holdOkUntil.remove(lift);
+            sim.server.holdOkUntil.put("M400", m400);
+            second.countDown();
+            waitFor(() -> count("M400") == m400s + 1); // the final lift's M400, its ok held
+            svc.setLocation(HeightSwitch.PLACE, 153, 200, 0);
+            m400.countDown();
+            HeightSwitch.Result r = f.get(120, TimeUnit.SECONDS);
+            assertTrue(r.refused, "a trip of the place before: " + r.why);
+            assertEquals("the height switch's place was set again during the measure: nothing recorded, measure again",
+                    r.why);
+            assertNull(svc.getConfig().heightSwitch.n1, "no trip");
+        }
+        finally {
+            first.countDown();
+            second.countDown();
+            m400.countDown();
+        }
+    }
 }

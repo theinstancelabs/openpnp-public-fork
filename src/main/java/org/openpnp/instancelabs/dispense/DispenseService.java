@@ -5654,11 +5654,18 @@ public final class DispenseService {
      * set time of the place it pressed.
      */
     private synchronized void recordHeightSwitch(boolean needle, HeightSwitch.Result res,
-            DispenseConfig.HeightSwitchTrip n1, long placeSetAtMs) throws IOException {
+            DispenseConfig.HeightSwitchTrip n1, long placeSetAtMs) throws IOException, RunRefusedException {
         if (needle) {
             // a needle change during the measure (its token is the one it started with): not this needle's trip (#60
             // re-review)
             requireToken(res.needleSinceMs);
+        }
+        DispenseConfig.NamedLocation place = cfg.location(HeightSwitch.PLACE);
+        if (place == null || place.setAtMs == null || place.setAtMs != placeSetAtMs) {
+            // #110 review MINOR 1: measured at the place before (3 mm along the lever trips some 0.5 mm away), it would
+            // count at the place set now, and K_switch from it be that far off
+            throw refused("the height switch's place was set again during the measure: nothing recorded, measure "
+                    + "again");
         }
         DispenseConfig.HeightSwitchTrip trip = new DispenseConfig.HeightSwitchTrip();
         trip.tripRawZ = res.tripRawZ;
