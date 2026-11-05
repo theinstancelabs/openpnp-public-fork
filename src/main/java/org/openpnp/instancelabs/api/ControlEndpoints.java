@@ -41,10 +41,9 @@ import com.google.gson.JsonObject;
  * transforms say and holds each to its floor at its own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed
  * surface under it (it may touch: the by-hand probe), the needle with a current frame not below the surface where its
  * tip lands (N2 + its landing and trim; contact = surface + offset) nor the one under N2, nor its I4 floor, without one
- * not below its safe
- * zone; over the height switch (BR-94: the circle around its place; the needle where its tip lands) neither below its
- * safe zone, whatever its floor. Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel
- * height). A STOP ends either at once; a move that saw one answers 409.</p>
+ * not below its safe zone; over the height switch (BR-94: the circle around its place; the needle where its tip lands)
+ * neither below its safe zone, whatever its floor. Move-to travels at safe Z and ends at the tool's safe Z (both
+ * nozzles at travel height). A STOP ends either at once; a move that saw one answers 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
