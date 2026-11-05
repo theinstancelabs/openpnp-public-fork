@@ -279,6 +279,10 @@ public class ControlApiSimTest {
             refused(409, "Z has no lower safe zone in OpenPnP (the Z axis's Safe Zone): X and Y move only at travel "
                     + "height", call("POST", "/api/jog", "{\"tool\":\"" + tool + "\",\"dx\":-10}", UI));
             assertEquals(x, loc(sim.n1).getX(), 1e-6, tool + ": nothing moved");
+            // nor a move-to into the switch's circle (review MINOR: OpenPnP's nozzle refuses it, no test held that)
+            refused(409, "Safe Zone", call("POST", "/api/move-to", "{\"tool\":\"" + tool + "\",\"x\":100,\"y\":100}",
+                    UI));
+            assertEquals(x, loc(sim.n1).getX(), 1e-6, tool + ": no move-to");
         }
     }
 
@@ -543,10 +547,30 @@ public class ControlApiSimTest {
             }
             svc.updateConfig(c);
             assertEquals(null, svc.getDispenserNozzle(), "the needle is not N1");
+            // unchanged it goes (the full settings editor sends every setting back): only a changed one is refused
+            ok(call("PUT", "/api/config", "{\"nozzle\":\"" + c.nozzle + "\"}", UI));
             refused(409, "has not found the needle (the settings' nozzle '" + c.nozzle + "' is N1, the probe nozzle)",
                     call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":2}", UI));
             assertEquals(n2, loc(sim.n2).getZ(), 1e-6, "nothing moved");
         }
+    }
+
+    /**
+     * Review NIT: a hand-edited {@code "nozzle": null} in the settings file failed the engine at its start (a
+     * NullPointerException: "failed", and PUT /api/config answered 503, so the API could not set it). It starts without
+     * the needle and says why; PUT /api/config sets it.
+     */
+    @Test
+    public void withNoNozzleInTheSettingsFileTheEngineStartsAndTheApiSetsIt() throws Exception {
+        DispenseConfig c = svc.getConfig();
+        c.nozzle = null;
+        c.save(svc.getConfigDir()); // the hand edit: saved as it is
+        svc = DispenseService.start(Configuration.get());
+        assertEquals("'nozzle' is not set in the settings", svc.getUnavailableReason());
+        refused(409, "has not found the needle ('nozzle' is not set in the settings)", call("POST", "/api/jog",
+                "{\"tool\":\"n1\",\"dz\":1}", UI));
+        ok(call("PUT", "/api/config", "{\"nozzle\":\"N2\"}", UI));
+        assertTrue(svc.getDispenserNozzle() == sim.n2, "the needle: " + svc.getDispenserNozzle());
     }
 
     /**
@@ -586,8 +610,10 @@ public class ControlApiSimTest {
         sim.n2.setName("N1");
         assertTrue(svc.getProbeNozzle() == svc.getDispenserNozzle(), "one nozzle for both");
         double n1 = loc(sim.n1).getZ();
-        refused(409, "has not found the needle (the settings' nozzle 'N2' is N1, the probe nozzle)", call("POST",
-                "/api/jog", "{\"tool\":\"needle\",\"dz\":2}", UI));
+        Res r = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":2}", UI);
+        refused(409, "the needle the engine found is now named N1 in OpenPnP: ", r);
+        // review NIT: not the settings (they named N2), and a new 'nozzle' ("P1") would take the vacuum nozzle
+        assertTrue(r.body.contains("name them back in OpenPnP") && !r.body.contains("'nozzle'"), r.toString());
         assertEquals(n1, loc(sim.n1).getZ(), 1e-6, "nothing moved");
         refused(409, "P1 is below its safe zone", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dx\":1}", UI));
     }

@@ -284,13 +284,16 @@ final class ControlEndpoints {
         // both read once: a press moves both, and one the engine has not found (renamed in OpenPnP) has no floor; one
         // nozzle as both (renamed since the engine found them) is checked twice and the other never
         HeadMountable n1 = svc.getProbeNozzle(), n2 = svc.getDispenserNozzle();
-        if (n1 == null || n2 == null || n1 == n2) {
+        String both = "no Z press without the floors of both (N1 and the needle share one Z: a press moves both)";
+        if (n1 != null && n1 == n2) { // not the settings: a new 'nozzle' could take the vacuum nozzle (renamed too)
+            throw ApiException.refused("the needle the engine found is now named " + DispenseService.PROBE_NOZZLE
+                    + " in OpenPnP: " + both + ": name them back in OpenPnP");
+        }
+        if (n1 == null || n2 == null) {
             String which = n1 == null ? "N1 (no nozzle named '" + DispenseService.PROBE_NOZZLE + "' in OpenPnP)"
-                    : "the needle (" + (n2 == null ? svc.getUnavailableReason() : "the settings' nozzle '"
-                            + svc.getConfig().nozzle + "' is N1, the probe nozzle") + ")";
-            throw ApiException.refused("the dispense engine has not found " + which + ": no Z press without the "
-                    + "floors of both (N1 and the needle share one Z: a press moves both): name it back in OpenPnP"
-                    + (n1 == null ? "" : ", or set 'nozzle' in the settings"));
+                    : "the needle (" + svc.getUnavailableReason() + ")";
+            throw ApiException.refused("the dispense engine has not found " + which + ": " + both + ": name it back in "
+                    + "OpenPnP" + (n1 == null ? "" : ", or set 'nozzle' in the settings"));
         }
         AxesLocation target = new AxesLocation(m).put(((AbstractHeadMountable) hm).toRaw(hm.toHeadLocation(to)));
         for (HeadMountable n : new HeadMountable[] {n1, n2}) {

@@ -1044,6 +1044,9 @@ public final class DispenseService {
         if (!(machine instanceof ReferenceMachine)) {
             why = "machine is not a ReferenceMachine";
         }
+        else if (cfg.nozzle == null) { // a hand edit (PUT /api/config refuses none): the engine starts, the API sets it
+            why = "'nozzle' is not set in the settings";
+        }
         else {
             Nozzle probe = getProbeNozzle();
             for (Head h : machine.getHeads()) {
