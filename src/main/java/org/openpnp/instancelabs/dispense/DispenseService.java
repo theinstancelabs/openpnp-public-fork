@@ -712,12 +712,13 @@ public final class DispenseService {
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
         catch (SQLException ex) {
-            Logger.error(ex, "dispense: the controller reset journal could not be written ({}): after a restart the "
-                    + "engine will not know about it", e.code);
             if (ControllerReset.EVENT_HOME_STARTED.equals(e.code)) {
+                Logger.error(ex, "dispense: a home's start could not be journaled: the home is refused");
                 throw new IllegalStateException("its start could not be journaled (" + ex.getMessage() + "), so its "
                         + "G28 was not sent", ex);
             }
+            Logger.error(ex, "dispense: the controller reset journal could not be written ({}): after a restart the "
+                    + "engine will not know about it", e.code);
         }
     }
 

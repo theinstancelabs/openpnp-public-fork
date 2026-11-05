@@ -773,8 +773,8 @@ public class ControllerResetTest {
 
     /**
      * BR-97 x BR-93: a lost link keeps the levelling reference and the reconnect decides: a powered controller keeps
-     * it, the boot position read sets Marlin's boot Z 0, an unread reconnect (a possible reset) takes it afresh. After
-     * a restart the loss's row clears it, as an unread connect's does.
+     * it, the boot position read sets Marlin's boot Z 0, an unread reconnect (a possible reset) takes it afresh. Not
+     * checked here, a known gap filed under BR-97: after a restart the loss's row clears it, as an unread connect's does.
      */
     @Test
     public void aLostLinkKeepsTheLevellingReferenceUntilTheReconnectDecides() {

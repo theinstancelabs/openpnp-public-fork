@@ -700,7 +700,7 @@ public final class ControllerReset {
     /**
      * BR-97: the Z (the controller's frame) the see-saw's levelling before a home stays within 32 mm of: where the
      * position became unknown. Marlin's boot Z 0 after a detected reset; else {@code zNow}, taken at the first levelling
-     * call since a possible reset, a home's start or a home.
+     * call since a possible reset, a home's start or a home (a lost link keeps it: the reconnect decides).
      */
     public synchronized double levelReference(double zNow) {
         if (levelRefZ == null) {

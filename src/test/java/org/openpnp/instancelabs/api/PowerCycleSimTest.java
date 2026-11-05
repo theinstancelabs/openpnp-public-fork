@@ -359,6 +359,40 @@ public class PowerCycleSimTest {
     }
 
     /**
+     * BR-97 re-review 4 (MINOR): the web home's other path, the engine up but unavailable (no N2), journals its start
+     * too: a start that cannot be written sends no G28, and the reference stays the boot Z.
+     */
+    @Test
+    public void aWebHomeWithoutTheEngineWhoseStartCannotBeJournaledDoesNotStart() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        try (java.sql.Connection c = java.sql.DriverManager.getConnection(svc.getDb().getUrl());
+                java.sql.Statement st = c.createStatement()) {
+            st.execute("CREATE TRIGGER home_started_fails BEFORE INSERT ON events WHEN NEW.code = 'HOME_STARTED' "
+                    + "BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+        }
+        java.lang.reflect.Field f = DispenseService.class.getDeclaredField("nozzle");
+        f.setAccessible(true);
+        Object n2 = f.get(svc);
+        f.set(svc, null); // the engine up but unavailable: the home goes the API's own way
+        assertFalse(svc.isAvailable());
+        sim.server.mark();
+        try {
+            call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        }
+        finally {
+            f.set(svc, n2);
+        }
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("homing failed") && lastBody.contains("database is locked"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "no G28: nothing sent");
+        assertFalse(sim.machine.isHomed());
+        walk(3, -32);
+        refusedLevel(level("w", -33), "32 mm");
+    }
+
+    /**
      * BR-97 x BR-93: a link lost in the middle of a levelling walk moves no frame by itself, so the reference stays (here
      * the boot Z) and the reconnect decides (a reset it detects sets the boot Z). Taken afresh at the reconnect, it would
      * allow another 32 mm past the see-saw's travel.
