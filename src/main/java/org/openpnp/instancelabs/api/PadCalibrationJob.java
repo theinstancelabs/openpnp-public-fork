@@ -630,8 +630,9 @@ final class PadCalibrationJob {
         if (expectedFromRequest) {
             if (ownNow) {
                 throw ApiException.refused("The " + c.tip.name + " has a landing of its own (" + Views.signed(own.dxMm)
-                        + ", " + Views.signed(own.dyMm) + " mm): the check already searches ±"
-                        + Texts.num(LandingFit.SEARCH_KNOWN_MM, 0) + " mm around it. Leave expectedLanding out.");
+                        + ", " + Views.signed(own.dyMm) + " mm): the check searches ±"
+                        + Texts.num(LandingFit.searchMm(true, straight, pointed, false), 0)
+                        + " mm around it. Leave expectedLanding out.");
             }
             expected = new double[] {req.expectedLanding.dxMm, req.expectedLanding.dyMm};
             searchMm = LandingFit.SEARCH_KNOWN_MM;
@@ -1812,11 +1813,11 @@ final class PadCalibrationJob {
             target[0] += expected[0];
             target[1] += expected[1];
         }
+        // C = blob - target: with a request's expectation (BR-103) the miss against it, so T = E + trim + C + residual
+        // still holds; the dot itself landed C + E from its spot (nothing aimed with E), which the lines are laid from
         double[] coarse = LandingFit.locate(blobs, target, searchMm);
-        if (coarse != null && expectedFromRequest) {
-            coarse[0] += expected[0]; // locate measures from the target: the landing is from the locator's spot
-            coarse[1] += expected[1];
-        }
+        double[] landed = coarse == null || !expectedFromRequest ? coarse
+                : new double[] {coarse[0] + expected[0], coarse[1] + expected[1]};
         if (coarse == null) {
             lr.found = blobs.size();
             landing = lr;
@@ -1827,11 +1828,11 @@ final class PadCalibrationJob {
             return;
         }
         lr.coarse = coarse;
-        done(LOCATOR, String.format(Locale.ROOT, "the locator dot landed %s, %s mm from its spot", Views.signed(coarse[0]),
-                Views.signed(coarse[1])));
+        done(LOCATOR, String.format(Locale.ROOT, "the locator dot landed %s, %s mm from its spot", Views.signed(landed[0]),
+                Views.signed(landed[1])));
         begin(ROW);
         double[] fov = fovMm();
-        PadLadder.LandingLayout l = PadLadder.landingLayout(landingArea, bandSearchMm(), d95(steps), fov, coarse);
+        PadLadder.LandingLayout l = PadLadder.landingLayout(landingArea, bandSearchMm(), d95(steps), fov, landed);
         if (l.problem != null) {
             landing = lr;
             landingText = l.problem;
@@ -1841,12 +1842,12 @@ final class PadCalibrationJob {
         }
         DoseBlocksRequest r2 = landingRequest();
         DoseBlocksRequest.Block row = new DoseBlocksRequest.Block(steps, "landing row", surface);
-        row.xy.addAll(shifted(l.row, coarse));
+        row.xy.addAll(shifted(l.row, landed));
         row.hopMm = LandingFit.ROW_MM[1];
         row.matchRadiusMm = LandingFit.MATCH_MM + LandingFit.RESIDUAL_MAX_MM;
         r2.blocks.add(row);
         r2.lookXy = looks(row.xy);
-        r2.purgeXy = shifted(l.purge, coarse);
+        r2.purgeXy = shifted(l.purge, landed);
         DoseBlocksResult res2 = engine(() -> engine.runDoseBlocks(r2), x -> x.run, x -> x.ok, x -> x.message);
         results.add(res2);
         List<Photo> stored = new ArrayList<>(photos);

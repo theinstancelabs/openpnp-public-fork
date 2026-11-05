@@ -947,6 +947,12 @@ public class PadCalibrationSimTest {
                 + "{\"dxMm\":2.35,\"dyMm\":-1.25}," + attest() + "}").status, "no evidence");
         assertEquals(400, call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\",\"expectedLanding\":"
                 + "{\"dxMm\":12,\"dyMm\":0,\"evidence\":\"x\"}," + attest() + "}").status, "beyond ±9 mm");
+        // the preview says what it will do: ±2 mm around the expectation, a band of 2(2 + 1.25) + 8 = 14.5 mm
+        JsonObject pe = ok(get("/api/pad-calibrations/preview?measure=landing&expectedLanding=2.35,-1.25&evidence=np1"))
+                .getAsJsonObject("landing");
+        assertEquals(2, pe.get("searchMm").getAsDouble(), 0, pe.toString());
+        assertEquals(14.5, pe.get("bandMm").getAsDouble(), 0.05, pe.toString());
+        assertEquals("the request: np1", str(pe, "expectedFrom"), pe.toString());
         JsonObject started = ok(call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\"," + expected + ","
                 + attest() + ",\"wait\":true}"));
         JsonObject job = started.getAsJsonObject("result");
@@ -957,11 +963,16 @@ public class PadCalibrationSimTest {
         assertEquals(2.4, l.get("dxMm").getAsDouble(), 0.08, l.toString());
         assertEquals(-1.3, l.get("dyMm").getAsDouble(), 0.08, l.toString());
         assertEquals(2.4, svc.getConfig().needleLanding.dxMm, 0.08);
-        // with a landing of its own the check already searches ±2 mm around it: an expectation is refused
+        // its record: the miss against the expectation (T = E + trim + C + residual), and the band it reserved
+        assertEquals(0.05, l.getAsJsonArray("coarse").get(0).getAsDouble(), 0.1, l.toString());
+        assertEquals(14.5, svc.getConfig().calibrationArea.usedMm, 0.05, "the grown band is reserved");
+        // with a landing of its own the check already searches around it: an expectation is refused
         wipeBlank();
         Res own = call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\"," + expected + "," + attest() + "}");
         assertEquals(409, own.status, own.toString());
         assertTrue(str(own.json(), "reason").contains("a landing of its own"), own.toString());
+        assertEquals(409, call("GET", "/api/pad-calibrations/preview?measure=landing&expectedLanding=2.35,-1.25"
+                + "&evidence=np1", null).status, "the preview refuses it too");
     }
 
     @Test

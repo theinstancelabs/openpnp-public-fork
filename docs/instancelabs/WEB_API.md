@@ -470,7 +470,8 @@ Changed routes:
   calibration › Blank wiped).`). **BR-103:** `expectedLanding: {dxMm, dyMm, evidence}` (preview: `expectedLanding=dx,dy`
   and `evidence=`) gives a setup with no landing of its own the place it is expected to land from N2's head offset,
   e.g. from its end measured from below: R = 2 mm around it, the band grown by |dyMm| (nothing aims with it, so the
-  dot lands there). 400 with `wide`, outside the landing check, beyond ±9 mm or without `evidence`; 409 when the
+  dot lands there). The result's `coarse` is then the miss against the expectation, so the landing is still
+  `expected` + trim + `coarse` + `residual`. 400 with `wide`, outside the landing check, beyond ±9 mm or without `evidence`; 409 when the
   setup has a landing of its own (the check already searches ±2 mm around that). The preview's `landing` adds
   `expectedFrom` (`the request: <evidence>`, else null); a locator dot at the band's centre, then the profile's purge dots and a row of 8 dots
   at uneven gaps, fitted (`P/LandingFit`). The preview adds `landing: {searchMm, wide, expected, bandMm, band: {x0, x1,
