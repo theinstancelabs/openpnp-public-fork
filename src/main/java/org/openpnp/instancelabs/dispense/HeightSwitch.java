@@ -12,8 +12,8 @@ import java.util.regex.Pattern;
  * (M42 takes the Arduino pin) and {@code M43 P5} reads it (M43 takes the pin table's entry). The pull-up is set again
  * before every read: M43 may read an analog-capable pin through analogRead, which leaves it in analog mode. The level
  * read with both tools at travel height is the idle level, so a normally open and a normally closed switch both work.
- * The needle's measure switches the valve and then the pump off before it moves (the passthrough may have left them
- * on): paste must never touch the switch.
+ * Every measure, N1's too, switches the needle's valve and then its pump off before it moves (the passthrough may have
+ * left them on): paste must never touch the switch, nor N1 carry a pressurised needle across the bed.
  *
  * <p>The way down from travel Z to the start is stepped and read as a coarse descent is (a press on it is refused:
  * start higher), so a start past the trip goes at most one coarse step past it. One press: a coarse descent from the
@@ -60,7 +60,7 @@ public final class HeightSwitch {
 
     /** One measure: the tool's head position over the switch and the window, all raw controller mm. */
     public static final class Plan {
-        /** "n1" or "needle" (the result's name; the needle's measure switches the valve and the pump off first). */
+        /** "n1" or "needle": the result's name. */
         public String tool;
         public double rawX, rawY, travelZ;
         /** −1: the tool goes down as raw Z falls (N1); +1: as it rises (the needle). */
