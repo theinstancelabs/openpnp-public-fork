@@ -613,7 +613,10 @@ public class DispenseConfig {
         public long setAtMs;
         /** The engine task that measured it. */
         public String runId;
-        /** The clean check on the measure's last frame, the needle at {@code needleEndMeasure.cleanRawZ} over B. */
+        /**
+         * The clean check on the measure's last frame, the needle at {@code needleEndMeasure.cleanRawZ} over B. History
+         * (review MINOR 6): never a gate, every needle press measures the end and checks it again in its own task.
+         */
         public CleanCheck clean;
         /** Recorded on its checks and used; Process reviews the records (nothing waits for that). */
         public boolean forReview = true;
@@ -650,6 +653,7 @@ public class DispenseConfig {
         public String setupKey;
         /** Its frame with the end's 0.5 and 1.0 mm drawn, and as taken. */
         public Long photoId, framePhotoId;
+        /** When it read its frame: what the tip looked like then, not a pass for later (a press checks again). */
         public long atMs;
     }
 

@@ -493,13 +493,16 @@ public class HeightSwitchSimTest {
 
     /**
      * The engine's own check replaces the clean-tip word (sent or not: ignored): paste on the end is refused as such,
-     * with its code, what it offers and its picture; nothing is pressed (no read of the switch). The picture is served
+     * with its code, what it offers and its picture; nothing is pressed (no read of the switch). A clean verdict on
+     * record from a minute before is history, not a pass (review MINOR 6): the press checks again. The picture is served
      * by its id, also while another client holds the machine (a GET is never locked).
      */
     @Test
     public void pasteOnTheEndIsRefusedByTheCameraNotByAWord() throws Exception {
         ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
         ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        assertTrue(ok("POST", "/api/needle/end/measure", null).getAsJsonObject("end").getAsJsonObject("clean")
+                .get("ok").getAsBoolean(), "a clean verdict on record");
         scene.paste = true;
         sim.server.mark();
         JsonObject r = call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"tipClean\":true}");
