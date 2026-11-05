@@ -147,6 +147,44 @@ public class ControllerResetTest {
         return c;
     }
 
+    /**
+     * BR-93: a lost link (the controller left USB, a read or a write failed) may have been a reset: the position is
+     * unknown until a home, that home moves the Z frame, and the screw's motor may have gone off (the start angle wants a
+     * measure). Each loss goes on record once and the next engine reads it back; a reconnect that reads a powered
+     * controller's position does not make it known again.
+     */
+    @Test
+    public void aLostLinkIsAPossibleResetOnRecordOnce() {
+        ControllerReset first = run(true, true);
+        now = 1000;
+        first.screwMoved();
+        assertNull(first.whyNoAngle(null), "the screw turned: an angle may be set");
+        now = 2000;
+        String why = "the link to the controller was lost at 15:07:57 (the controller left USB)";
+        assertTrue(first.linkLost(1500, why));
+        assertFalse(first.linkLost(1500, why), "the same loss goes on record once");
+        assertFalse(first.isPositionKnown());
+        assertTrue(first.unknownWhy().startsWith(why) && first.unknownWhy().contains("may have been reset"),
+                first.unknownWhy());
+        assertEquals(Long.valueOf(1500), first.countEpochMs(), "I11: an angle older than the loss is stale");
+        String noAngle = first.whyNoAngle(null);
+        assertTrue(noAngle != null && noAngle.contains("measure the start angle"), String.valueOf(noAngle));
+        first.flush();
+        assertEquals(Arrays.asList(ControllerReset.EVENT_UNREAD, ControllerReset.EVENT_MOTOR_OFF), codes());
+
+        now = 5000;
+        ControllerReset second = run(false, false);
+        assertFalse(second.isPositionKnown(), "after a restart too");
+        assertTrue(second.unknownWhy().startsWith(why), second.unknownWhy());
+        now = 6000;
+        second.connected(reply(PARKED), 'B', null); // the board is back, not reset: still a possible one
+        assertFalse(second.isPositionKnown());
+        assertNotNull(second.whyNoAngle(null));
+        now = 7000;
+        assertTrue(second.homed(), "that home moves the Z frame");
+        assertTrue(second.isPositionKnown());
+    }
+
     @Test
     public void aResetHomedBeforeAnEngineRestartStillDatesTheScrewCount() {
         // the review's case: start angle set, power cycle, attested home (its G92 A0 B0 removes the boot

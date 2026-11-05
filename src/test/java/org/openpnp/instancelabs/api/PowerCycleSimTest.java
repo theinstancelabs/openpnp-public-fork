@@ -149,6 +149,19 @@ public class PowerCycleSimTest {
         }
     }
 
+    /** BR-93: the machine block once OpenPnP's reader has seen the link end (within 5 s). */
+    JsonObject awaitLinkLost() throws Exception {
+        long until = System.currentTimeMillis() + 5000;
+        while (true) {
+            JsonObject m = ok("GET", "/api/machine", null);
+            if (m.has("linkLost") && !m.get("linkLost").isJsonNull()) {
+                return m;
+            }
+            assertTrue(System.currentTimeMillis() < until, "the lost link never showed: " + m);
+            Thread.sleep(20);
+        }
+    }
+
     /** The journal's events of one code. */
     List<java.util.Map<String, Object>> events(String code) throws Exception {
         return svc.getDb().query("SELECT * FROM events WHERE code = ?", code);
@@ -223,6 +236,143 @@ public class PowerCycleSimTest {
         JsonObject pc2 = again.getAsJsonObject("powerCycle");
         assertFalse(pc2.get("detected").getAsBoolean(), again.toString());
         assertEquals(pc.get("atMs").getAsLong(), pc2.get("atMs").getAsLong(), "the last reset stays on record");
+    }
+
+    /**
+     * BR-93 (seen live 11-04 15:07: the controller left USB and the status kept saying connected and homed): a link that
+     * ends unasked shows as lost, with when and why; nothing that moves or sends a line starts (refused with that
+     * reason before anything is tried); STOP still answers. A Stop's own disconnect is no lost link.
+     */
+    @Test
+    public void aLostLinkShowsAsGoneAndRefusesMovesWithItsReason() throws Exception {
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"BR-93\"}").get("token")
+                .getAsString();
+        JsonObject before = ok("GET", "/api/machine", null);
+        assertTrue(before.get("connected").getAsBoolean(), before.toString());
+        assertTrue(before.has("linkLost") && before.get("linkLost").isJsonNull(), "no loss yet: " + before);
+
+        long t0 = System.currentTimeMillis();
+        sim.server.dropLink(); // the controller leaves USB
+        JsonObject m = awaitLinkLost();
+        assertTrue(m.get("enabled").getAsBoolean(), "OpenPnP still reads started: " + m);
+        assertFalse(m.get("connected").getAsBoolean(), m.toString());
+        assertFalse(m.get("homed").getAsBoolean(), m.toString());
+        assertFalse(m.get("positionKnown").getAsBoolean(), m.toString());
+        JsonObject lost = m.getAsJsonObject("linkLost");
+        assertTrue(lost.get("atMs").getAsLong() >= t0, m.toString());
+        String why = lost.get("why").getAsString();
+        assertTrue(why.startsWith("the link to the controller was lost at ") && why.contains("the link ended"), why);
+        assertTrue(lost.get("next").getAsString().startsWith("once the board is back on USB: Stop, then Start"),
+                "the operator's next step, word for word (the UI shows it as given): " + lost);
+        assertTrue(m.get("positionUnknownWhy").getAsString().contains(why), m.toString());
+        JsonObject st = ok("GET", "/api/status", null).getAsJsonObject("machine");
+        assertFalse(st.get("connected").getAsBoolean(), "the status's machine block too: " + st);
+        assertEquals(why, st.getAsJsonObject("linkLost").get("why").getAsString());
+
+        // refused with the reason and the way back, before anything is tried
+        String[][] tries = {{"/api/gcode", "{\"lines\":[\"M114\"]}"}, {"/api/jog", "{\"tool\":\"n1\",\"dx\":1}"},
+                {"/api/move-to", "{\"tool\":\"n1\",\"x\":100,\"y\":100}"},
+                {"/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}"}};
+        for (String[] t : tries) {
+            call("POST", t[0], t[1]);
+            assertEquals(409, lastStatus, t[0] + " " + lastBody);
+            assertTrue(lastBody.contains(why) && lastBody.contains("restart il-openpnp"), t[0] + " " + lastBody);
+        }
+        ok("POST", "/api/stop", null); // STOP still runs (it switches off what it can)
+    }
+
+    /** BR-93 (#53 review MINOR 4): a link that breaks hard (the read fails, as at 15:07:57 on the machine) is lost too. */
+    @Test
+    public void aLinkThatBreaksHardIsLostToo() throws Exception {
+        sim.server.resetLink();
+        JsonObject m = awaitLinkLost();
+        String why = m.getAsJsonObject("linkLost").get("why").getAsString();
+        assertTrue(why.contains("a read failed ("), why);
+        assertFalse(m.get("connected").getAsBoolean() || m.get("positionKnown").getAsBoolean(), m.toString());
+    }
+
+    /**
+     * BR-93 (#53 review MINOR 3): a connect while the old link's reader still runs (a Start whose CONNECT_COMMAND timed
+     * out leaves it) closes that link on purpose: its reader's error is no loss of the new link, and no possible reset.
+     */
+    @Test
+    public void theOldReaderOfAReconnectReportsNothing() throws Exception {
+        sim.driver.connect(); // the old link's reader is alive and blocked in its read
+        Thread.sleep(300);
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertTrue(m.get("linkLost").isJsonNull(), m.toString());
+        assertTrue(m.get("positionKnown").getAsBoolean(), "no possible reset was recorded: " + m);
+        assertTrue(events(ControllerReset.EVENT_UNREAD).isEmpty(), "nothing journaled");
+    }
+
+    /** BR-93: a Stop closes the link on purpose: no loss shows, and the Start after it is a plain reconnect. */
+    @Test
+    public void aStopsDisconnectIsNoLostLink() throws Exception {
+        sim.driver.setConnectionKeepAlive(false); // the SIM keeps the link open across a Stop, as the live machine
+        sim.machine.setEnabled(false); // so this Stop closes it
+        Thread.sleep(200); // the reader ends meanwhile
+        JsonObject off = ok("GET", "/api/machine", null);
+        assertTrue(off.get("linkLost").isJsonNull(), off.toString());
+        sim.machine.setEnabled(true);
+        JsonObject on = ok("GET", "/api/machine", null);
+        assertTrue(on.get("connected").getAsBoolean() && on.get("linkLost").isJsonNull(), on.toString());
+        assertTrue(on.get("positionKnown").getAsBoolean(), "a plain reconnect is no possible reset: " + on);
+    }
+
+    /**
+     * BR-93 + BR-02: a lost link may have been a reset (a USB device that leaves has often lost power). Once the board is
+     * back, Stop and Start open the link again (BR-44; the SIM keeps the link open across a Stop, as the live machine
+     * does); the home then needs the operator's word and is G28 first, it
+     * moves the Z frame, and the start angle wants a measure (the motor may have gone off), not a confirm.
+     */
+    @Test
+    public void afterALostLinkTheNextHomeCountsAsAfterAReset() throws Exception {
+        ok("POST", "/api/screw/start-angle", "{\"startAngleDeg\":298}");
+        Thread.sleep(5); // the loss comes later than the angle, in ms
+        long t0 = System.currentTimeMillis();
+        sim.server.dropLink();
+        awaitLinkLost();
+
+        reconnect(); // the board is back on USB: Stop, then Start
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertTrue(m.get("connected").getAsBoolean(), m.toString());
+        assertTrue(m.get("linkLost").isJsonNull(), "a connect opened the link again: " + m);
+        assertFalse(m.get("positionKnown").getAsBoolean(), "a possible reset: " + m);
+        assertTrue(m.get("positionUnknownWhy").getAsString().contains("the link to the controller was lost at "),
+                m.toString());
+
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("nothing is under either tool"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
+        sim.server.mark();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        List<String> l = motionAndOutputs();
+        assertTrue(!l.isEmpty() && l.get(0).startsWith("G28"), "G28 first: " + l);
+        Long moved = svc.getConfig().zFrameMovedAtMs;
+        assertTrue(moved != null && moved >= t0, "the home after the possible reset moved the Z frame: " + moved);
+
+        call("POST", "/api/screw/start-angle", "{}");
+        assertEquals(409, lastStatus, "a confirm cannot keep the angle set before the loss: " + lastBody);
+        assertTrue(lastBody.contains("measure"), lastBody);
+    }
+
+    /** BR-93: the lost link is on record: after an OpenPnP restart the position is still unknown until that home. */
+    @Test
+    public void aLostLinkOutlivesAnOpenPnpRestart() throws Exception {
+        sim.server.dropLink();
+        awaitLinkLost();
+        assertEquals(1, events(ControllerReset.EVENT_UNREAD).size(), "on record once");
+        restartOpenPnp();
+        JsonObject m = ok("GET", "/api/machine", null);
+        assertTrue(m.get("connected").getAsBoolean() && m.get("linkLost").isJsonNull(), m.toString());
+        assertFalse(m.get("positionKnown").getAsBoolean(), m.toString());
+        assertTrue(m.get("positionUnknownWhy").getAsString().contains("the link to the controller was lost at "),
+                m.toString());
+        call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("nothing is under either tool"), lastBody);
     }
 
     /**

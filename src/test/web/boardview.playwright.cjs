@@ -120,6 +120,8 @@ async function recordsArt(page) {
     const resp = await page.goto(BASE + '#run');
     check('UI served through devproxy', resp.ok(), resp.status());
     await waitPlan(page);
+    // Run opens Run › Start while nothing runs (runflow.js): the board picture is on today's pages, Step by step
+    await page.waitForSelector('#rs-step-by-step', { state: 'visible', timeout: 5000 }).then((a) => a.click(), () => null);
     // ---- the default picture: a browser that never chose one shows the whole PCB (Full), not the grey Quiet mask ----
     await page.waitForFunction(() => {
       const bv = IL.run.bv, p = IL.S.plan;

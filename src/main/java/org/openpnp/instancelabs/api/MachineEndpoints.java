@@ -498,10 +498,14 @@ final class MachineEndpoints {
         if (m == null) {
             return s;
         }
+        // BR-93: first, so the engine's view below has it on record
+        GcodeDriver.LinkLoss lost = ctx.linkLoss();
         s.put("enabled", m.isEnabled());
-        // OpenPnP opens the controller link when the machine is started (enabled).
-        s.put("connected", m.isEnabled());
-        s.put("homed", m.isHomed());
+        // OpenPnP opens the controller link when the machine is started (enabled); a lost one stays open in its eyes
+        s.put("connected", m.isEnabled() && lost == null);
+        s.put("homed", m.isHomed() && lost == null);
+        s.put("linkLost", lost == null ? null : Views.map("atMs", lost.atMs, "why",
+                ControllerReset.linkLostWhy(lost.atMs, lost.cause), "next", ControllerReset.LINK_LOST_REMEDY));
         // BR-44: from the start of any home until it ends (the deployer never sends STOP while it is true)
         s.put("homing", m instanceof ReferenceMachine && ((ReferenceMachine) m).isHoming());
         s.put("busy", m.isBusy());
