@@ -93,6 +93,12 @@ public class DispenseProfile {
      */
     public int touchOffSkipDots = 0;
     /**
+     * BR-90: the touch-off ladder of this recipe's tip (Process sets it; the 25G: 0.20 / 0.025 / 13), which the web
+     * UI's touch-off form opens with; null: none set (the engine never makes one up). Checked as the touch-off route
+     * checks these numbers under {@link #touchOffSkipDots}. Not part of a dot, so not in the fingerprints.
+     */
+    public TouchOffLadder touchOffLadder = null;
+    /**
      * Highest paste demand (mg/s) a block of dots may ask of the screw (§1.2 R7): the bench saw 2.56
      * mg/s sustained at 18 psi (36 one-turn dots at 180 rpm and 250 ms dwell, runs/p18_blank). A
      * screw asked for more pulls in air. Not part of a dot, so not in the fingerprints.
@@ -116,6 +122,22 @@ public class DispenseProfile {
             this.deg = deg;
             this.measuredAtMs = measuredAtMs;
             this.runId = runId;
+        }
+    }
+
+    /**
+     * BR-90: a touch-off ladder, POST /api/calibrations/touch-off's {@code startGapMm} (mm above the needle Z offset),
+     * {@code stepMm} and {@code steps}; immutable (shared). Boxed: a field the JSON left out is null, not 0.
+     */
+    public static final class TouchOffLadder {
+        public final Double startGapMm;
+        public final Double stepMm;
+        public final Integer steps;
+
+        public TouchOffLadder(Double startGapMm, Double stepMm, Integer steps) {
+            this.startGapMm = startGapMm;
+            this.stepMm = stepMm;
+            this.steps = steps;
         }
     }
 
@@ -291,6 +313,25 @@ public class DispenseProfile {
         if (!(touchOffSkipDots >= 0 && touchOffSkipDots <= 5)) {
             p.add("profile touchOffSkipDots must be 0 to 5");
         }
+        else if (touchOffLadder != null) {
+            TouchOffLadder l = touchOffLadder;
+            if (l.startGapMm == null || l.stepMm == null || l.steps == null || !Double.isFinite(l.startGapMm)
+                    || !Double.isFinite(l.stepMm)) {
+                p.add("profile touchOffLadder needs startGapMm, stepMm and steps, each a number (null: none)");
+            }
+            else {
+                // the touch-off route's own check of a request with this ladder (its pitch: the route's default)
+                NeedleTouchOff.Request req = new NeedleTouchOff.Request();
+                req.startGapMm = l.startGapMm;
+                req.stepMm = l.stepMm;
+                req.steps = l.steps;
+                req.pitchMm = NeedleTouchOff.defaultPitchMm(req, c);
+                String why = NeedleTouchOff.requestProblem(req, touchOffSkipDots, c);
+                if (why != null) {
+                    p.add("profile touchOffLadder: " + why);
+                }
+            }
+        }
         return p;
     }
 
@@ -327,6 +368,7 @@ public class DispenseProfile {
         x.sustainedFeedMgS = sustainedFeedMgS;
         x.notes = notes;
         x.touchOffSkipDots = touchOffSkipDots;
+        x.touchOffLadder = touchOffLadder;
         return x;
     }
 }

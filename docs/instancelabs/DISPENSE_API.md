@@ -141,6 +141,7 @@ One profile per pressure session, the same for the purge row and the work. Defau
 | `liftMm` | null | The lift after each dot above its dispense Z (mm; > 0 and <= 10; null = the machine's `hopHeightMm`). The recipe's own, so a tip mount brings it back with the pause (the plastic 25G 0603 recipe: 3). Every dot's hop uses it (`DispenseConfig.liftMm()`): board, purge row, shots, calibration blocks, dot ladder, touch-off (a dot at a place, like the prime, lifts to `travelSafeZMm`). In both fingerprints only when set (` lift=3.000`), so records and plans made without it keep theirs. |
 | `purgeDots` | 8 | Purge dots on the purge row before the work (>= 2 for a partial turn: the first sets the start angle, at least one normal dot flushes it). |
 | `touchOffSkipDots` | 0 | BR-85: dots the needle touch-off leaves out after the prime, before its reference pair (0..5; the plastic 25G's start blob: 2 at 13.7 psi, 3 above drool). Parked and restored with the tip's recipe; not in the fingerprints. |
+| `touchOffLadder` | null | BR-90: the tip's touch-off ladder `{startGapMm, stepMm, steps}` (Process sets it; the 25G: 0.20 / 0.025 / 13), which the web UI's touch-off form opens with; null = none set (the engine never makes one up). All three numbers, checked by `NeedleTouchOff.requestProblem` under `touchOffSkipDots`, the touch-off route's own check. Parked and restored with the tip's recipe; not in the fingerprints. |
 | `notes` | | Operator notes. |
 
 Derived: `netDeg(c)` = 800 / 4.44 = 180.1802°, `forwardDeg(c)` = 844 / 4.44 = 190.0901°, `suckBackSteps(c)` = 44,

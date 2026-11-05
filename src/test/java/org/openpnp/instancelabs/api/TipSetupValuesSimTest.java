@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseDb;
 import org.openpnp.instancelabs.dispense.LandingResult;
 import org.openpnp.instancelabs.dispense.PadType;
@@ -22,11 +23,13 @@ import org.openpnp.instancelabs.padprofile.Family;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 /**
  * BR-85 through the API on the SIM machine: the values that are a tip's own and follow it through a mount. The dots
  * its touch-off skips (its recipe's touchOffSkipDots) and its dose anchor (PUT /api/tip-setups/{key}/dose-anchor, a
- * guarded write), shown per setup in GET /api/tip-setups and for the mounted tip in status.dispense.tip.
+ * guarded write), shown per setup in GET /api/tip-setups and for the mounted tip in status.dispense.tip. BR-90: its
+ * recipe's touch-off ladder, shown in status.dispense.profile.
  */
 public class TipSetupValuesSimTest {
     TipSim t;
@@ -237,6 +240,115 @@ public class TipSetupValuesSimTest {
         assertTrue(res.has("steps") && res.has("startGapMm"), res.toString());
         assertEquals(15, res.get("steps").getAsInt());
         assertEquals(0.25, res.get("startGapMm").getAsDouble(), 1e-12);
+    }
+
+    /** BR-90: the 25G's touch-off ladder as Process sets it, with 3 dots not counted after the prime. */
+    static final String LADDER_25 = "{\"startGapMm\":0.20,\"stepMm\":0.025,\"steps\":13}";
+
+    static JsonElement json(String s) {
+        return new JsonParser().parse(s);
+    }
+
+    /** status.dispense.profile.touchOffLadder: JSON null when none is set (the key is always there). */
+    JsonElement ladder() throws Exception {
+        JsonObject p = t.dispense().getAsJsonObject("profile");
+        assertTrue(p.has("touchOffLadder"), p.toString());
+        return p.get("touchOffLadder");
+    }
+
+    /** The ladder in the saved settings file, as a restart reads it: the mounted tip's (null), or a parked tip's. */
+    JsonElement savedLadder(String parked) throws Exception {
+        DispenseConfig c = DispenseConfig.load(t.sim.configDir);
+        return Json.GSON.toJsonTree(parked == null ? c.profile : c.parkedTips.get(parked).profile).getAsJsonObject()
+                .get("touchOffLadder");
+    }
+
+    /**
+     * BR-90: the touch-off ladder is the tip's recipe's: shown in status.dispense.profile for the web UI's touch-off
+     * form, saved with the recipe, no part of a dot, and following its tip through the mounts. The engine never makes
+     * one up: null until set, and null clears it.
+     */
+    @Test
+    public void eachTipsTouchOffLadderIsItsRecipes() throws Exception {
+        assertTrue(ladder().isJsonNull(), "the 22G: none set");
+        t.add25();
+        t.mount(TipSim.K25);
+        assertTrue(ladder().isJsonNull(), "the 25G's recipe from the defaults: none");
+        String fp = t.dispense().getAsJsonObject("profile").get("fingerprint").getAsString();
+        String recipe = "{\"forTip\":\"" + TipSim.K25 + "\",\"profile\":{";
+        TipSim.ok(t.call("PUT", "/api/config", recipe + "\"touchOffSkipDots\":3,\"touchOffLadder\":" + LADDER_25
+                + "}}"));
+        assertEquals(json(LADDER_25), ladder());
+        assertEquals(json(LADDER_25), savedLadder(null), "saved: a restart reads it back");
+        assertEquals(fp, t.dispense().getAsJsonObject("profile").get("fingerprint").getAsString(), "plans stay fresh");
+        // the recipe form's save sends no ladder: it stays
+        TipSim.ok(t.call("PUT", "/api/config", recipe + "\"dwellMs\":300}}"));
+        assertEquals(json(LADDER_25), ladder());
+
+        // the 22G on: its own (none), then one set for it; the 25G's parked with its recipe
+        t.mount(TipSim.SEED);
+        assertTrue(ladder().isJsonNull(), "the 22G's own: none");
+        assertEquals(json(LADDER_25), savedLadder(TipSim.K25));
+        String ladder22 = "{\"startGapMm\":0.125,\"stepMm\":0.025,\"steps\":6}";
+        TipSim.ok(t.call("PUT", "/api/config", "{\"forTip\":\"" + TipSim.SEED + "\",\"profile\":{\"touchOffLadder\":"
+                + ladder22 + "}}"));
+        assertEquals(json(ladder22), ladder());
+        t.mount(TipSim.K25);
+        assertEquals(json(LADDER_25), ladder(), "back with the 25G");
+        assertEquals(json(ladder22), savedLadder(TipSim.SEED));
+
+        TipSim.ok(t.call("PUT", "/api/config", recipe + "\"touchOffLadder\":null}}"));
+        assertTrue(ladder().isJsonNull(), "cleared");
+        assertTrue(savedLadder(null).isJsonNull());
+    }
+
+    /**
+     * BR-90: a recipe's ladder is checked as the touch-off route checks these three numbers under the recipe's skip, in
+     * its words (the route's answer to the same ladder); a bad one is a 400 that changes nothing. It has no defaults, so
+     * a ladder without one of them, or with one that is no number, is refused too. The skip and the ladder are checked
+     * together.
+     */
+    @Test
+    public void aBadTouchOffLadderIsRefusedInTheTouchOffsWords() throws Exception {
+        t.add25();
+        t.mount(TipSim.K25);
+        String recipe = "{\"forTip\":\"" + TipSim.K25 + "\",\"profile\":{";
+        TipSim.ok(t.call("PUT", "/api/config", recipe + "\"touchOffSkipDots\":3,\"touchOffLadder\":" + LADDER_25
+                + "}}"));
+        // one number off the 25G's each: the ranges (start, step, steps), too few dots for the skip, a step too large
+        // for the skip, the reference pair below 0.125 mm, the lowest gap below -0.1 mm
+        for (String bad : new String[] {"{\"startGapMm\":2.5,\"stepMm\":0.025,\"steps\":13}", "{\"startGapMm\":0.20,"
+                + "\"stepMm\":0,\"steps\":13}", "{\"startGapMm\":0.20,\"stepMm\":0.025,\"steps\":21}", "{\"startGapMm\":"
+                        + "0.20,\"stepMm\":0.025,\"steps\":5}", "{\"startGapMm\":0.20,\"stepMm\":0.47,\"steps\":13}",
+                "{\"startGapMm\":0.15,\"stepMm\":0.025,\"steps\":13}", "{\"startGapMm\":0.20,\"stepMm\":0.025,\"steps\":"
+                        + "14}"}) {
+            String route = TipSim.str(TipSim.refused(t.post("/api/calibrations/touch-off", bad), 400, "bad-request"),
+                    "reason");
+            JsonObject put = TipSim.refused(t.call("PUT", "/api/config", recipe + "\"touchOffLadder\":" + bad + "}}"),
+                    400, "bad-request");
+            assertEquals("invalid dispense config: [profile touchOffLadder: " + route + "]", TipSim.str(put, "reason"));
+            assertEquals(json(LADDER_25), ladder(), "unchanged: " + bad);
+        }
+        for (String bad : new String[] {"{\"startGapMm\":0.20,\"stepMm\":0.025}", "{\"startGapMm\":\"NaN\","
+                + "\"stepMm\":0.025,\"steps\":13}", "{}"}) {
+            JsonObject put = TipSim.refused(t.call("PUT", "/api/config", recipe + "\"touchOffLadder\":" + bad + "}}"),
+                    400, "bad-request");
+            assertEquals("invalid dispense config: [profile touchOffLadder needs startGapMm, stepMm and steps, each a "
+                    + "number (null: none)]", TipSim.str(put, "reason"));
+            assertEquals(json(LADDER_25), ladder(), "unchanged: " + bad);
+        }
+        assertEquals(json(LADDER_25), savedLadder(null), "nothing saved");
+
+        JsonObject skip = TipSim.refused(t.call("PUT", "/api/config", recipe + "\"touchOffSkipDots\":5}}"), 400,
+                "bad-request");
+        assertEquals("invalid dispense config: [profile touchOffLadder: the 25G straight's recipe skips the first 5 dots "
+                + "after the prime (touchOffSkipDots): with a start gap of 0.200 mm its reference dots would sit at "
+                + "0.075 mm and 0.050 mm, possibly at contact; start at 0.250 mm or more, so they sit at 0.125 mm and "
+                + "0.100 mm as without a skip]", TipSim.str(skip, "reason"));
+        String ladder5 = "{\"startGapMm\":0.25,\"stepMm\":0.025,\"steps\":15}";
+        TipSim.ok(t.call("PUT", "/api/config", recipe + "\"touchOffSkipDots\":5,\"touchOffLadder\":" + ladder5
+                + "}}"));
+        assertEquals(json(ladder5), ladder());
     }
 
     /**

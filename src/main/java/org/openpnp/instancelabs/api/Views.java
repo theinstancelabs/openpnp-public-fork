@@ -101,6 +101,7 @@ final class Views {
         m.put("purgeDots", p.purgeDots);
         m.put("notes", p.notes);
         m.put("touchOffSkipDots", p.touchOffSkipDots);
+        m.put("touchOffLadder", p.touchOffLadder);
         m.put("stepsPerRev", c.bStepsPerRev);
         m.put("stepsPerDeg", c.bStepsPerDeg);
         m.put("revolutionsPerDot", p.revolutionsPerDot(c));

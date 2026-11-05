@@ -332,6 +332,49 @@ public final class NeedleTouchOff {
                 REFERENCE_GAP_MM, REFERENCE_GAP_MM - req.stepMm);
     }
 
+    /**
+     * The touch-off route's refusal of its request under a recipe that skips {@code skip} dots (the first, in its
+     * order), or null. BR-90: a recipe's own ladder ({@link DispenseProfile#touchOffLadder}) is checked by it too.
+     */
+    public static String requestProblem(Request req, int skip, DispenseConfig c) {
+        // skip + 3 dots from at most 2 mm end at -0.1 mm or above in steps of at most (2 + 0.1) / (skip + 2) mm: 0.42,
+        // 0.35 and 0.30 for skips 3 to 5 (for 1 and 2 the 0.5 mm a step may be binds first)
+        double largest = Math.floor((2 + 0.1) / (skip + 2) * 1000 + 1e-9) / 1000;
+        if (skip > 0 && largest < 0.5 && req.stepMm > largest + 1e-9) {
+            return String.format(Locale.ROOT, "the %s's recipe skips the first %d dots after the prime "
+                    + "(touchOffSkipDots): in steps of %.3f mm no ladder of %d dots from at most 2 mm keeps its "
+                    + "reference pair at %.3f mm or higher and its lowest gap at -0.1 mm or above; use steps of at most "
+                    + "%.3f mm", c.tip.name, skip, req.stepMm, skip + 3, REFERENCE_GAP_MM, largest);
+        }
+        if (req.steps < 2 || req.steps > 20 || req.stepMm <= 0 || req.stepMm > 0.5 || req.startGapMm > 2
+                || req.pitchMm <= 0 || req.jumpRatio <= 0) {
+            return "steps " + (skip + 3) + " to 20, step 0 to 0.5 mm, start gap at most 2 mm, pitch and jump ratio "
+                    + "above 0";
+        }
+        if (req.steps < skip + 3) {
+            return (skip == 0 ? "the reference takes the first two dots after the prime"
+                    : String.format(Locale.ROOT, "the %s's recipe skips the first %d dots after the prime "
+                            + "(touchOffSkipDots), the reference takes the next two", c.tip.name, skip))
+                    + " and a dot after them shows the contact: lay at least " + (skip + 3) + " dots";
+        }
+        String pitch = pitchProblem(req, c);
+        if (pitch != null) {
+            return pitch;
+        }
+        String start = startGapProblem(req, skip, c.tip.name);
+        if (start != null) {
+            return start;
+        }
+        double lowest = req.startGapMm - (req.steps - 1) * req.stepMm;
+        if (lowest < -0.1 - 1e-9) { // F16: 0.30 - 8 x 0.05 is -0.10000000000000003 in doubles
+            return String.format(Locale.ROOT, "the lowest gap would be %.3f mm (%d steps of %.3f mm from %.3f mm), "
+                    + "i.e. the needle %.3f mm into the surface if the current offset is right; keep it at -0.1 mm or "
+                    + "above: at most %d such steps, or start higher", lowest, req.steps, req.stepMm, req.startGapMm,
+                    -lowest, 1 + (int) Math.floor((req.startGapMm + 0.1) / req.stepMm + 1e-9));
+        }
+        return null;
+    }
+
     /** The disc (mm across) that cuts the strings off dots of the expected diameter. */
     public static double cutMm(double expectedDotDiameterMm) {
         return CUT_SHARE * expectedDotDiameterMm;
