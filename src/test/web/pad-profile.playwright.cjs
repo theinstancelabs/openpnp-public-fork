@@ -332,6 +332,9 @@ async function weighCoupon(page, place) {
     // ---- (3) Profile › Needs a profile ---------------------------------------------------------------------------------
     await page.evaluate(() => IL.go('#profile/needs'));
     await page.waitForSelector('#pt-needs:not([hidden]) #pt-needs-table tbody tr[data-group]', { timeout: 15000 });
+    // the workspace shows at once what it drew in (1), the board file's list (only the workspace on screen is drawn), and
+    // draws the plan's at the next frame: read once the source line says the plan (#87's group 11-05 read it before)
+    await page.waitForFunction(() => /^From the plan of /.test((document.getElementById('pt-needs-src') || {}).textContent || ''), null, { timeout: 15000 }).catch(() => null);
     const list = await page.evaluate(() => ({
       rows: Array.from(document.querySelectorAll('#pt-needs-table tbody tr[data-group]')).map((tr) => [tr.dataset.reason, tr.querySelector('.pt-needs__n').textContent]),
       tip: Array.from(document.querySelectorAll('#pt-needs-tip tr[data-reason]')).map((tr) => tr.dataset.reason),
