@@ -789,6 +789,12 @@ async function runFirstDots(page, n) {
         // zones refuse the others (CalibrationEndpoints shotsRun)
         check('Scale shots: the places the engine takes shots on (the sinks, the blank, a coupon), a cup chosen; not "backup" or "cupboard"', !!shots
           && shots.chosen === 'cup1' && JSON.stringify(shots.opts.slice().sort()) === JSON.stringify(['blank', coupon, 'cup1', 'scale-2', 'towel', 'waste'].sort()), shots);
+        // no cup place: the waste is chosen, not the first name (the blank, whose surface 30 whole turns would cover)
+        for (const n of ['cup1', 'scale-2']) extra.splice(extra.indexOf(n), 1);
+        const shots2 = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
+          return sel && sel.options.length && ![...sel.options].some((o) => o.value === 'cup1') ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value } : null; },
+        null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        check('Scale shots without a cup place: the waste is chosen, not the first name (the blank)', !!shots2 && shots2.chosen === 'waste', shots2);
         await page.unroute('**/api/status');
       }
       await nav(page, 'calibrate');
