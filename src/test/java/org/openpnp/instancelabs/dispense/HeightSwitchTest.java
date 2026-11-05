@@ -132,6 +132,21 @@ public class HeightSwitchTest {
     }
 
     /**
+     * Re-review MINOR: a window of no whole number of coarse steps never takes a step longer than one coarse step, on
+     * the presses (13.0 to the floor 11.15, the trip at 11.45) and on the way down from travel Z (to zStart 13.15, the
+     * trip at 13.45): a rounded step count would put the tool 0.30 past the trip.
+     */
+    @Test
+    public void aWindowOfNoWholeNumberOfStepsStaysWithinOneCoarseStepOfTheTrip() throws Exception {
+        FakeSwitch presses = new FakeSwitch(11.45, -1);
+        HeightSwitch.measure(presses, plan("n1", -1, 13.0, 11.15, 1));
+        assertTrue(presses.deepestPast() <= 0.25 + 1e-9, "presses: " + presses.deepestPast() + " " + presses.lines);
+        FakeSwitch wayDown = new FakeSwitch(13.45, -1);
+        HeightSwitch.measure(wayDown, plan("n1", -1, 13.15, 11.15, 1));
+        assertTrue(wayDown.deepestPast() <= 0.25 + 1e-9, "way down: " + wayDown.deepestPast() + " " + wayDown.lines);
+    }
+
+    /**
      * Review MAJOR 2: the needle's measure switches the valve and then the pump off (the order STOP uses) before its
      * first move: the passthrough may have left them on, and paste must never touch the switch.
      */
@@ -139,6 +154,17 @@ public class HeightSwitchTest {
     public void theNeedlesMeasureSwitchesTheValveAndThePumpOffBeforeItsFirstMove() throws Exception {
         FakeSwitch sw = new FakeSwitch(52.0, 1);
         HeightSwitch.measure(sw, plan("needle", 1, 51.0, 53.0, 1));
+        assertEquals(Arrays.asList("M107 P3", "M107 P2", "G1 Z31.500 F600"), sw.lines.subList(0, 3), sw.lines.toString());
+    }
+
+    /**
+     * Re-review NIT: N1's measure switches the needle's valve and pump off first too (switching off is always safe): a
+     * passthrough may have left them on, and N1 would carry a pressurised needle across the bed.
+     */
+    @Test
+    public void n1sMeasureAlsoSwitchesTheValveAndThePumpOffFirst() throws Exception {
+        FakeSwitch sw = new FakeSwitch(12.0, -1);
+        HeightSwitch.measure(sw, plan("n1", -1, 13.0, 11.0, 1));
         assertEquals(Arrays.asList("M107 P3", "M107 P2", "G1 Z31.500 F600"), sw.lines.subList(0, 3), sw.lines.toString());
     }
 

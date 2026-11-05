@@ -197,11 +197,10 @@ public final class HeightSwitch {
     }
 
     private static void presses(Io io, Plan p, Result r) throws Exception {
-        if ("needle".equals(p.tool)) {
-            // the passthrough may have left them on: valve, then pump, as STOP orders them; no pressure at the switch
-            io.send(ControllerCommands.VALVE_OFF);
-            io.send(ControllerCommands.PUMP_OFF);
-        }
+        // the passthrough may have left them on: valve, then pump, as STOP orders them; no pressure at the switch, and
+        // none in a needle that N1's measure carries across the bed (switching off is always safe)
+        io.send(ControllerCommands.VALVE_OFF);
+        io.send(ControllerCommands.PUMP_OFF);
         io.send(move(p.travelZ, 600));
         io.send(String.format(Locale.ROOT, "G1 X%.3f Y%.3f F6000", p.rawX, p.rawY));
         io.send("M42 P" + M42_PIN + " T2");
