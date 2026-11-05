@@ -19,7 +19,8 @@ import org.pmw.tinylog.Logger;
  * Then, unlike the bench: back to the last open coarse step until the seal lets go (the bench's fine
  * pass started right after the seal and reported contact up to 0.3 mm high, 29 of 156 passes at their
  * first step; one step higher when that step itself still draws), and a fine pass of 0.025 mm steps
- * below it whose contact is the first of two sealed steps in a row. A fine miss re-probes once from
+ * below it whose contact is the first of two sealed steps in a row, then the steps above it read again
+ * from the seal (a lagging line can show a touching step open). A fine miss re-probes once from
  * the start; the coarse contact is never accepted. Every point ends with the bench's lift and vent:
  * {@code G1 Z<travel> F600, M400, M107 P1, M107 P0}, also after a refusal or an error inside it; only a
  * STOP sends nothing but the I1 shutdown.
@@ -112,6 +113,8 @@ public final class VacuumProber {
         /** N1's first touch: a 3-read mean this far below open air (probe.py's ONSET; BR-100: not its 15 % seal). */
         public int minDropCounts = 40000;
         public long releaseTimeoutMs = 1500;
+        /** Fine steps a lagging line can hide below the first touch (Process: lag <= 1 s, ~4 steps). */
+        public int maxLagSteps = 4;
         public int maxSpreadCounts = 15000;
         public int maxDeltaFirstCounts = 50000;
         public int maxDeltaMemoryCounts = 60000;
@@ -618,9 +621,9 @@ public final class VacuumProber {
     }
 
     /**
-     * Back to the last open coarse step until the seal lets go (|mean - baseline| < drop / 2 within
-     * {@link Settings#releaseTimeoutMs}), then the fine pass below it: the first step whose mean and the
-     * next step's mean are both sealed, unless a step above it stays sealed when read again
+     * Back to the last open coarse step until the seal lets go (the mean less than drop / 2 below the
+     * baseline within {@link Settings#releaseTimeoutMs}), then the fine pass below it: the first step whose
+     * mean and the next step's mean are both sealed, unless a step above it stays sealed when read again
      * ({@link #settledAbove}). Null when the fine pass finds no such pair.
      *
      * <p>The last open coarse step can read a near touch (up to 34 k below open air on the real machine,
@@ -669,15 +672,22 @@ public final class VacuumProber {
      * show a touching step open. The steps above the contact are read again, each entered from one step
      * higher as every fine step, with the line still drawing from the seal below: a step that does not let
      * go by the touch threshold within {@link Settings#releaseTimeoutMs} is the contact, and the step above
-     * it is read next. An open step lets go at once; the release height let go already.
+     * it is read next. An open step lets go within ~0.5 s; the release height let go already. A seal that
+     * holds above the {@link Settings#maxLagSteps} steps a lag can hide (a blocked tip, something lifted with
+     * N1) is refused, never taken as a surface up to 0.575 mm high.
      */
     private double settledAbove(Point p, Window w, double contact) throws Exception {
         double z = contact;
-        while (round4(z + s.fineStepMm) < p.releaseZ - 1e-9) {
+        for (int hidden = 0; round4(z + s.fineStepMm) < p.releaseZ - 1e-9; hidden++) {
             double up = round4(z + s.fineStepMm);
             moveZ(round4(up + s.fineStepMm), s.zProbeFeedMmMin, w);
             if (released(p, w, up, p.drop)) {
                 return z;
+            }
+            if (hidden == s.maxLagSteps) {
+                throw refused(String.format(Locale.ROOT, "PROBE: N1 did not let go of the surface within %.1f s after "
+                        + "the touch at X %.2f, Y %.2f: check the N1 tip and tubing, then try again",
+                        s.releaseTimeoutMs / 1000.0, p.x, p.y));
             }
             z = up;
         }
@@ -685,8 +695,9 @@ public final class VacuumProber {
     }
 
     /**
-     * Moves to {@code z} and reads until the mean is within {@code within} of the baseline (the seal let go
-     * there), at most {@link Settings#releaseTimeoutMs}.
+     * Moves to {@code z} and reads until the mean is less than {@code within} below the baseline (the seal let
+     * go there), at most {@link Settings#releaseTimeoutMs}. Above the baseline is let go too: the real line
+     * overshoots open air for ~1.5 s after a seal lets go (+20-26 k at 78 of 167 journal touches).
      */
     private boolean released(Point p, Window w, double z, double within) throws Exception {
         moveZ(z, s.zProbeFeedMmMin, w);
@@ -696,7 +707,7 @@ public final class VacuumProber {
             double m = mean(reads(s.stepReads));
             p.readings.add(new double[] {z, m});
             report(p);
-            if (Math.abs(m - p.baseline) < within) {
+            if (p.baseline - m < within) {
                 return true;
             }
             if (s.clock.getAsLong() - t0 >= s.releaseTimeoutMs) {

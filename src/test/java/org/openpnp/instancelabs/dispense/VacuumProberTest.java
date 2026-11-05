@@ -693,6 +693,54 @@ public class VacuumProberTest {
         assertEquals(END, rig.ch.sent.subList(rig.ch.sent.size() - 4, rig.ch.sent.size()));
     }
 
+    /**
+     * After a seal lets go, the real line overshoots open air (less vacuum) for ~1.5 s: 78 of 167 journal touches read
+     * over +20 k there (10-31 13:59: -84, +13, +24, +25, +25, +24, +17 k). A reading above open air is never a seal.
+     */
+    @Test
+    public void theLineOvershootingOpenAirAfterTheSealIsLetGo() throws Exception {
+        Rig rig = new Rig();
+        rig.ch.releaseTauMs = 1; // the model lets go at once: the journal's series below is the release at 4.75
+        int[] postLift = {-84_000, 21_000, 24_000, 25_000, 25_000, 24_000, 22_000, 21_000, 21_000};
+        java.util.Map<Double, Integer> visits = new java.util.HashMap<>();
+        rig.ch.byZ = (z, n) -> {
+            int visit = n == 0 ? visits.merge(z, 1, Integer::sum) : visits.get(z);
+            return Math.abs(z - 4.75) < 1e-9 && visit > 1
+                    ? (int) rig.ch.openAir + postLift[Math.min(n / 3, postLift.length - 1)] : null;
+        };
+        VacuumProber.Point p = rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)).get(0);
+        assertEquals(4.75, p.lastOpenZ, 1e-9);
+        assertEquals(4.75, p.releaseZ, 1e-9, "let go at its second mean, +21 k");
+        assertTrue(p.notes.stream().noneMatch(x -> x.contains("still drawing")), String.valueOf(p.notes));
+        assertEquals("contact", p.state);
+        assertEquals(4.50, p.z, 1e-9);
+    }
+
+    /** A seal that holds above the contact (a blocked tip) is refused after the steps a 1 s lag can hide. */
+    @Test
+    public void aSealHoldingAboveTheContactIsRefused() throws Exception {
+        Rig rig = new Rig();
+        rig.ch.onLine = l -> {
+            if (l.equals(z(4.475, 300))) {
+                rig.ch.releaseTauMs = 100_000; // from the fine pass's second sealed step on, the line never lets go
+            }
+        };
+        DispenseService.RunRefusedException e = assertThrows(DispenseService.RunRefusedException.class,
+                () -> rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)));
+        assertEquals("PROBE: N1 did not let go of the surface within 1.5 s after the touch at X 303.81, Y 122.62: "
+                + "check the N1 tip and tubing, then try again", e.getMessage());
+        List<String> moves = new ArrayList<>();
+        for (String l : rig.ch.sent.subList(rig.ch.sent.indexOf(z(4.475, 300)) + 1, rig.ch.sent.size())) {
+            if (l.startsWith("G1 Z") && l.endsWith("F300")) {
+                moves.add(l);
+            }
+        }
+        assertEquals(Arrays.asList(z(4.55, 300), z(4.525, 300), z(4.575, 300), z(4.55, 300), z(4.6, 300),
+                z(4.575, 300), z(4.625, 300), z(4.6, 300), z(4.65, 300), z(4.625, 300)), moves,
+                "the 4 steps a 1 s lag can hide, then the one above them, each entered from above; never higher");
+        assertEquals(END, rig.ch.sent.subList(rig.ch.sent.size() - 4, rig.ch.sent.size()));
+    }
+
     @Test
     public void theFloorIsTheHigherReferenceMinusOneAndAHalf() throws Exception {
         Rig rig = new Rig();
