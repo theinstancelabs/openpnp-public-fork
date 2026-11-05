@@ -16,7 +16,7 @@
  * missing (a group that waits for the tip's dots or a by-hand dose says so; stubbed: a fresh SIM tip is measured); a
  * refusal stays with its design; a file dropped on the open dialog keeps Designs' Save, even over another page; the menu
  * line follows a design saved in Run's Board step in this tab; (6) a ready design: Make a board opens Run › Start with it chosen,
- * and waits as Start's own design cards do (a task, Start under way: (6b2));
+ * and waits as Start's own design cards do (a task, Start under way: (6b2)); so does Run's Board step (6b3);
  * a failed read of the list keeps the cards Start and Designs have and says so in one wording everywhere (no "look at the
  * machine" after a read), with Retry on Start, Designs and Set up (a Retry pressed from the keyboard keeps the focus);
  * nothing reads the list again by itself but OpenPnP answering again (online); every other read with no answer (core's
@@ -591,6 +591,35 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
         mTask.dis && mTask.why === 'Locked while the needle touch-off runs' && kept.hash === routeOf(rd) && kept.chosen === 'file:' + late.file
           && /Locked while the needle touch-off runs/.test(kept.toast) && relock.dis && mFree.dis === false && mFree.why === null && chaining.dis && chaining.why === 'Start is under way'
           && mEnd.dis === false && mEnd.why === null, { mTask, kept, relock, mFree, chaining, mEnd });
+    }
+
+    // ---- (6b3) Run's Board step waits while Start is under way, as Make a board does (#98's follow-up): Start's chain plans,
+    // finds and pastes its design, so the design select, the position and the buttons that fill it, the pictures, Plan (it
+    // says why), Change board and Plan again are locked; free again after (the chain stood in for by its accessor, as (6b2))
+    if (late) {
+      await page.evaluate(() => IL.go('#run/board'));
+      await page.waitForSelector('#board-select', { state: 'visible', timeout: 15000 }).catch(() => null);
+      const read = () => page.evaluate(() => {
+        const g = (i) => document.getElementById(i) || {}, w = document.getElementById('plan-why');
+        return { select: g('board-select').disabled, x: g('board-x').disabled, plan: g('btn-plan').disabled, change: g('btn-board-change').disabled,
+          again: g('btn-plan-again').disabled, thumbs: [...document.querySelectorAll('#board-thumbs button.board-thumb')].map((b) => b.disabled),
+          fills: ['btn-board-use-cam', 'btn-board-use-n1z', 'btn-board-use-fid'].map((i) => (g(i).disabled ? g(i).title : 'free')),
+          why: w && !w.hidden ? w.textContent : null };
+      });
+      const settle = (locked) => page.waitForFunction((l) => {
+        const sel = document.getElementById('board-select'), w = document.getElementById('plan-why');
+        const says = !!w && !w.hidden && w.textContent === 'Start is under way';
+        return !!sel && sel.disabled === l && says === l;
+      }, locked, { timeout: 10000 }).catch(() => null).then(read);
+      const free0 = await settle(false);
+      await page.evaluate(() => { window.__chaining = IL.runFlow.chaining; IL.runFlow.chaining = () => true; IL.render(); });
+      const during = await settle(true);
+      await page.evaluate(() => { IL.runFlow.chaining = window.__chaining; IL.render(); });
+      const free1 = await settle(false);
+      check('(6b3) Run\'s Board step while Start is under way: the design select, its position and the buttons that fill it, the pictures, Plan (it says why), Change board and Plan again locked; free again after',
+        !free0.select && during.select && during.x && during.thumbs.length > 0 && during.thumbs.every(Boolean) && during.plan && during.why === 'Start is under way'
+          && during.fills.every((t) => t === 'Start is under way') && free1.fills.every((t) => t !== 'Start is under way')
+          && during.change && during.again && !free1.select && !free1.x && free1.thumbs.every((d) => !d) && free1.why === null && !free1.change, { free0, during, free1 });
     }
 
     // one wording for a failed read of the list (#48's re-checks): kept cards, or none
