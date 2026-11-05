@@ -212,6 +212,15 @@ public class HeightSwitchSimTest {
         call("PUT", "/api/config", "{\"heightSwitch\":{\"n1\":null,\"needle\":null}}");
         assertEquals(400, lastStatus, lastBody);
         assertTrue(lastBody.contains("/api/height-switch/measure"), lastBody);
+        // #60 merge review NIT: while the position is unknown (a reset, a lost link) none either, that the reason
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.machine.setEnabled(true);
+        String unknown = svc.positionUnknownWhy();
+        assertNotNull(unknown);
+        JsonObject reset = heightSwitchStatus();
+        assertTrue(reset.get("kSwitch").isJsonNull(), reset.toString());
+        assertEquals(unknown, reset.get("kSwitchWhy").getAsString());
         // review NIT: K_switch is of this home's trips only; after a new home it is null, with the reason
         sim.machine.home();
         JsonObject later = heightSwitchStatus();

@@ -238,6 +238,7 @@ public class HeightSwitchTest {
     /**
      * BR-94 follow-up NIT: a start close below travel Z leaves the 0.40 back move no room (it stops at travel Z); a
      * switch still pressed there is refused in words that say so, not as one still pressed so far above its trip.
+     * Review MINOR: and that send the operator the right way (the switch sits high under travel Z, not the window).
      */
     @Test
     public void aSwitchStillPressedAtTravelZSaysSo() throws Exception {
@@ -248,7 +249,8 @@ public class HeightSwitchTest {
             HeightSwitch.Result r = HeightSwitch.measure(sw, plan(down < 0 ? "n1" : "needle", down, start,
                     start + down * 2.0, 5));
             assertTrue(r.refused && r.why.contains("the switch still reads pressed at travel Z (Z 31.500")
-                    && r.why.contains("it may stick, or the window lies too close to travel Z"), r.why);
+                    && r.why.contains(": it sticks, or it trips less than 0.40 mm below travel Z (the tool barely "
+                            + "clears it at travel height): check the switch's height or travelSafeZMm"), r.why);
         }
     }
 
