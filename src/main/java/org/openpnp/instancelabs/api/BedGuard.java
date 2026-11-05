@@ -10,6 +10,7 @@ import org.openpnp.instancelabs.dispense.BedModelStore;
 import org.openpnp.instancelabs.dispense.CollisionCheck;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HomeTracker;
+import org.openpnp.instancelabs.dispense.ZCheck;
 import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
 import org.openpnp.model.AxesLocation;
 import org.openpnp.model.LengthUnit;
@@ -28,7 +29,8 @@ import com.google.gson.JsonObject;
  * check is off and every route runs as before. A file that fails validation: every hooked motion is refused (fail
  * closed). A valid one: each path is proven before its first line; clear journals one {@value #PROOF} row, blocked
  * answers 409 {@code collision} (§6.3; a stable key the deployer maps) and journals a {@value #REFUSED} row with
- * that body.
+ * that body. A needle tip end measured before the engine's last needle change cannot prove anything: every hooked
+ * motion answers 409 {@code measurement-needed} until it is measured again (#66 review MAJOR 3).
  *
  * <p>The start in this stage is OpenPnP's raw position while the head's place is known (homed in this connection and
  * BR-02's position known): source {@code homed}, X/Y error 0. Otherwise it is unknown, and the routes already refuse
@@ -36,6 +38,7 @@ import com.google.gson.JsonObject;
  */
 final class BedGuard {
     static final String NO_MODEL = "no bed model yet, moves are not checked for collisions";
+    static final String COLLISION = "collision";
     static final String PROOF = "MOTION_PROOF";
     static final String REFUSED = "MOTION_REFUSED";
 
@@ -165,18 +168,30 @@ final class BedGuard {
         if (!active()) {
             return null;
         }
-        BedModelStore.State st = state();
+        DispenseService svc = ctx.svcOrNull();
+        BedModelStore.State st = svc == null ? null : svc.getBedModel().state();
         if (st == null) {
-            throw refusal(null, "the dispense engine is not running, so the bed model cannot be checked",
+            throw refusal(COLLISION, null, "the dispense engine is not running, so the bed model cannot be checked",
                     "restart OpenPnP (il-openpnp) so its engine starts", legs, null, dry);
         }
         if (st.model == null) {
-            throw refusal(null, "the bed model is not valid (" + st.error + ")", "send a valid model with PUT /api/bed",
-                    legs, null, dry);
+            throw refusal(COLLISION, null, "the bed model is not valid (" + st.error + ")", "send a valid model with PUT "
+                    + "/api/bed", legs, null, dry);
         }
         BedModel m = st.model;
+        Long changed = svc.getConfig().needleChangedAtMs;
+        for (BedModel.Tool t : m.tools()) {
+            // the full fix: the engine derives the tip end from N2's head offset, the landing and the trim at a mount
+            if ("needle".equals(t.moves) && changed != null && (t.tipEndAtMs == null || t.tipEndAtMs < changed)) {
+                throw refusal(BedEndpoints.MEASUREMENT_NEEDED, null, "the needle's tip end in the bed model (tools '"
+                        + t.id + "'.tipEnd) is from before the needle change at " + ZCheck.clock(changed), "measure the "
+                                + "mounted needle's tip end, then send it with PUT /api/bed/tools/" + t.id + " (a later "
+                                + "tipEnd.atMs and a measurement record)", legs, m.version, dry);
+            }
+        }
         if (!s.known) {
-            throw refusal(null, "the head's place is not known (" + s.why + ")", s.next, legs, m.version, dry);
+            throw refusal(COLLISION, null, "the head's place is not known (" + s.why + ")", s.next, legs, m.version,
+                    dry);
         }
         o.homeAtMs = s.homeAtMs;
         o.xyErrMm = 0;
@@ -184,7 +199,7 @@ final class BedGuard {
         CollisionCheck.Result r = CollisionCheck.check(m, legs, o);
         double ms = (System.nanoTime() - t0) / 1e6;
         if (!r.clear) {
-            throw refusal(r.hit, why(r.hit), next(r.hit), legs, m.version, dry);
+            throw refusal(COLLISION, r.hit, why(r.hit), next(r.hit), legs, m.version, dry);
         }
         Map<String, Object> proof = Views.map("what", what, "tool", tool, "modelVersion", m.version, "start",
                 startView(s), "legs", path(legs), "closest", r.hit == null ? null : Views.map("id", r.hit.object.id,
@@ -198,9 +213,9 @@ final class BedGuard {
     }
 
     /** The 409 every hooked route and the dry run give (§6.3); journaled unless {@code dry}. */
-    private ApiException refusal(CollisionCheck.Hit h, String why, String next, List<CollisionCheck.Leg> legs,
-            Integer version, boolean dry) {
-        ApiException e = new ApiException(409, "collision", why + ": " + next).with("why", why).with("next", next)
+    private ApiException refusal(String code, CollisionCheck.Hit h, String why, String next,
+            List<CollisionCheck.Leg> legs, Integer version, boolean dry) {
+        ApiException e = new ApiException(409, code, why + ": " + next).with("why", why).with("next", next)
                 .with("tool", h == null ? null : h.tool.id).with("layer", h == null ? null : h.layer.name)
                 .with("blocker", h == null ? null : Views.map("id", h.object.id, "name", h.object.name, "kind",
                         h.object.kind, "state", h.object.state)).with("shortfallMm", h == null ? null : h.mm)

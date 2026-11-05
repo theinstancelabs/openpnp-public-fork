@@ -382,6 +382,46 @@ public class BedGuardSimTest {
     }
 
     /**
+     * After a needle change the model's needle tip end is the old needle's (the 27G's and the bent 22G's ends were 5.9
+     * mm apart): every hooked move is refused, 409 measurement-needed naming it, nothing sent, until a tip end measured
+     * since the change is recorded with its measurement record (review MAJOR 3).
+     */
+    @Test
+    public void afterANeedleChangeMovesWaitForTheNeedlesTipEnd() throws Exception {
+        start(BedFixture.text());
+        ok("POST", "/api/needle/changed", "{\"why\":\"bed test\"}", UI);
+        sim.server.mark();
+        JsonObject r = call("POST", "/api/jog", "{\"tool\":\"n1\",\"dx\":1}", UI);
+        assertEquals(409, status, body);
+        assertEquals("measurement-needed", r.get("error").getAsString(), body);
+        assertTrue(r.get("why").getAsString().contains("needle's tip end"), body);
+        assertTrue(r.get("next").getAsString().contains("PUT /api/bed/tools/needle"), body);
+        assertEquals(r.get("why").getAsString() + ": " + r.get("next").getAsString(), r.get("reason").getAsString());
+        call("POST", "/api/move-to", "{\"tool\":\"n1\",\"x\":100,\"y\":400}", UI);
+        assertEquals(409, status, body);
+        call("POST", "/api/motion/check", "{\"kind\":\"jog\",\"tool\":\"n1\",\"dx\":1}", UI);
+        assertEquals(409, status, body);
+        ok("POST", "/api/lock/release", "{}", UI);
+        String token = acquire();
+        call("POST", "/api/gcode", "{\"lines\":[\"G1 X100 F3000\"]}", token);
+        assertEquals(409, status, body);
+        assertEquals(List.of(), motionSent(), "nothing sent");
+        assertEquals("measurement-needed", rows("MOTION_REFUSED").get(0).get("error").getAsString());
+        // a tip end stamped after the change needs its measurement record; with it, moves pass again
+        JsonObject needle = BedFixture.json().getAsJsonArray("tools").get(1).getAsJsonObject();
+        needle.getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis());
+        call("PUT", "/api/bed/tools/needle", needle.toString(), token);
+        assertEquals(409, status, "a newer tip end is a measurement: " + body);
+        svc.getDb().event(null, "INFO", "NEEDLE_LANDING", "the tip's end over the bottom camera (bench)");
+        needle.add("measured", new JsonParser().parse("{\"how\":\"bottom camera\",\"by\":\"Process\",\"atMs\":"
+                + System.currentTimeMillis() + ",\"errMm\":0.05,\"evidence\":\"event:" + svc.getDb().recentEvents(1)
+                        .get(0).get("id") + "\"}"));
+        ok("PUT", "/api/bed/tools/needle", needle.toString(), token);
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 F3000\",\"M400\"]}", token);
+        assertEquals(100, sim.server.position('X'), 1e-9);
+    }
+
+    /**
      * The proof is made on OpenPnP's machine thread right before the first line, as jog and move-to make theirs: a move
      * queued there after the batch's checks is proven from where it leaves the head (review MINOR b).
      */

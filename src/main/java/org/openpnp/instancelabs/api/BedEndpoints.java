@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 
 import org.openpnp.instancelabs.dispense.BedModel;
@@ -31,11 +32,11 @@ import com.google.gson.JsonPrimitive;
  * exist) where that part keeps its records: a lower or newly measured top, a smaller top error or a touchable top
  * ({@code measured.top}); a smaller outline or margin, or an unmeasured object becoming measured ({@code measured.xy});
  * any change of the bed plane or the bed's smaller outline ({@code bed.plane}); any see-saw change
- * ({@code seesaw.measured}); a smaller, higher or moved tool layer ({@code tools[].measured}). A removed object stops
- * blocking only through {@code /cleared} with both of Process's measurements: the top camera against the stored
- * empty-bed picture of that spot (a fixed threshold, no person judging) and N1 lowered to its floor at 3 points inside
- * the outline with no contact (N1 cannot touch the bare bed). A smaller Z margin or a deeper contact depth frees space
- * everywhere: not through the API in this build.</p>
+ * ({@code seesaw.measured}); a smaller, higher or moved tool layer, a changed tipEnd (its atMs too) or moves
+ * ({@code tools[].measured}). A removed object stops blocking only through {@code /cleared} with both of Process's
+ * measurements: the top camera against the stored empty-bed picture of that spot (a fixed threshold, no person
+ * judging) and N1 lowered to its floor at 3 points inside the outline with no contact (N1 cannot touch the bare bed). A
+ * smaller Z margin or a deeper contact depth frees space everywhere: not through the API in this build.</p>
  */
 final class BedEndpoints {
     static final String MEASUREMENT_NEEDED = "measurement-needed";
@@ -323,8 +324,9 @@ final class BedEndpoints {
                 needs.add("the tool " + t.id + " leaves the model: not through the API in this build");
                 continue;
             }
+            // a new tipEnd.atMs too: it lets the needle prove again after a needle change (#66 review MAJOR 3)
             boolean freed = !t.moves.equals(n.moves) || Double.compare(t.tipDx, n.tipDx) != 0 || Double.compare(t.tipDy,
-                    n.tipDy) != 0;
+                    n.tipDy) != 0 || !Objects.equals(t.tipEndAtMs, n.tipEndAtMs);
             for (BedModel.Layer l : t.layers) {
                 BedModel.Layer nl = null;
                 for (BedModel.Layer x : n.layers) {

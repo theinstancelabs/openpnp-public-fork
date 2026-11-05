@@ -56,7 +56,7 @@ Every error is JSON: `{"error": "<slug>", "reason": "<plain language>", ...detai
 | 405 | `method-not-allowed` | |
 | 409 | `refused` | machine state or an interlock refuses; `interlocks: {ok, violations:[{code,message}], notes}` included when the engine's interlocks refused |
 | 409 | `collision` | BR-98 (§3.9): a jog, move-to or G-code batch (or its dry run) whose path the bed model does not prove clear; nothing was sent. `why`, `next` (clauses: lower case, no final period), `tool`, `layer`, `blocker {id, name, kind, state}`, `shortfallMm`, `toolLowestZ`, `blockerTopZ`, `at {x, y}`, `leg`, `path`, `modelVersion`. A stable key: the deployer maps it |
-| 409 | `measurement-needed` | BR-98 (§3.9): a bed model write that frees space without the new measurement record it needs; `needs` lists each, in words |
+| 409 | `measurement-needed` | BR-98 (§3.9): a bed model write that frees space without the new measurement record it needs (`needs` lists each, in words); or a jog, move-to or G-code batch (or its dry run) while the model's needle tip end is older than the engine's last needle change (`why`, `next` and the rest as `collision`'s; a `MOTION_REFUSED` row; nothing sent) |
 | 409 | `locked`, `lock-lost`, `no-lock`, `stop-not-confirmed`, `stopped` | the machine lock (§3.7): someone else holds it; your lock was taken, released or ran out (`lost: {how, by, atMs, what}`); no lock (or an unknown token); Take control's STOP not confirmed (the lock is the user's anyway); a STOP ended your G-code batch. Each carries `lock` |
 | 400 / 403 | `refused-line`, `not-ui` | a G-code line the passthrough does not send (`index`, `line`, `why`; nothing sent); Take control without `X-IL-Client: ui` |
 | 502 / 504 | `controller-error`, `controller-timeout` | a passthrough line answered with a controller error, or no `ok` in `timeoutMs`; `index`, `line`, `replies`, `results` so far; the rest not sent |
@@ -619,6 +619,12 @@ under it). An object that is not measured (null top; added, moved, removed) bloc
 bed is the object `bed` (top 0, no margin). Only a tip layer (`at: tip-end`) is ever exempt (G-code: contact depth;
 a jog: its floor), and only over a measured `touchable` top whose outline holds it.
 
+**The needle's tip end** (`tools[moves: needle].tipEnd {dx, dy, setup, atMs}`) is where the mounted needle ends, and
+moves with each needle. In this build nothing rewrites it at a mount: while the engine's last needle change
+(`needleChangedAtMs`) is later than its `atMs` (or it has none), every hooked move and dry run answers 409
+`measurement-needed` (`the needle's tip end in the bed model (tools 'needle'.tipEnd) is from before the needle change at
+<time>`; next: measure it and send it with `PUT /api/bed/tools/needle`, a later `tipEnd.atMs` and a measurement record).
+
 - `GET /api/bed` (no lock) → `{version, valid, error, why, digest, changedAtMs, changedBy, zMarginMm, contactDepthMm,
   bed, objects: [{...as stored, stateLabel}], tools: [{...as stored, lowestZNow, lowest: homed|measured|worst-case}],
   head: {x, y, known, source: homed|unknown, errMm, atMs}, seesaw: {...as stored, state: homed|worst-case, source,
@@ -661,8 +667,8 @@ a jog: its floor), and only over a measured `touchable` top whose outline holds 
     exist): a lower top, a smaller top error, `touchable` switched on, or an unmeasured object becoming measured
     (`measured.top`); a smaller outline or margin, or an unmeasured object becoming measured (`measured.xy`); any
     change of the bed plane or a smaller bed outline (`bed.plane`, which is its own record); any see-saw change
-    (`seesaw.measured`); a smaller, higher, removed or moved tool layer, a changed `tipEnd` or `moves`
-    (`tools[].measured`). A removed object stops blocking only through `/cleared`. A smaller `zMarginMm`, a deeper
+    (`seesaw.measured`); a smaller, higher, removed or moved tool layer, a changed `tipEnd` (its `atMs` too) or
+    `moves` (`tools[].measured`). A removed object stops blocking only through `/cleared`. A smaller `zMarginMm`, a deeper
     `contactDepthMm` or a tool leaving the model: not through the API in this build. Otherwise 409
     `measurement-needed`.
 

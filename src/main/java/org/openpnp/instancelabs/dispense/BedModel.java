@@ -259,13 +259,16 @@ public final class BedModel {
         public final String moves;
         /** The tip's end relative to the head; NaN on a fixed tool without one. */
         public final double tipDx, tipDy;
+        /** When that end was measured ({@code tipEnd.atMs}); null when the file does not say. */
+        public final Long tipEndAtMs;
         public final List<Layer> layers;
 
-        Tool(String id, String moves, double tipDx, double tipDy, List<Layer> layers) {
+        Tool(String id, String moves, double tipDx, double tipDy, Long tipEndAtMs, List<Layer> layers) {
             this.id = id;
             this.moves = moves;
             this.tipDx = tipDx;
             this.tipDy = tipDy;
+            this.tipEndAtMs = tipEndAtMs;
             this.layers = layers;
         }
 
@@ -483,10 +486,12 @@ public final class BedModel {
         }
         boolean rides = !"fixed".equals(moves);
         double dx = Double.NaN, dy = Double.NaN;
+        Long tipAt = null;
         JsonElement te = o.get("tipEnd");
         if (te != null && te.isJsonObject()) {
             dx = number(te.getAsJsonObject(), "dx", path + ".tipEnd");
             dy = number(te.getAsJsonObject(), "dy", path + ".tipEnd");
+            tipAt = optionalLong(te.getAsJsonObject(), "atMs", path + ".tipEnd");
         }
         else if (rides) {
             throw new IllegalArgumentException(path + ": tipEnd {dx, dy} is required for a tool that rides the see-saw "
@@ -531,7 +536,7 @@ public final class BedModel {
             Poly poly = outline(l.get("outline"), lp + ".outline");
             layers.add(new Layer(name, tip, tip ? poly.shifted(dx, dy) : poly, above, bottom));
         }
-        return new Tool(id, moves, dx, dy, Collections.unmodifiableList(layers));
+        return new Tool(id, moves, dx, dy, tipAt, Collections.unmodifiableList(layers));
     }
 
     /** {box: [x0, y0, x1, y1]}, {circle: [cx, cy, r]} or {polygon: [[x, y], ...]} convex, counter-clockwise. */
