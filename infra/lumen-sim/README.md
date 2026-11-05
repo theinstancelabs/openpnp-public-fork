@@ -197,7 +197,9 @@ nothing.
 - A press deeper than `overtravel_mm` past its point is reported once in `sim_errors` ("PA5 switch overtravel: n1 0.62
   mm past its trip point (overtravel 0.50 mm)", `line` null), seen at the end of each move (a quick stop's too), at
   each read, at a Z release (`z_drop`) and at a physical fault (where the head is then, also mid-move), and when it is
-  wired under the head. Not seen: an X/Y move that crosses a window deep and ends outside it. The head is not stopped
+  wired under the head (a new switch wired under a head already past its point reports it once more). At M112 the
+  stock firmware's steppers go off only after its 0.6 s coast, so a `z_drop` there is seen where the coast ends
+  (il-safety: at once). Not seen: an X/Y move that crosses a window deep and ends outside it. The head is not stopped
   (no hard stop is modelled).
 - The state's `pa5`: the settings, `level`, `pressed`, `tool`, `trip_z` and `depth_mm` (the deepest of this press),
   `overtravels`, as of the last observation (from its wiring on): the state request reads nothing. The switch is the

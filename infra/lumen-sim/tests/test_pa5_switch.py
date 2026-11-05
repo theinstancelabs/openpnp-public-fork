@@ -12,12 +12,13 @@ from lumen_sim.bench import Bench
 # The real board's answer to M43 P5 (runs/serial.log, 11-02, nothing wired: 0), byte for byte
 PA5_LINE = "PIN: PA5  (A9)   M42 P53          <unused/unknown>                       Input  = %d"
 PARK = (100.0, 50.0, 31.5)
+OVER_06 = "PA5 switch overtravel: n1 0.60 mm past its trip point (overtravel 0.50 mm)"
 N1 = {"tool": "n1", "x0": 99.0, "y0": 49.0, "x1": 101.0, "y1": 51.0, "trip_z": 12.0}
 NEEDLE = {"tool": "needle", "x0": 199.0, "y0": 49.0, "x1": 201.0, "y1": 51.0, "trip_z": 52.0}
 
 
-def homed():
-    b = Bench(park=PARK)
+def homed(**kw):
+    b = Bench(park=PARK, **kw)
     b.send("G28")
     return b
 
@@ -282,6 +283,42 @@ class Pa5Switch(unittest.TestCase):
         self.assertEqual(level(b), 1)
         self.assertTrue(b.sim.control({"cmd": "fault", "fault": "home_offset", "x": 0.1}, b.t)["ok"])
         self.assertTrue(pa5(b)["pressed"], "a fault that moves no head keeps the press")
+
+    def test_a_kill_drops_z_after_its_coast(self):
+        """Stock Marlin's minkill() turns the steppers off only after its 0.6 s coast: an M112 0.15 s into a move up
+        off the switch drops Z where the coast ends, above the trip (nothing to report)."""
+        b = switch(homed())
+        to(b, 100, 50, 11.8)
+        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+        b.send("G1 Z20 F60")
+        b.run(0.15)
+        b.write("M112\n")
+        b.run(1.0)
+        self.assertEqual(errors(b), [])
+        self.assertFalse(pa5(b)["pressed"])
+
+    def test_a_kill_at_rest_drops_z_onto_the_switch(self):
+        """Stock: when the coast ends; il-safety (its kill freezes at once): at the kill."""
+        for personality, at_kill in (("stock", []), ("il-safety", [OVER_06])):
+            with self.subTest(personality):
+                b = switch(homed(personality=personality))
+                to(b, 100, 50, 11.8)
+                self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+                b.write("M112\n")  # no ok comes: send would wait 60 s
+                b.run(0.1)
+                self.assertEqual(errors(b), at_kill)
+                b.run(1.0)
+                self.assertEqual(errors(b), [OVER_06])
+
+    def test_another_tools_window_clears_the_release_point(self):
+        """N1 released and lifted in its window to Z 53 (its release point follows), then the head moves into the
+        needle's window at that height: the needle's own press, 1 mm past its trip at once."""
+        b = switch(homed())
+        to(b, 100, 50, 11.9)
+        to(b, z=53)
+        to(b, x=200)
+        self.assertEqual(level(b), 1)
+        self.assertEqual(errors(b), ["PA5 switch overtravel: needle 1.00 mm past its trip point (overtravel 0.50 mm)"])
 
     def test_the_state_is_right_once_the_switch_is_wired(self):
         b = homed()

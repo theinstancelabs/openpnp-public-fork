@@ -104,7 +104,7 @@ class Stepper:
         self.endstop_hit = False            # latched like Endstops::hit_state
         self.freeze_at = None               # kill(): the stepper ISR stops at this time
         self.frozen = False
-        self.on_move = None                 # called after the head moved (a block ended or was cut)
+        self.on_move = None                 # called after the head moved (a block ended or was cut, or a kill froze)
 
     # --- queries ---
     def update(self, now):
@@ -114,6 +114,8 @@ class Stepper:
             self._advance(self.freeze_at)
             self._cut(self.freeze_at)
             self.frozen = True
+            if self.on_move:
+                self.on_move()  # minkill() switches the steppers off here: where the head ends, moving or not
             return
         self._advance(now)
 

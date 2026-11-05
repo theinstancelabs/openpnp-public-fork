@@ -563,7 +563,9 @@ class Firmware:
         """stepper.disable_axis(): the driver lets go. A released Z moves by the machine's z_drop."""
         if axis == "Z" and self.enabled["Z"]:
             self.machine.release_z()
-            self.pa5(self.now)  # a drop under or off the switch, where the head is (a quick stop's move may run)
+            if not (self.stepper.freeze_at is not None and self.stepper.freeze_at > self.now):
+                self.pa5(self.now)  # a drop under or off the switch, where the head is (a quick stop's move may run)
+            # else a kill's coast: the steppers go off when it ends, and Stepper.update reads the switch there
         self.enabled[axis] = False
 
     # ------------------------------------------------------------------ positions
