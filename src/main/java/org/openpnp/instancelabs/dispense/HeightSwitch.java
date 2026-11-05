@@ -16,17 +16,22 @@ import java.util.regex.Pattern;
  * left them on): paste must never touch the switch, nor N1 carry a pressurised needle across the bed.
  *
  * <p>The way down from travel Z to the start is stepped and read as a coarse descent is (a press on it is refused:
- * start higher), so a start past the trip goes at most one coarse step past it. One press: a coarse descent from the
- * start (N1 0.25 mm, the needle 0.10) to the first step that reads pressed, 0.40 mm back (still pressed there: the
- * switch sticks or the tool is caught, refused), then a fine descent of 0.025 mm from 0.30 above that step to one fine
- * step past it: the trip is the first fine step that reads pressed, so the tool goes at most one coarse and one fine
- * step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. No move goes
- * above travel Z (the back move, the fine start and the lift stop there): past it the see-saw lowers the other tool;
- * still pressed at travel Z is refused as that (it sticks, or it trips less than 0.40 mm below travel Z).
- * Every step is a move, M400 and 50 ms before its read. Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's
- * other side) as it rises ({@link Plan#down}). Travel Z at the end, also after a refusal and after a failure (a reply
- * with no level twice, a line that timed out: the tool goes up, Z only, before the failure is thrown); a STOP's abort
- * ends it where it is.</p>
+ * start higher), so a start past the trip goes at most one coarse step past it. The switch is a hinge lever pressed
+ * near its free end: it lets go well above its trip (its movement differential times the lever ratio). One press
+ * (Process's rule, 11-04): a coarse descent from the start (N1 0.25 mm, the needle 0.10) to the first step that reads
+ * pressed; lifts of 0.25 mm until it reads released (still pressed 2.5 mm up: the switch sticks or the tool is caught,
+ * refused); straight to 0.30 above that step, above the operating point (within one coarse step above it), where a
+ * snap switch stays released (pressed there: erratic, refused); then a fine descent of 0.025 mm to one fine step past
+ * that step: the trip is the first fine step that reads pressed, so the tool goes at most one coarse and one fine step
+ * past the plunger's trip, and never past the floor. Lifts of 0.25 mm again until it reads released: the press's
+ * release (the same refusal); the differential is the mean of |release − trip|, at 0.25 mm resolution or travel Z. The
+ * next press starts 1 mm above the trip (it stays released between the trip and the release). No move goes above
+ * travel Z (the lifts and the fine start stop there): past it the see-saw lowers the other tool; still pressed at
+ * travel Z is refused as that (it sticks, or it releases only above travel Z). Every step is a move, M400 and a dwell
+ * before its read (a descent's 50 ms, a lift's 100, the fine start's 200, as the bench tool's). Raw Z: N1 goes down as
+ * raw Z falls, the needle (the see-saw's other side) as it rises ({@link Plan#down}). Travel Z at the end, also after a
+ * refusal and after a failure (a reply with no level twice, a line that timed out: the tool goes up, Z only, before the
+ * failure is thrown); a STOP's abort ends it where it is.</p>
  */
 public final class HeightSwitch {
     /** The named location of the switch's top centre ({@code PUT /api/locations/height-switch {x, y}}). */
@@ -37,8 +42,9 @@ public final class HeightSwitch {
     public static final double FINE_MM = 0.025;
     /** The fine descent starts this far above the coarse trip. */
     public static final double FINE_FROM_MM = 0.30;
-    /** How far back from the coarse trip the switch must read released. */
-    public static final double BACK_MM = 0.40;
+    /** After a trip the tool lifts in steps of this until the switch reads released, at most {@link #RELEASE_MAX_MM}. */
+    public static final double RELEASE_STEP_MM = 0.25;
+    public static final double RELEASE_MAX_MM = 2.5;
     /** The lift after a press: the next press starts here. */
     public static final double LIFT_MM = 1.0;
     /** The longest start-to-floor window (a first search over the switch's unknown height is the bench tool's). */
@@ -88,8 +94,12 @@ public final class HeightSwitch {
     /** What a measure found. {@code why}: why nothing (or not everything) was found; {@code refused}: a refusal. */
     public static final class Result {
         public String tool;
-        public List<Double> trips = new ArrayList<>();
-        public Double tripRawZ, sdMm, rangeMm;
+        /** Each press's trip and where it read released on the lifts after it (raw Z, one of each per press). */
+        public List<Double> trips = new ArrayList<>(), releases = new ArrayList<>();
+        /**
+         * {@code differentialMm}: the mean of |release − trip| (0.25 mm resolution or travel Z), null with no press.
+         */
+        public Double tripRawZ, sdMm, rangeMm, differentialMm;
         public Integer idleLevel;
         public boolean accepted, refused;
         public String why;
@@ -143,13 +153,16 @@ public final class HeightSwitch {
         }
         lift(io, p);
         if (!r.trips.isEmpty()) {
-            double sum = 0, min = Double.MAX_VALUE, max = -Double.MAX_VALUE;
-            for (double t : r.trips) {
+            double sum = 0, min = Double.MAX_VALUE, max = -Double.MAX_VALUE, differential = 0;
+            for (int i = 0; i < r.trips.size(); i++) {
+                double t = r.trips.get(i);
                 sum += t;
                 min = Math.min(min, t);
                 max = Math.max(max, t);
+                differential += Math.abs(r.releases.get(i) - t);
             }
             r.tripRawZ = sum / r.trips.size();
+            r.differentialMm = differential / r.trips.size();
             double v = 0;
             for (double t : r.trips) {
                 v += (t - r.tripRawZ) * (t - r.tripRawZ);
@@ -232,32 +245,36 @@ public final class HeightSwitch {
                 r.why = String.format(Locale.ROOT, "no trip between Z %.3f and Z %.3f", from, p.zFloor);
                 return;
             }
-            double back = up(p, zc, BACK_MM);
-            io.send(move(back, 600));
+            Double released = release(io, p, r, zc, "the coarse trip");
+            if (released == null) {
+                return;
+            }
+            // above the operating point (within one coarse step above zc): a snap switch stays released here
+            double fine = up(p, zc, FINE_FROM_MM);
+            io.send(move(fine, 600));
             io.send("M400");
             io.send("G4 P200");
             if (read(io) != r.idleLevel) {
                 r.refused = true;
-                // the back move stops at travel Z (no move goes above it), maybe short of 0.40
-                r.why = back == p.travelZ
-                        ? String.format(Locale.ROOT, "the switch still reads pressed at travel Z (Z %.3f, the coarse "
-                                + "trip at Z %.3f): it sticks, or it trips less than %.2f mm below travel Z (the tool "
-                                + "barely clears it at travel height): check the switch's height or travelSafeZMm",
-                                back, zc, BACK_MM)
-                        : String.format(Locale.ROOT, "still pressed %.2f mm above the coarse trip (Z %.3f): the switch "
-                                + "sticks or the tool is caught", Math.abs(zc - back), zc);
+                r.why = String.format(Locale.ROOT, "pressed again %.2f mm above the coarse trip after its release at Z "
+                        + "%.3f: the switch is erratic", Math.abs(zc - fine), released);
                 return;
             }
             // one fine step past the coarse trip: a press that does not repeat (a bounce, noise) goes no deeper
             double end = p.down < 0 ? Math.max(zc - FINE_MM, p.zFloor) : Math.min(zc + FINE_MM, p.zFloor);
-            double fine = up(p, zc, FINE_FROM_MM);
             Double t = descend(io, p, fine, end, FINE_MM, r.idleLevel);
             if (t == null) {
                 r.why = String.format(Locale.ROOT, "the fine descent from Z %.3f found no trip (the coarse one did at Z "
                         + "%.3f)", fine, zc);
                 return;
             }
+            Double tReleased = release(io, p, r, t, "the trip");
+            if (tReleased == null) {
+                return;
+            }
             r.trips.add(t);
+            r.releases.add(tReleased);
+            // it stays released between the trip and the release, wherever the release was
             from = round(up(p, t, LIFT_MM));
             io.send(move(from, 600));
             io.send("M400");
@@ -279,6 +296,35 @@ public final class HeightSwitch {
                 return z;
             }
         }
+        return null;
+    }
+
+    /**
+     * Lifts from {@code from} in 0.25 mm steps, each read, until the pin is back at its idle level: that Z, or null
+     * when refused (still pressed 2.5 mm up, or at travel Z, where the lifts stop). {@code what}: the trip it lifts
+     * from, for the refusal.
+     */
+    private static Double release(Io io, Plan p, Result r, double from, String what) throws Exception {
+        int n = (int) Math.round(RELEASE_MAX_MM / RELEASE_STEP_MM);
+        for (int k = 1; k <= n; k++) {
+            double z = up(p, from, k * RELEASE_STEP_MM);
+            io.send(move(z, 600));
+            io.send("M400");
+            io.send("G4 P100");
+            if (read(io) == r.idleLevel) {
+                return round(z);
+            }
+            if (z == p.travelZ) {
+                r.refused = true;
+                r.why = String.format(Locale.ROOT, "the switch still reads pressed at travel Z (Z %.3f, %s at Z %.3f): "
+                        + "it sticks, or it releases only above travel Z (the tool still holds its lever down at travel "
+                        + "height): check the switch's height or travelSafeZMm", z, what, from);
+                return null;
+            }
+        }
+        r.refused = true;
+        r.why = String.format(Locale.ROOT, "still pressed %.2f mm above %s (Z %.3f): the switch sticks or the tool is "
+                + "caught", RELEASE_MAX_MM, what, from);
         return null;
     }
 

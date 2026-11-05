@@ -5288,6 +5288,8 @@ public final class DispenseService {
         trip.rangeMm = res.rangeMm;
         trip.sdMm = res.sdMm;
         trip.presses = res.trips.size();
+        trip.releases = new ArrayList<>(res.releases);
+        trip.differentialMm = res.differentialMm;
         // not before the needle's token (ahead of the clock after a clock set back), or needleTrip would void it
         trip.atMs = needle && token != null ? Math.max(res.atMs, token) : res.atMs;
         trip.homeAtMs = res.homeAtMs;

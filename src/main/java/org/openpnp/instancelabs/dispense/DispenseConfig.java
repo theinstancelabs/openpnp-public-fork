@@ -393,6 +393,9 @@ public class DispenseConfig {
     public static class HeightSwitchTrip {
         public double tripRawZ, rangeMm, sdMm;
         public int presses;
+        /** Each press's release (raw Z) and their mean distance from the trips (mm); null in a trip from before them. */
+        public java.util.List<Double> releases;
+        public Double differentialMm;
         public long atMs;
         /** The home it was measured under ({@link HomeTracker#getLastHomeAtMs()}); null: a home of unknown time. */
         public Long homeAtMs;
