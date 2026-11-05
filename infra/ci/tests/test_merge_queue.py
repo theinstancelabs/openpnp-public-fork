@@ -181,6 +181,26 @@ class GateBehaviour(unittest.TestCase):
         names = {n.strip() for n in re.search(r"needs: \[([^\]]*)\]", self.needs).group(1).split(",")}
         self.assertEqual(names, set(ci_wiring.jobs(self.ci)) - {"gate", "release", "prune-artifacts"})
 
+    def test_a_cancelled_pr_run_reports_its_gate_under_another_name(self):
+        """A PR's newer run (a push, or the label full-ci added while a run is on the commit) cancels the older run,
+        whose gate still runs (if: always()). As `gate` its red would stay on the commit beside the newer run's verdict
+        and block the PR (11-04 #67, 11-05 #70). Under another name it is not the required check, so the commit waits
+        for the newer run's gate. Everywhere else the gate keeps its name: a cancelled leg ejects a queued PR at once."""
+        name = ci_wiring.job_value(self.needs, "name")
+
+        def shown(event, **results):
+            return ci_wiring.interpolate(name, {"github.event_name": event,
+                                                "needs.*.result": list(self.all_jobs(**results).values())})
+
+        self.assertEqual(shown("pull_request"), "gate")
+        self.assertEqual(shown("pull_request", **{s: "skipped" for s in SLOW}), "gate")  # the fast gate
+        self.assertEqual(shown("pull_request", maven="failure"), "gate")  # a failed job still blocks the PR
+        for need in ("build", "queued", "ui-e2e"):
+            self.assertNotEqual(shown("pull_request", **{need: "cancelled"}), "gate", need)
+        self.assertNotEqual(shown("pull_request", result="cancelled"), "gate")  # the whole run cancelled
+        for event in ("merge_group", "push", "workflow_dispatch"):
+            self.assertEqual(shown(event, build="cancelled"), "gate", event)
+
     def test_the_fast_gate_only_on_an_unlabelled_pr_and_only_for_the_slow_jobs(self):
         fast = self.all_jobs(**{s: "skipped" for s in SLOW})
         self.assertTrue(self.verdict(fast, "pull_request"))

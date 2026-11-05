@@ -343,7 +343,9 @@ jobs:
           retention-days: 1
 
   gate:
-    name: gate
+    # A PR run cancelled by a newer run of the PR still runs its gate: as `gate` its red would block the commit beside
+    # the newer run's verdict (INF-14), so it reports under another name and the commit waits for the newer gate
+    name: ${{ github.event_name == 'pull_request' && contains(needs.*.result, 'cancelled') && 'gate (cancelled run)' || 'gate' }}
     if: always()
     timeout-minutes: 10  # a hung step must not hold the queue's required check for hours
     needs: [queued, build, infra, maven, deploy-e2e, controller-e2e, ui-e2e, ui-boardview, acceptance]
