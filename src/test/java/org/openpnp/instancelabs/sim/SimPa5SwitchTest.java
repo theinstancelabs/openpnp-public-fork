@@ -208,7 +208,7 @@ public class SimPa5SwitchTest {
     @Test
     public void thePullWithoutASwitch() throws Exception {
         start(scene(null));
-        for (String[] m : new String[][] {{"T2", "1"}, {"T3", "0"}, {"T0", "0"}, {"T2", "1"}}) {
+        for (String[] m : new String[][] {{"T2", "1"}, {"T0", "0"}, {"T2", "1"}, {"T3", "0"}, {"T2", "1"}}) {
             assertEquals(List.of("ok"), send("M42 P53 " + m[0]));
             assertEquals(Integer.parseInt(m[1]), level(), m[0]);
         }
@@ -427,7 +427,7 @@ public class SimPa5SwitchTest {
         SimPa5Switch sw = new SimPa5Switch(() -> now[0], System::nanoTime);
         assertEquals(1, to(sw, 100, 12.0));
         assertEquals(0, to(sw, 100, 12.025), "one step back: released");
-        now[0] = sceneOf("{\"presses\": [" + N1.replace("12.0", "12.05") + "]}");
+        now[0] = sceneOf(wired().replace("\"tripZ\": 12.0", "\"tripZ\": 12.05")); // the trip point alone changes
         assertEquals(1, read(sw, 100, 12.025), "at rest 0.025 mm past the new switch's point");
     }
 
