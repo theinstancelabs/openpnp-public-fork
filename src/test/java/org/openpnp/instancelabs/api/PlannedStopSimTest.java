@@ -553,7 +553,9 @@ public class PlannedStopSimTest {
     public void aPlannedStopWhoseWaitIsInterruptedNeverRuns() throws Exception {
         CountDownLatch queued = new CountDownLatch(1);
         CountDownLatch out = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<Thread> route = new java.util.concurrent.atomic.AtomicReference<>();
         MachineEndpoints.plannedStopHook = () -> {
+            route.set(Thread.currentThread()); // the hook runs on the route's request thread
             sim.machine.submit(() -> {
                 out.await(30, TimeUnit.SECONDS);
                 return null;
@@ -561,12 +563,20 @@ public class PlannedStopSimTest {
             queued.countDown();
         };
         sim.server.mark();
-        http.sendAsync(request("POST", "/api/stop/planned", null), HttpResponse.BodyHandlers.ofString());
-        assertTrue(queued.await(30, TimeUnit.SECONDS));
-        Thread.sleep(200); // the route waits for its task
-        api.stop();
-        MachineEndpoints.plannedStopHook = null;
-        out.countDown();
+        try {
+            http.sendAsync(request("POST", "/api/stop/planned", null), HttpResponse.BodyHandlers.ofString());
+            assertTrue(queued.await(30, TimeUnit.SECONDS));
+            Thread.sleep(200); // the route waits for its task
+            api.stop();
+            MachineEndpoints.plannedStopHook = null;
+            // the interrupted route claims its task in its catch: release the machine thread only after that ran
+            // (its request thread ends then: the stopped server's pool lets it go), else the two race (CI #47, 11-04)
+            route.get().join(10_000);
+            assertFalse(route.get().isAlive(), "the route's thread ended after the interrupt");
+        }
+        finally {
+            out.countDown(); // a failed check above must not hold the machine thread into the next test
+        }
         sim.machine.submit(() -> null, null, true).get(30, TimeUnit.SECONDS); // the planned stop's task had its turn
         assertEquals(Collections.emptyList(), sim.server.sinceMark(), "nothing sent, then or later");
         assertTrue(sim.machine.isEnabled());
