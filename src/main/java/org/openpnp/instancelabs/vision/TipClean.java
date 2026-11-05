@@ -1,7 +1,14 @@
 package org.openpnp.instancelabs.vision;
 
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 
 /**
  * BR-94: is the needle's end clean enough to press the height switch? Process's tipclean.py (runs/p37/tipclean.md,
@@ -18,8 +25,15 @@ public final class TipClean {
     private TipClean() {
     }
 
-    /** The checks' limits for one tip kind; the defaults are Process's for the 25G plastic taper (tipclean.md). */
+    /**
+     * The checks' limits for one tip kind; {@code new Limits()} is Process's 25G plastic taper (tipclean.md). A kind's
+     * entry in the settings gives every limit itself ({@link #of}): never the 25G's for one it leaves out.
+     */
     public static class Limits {
+        private static final Gson GSON = new Gson();
+        private static final java.lang.reflect.Type ENTRY = new TypeToken<Map<String, Double>>() {
+        }.getType();
+
         /** light: the rim's grey at least, its R/G within (the white ring on: 0.27-0.34 on record). */
         public double rimMin = 60, rimRgLow = 0.20, rimRgHigh = 0.45;
         /** found: the top-hat's peak at least (clean 25G 98-149; the needle at travel Z: 4-24). */
@@ -32,6 +46,40 @@ public final class TipClean {
         public double redMin = 0.45;
         /** The radii (mm): the end (a blurred clean end is ~0.8 across), the annulus (paste rims and tails), red, the search. */
         public double endMm = 0.5, annulusMm = 1.0, redMm = 0.35, findMm = 2.0;
+
+        /** These limits as a settings entry: {name: value}, every limit. */
+        public Map<String, Double> toMap() {
+            return GSON.fromJson(GSON.toJson(this), ENTRY);
+        }
+
+        /** A settings entry's limits, each its own; null when it is no kind's limits ({@link #problem}). */
+        public static Limits of(Map<String, Double> entry) {
+            return problem(entry) != null ? null : GSON.fromJson(GSON.toJson(entry), Limits.class);
+        }
+
+        /** Why a settings entry is no kind's limits (a limit missing or no number, a key that is no limit), or null. */
+        public static String problem(Map<String, Double> entry) {
+            if (entry == null) {
+                return "no limits";
+            }
+            Set<String> names = new Limits().toMap().keySet();
+            List<String> missing = new ArrayList<>(), unknown = new ArrayList<>();
+            for (String n : names) {
+                Double v = entry.get(n);
+                if (v == null || v.isNaN() || v.isInfinite()) {
+                    missing.add(n);
+                }
+            }
+            for (String k : entry.keySet()) {
+                if (!names.contains(k)) {
+                    unknown.add("'" + k + "'");
+                }
+            }
+            return missing.isEmpty() && unknown.isEmpty() ? null
+                    : (missing.isEmpty() ? "" : "no " + String.join(", ", missing) + " (every limit is the kind's own)")
+                            + (missing.isEmpty() || unknown.isEmpty() ? "" : "; ") + (unknown.isEmpty() ? ""
+                                    : String.join(", ", unknown) + " is no limit (" + String.join(", ", names) + ")");
+        }
     }
 
     /** What the check read, and the first check that failed (null: clean). */

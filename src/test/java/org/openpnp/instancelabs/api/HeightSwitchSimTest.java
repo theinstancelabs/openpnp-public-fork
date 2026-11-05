@@ -27,7 +27,6 @@ import org.openpnp.instancelabs.dispense.NeedleEndMeasure;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.instancelabs.dispense.TipCamera;
-import org.openpnp.instancelabs.vision.TipClean;
 import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.Length;
@@ -86,7 +85,8 @@ public class HeightSwitchSimTest {
         sim.server.heightSwitchNeedleTripZ = NEEDLE_TRIP;
         DispenseConfig c = svc.getConfig();
         c.heightSwitchMaxPastTripMm = 0.5; // Process's first value (BR-94: the lever's differential x overtravel)
-        c.needleEndMeasure.clean.put(c.tip.key, new TipClean.Limits()); // the 25G's limits for the SIM's tip
+        // the 25G's limits for the SIM's tip
+        c.needleEndMeasure.clean.put(c.tip.key, c.needleEndMeasure.clean.get("plastic-25g-taper"));
         svc.updateConfig(c);
         scene = new FromBelowScene(1);
         scene.k = N1_TRIP + NEEDLE_TRIP; // the SIM's see-saw
@@ -674,6 +674,26 @@ public class HeightSwitchSimTest {
             assertEquals(new ArrayList<String>(), sim.server.sinceMark(), route[0] + ": nothing sent");
         }
         assertTrue(heightSwitchStatus().get("needle").isJsonNull());
+    }
+
+    /**
+     * Review MINOR 1: PUT /api/config refuses a tip kind's clean limits that leave one out or name one that is no limit
+     * (400, naming them): never the 25G's in their place.
+     */
+    @Test
+    public void cleanLimitsThatAreNotWholeAre400() throws Exception {
+        JsonObject g25 = ok("GET", "/api/config", null).getAsJsonObject("needleEndMeasure").getAsJsonObject("clean")
+                .getAsJsonObject("plastic-25g-taper");
+        call("PUT", "/api/config", "{\"needleEndMeasure\":{\"clean\":{\"plastic-25g-taper\":" + g25
+                + ",\"steel-27g\":{\"spreadMax\":0.41}}}}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("needleEndMeasure.clean['steel-27g']: no rimMin"), lastBody);
+        g25.add("spredMax", g25.remove("spreadMax"));
+        call("PUT", "/api/config", "{\"needleEndMeasure\":{\"clean\":{\"plastic-25g-taper\":" + g25 + "}}}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("'spredMax' is no limit"), lastBody);
+        assertEquals(0.35, ok("GET", "/api/config", null).getAsJsonObject("needleEndMeasure").getAsJsonObject("clean")
+                .getAsJsonObject("plastic-25g-taper").get("spreadMax").getAsDouble(), 1e-9, "nothing changed");
     }
 
     /** Without N1's trip in this home, or without clean-check limits for the tip kind: refused, nothing sent. */

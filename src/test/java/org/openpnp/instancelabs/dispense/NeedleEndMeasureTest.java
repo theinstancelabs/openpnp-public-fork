@@ -297,6 +297,31 @@ public class NeedleEndMeasureTest {
         assertEquals("G1 Z31.500 F1200", cam.lines.get(cam.lines.size() - 2), "back at travel Z");
     }
 
+    /**
+     * Review MINOR 1: a tip kind's clean limits are all its own. An entry that leaves a limit out (another kind's, or the
+     * 25G's with a misspelt key) is refused by name, also from the settings file (the measure validates it): never
+     * filled in with the 25G's. The engine's copies of the settings keep what was refused.
+     */
+    @Test
+    public void aTipKindsCleanLimitsAreAllItsOwn() {
+        DispenseConfig c = new DispenseConfig();
+        assertTrue(c.validate().stream().noneMatch(x -> x.contains("needleEndMeasure")), "the 25G's entry, every limit "
+                + "given: " + c.validate());
+        com.google.gson.JsonParser json = new com.google.gson.JsonParser();
+        com.google.gson.JsonObject o = json.parse(c.toJson()).getAsJsonObject();
+        com.google.gson.JsonObject clean = o.getAsJsonObject("needleEndMeasure").getAsJsonObject("clean");
+        clean.add("steel-27g", json.parse("{\"spreadMax\": 0.41}"));
+        com.google.gson.JsonObject g25 = clean.getAsJsonObject("plastic-25g-taper");
+        g25.add("spredMax", g25.remove("spreadMax"));
+        DispenseConfig file = DispenseConfig.fromJson(o.toString());
+        List<String> p = file.validate();
+        assertTrue(p.stream().anyMatch(x -> x.startsWith("needleEndMeasure.clean['steel-27g']: no rimMin")),
+                p.toString());
+        assertTrue(p.stream().anyMatch(x -> x.startsWith("needleEndMeasure.clean['plastic-25g-taper']: no spreadMax")
+                && x.contains("'spredMax' is no limit")), p.toString());
+        assertEquals(p, file.copy().validate(), "a copy keeps them");
+    }
+
     /** A room-lit frame (the ring's glow not white): the clean check's light, the end not found (light or focus). */
     @Test
     public void aRingThatIsNotWhiteIsTheLight() throws Exception {

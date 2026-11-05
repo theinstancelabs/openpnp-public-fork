@@ -470,10 +470,12 @@ public class DispenseConfig {
         public double cleanRawZ = 40.4;
         /**
          * The clean check's limits per tip kind (the tip setup's key): Process's for the 25G plastic taper
-         * (tipclean.md; red holds for a red 25G only). A kind without its own limits is refused: never another's.
+         * (tipclean.md; red holds for a red 25G only). A kind without its own limits is refused: never another's. Each
+         * entry gives every limit and no other key (review MINOR 1: kept as given, so a file's missing or misspelt
+         * limit is refused too, never filled in).
          */
-        public java.util.Map<String, TipClean.Limits> clean = new java.util.LinkedHashMap<>(
-                java.util.Collections.singletonMap("plastic-25g-taper", new TipClean.Limits()));
+        public java.util.Map<String, java.util.Map<String, Double>> clean = new java.util.LinkedHashMap<>(
+                java.util.Collections.singletonMap("plastic-25g-taper", new TipClean.Limits().toMap()));
 
         void validate(java.util.List<String> p) {
             heights(p, "needleRawZ", needleRawZ, 31.5, 44.0, "np1.py: the needle's look stays between travel and raw "
@@ -504,10 +506,21 @@ public class DispenseConfig {
             if (needleRawZ != null && !needleRawZ.contains(cleanRawZ)) {
                 p.add("needleEndMeasure.cleanRawZ must be one of needleRawZ (the clean check reads that height's frame)");
             }
-            if (clean == null || clean.values().stream().anyMatch(l -> l == null || !(l.rimRgLow <= l.rimRgHigh
-                    && l.kLow <= l.kHigh && l.endMm > 0 && l.annulusMm > l.endMm && l.redMm > 0 && l.findMm > 0))) {
-                p.add("needleEndMeasure.clean must map tip setup keys to limits (low <= high, the radii above 0, the "
-                        + "annulus beyond the end)");
+            if (clean == null) {
+                p.add("needleEndMeasure.clean must map tip setup keys to their limits");
+            }
+            else {
+                for (java.util.Map.Entry<String, java.util.Map<String, Double>> e : clean.entrySet()) {
+                    String bad = TipClean.Limits.problem(e.getValue());
+                    TipClean.Limits l = bad == null ? TipClean.Limits.of(e.getValue()) : null;
+                    if (l != null && !(l.rimRgLow <= l.rimRgHigh && l.kLow <= l.kHigh && l.endMm > 0
+                            && l.annulusMm > l.endMm && l.redMm > 0 && l.findMm > 0)) {
+                        bad = "low <= high, the radii above 0, the annulus beyond the end";
+                    }
+                    if (bad != null) {
+                        p.add("needleEndMeasure.clean['" + e.getKey() + "']: " + bad);
+                    }
+                }
             }
         }
 

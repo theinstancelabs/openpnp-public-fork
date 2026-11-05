@@ -34,6 +34,7 @@ import org.openpnp.instancelabs.vision.BareSpotCheck;
 import org.openpnp.instancelabs.vision.Dot;
 import org.openpnp.instancelabs.vision.FiducialLocator;
 import org.openpnp.instancelabs.vision.SpotDot;
+import org.openpnp.instancelabs.vision.TipClean;
 import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
 import org.openpnp.machine.reference.driver.GcodeDriver;
@@ -5346,7 +5347,7 @@ public final class DispenseService {
         }
         NeedleEndMeasure.Plan p = new NeedleEndMeasure.Plan();
         p.s = c.needleEndMeasure;
-        p.clean = c.needleEndMeasure.clean.get(c.tip.key);
+        p.clean = TipClean.Limits.of(c.needleEndMeasure.clean.get(c.tip.key));
         p.setupKey = c.tip.key;
         p.nominalDx = ho[0] + lt[0];
         p.nominalDy = ho[1] + lt[1];
