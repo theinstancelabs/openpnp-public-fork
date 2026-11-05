@@ -1350,6 +1350,39 @@ public class PowerCycleSimTest {
     }
 
     /**
+     * BR-97 review: a batch's lines are checked against OpenPnP's homed state of the moment; a home that lands before
+     * they go out (here between the checks and the submit) would put unhomed levelling lines in the homed frame,
+     * unchecked: the batch stops before its first line.
+     */
+    @Test
+    public void aHomeBetweenTheChecksAndTheSendStopsTheBatch() throws Exception {
+        powerCycle();
+        lockForProcess();
+        GcodePassthrough.submitHook = () -> {
+            try {
+                sim.machine.execute(() -> {
+                    sim.machine.home();
+                    return null;
+                });
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", level("w", 1));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertTrue(sim.machine.isHomed(), "the home ran first");
+        assertFalse(sim.server.sinceMark().contains("G1 Z1 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("homed"), lastBody);
+    }
+
+    /**
      * BR-97 review: without the engine nothing journals a levelling call (Z_LEVEL) or keeps the reset on record: the
      * call is refused (409) and nothing is sent.
      */

@@ -59,6 +59,9 @@ final class GcodePassthrough {
     private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS",
             Locale.ROOT);
 
+    /** Tests only (BR-97 review): runs between a batch's checks and its submit. */
+    static volatile Runnable submitHook;
+
     private final ApiContext ctx;
     private volatile Batch running;
     /** A G0/G1 sent since the last M400's ok: the head may still move. */
@@ -70,11 +73,14 @@ final class GcodePassthrough {
     /** One running batch. */
     static final class Batch {
         final MachineLock.Holder holder;
+        /** OpenPnP's homed state its lines were checked under (BR-97: unhomed, Z moves are levelling moves). */
+        final boolean homed;
         /** The web STOP's reason once pressed. */
         volatile String stoppedBy;
 
-        Batch(MachineLock.Holder holder) {
+        Batch(MachineLock.Holder holder, boolean homed) {
             this.holder = holder;
+            this.homed = homed;
         }
     }
 
@@ -158,7 +164,7 @@ final class GcodePassthrough {
         }
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
-        Batch b = new Batch(holder);
+        Batch b = new Batch(holder, homed);
         synchronized (this) {
             if (running != null) {
                 throw ApiException.refused("a G-code batch is already running: wait for it");
@@ -168,6 +174,10 @@ final class GcodePassthrough {
         try {
             if (levelling) {
                 checkLevelling(m, d, svc, raw, lines, holder, what);
+            }
+            Runnable hook = submitHook;
+            if (hook != null) {
+                hook.run();
             }
             Future<Outcome> f = m.submit(() -> execute(m, d, b, lines, timeoutMs), null, true);
             long bound = lines.size() * (timeoutMs + 1000L) + 30000L;
@@ -410,6 +420,11 @@ final class GcodePassthrough {
         }
         if (!m.isEnabled()) {
             return "the machine was switched off";
+        }
+        // a home (or a Stop and Start) between the checks and this line: they no longer hold (BR-97 review)
+        if (m.isHomed() != b.homed) {
+            return "OpenPnP " + (b.homed ? "is no longer homed" : "homed") + " after the lines were checked: send them "
+                    + "again";
         }
         return null;
     }

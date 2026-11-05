@@ -549,7 +549,9 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   homed)}` (the holder): on OpenPnP's
   machine thread through its driver, one `ok` per line; `{results: [{line, replies[], ms}], ms, lock}`. Taken or
   stopped while a line ran (its last line included): 409 `lock-lost` / `stopped` with that line in `results` marked
-  `interrupted: true` (its `ok` may be the STOP's flush, not the move's end: never take it as done). Every line
+  `interrupted: true` (its `ok` may be the STOP's flush, not the move's end: never take it as done). OpenPnP homed, or
+  no longer homed, since the lines were checked (a home or a Stop and Start before they went out): 409 `stopped`
+  before the next line (`… after the lines were checked: send them again`). Every line
   is checked first (`PassthroughLines`): the bench tools' commands; X/Y/Z inside the soft limits; X/Y only once
   homed; while not homed (BR-97: levelling the see-saw before a reset's Home) `G1` with Z as the only axis and `F` ≤
   300 (not `G0`: it keeps `F` only while the firmware's `G0_FEEDRATE` is off), each line at most 1 mm from the Z before it (the first from the controller's Z, read first with M400 and
