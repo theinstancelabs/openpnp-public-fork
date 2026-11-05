@@ -1859,6 +1859,7 @@ public class PowerCycleSimTest {
         }
         stopper.join();
         stop[0].join(10000);
+        assertTrue(sim.server.sinceMark().contains("G1 Z1 F300"), "the first line went: " + sim.server.sinceMark());
         assertTrue(sim.server.sinceMark().contains("M410"), "OpenPnP's Stop ran: " + sim.server.sinceMark());
         assertFalse(sim.server.sinceMark().contains("G1 Z2 F300"), "no line after it: " + sim.server.sinceMark());
         assertEquals(409, lastStatus, lastBody);

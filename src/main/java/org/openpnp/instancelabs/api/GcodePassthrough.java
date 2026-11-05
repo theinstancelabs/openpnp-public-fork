@@ -284,8 +284,8 @@ final class GcodePassthrough {
                     + "its lines was sent; press STOP if the machine may still move";
         }
         return Math.abs(z - from) <= 0.01 ? null : String.format(Locale.ROOT, "Z moved after the lines were checked "
-                + "(raw Z %.2f then, %.2f now: a home, a jog or a power cycle ran meanwhile): walk again from the Z now", from,
-                z);
+                + "(raw Z %.2f then, %.2f now: a home, a jog or a power cycle ran meanwhile): walk again from the Z "
+                + "now", from, z);
     }
 
     /** How a batch ended: {@link #status} "ok", "lock-lost", "stopped", "controller-error" or "controller-timeout". */
