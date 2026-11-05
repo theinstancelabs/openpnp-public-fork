@@ -119,10 +119,12 @@ public class TaskRunIdSimTest {
         assertThrows(IllegalStateException.class, () -> tracker.start("needle touch-off", () -> {
             throw new IllegalStateException("a dispense task is already running");
         }));
+        assertEquals(1, tracker.labelsHeld(), "the refused start took its label with it");
         RunResult run = new RunResult(); // the queued run, under the id its task was started with
         run.runId = queued.runId;
         run.kind = "dot-ladder";
         tracker.onPhase(run, "dispensing calibration dots");
         assertEquals("dot ladder", tracker.snapshot().get("label"));
+        assertEquals(0, tracker.labelsHeld());
     }
 }

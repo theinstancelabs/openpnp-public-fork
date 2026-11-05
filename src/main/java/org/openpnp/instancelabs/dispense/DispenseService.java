@@ -6666,7 +6666,13 @@ public final class DispenseService {
     public static <T> T startAs(String runId, Callable<T> task) throws Exception {
         RUN_ID.set(runId);
         try {
-            return task.call();
+            T started = task.call();
+            if (RUN_ID.get() != null) {
+                // every task method makes its run on its caller's thread today; one that does not names no run
+                Logger.warn("BR-101: the task started as run {} made no run on its caller's thread: its answer's runId "
+                        + "names no run", runId);
+            }
+            return started;
         }
         finally {
             RUN_ID.remove();

@@ -74,13 +74,22 @@ final class RunTracker implements DispenseListener {
     <T> Started<T> start(String label, Callable<Future<T>> task) throws Exception {
         String runId = UUID.randomUUID().toString();
         labels.put(runId, label);
+        boolean started = false;
         try {
-            return new Started<>(runId, DispenseService.startAs(runId, task));
+            Started<T> s = new Started<>(runId, DispenseService.startAs(runId, task));
+            started = true;
+            return s;
         }
-        catch (Exception e) {
-            labels.remove(runId);
-            throw e;
+        finally {
+            if (!started) {
+                labels.remove(runId); // refused, or any throwable: the label goes with its task
+            }
         }
+    }
+
+    /** The labels held for runs not started yet (tests). */
+    int labelsHeld() {
+        return labels.size();
     }
 
     private synchronized Progress forRun(RunResult run) {
