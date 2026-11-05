@@ -123,6 +123,9 @@ async function nav(page, ws) {
     return;
   }
   await page.click('.tabs [role=tab][data-tab=' + ws + ']');
+  // Run opens Run › Start while nothing runs (runflow.js; run-flow.playwright.cjs tests it): these steps are today's
+  // pages, reached as the operator does, by Step by step (not shown while a run runs or the recovery leads)
+  if (ws === 'run') await page.waitForSelector('#rs-step-by-step', { state: 'visible', timeout: 3000 }).then((a) => a.click(), () => null);
 }
 
 /**
@@ -456,6 +459,32 @@ async function runFirstDots(page, n) {
       const p2 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 0 && s.dispense.profile.liftMm === null, 10000).then((s) => s.dispense.profile, () => null);
       check('profile: a blank lift is saved as null (the machine’s hop height); the fingerprint is the one before, byte for byte',
         !!p2 && p2.fingerprint === fp0, { fp0, fp: p2 && p2.fingerprint, liftMm: p2 && p2.liftMm });
+      // BR-85: the dots the touch-off does not count after the prime (the 25G's 3) are the recipe's, editable here; not part of a dot
+      check('profile: “Dots not counted after the prime” comes after “Pause after the lift” and shows the recipe’s 0 (the SIM’s)', await page.evaluate(() => {
+        const e = document.getElementById('pf-skip');
+        return !!e && e.value === '0' && !!(document.getElementById('pf-liftpause').compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }));
+      for (const [v, err] of [['6', 'Must be 0 to 5 dots.'], ['-1', 'Must be 0 to 5 dots.'], ['2.5', 'Must be a whole number.'], ['', 'Enter a number.']]) {
+        r = await typeIn('pf-skip', v, true);
+        check('profile: “' + v + '” dots not counted is refused at the field, as the engine refuses it (Save locked)', r.err === err && r.save, r);
+      }
+      r = await typeIn('pf-skip', '3', false);
+      check('profile: 3 dots not counted is taken', r.err === '', r);
+      await waitText(page, 'pf-diff-t', /dots not counted/, 5000).catch(() => {});
+      const bar3 = { parts: await textOf(page, 'pf-diff-t'), cons: await textOf(page, 'pf-diff-c') };
+      check('profile: the unsaved bar names the dots not counted; plans stay current (not part of a dot)',
+        bar3.parts === 'dots not counted after the prime 0 → 3' && /plans stay current/.test(bar3.cons), bar3);
+      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+      await page.click('#btn-pf-save');
+      const p3 = await waitStatus(page, (s) => s.dispense.profile.touchOffSkipDots === 3, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: 3 dots not counted is saved with the recipe; the fingerprint is the one before, byte for byte',
+        !!p3 && p3.fingerprint === fp0 && p3.problems.length === 0, p3 && { fp0, fp: p3.fingerprint, skip: p3.touchOffSkipDots, problems: p3.problems });
+      // back to the SIM's 0: the touch-off below counts every dot
+      await typeIn('pf-skip', '0', false);
+      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+      await page.click('#btn-pf-save');
+      const p4 = await waitStatus(page, (s) => s.dispense.profile.touchOffSkipDots === 0, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: 0 dots not counted is saved again (every dot counts)', !!p4 && p4.fingerprint === fp0, p4 && { fp: p4.fingerprint, skip: p4.touchOffSkipDots });
     }
 
     // ---- regulator attestation (§9.4): a psi change expires it for good, also when the psi is set back --------
@@ -801,6 +830,24 @@ async function runFirstDots(page, n) {
         && document.getElementById('btn-to-run').disabled) && (await textOf(page, 'to-reason')) === 'Too few steps: see the Steps field.', await textOf(page, 'to-reason'));
       await page.fill('#to-steps', '6');
       await page.waitForFunction(() => document.getElementById('to-steps-err').hidden && !document.getElementById('btn-to-run').disabled, null, { timeout: 10000 }).catch(() => {});
+      // the 25G's recipe (3 dots not counted, saved as Process saves it): the ladder opens at 0.200 mm; a start that leaves the
+      // counted dots below 0.125 mm is refused at the Start field (#44's rule), the line under Run points there
+      const setSkip = (k) => page.evaluate((v) => IL.api('PUT', '/api/config', { profile: { touchOffSkipDots: v }, forTip: IL.S.status.dispense.tip.key }), k);
+      await setSkip(3);
+      await page.waitForFunction(() => document.getElementById('to-start').value === '0.200', null, { timeout: 10000 }).catch(() => {});
+      const opened = await page.evaluate(() => document.getElementById('to-start').value);
+      await page.fill('#to-start', '0.125');
+      await page.waitForFunction(() => !document.getElementById('to-start-err').hidden && document.getElementById('btn-to-run').disabled, null, { timeout: 10000 }).catch(() => {});
+      const low = await page.evaluate(() => ({ err: document.getElementById('to-start-err').hidden ? '' : document.getElementById('to-start-err').textContent,
+        locked: document.getElementById('btn-to-run').disabled, reason: document.getElementById('to-reason').textContent }));
+      check('touch-off with the 25G\'s recipe: opens at 0.200 mm; 0.125 refused at the Start field, Run locked, pointing there', opened === '0.200'
+        && /^At least 0\.200 mm: /.test(low.err) && low.locked && low.reason === 'The start gap is too low for this tip’s recipe: see the Start gap field.', { opened, low });
+      await page.fill('#to-start', '');
+      await page.evaluate(() => document.activeElement && document.activeElement.blur());
+      await setSkip(0);
+      await page.waitForFunction(() => document.getElementById('to-start').value === '0.125' && !document.getElementById('btn-to-run').disabled, null, { timeout: 10000 }).catch(() => {});
+      check('touch-off: back to the SIM\'s recipe (every dot counted): 0.125 mm again, Run unlocked', await page.evaluate(() => document.getElementById('to-start').value === '0.125'
+        && !document.getElementById('btn-to-run').disabled), await textOf(page, 'to-reason'));
       // a run that records nothing: this SIM scene draws no paste, so no dot forms; the run's message word for word
       const touchOffs = async () => (await (await page.request.get(BASE + 'api/calibrations')).json()).touchOffs;
       const rows0 = (await touchOffs()).length;
