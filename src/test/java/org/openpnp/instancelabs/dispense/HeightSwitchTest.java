@@ -528,6 +528,9 @@ public class HeightSwitchTest {
     @Test
     public void theEngineDerivesTheNeedlesWindowFromItsRecords() {
         DispenseConfig c = new DispenseConfig();
+        DispenseConfig.NamedLocation place = new DispenseConfig.NamedLocation(150, 200, 0);
+        place.setAtMs = 0L; // before every trip here: a trip counts after it only (re-review MINOR 1)
+        c.locations.put(HeightSwitch.PLACE, place);
         DispenseConfig.NeedleEnd end = new DispenseConfig.NeedleEnd();
         end.kParallax = 65.075;
         assertEquals(HeightSwitch.NO_MAX_PAST_TRIP, HeightSwitch.needleWindow(c, end, 100L, 1).why);

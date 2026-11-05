@@ -5068,7 +5068,8 @@ public final class DispenseService {
         boolean needle = "needle".equals(res.tool);
         DispenseConfig c = cfg;
         DispenseConfig.NamedLocation place = c.location(HeightSwitch.PLACE);
-        if (place == null) {
+        if (place == null || place.setAtMs == null) {
+            // re-review MINOR 1: a trip counts after the place's set time only (PUT /api/config may leave none)
             throw refused("the height switch's place is not set: PUT /api/locations/" + HeightSwitch.PLACE
                     + " {x, y}, the switch's top centre");
         }
@@ -5090,13 +5091,13 @@ public final class DispenseService {
         Long home = homeTracker.getLastHomeAtMs();
         res.homeAtMs = home;
         DispenseConfig.HeightSwitchTrip n1 = c.heightSwitch.n1;
-        boolean n1Here = n1 != null && home != null && home.equals(n1.homeAtMs);
+        boolean n1Here = HeightSwitch.counts(c, n1, home);
         if (needle && !n1Here) {
             throw refused(HeightSwitch.PRESS_N1_FIRST);
         }
         if (!needle && (zStart == null || zFloor == null) && !n1Here) {
             throw refused("zStart and zFloor (raw Z) are needed: N1 has no accepted trip on the height switch in this "
-                    + "home");
+                    + "home since its place was set");
         }
         Nozzle probeNozzle = getProbeNozzle();
         if (probeNozzle == null) {

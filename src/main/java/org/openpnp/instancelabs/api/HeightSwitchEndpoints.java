@@ -93,13 +93,14 @@ final class HeightSwitchEndpoints {
     /** {@code dispense.heightSwitch} of the status, from the settings and memory only: it never sends G-code. */
     static Map<String, Object> status(DispenseService svc, DispenseConfig c) {
         DispenseConfig.HeightSwitchTrip n1 = c.heightSwitch.n1, needle = HeightSwitch.needleTrip(c);
-        // a sum of raw Z heights holds for the home both were measured under only, while it is this home and the
-        // position is known (a reset or a lost link voids that home before the next one)
+        // a sum of raw Z heights holds for the home and the place both were measured under only, while it is this home
+        // and the position is known (a reset or a lost link voids that home before the next one)
         Long home = svc.getHomeTracker().getLastHomeAtMs();
-        String who = !thisHome(n1, home) ? "N1" : !thisHome(needle, home) ? "the needle" : null;
+        String who = !HeightSwitch.counts(c, n1, home) ? "N1" : !HeightSwitch.counts(c, needle, home) ? "the needle"
+                : null;
         String why = svc.positionUnknownWhy();
         if (why == null && who != null) {
-            why = who + " has no accepted trip on the height switch in this home";
+            why = who + " has no accepted trip on the height switch in this home since its place was set";
         }
         HeightSwitch.Read last = svc.getLastHeightSwitchRead();
         HeightSwitch.Window w = svc.needleWindow();
@@ -108,10 +109,6 @@ final class HeightSwitchEndpoints {
                 last == null ? null : lastRead(last), "needleWindow", w.why != null ? null : Views.map("zStart",
                         w.zStart, "zFloor", w.zFloor, "expectedRawZ", w.expectedRawZ, "from", w.from),
                 "needleWindowWhy", w.why);
-    }
-
-    private static boolean thisHome(DispenseConfig.HeightSwitchTrip t, Long home) {
-        return t != null && home != null && home.equals(t.homeAtMs);
     }
 
     private static Map<String, Object> lastRead(HeightSwitch.Read r) {

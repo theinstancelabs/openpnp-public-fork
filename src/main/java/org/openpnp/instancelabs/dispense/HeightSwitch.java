@@ -57,7 +57,7 @@ public final class HeightSwitch {
             + "heightSwitchMaxPastTripMm is not set (PUT /api/config)";
     /** The needle's measure without N1's trip of this home (the needle's window is K − N1's trip). */
     public static final String PRESS_N1_FIRST = "press N1 on the switch first: N1 has no accepted trip on the height "
-            + "switch in this home";
+            + "switch in this home since its place was set";
     /**
      * A window from K: this far above and past the trip it expects (mm): kParallax on a needle's first press since a
      * change, its K_switch on a press in another home (Process 11-05 04:3x).
@@ -72,6 +72,16 @@ public final class HeightSwitch {
     public static DispenseConfig.HeightSwitchTrip needleTrip(DispenseConfig c) {
         DispenseConfig.HeightSwitchTrip t = c.heightSwitch.needle;
         return t == null || c.needleChangedAtMs != null && t.atMs < c.needleChangedAtMs ? null : t;
+    }
+
+    /**
+     * The trip counts in home {@code home}: measured under it, after the switch's place was last set (re-review MINOR
+     * 1: another point of the lever trips at another height). None counts without the place's set time.
+     */
+    public static boolean counts(DispenseConfig c, DispenseConfig.HeightSwitchTrip t, Long home) {
+        DispenseConfig.NamedLocation place = c.location(PLACE);
+        return t != null && home != null && home.equals(t.homeAtMs) && place != null && place.setAtMs != null
+                && t.atMs > place.setAtMs;
     }
 
     private static final Pattern INPUT = Pattern.compile("Input\\s*=\\s*(\\d+|HIGH|LOW)", Pattern.CASE_INSENSITIVE);
@@ -171,9 +181,10 @@ public final class HeightSwitch {
     }
 
     /**
-     * BR-94: the needle's window, from the engine's records only (review MINOR 3, Process 11-05 04:3x). In this home
-     * from its own trip there, 1.0 above and 0.5 past; with a trip of another home its K_switch − N1's trip in this home,
-     * ± 1 mm; its first press since a change (kParallax − N1's trip in this home) ± 1 mm. The floor is never more than
+     * BR-94: the needle's window, from the engine's records only (review MINOR 3, Process 11-05 04:3x), of trips that
+     * count ({@link #counts}). In this home from its own trip there, 1.0 above and 0.5 past; with a trip of another
+     * home or of the place before its K_switch − N1's trip in this home, ± 1 mm; its first press since a change
+     * (kParallax − N1's trip in this home) ± 1 mm. The floor is never more than
      * {@code heightSwitchMaxPastTripMm} past the expected trip. In this home a fresh kParallax more than
      * {@code needleEndMeasure.maxKFromSwitchMm} from its K_switch gives none (review MINOR 2: a constant K error, N1's
      * template on its holder or a slipped tip, never sets a window). {@code end}: the needle's end measured now, or null;
@@ -186,13 +197,13 @@ public final class HeightSwitch {
             w.why = NO_MAX_PAST_TRIP;
             return w;
         }
-        if (n1 == null || home == null || !home.equals(n1.homeAtMs)) {
+        if (!counts(c, n1, home)) {
             w.why = PRESS_N1_FIRST;
             return w;
         }
         Double k = end == null ? null : end.kParallax;
         double past = K_WINDOW_MM;
-        if (own != null && home.equals(own.homeAtMs)) {
+        if (counts(c, own, home)) {
             w.from = "trip";
             w.expectedRawZ = round(own.tripRawZ);
             past = PAST_MM;

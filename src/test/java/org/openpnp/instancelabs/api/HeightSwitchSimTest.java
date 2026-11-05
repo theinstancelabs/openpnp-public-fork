@@ -272,8 +272,8 @@ public class HeightSwitchSimTest {
         sim.machine.home();
         JsonObject later = heightSwitchStatus();
         assertTrue(later.get("kSwitch").isJsonNull(), later.toString());
-        assertEquals("N1 has no accepted trip on the height switch in this home", later.get("kSwitchWhy")
-                .getAsString());
+        assertEquals("N1 has no accepted trip on the height switch in this home since its place was set", later.get(
+                "kSwitchWhy").getAsString());
         assertTrue(hs.get("kSwitchWhy").isJsonNull(), "both of this home: no reason: " + hs);
     }
 
@@ -745,6 +745,58 @@ public class HeightSwitchSimTest {
         assertTrue(end.get("kParallax").isJsonNull() && end.getAsJsonArray("n1").size() == 0, end.toString());
         String phases = ok("GET", "/api/status", null).getAsJsonObject("run").getAsJsonArray("phases").toString();
         assertFalse(phases.contains("needle end: N1 at raw Z"), phases);
+    }
+
+    /**
+     * Re-review MINOR 1: a trip counts only after the switch's place was last set (another point of the lever trips at
+     * another height: 3 mm along it some 0.5 mm, 11-04). The place set again after both trips: the needle waits for N1
+     * to press at the new place (N1 needs its window again), nothing sent; then its window comes from its K_switch (of
+     * any place) − N1's new trip, never from its own trip at the old place.
+     */
+    @Test
+    public void aTripCountsOnlyAfterTheSwitchsPlaceWasSet() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        assertTrue(ok("POST", "/api/height-switch/measure", "{\"tool\":\"needle\"}").get("accepted").getAsBoolean());
+        double kSwitch = svc.getConfig().heightSwitch.needle.kSwitch;
+        ok("PUT", "/api/locations/height-switch", "{\"x\":153,\"y\":200,\"z\":0}"); // 3 mm along the lever
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\"}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("press N1 on the switch first"), lastBody);
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\"}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("zStart and zFloor (raw Z) are needed"), lastBody);
+        assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "nothing sent");
+        JsonObject hs = heightSwitchStatus();
+        assertEquals(HeightSwitch.PRESS_N1_FIRST, hs.get("needleWindowWhy").getAsString());
+        assertTrue(hs.get("kSwitch").isJsonNull(), hs.toString());
+        double n1 = ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}")
+                .get("tripRawZ").getAsDouble();
+        assertTrue(heightSwitchStatus().get("kSwitch").isJsonNull(), "the needle's trip is of the old place");
+        JsonObject r = ok("POST", "/api/height-switch/measure", "{\"tool\":\"needle\"}");
+        assertTrue(r.get("accepted").getAsBoolean(), r.toString());
+        JsonObject w = r.getAsJsonObject("window");
+        assertEquals("kSwitch", w.get("from").getAsString(), w.toString());
+        assertEquals(kSwitch - n1, w.get("expectedRawZ").getAsDouble(), 1e-3);
+        assertEquals("trip", heightSwitchStatus().getAsJsonObject("needleWindow").get("from").getAsString(),
+                "its trip at the new place counts");
+    }
+
+    /**
+     * Re-review MINOR 1: a place without its set time (PUT /api/config may leave none), where no trip can count, is
+     * refused as not set: PUT /api/locations stamps it. Nothing sent.
+     */
+    @Test
+    public void aPlaceWithoutItsSetTimeIsNotSet() throws Exception {
+        ok("PUT", "/api/config", "{\"locations\":{\"height-switch\":{\"x\":150,\"y\":200,\"z\":0}}}");
+        assertEquals(null, svc.getConfig().location(HeightSwitch.PLACE).setAtMs);
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "nothing sent");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("the height switch's place is not set: PUT /api/locations/height-switch"),
+                lastBody);
     }
 
     /**
