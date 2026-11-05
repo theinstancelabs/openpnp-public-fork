@@ -272,14 +272,14 @@ public class ScrewPhaseFitTest {
 
     /**
      * The error covers the truth at few dots (review 11-04): over seeded runs of normal scatter (cv 0.12) at a 0.3
-     * ripple, 1.96·xSe holds the model's x in 90 to 98 % of the rows at 3, 4, 5 and 8 dots per half (too wide an error
-     * refuses good measures).
+     * ripple, 1.96·xSe holds the model's x in 93.5 to 96.5 % of the rows at 3, 4, 5, 6 and 8 dots per half (too wide an
+     * error refuses good measures).
      */
     @Test
     public void halvesErrorCoversTheTruthAtFewDots() {
         Random rnd = new Random(20261104);
         Map<Integer, Double> covered = new TreeMap<>();
-        for (int n : new int[] {3, 4, 5, 8}) {
+        for (int n : new int[] {3, 4, 5, 6, 8}) {
             int in = 0, runs = 4000;
             for (int k = 0; k < runs; k++) {
                 List<List<ScrewPhaseFit.Dot>> rows = new ArrayList<>();
@@ -302,7 +302,7 @@ public class ScrewPhaseFitTest {
             covered.put(n, Math.round(in / (2.0 * runs) * 1000) / 1000.0);
         }
         for (double c : covered.values()) {
-            assertTrue(c >= 0.9 && c <= 0.98, "dots per half = share of rows 1.96·xSe holds: " + covered);
+            assertTrue(c >= 0.935 && c <= 0.965, "dots per half = share of rows 1.96·xSe holds: " + covered);
         }
     }
 
