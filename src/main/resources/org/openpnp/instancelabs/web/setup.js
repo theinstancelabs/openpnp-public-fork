@@ -29,7 +29,8 @@
   const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleZOffsetHomeAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces',
     'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs', 'doseAnchor',
     'heightSwitch']);
-  const STAMPED_NESTED = new Set(['profile.startAngleSetAtMs', 'profile.startAngleChangedAtMs', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
+  const STAMPED_NESTED = new Set(['profile.startAngleDeg', 'profile.startAngleSetAtMs', 'profile.startAngleChangedAtMs',
+    'profile.startAngleFeature', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
   const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe']);
   /** Maps PUT /api/config replaces whole: the editor diffs them per entry and Save sends the server's map as it is then
    *  with only the edited entries changed (a place saved meanwhile on the Places card is kept). */
@@ -2146,7 +2147,7 @@
     c.adv = el('details', { class: 'disclose su-adv', id: 'set-advanced' }, el('summary', { text: 'All settings (advanced JSON)' }),
       el('div', { class: 'su-col', 'data-refusals': '' },
         el('p', { class: 'su-note', text: 'Every engine setting. Save sends only the keys you changed (one level deep for profile, purgeRow and cleanPadCheck). Keys stamped by the engine are read-only here: '
-          + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, profile.startAngleSetAtMs; the tip (tip, parkedTips) is set in Setup › Dispenser & tip, '
+          + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, the start angle (profile.startAngleDeg, startAngleSetAtMs, startAngleChangedAtMs and startAngleFeature: set or measured in Profiles); the tip (tip, parkedTips) is set in Setup › Dispenser & tip, '
           + 'where the needle lands (needleLanding, needleXyTrim) by Check where it lands and the trim panel, the tip’s dose anchor (doseAnchor) and '
           + 'the switch’s measures (heightSwitch) by their own steps. The profile is the mounted tip’s recipe. '
           + 'Places (locations) are sent one by one: a place saved elsewhere meanwhile is kept.' }),
