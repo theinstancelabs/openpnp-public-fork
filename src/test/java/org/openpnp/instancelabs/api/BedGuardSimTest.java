@@ -289,4 +289,25 @@ public class BedGuardSimTest {
         ok("POST", "/api/gcode", "{\"lines\":[\"G1 X39.709 Y100.926 F3000\"]}", token);
         collision("height-switch", call("POST", "/api/gcode", "{\"lines\":[\"G1 Z60 F600\"]}", token));
     }
+
+    /**
+     * A batch cut short (the controller answered a move with an error) leaves where the head went unknown: the next
+     * batch with moves is refused until an M400 alone has OpenPnP re-read the position.
+     */
+    @Test
+    public void afterABatchCutShortMovesWaitForAnM400() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        sim.server.mark();
+        sim.server.failAtLine = 0;
+        call("POST", "/api/gcode", "{\"lines\":[\"G1 X10 F3000\"]}", token);
+        assertEquals(502, status, body);
+        sim.server.failAtLine = -1;
+        JsonObject r = collision(null, call("POST", "/api/gcode", "{\"lines\":[\"G1 X20 F3000\"]}", token));
+        assertTrue(r.get("why").getAsString().contains("cut short"), body);
+        assertTrue(r.get("next").getAsString().contains("M400"), body);
+        ok("POST", "/api/gcode", "{\"lines\":[\"M400\"]}", token);
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X20 F3000\"]}", token);
+        assertEquals(20, sim.server.position('X'), 1e-9);
+    }
 }

@@ -341,6 +341,9 @@ final class GcodePassthrough {
                         catch (Exception cleared) {
                             // expected: bailOnError throws the error it clears
                         }
+                        synchronized (this) {
+                            commanded = l.motion ? null : commanded; // an answered error: maybe not queued
+                        }
                         return new Outcome("controller-error", results, ms(t0), i, l.text, replies,
                                 "the controller answered '" + r + "'");
                     }

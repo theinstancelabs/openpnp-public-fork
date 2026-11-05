@@ -50,26 +50,28 @@ final class BedGuard {
         final boolean known;
         /** homed | unknown */
         final String source;
-        /** Why it is unknown, or null. */
-        final String why;
+        /** Why it is unknown, and what makes it known again; null when known. */
+        final String why, next;
         final double x, y, z;
         /** The home the raw Z is in (for the model's values of other homes), or null. */
         final Long homeAtMs;
 
-        Start(boolean known, String why, double x, double y, double z, Long homeAtMs) {
-            this.known = known;
+        Start(String why, String next, double x, double y, double z, Long homeAtMs) {
+            this.known = why == null;
             this.source = known ? "homed" : "unknown";
             this.why = why;
+            this.next = next;
             this.x = x;
             this.y = y;
             this.z = z;
             this.homeAtMs = homeAtMs;
         }
 
-        /** The same start at another raw position (where the passthrough's last lines left the head). */
+        /** The same start at another raw position (where the passthrough's last lines left the head; null: unknown). */
         Start at(double[] xyz) {
-            return xyz == null ? new Start(false, "the last G-code batch was cut short, so where it left the head is "
-                    + "not known", x, y, z, homeAtMs) : new Start(known, why, xyz[0], xyz[1], xyz[2], homeAtMs);
+            return xyz == null ? new Start("the last G-code batch was cut short, so where it left the head is not known",
+                    "send M400 alone first: OpenPnP then reads where the head is", x, y, z, homeAtMs)
+                    : new Start(why, next, xyz[0], xyz[1], xyz[2], homeAtMs);
         }
     }
 
@@ -109,7 +111,8 @@ final class BedGuard {
         DispenseService s = ctx.svcOrNull();
         String why = s == null ? "the dispense engine is not running" : !m.isEnabled() ? "the machine is not started"
                 : !m.isHomed() ? "the machine is not homed" : s.positionUnknownWhy();
-        return new Start(why == null, why, x, y, z, s == null ? null : s.getHomeTracker().frameHomeAtMs());
+        return new Start(why, why == null ? null : "home first", x, y, z, s == null ? null : s.getHomeTracker()
+                .frameHomeAtMs());
     }
 
     private static double mm(ReferenceControllerAxis a) {
@@ -168,7 +171,7 @@ final class BedGuard {
         }
         BedModel m = st.model;
         if (!s.known) {
-            throw refusal(null, "the head's place is not known (" + s.why + ")", "home first", legs, m.version, dry);
+            throw refusal(null, "the head's place is not known (" + s.why + ")", s.next, legs, m.version, dry);
         }
         o.homeAtMs = s.homeAtMs;
         o.xyErrMm = 0;

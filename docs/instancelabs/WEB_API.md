@@ -55,6 +55,8 @@ Every error is JSON: `{"error": "<slug>", "reason": "<plain language>", ...detai
 | 404 | `art-gone` | `GET /api/board-art/{id}` of an unknown drawing |
 | 405 | `method-not-allowed` | |
 | 409 | `refused` | machine state or an interlock refuses; `interlocks: {ok, violations:[{code,message}], notes}` included when the engine's interlocks refused |
+| 409 | `collision` | BR-98 (§3.9): a jog, move-to or G-code batch (or its dry run) whose path the bed model does not prove clear; nothing was sent. `why`, `next` (clauses: lower case, no final period), `tool`, `layer`, `blocker {id, name, kind, state}`, `shortfallMm`, `toolLowestZ`, `blockerTopZ`, `at {x, y}`, `leg`, `path`, `modelVersion`. A stable key: the deployer maps it |
+| 409 | `measurement-needed` | BR-98 (§3.9): a bed model write that frees space without the new measurement record it needs; `needs` lists each, in words |
 | 409 | `locked`, `lock-lost`, `no-lock`, `stop-not-confirmed`, `stopped` | the machine lock (§3.7): someone else holds it; your lock was taken, released or ran out (`lost: {how, by, atMs, what}`); no lock (or an unknown token); Take control's STOP not confirmed (the lock is the user's anyway); a STOP ended your G-code batch. Each carries `lock` |
 | 400 / 403 | `refused-line`, `not-ui` | a G-code line the passthrough does not send (`index`, `line`, `why`; nothing sent); Take control without `X-IL-Client: ui` |
 | 502 / 504 | `controller-error`, `controller-timeout` | a passthrough line answered with a controller error, or no `ok` in `timeoutMs`; `index`, `line`, `replies`, `results` so far; the rest not sent |
@@ -174,6 +176,7 @@ Also added for Register board and the home at run:
 | `run.nextPlanId` | Register board: the plan made at its end (another page loads it once). |
 | `run.label` | Adds `board registration`, `blank probe`, `z check` (`runs` kinds `board-registration`, `surface-probe`, `z-check`), and `pad calibration` while a pad calibration's engine step runs (`runs` kinds `pad-ladder`, `pad-weigh`; `run.detail` `{stage, home, blocks, dots, stepsDone, stepsPlanned, estimatedSecondsLeft}`). |
 | `padCalibration` | The pad calibration of this session (running, waiting for the readings, or the last one that ended), else null: the job view of §3.5. Next to `run`; a second browser shows the same job. |
+| `bed` | BR-98 (§3.9), top level: `{version, valid, unmeasured, headKnown, why}`. No model file: `version` and `valid` null, `why` `no bed model yet, moves are not checked for collisions`. A file that fails validation: `valid` false, `why` names the problem (every hooked move is refused). `unmeasured`: the objects that block at every height (added, moved, removed, or no top). |
 
 The run view (`lastRun`, `/api/runs/last`, a run's `result`) adds `profile` (the profile used), `cleanCheck`
 (the clean-pad report of a board run), `purgeDots`, `bCountAtStart` (M114 B step count before the purge;
@@ -557,6 +560,12 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   (`POST /api/machine/home`), `G92` on X/Y/Z, bare `M18`/`M84`, `G91`, `M92`, EEPROM, `M112`/`M999`/`M997`, `M990`,
   anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before the next
   guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
+- BR-98 (§3.9): with a bed model in place the batch's G0/G1 moves are walked from where the head is (OpenPnP's raw
+  position, or where the last batch's acknowledged moves left it while that is not re-read yet) and proven before any
+  line is sent: a blocked batch answers 409 `collision` (its `leg` is `line <n>: <the line>`) and nothing is sent.
+  Raw G-code has no semantics: a tip may go the model's `contactDepthMm` into the measured top of a `touchable`
+  object that holds it (N1's touches, the needle's touch-offs), no deeper. After a batch cut short (an error, a STOP
+  or take-over mid-line, `M410`) the next batch with moves is refused until an `M400` alone re-reads the position.
 
 ### 3.8 Jog, move-to and the cameras (BR-49, BR-53)
 
@@ -573,9 +582,83 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current frame (anchored and
   touched off since the needle change, and no failed Z check of this home), not below the surface under it + its
   offset nor its I4 floor, without one not below its safe zone; OpenPnP's soft limits. 404 for an unknown place.
+- BR-98 (§3.9): with a bed model in place each press and each move-to is proven against it after the checks above
+  (which stay) and before anything moves: one leg for a jog (labelled `jog Z -2`), three for a move-to (`up to safe
+  Z`, `X/Y at safe Z`, `down to <tool>'s safe Z`, as OpenPnP drives them); 409 `collision` otherwise. A jog's tool tip
+  may go down to the floor above over the probed surface under it (a measured touchable object holding the tip);
+  every other layer and tool is held to the top + `zMarginMm` + the errors.
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
   `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
   ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.
+
+### 3.9 The bed model and the collision check (BR-98 stage 1; `collision-model-design.md`)
+
+The model is `<config>/instancelabs/collision-model.json` (schema 1, design §2, plus each object's `marginMm` in X/Y
+and a top-level `zMarginMm`; the fixture `src/test/resources/config/DispenseSimMachine/instancelabs/collision-model.json`
+is one file for the unit tests, the in-process SIM and lumen-sim). The engine reads it at its start and journals its
+version and SHA-256 (`BED_MODEL` `{at: start, file, version, digest, error}`); only the engine writes it.
+**Rollout:** no file: nothing is checked and every route runs as before; a file that fails validation: every hooked
+move answers 409 `collision` naming the problem; a valid file: enforced. Hooked in this build: `POST /api/jog`,
+`POST /api/move-to`, `POST /api/gcode` (G0/G1). Not yet: Home, the engine's programs, the N1 probe, OpenPnP's own
+moves (later stages). The start: OpenPnP's raw position while the head's place is known (homed in this connection,
+BR-02's position known; X/Y error 0); otherwise these routes refuse anyway (nothing moves unhomed).
+
+**The check:** per leg and tool layer, the area the layer sweeps against every object whose outline (grown by its
+`marginMm` and the start's X/Y error) it overlaps, at the layer's lowest point on the leg (one of its ends). An
+overlapped object needs its top + `zMarginMm` + its top's `errMm` + the tool's height error at or below it. The tool's
+height error: the see-saw's and the plane's `errMm`, plus `seesaw.homeRepeatMm` for each raw value of another home than
+the current one (the plane, the knees, and K twice). Tips: N1 g1 (min(r, k1) − rc), the needle g2 ((K − rc) −
+max(r, k2)), rc the least-squares plane of `bed.plane.points` at the tool's own tip. Unknown inputs are the worst case:
+a null knee puts that tip at its lowest end stop, a null K leaves the needle's height unknown (it meets everything
+under it). An object that is not measured (null top; added, moved, removed) blocks its outline at every height. The
+bed is the object `bed` (top 0, no margin). Only a tip layer (`at: tip-end`) is ever exempt (G-code: contact depth;
+a jog: its floor), and only over a measured `touchable` top whose outline holds it.
+
+- `GET /api/bed` (no lock) → `{version, valid, error, why, digest, changedAtMs, changedBy, zMarginMm, contactDepthMm,
+  bed, objects: [{...as stored, stateLabel}], tools: [{...as stored, lowestZNow, lowest: homed|measured|worst-case}],
+  head: {x, y, known, source: homed|unknown, errMm, atMs}, seesaw: {...as stored, state: homed|worst-case, source,
+  atMs, rawZ}, reach}`. Values come back as written. `stateLabel`: `measured`, `added, not measured`, `moved, not
+  measured`, `removed, not checked`, `top not measured`. `lowestZNow`: the tool's lowest layer above the bed now (the
+  head unknown: the worst case over the bed's corners). No file: `{version: null, valid: null, why, head}`.
+- `POST /api/motion/check {kind: jog|move-to, tool, dx?, dy?, dz?, place?, x?, y?}` (no lock, moves nothing,
+  journals nothing): the route's own refusals first (400s, unhomed, busy, travel height, floors), then 200 `{clear:
+  true, clearanceMm, closest: {id, name, tool, layer, leg, at, clearanceMm, vertical}, path: [{leg, from, to}],
+  modelVersion, start: {x, y, z, source, xyErrMm, seesaw, homeAtMs}}` or the route's 409 `collision`. No model:
+  `{clear: null, why}`. `kind: home|run`: 400 `not in this build yet`. `clearanceMm`: the room beyond the margins
+  (vertical: lowest − (top + `zMarginMm` + errors); `vertical: false` only when no layer is over anything: the gap
+  to the side beyond the margin).
+- **Journal:** a clear path: one `MOTION_PROOF` row `{what: jog|move-to|gcode, tool, modelVersion, start, legs,
+  closest, checkMs}`; a refused one: a `MOTION_REFUSED` row with the 409 body.
+- **Writes** (guarded: the lock holder's; 409 `refused` while anything moves: OpenPnP busy, an engine task or pad
+  calibration, a G-code batch or its moves not ended by an `M400`). Each is validated as the loader does (400
+  `bad-request` with the problem; nothing written), then `version` + 1, `changedAtMs`/`changedBy` stamped, the file
+  rewritten atomically, a `BED_MODEL` row `{who, what, version: [before, after], before, after}`, and the answer is
+  `GET /api/bed`'s.
+  - `PUT /api/bed {whole model}`: the first model (no file, or one that fails validation); with a valid model the
+    same rules as the parts below.
+  - `POST /api/bed/objects {name, outline, id?, kind? = movable, role?, marginMm? = 1.0, touchable? = false,
+    noPaste? = false, invalidatedBy?}`: state `added`, no top: it blocks its outline at every height (`topZ`, `state`
+    or `measured` in the body: 400). An id taken: 409 `exists`.
+  - `POST /api/bed/objects/{id}/moved {outline?}`: the entry becomes `moved` (it keeps blocking); with an outline a new
+    entry `<id>-2` (`added`) there. `.../removed {}`: `removed` (it keeps blocking; the API shows `removed, not
+    checked`).
+  - `POST /api/bed/objects/{id}/cleared {camera: {reference, diff, threshold, evidence}, n1: {points, floorRaw,
+    evidence}, by?, atMs?}` (Process 11-04 20:5x): a removed object leaves the model only with both measurements:
+    the top camera's comparison of the old outline's area with the stored empty-bed picture of that spot (`diff` ≤
+    its fixed `threshold`) and N1 lowered to its floor at ≥ 3 points inside the outline with no contact. Anything
+    less: 409 `measurement-needed`, it stays removed. Not removed: 409 `refused`.
+  - `PUT /api/bed/objects/{id}`, `PUT /api/bed/tools/{id}` (a new id adds the tool), `PUT /api/bed/plane {the
+    bed.plane block}`, `PUT /api/bed/seesaw {the seesaw block}`: the part as the file holds it.
+  - **The rule:** a person's word may add, mark moved or removed, grow an outline or a tool layer, raise a top or a
+    layer, lower a layer. What frees space needs a new measurement record where that part keeps it (`how` any words,
+    `atMs` later than the stored record's, `evidence` naming journal events `event:<id>` or photos `photo:<id>` that
+    exist): a lower top, a smaller top error, `touchable` switched on, or an unmeasured object becoming measured
+    (`measured.top`); a smaller outline or margin, or an unmeasured object becoming measured (`measured.xy`); any
+    change of the bed plane or a smaller bed outline (`bed.plane`, which is its own record); any see-saw change
+    (`seesaw.measured`); a smaller, higher, removed or moved tool layer, a changed `tipEnd` or `moves`
+    (`tools[].measured`). A removed object stops blocking only through `/cleared`. A smaller `zMarginMm`, a deeper
+    `contactDepthMm` or a tool leaving the model: not through the API in this build. Otherwise 409
+    `measurement-needed`.
 
 ## 4. Pressure hold (Dispense tab)
 
@@ -686,6 +769,13 @@ Added on `il/bench-sync-autoreg` and its web branches (`UI_DESIGN.md` §8.1.2–
 Jargon is explained in tooltips (`title`/`abbr`).
 
 ## 6. Tests
+
+- BR-98 stage 1: `BedModelTest` (5: the loader's rules, the see-saw maps U2, the worst case, the tip errors) and
+  `CollisionCheckTest` (7: the sweep U1, the lowest point at a leg's end, the tip-only exemption U3, the jog floor,
+  unmeasured objects and the first leg, the everyday moves on the fixture, U4 5,000 legs < 100 ms), no machine;
+  `BedGuardSimTest` (6) and `BedApiSimTest` (5) on the SIM with the fixture model: jog, move-to and passthrough refused
+  with nothing sent and proven beside the objects, a batch cut short, no file, a file that fails validation, the dry
+  run, the reads, the writes and their rules.
 
 - `mvn -T1 test -Dtest='ApiServerSimTest,ReviewSafetySimTest,RegistrationSimTest,BoardImportSimTest'` (part of `mvn
   test`): 23 + 11 + 11 + 12 tests on the engine's simulated machine (OpenPnP GcodeDriver over localhost TCP to
