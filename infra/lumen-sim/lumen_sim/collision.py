@@ -4,8 +4,10 @@ collision-model-design.md, sections 2 and 3). The bed plane, the objects on the 
 lumen-sim is the physical truth: it uses no margin and no error term (the engine's proof adds those), so a clear proof
 never meets a collision here and an engine bug shows up in sim_errors.
 """
+import json
 import math
 import re
+import time
 from collections import namedtuple
 
 CIRCLE_SIDES = 64  # a circle is the 64-gon around it: at most 0.12 % of its radius outside it
@@ -35,6 +37,38 @@ def _get(d, key, what, kind=dict):
     if not isinstance(v, kind):
         raise ValueError("%s.%s must be a JSON %s, not %r" % (what, key, "object" if kind is dict else "list", v))
     return v
+
+
+TOO_DEEP = "%s: nested too deep to read (a bed model is a few levels deep)"  # the engine's words
+
+
+def _scan(v, path, latest):
+    """The whole file before any field is read, as the engine's BedModel.scan: null nowhere (a key is given a value or
+    left out), no NaN or Infinity (strict JSON has none), and every atMs a time, ms since 1970, no later than latest
+    (now + 1 min: not microseconds)."""
+    if v is None:
+        raise ValueError("%s is null: give the key a value or leave it out" % path)
+    if isinstance(v, float) and not math.isfinite(v):
+        raise ValueError("%s is %r: strict JSON has no NaN or Infinity" % (path, v))
+    for k, x in v.items() if isinstance(v, dict) else enumerate(v) if isinstance(v, list) else ():
+        p = "%s.%s" % (path, k) if isinstance(v, dict) else "%s[%d]" % (path, k)
+        _scan(x, p, latest)
+        if k == "atMs" and isinstance(v, dict):
+            if isinstance(x, bool) or not isinstance(x, (int, float)):
+                raise ValueError("%s must be a time (ms since 1970, a number), not %r" % (p, x))
+            if x > latest:
+                raise ValueError("%s is later than now + 1 min: a time is ms since 1970, not %r" % (p, x))
+
+
+def parse(text):
+    """The model in a file's text (--collision-model), read as strictly as the engine's BedModel.parse."""
+    try:
+        raw = json.loads(text)
+    except RecursionError:
+        raise ValueError(TOO_DEEP % "collision_model") from None
+    except json.JSONDecodeError as e:
+        raise ValueError("collision_model: not JSON: %s" % e) from None
+    return Model(raw)
 
 
 def _id(d, taken, what):
@@ -94,15 +128,25 @@ def _outline(raw, what):
         r /= math.cos(math.pi / CIRCLE_SIDES)
         return [(cx + r * math.cos(a), cy + r * math.sin(a))
                 for a in (2 * math.pi * k / CIRCLE_SIDES for k in range(CIRCLE_SIDES))]
-    if not (isinstance(v, list) and all(isinstance(p, list) and len(p) == 2 for p in v)):
-        raise ValueError("%s: a polygon is a list of [x, y], not %r" % (what, v))
+    if not (isinstance(v, list) and len(v) >= 3 and all(isinstance(p, list) and len(p) == 2 for p in v)):
+        raise ValueError("%s: a polygon is at least 3 points [x, y], not %r" % (what, v))
     pts = [(_num(x, what), _num(y, what)) for x, y in v]
-    hull = _hull(pts)
-    first = pts.index(hull[0]) if len(hull) >= 3 else 0
-    if len(hull) < 3 or pts[first:] + pts[:first] != hull:
-        raise ValueError("%s: a polygon must be convex and counter-clockwise (no point on a line between two "
-                         "others), not %r" % (what, v))
-    return pts
+    # the engine's rule, op for op (BedModel.outline): no turn both ways and one whole turn in all (a star winding
+    # twice turns 4 pi; a point on a straight edge, or repeated there, turns by 0), then a positive area
+    left = right = False
+    turn = area = 0.0
+    for (x0, y0), (x1, y1), (x2, y2) in zip(pts, pts[1:] + pts[:1], pts[2:] + pts[:2]):
+        area += x0 * y1 - x1 * y0
+        ax, ay, bx, by = x1 - x0, y1 - y0, x2 - x1, y2 - y1
+        cr = ax * by - ay * bx
+        left, right = left or cr > 1e-9, right or cr < -1e-9
+        turn += math.atan2(cr, ax * bx + ay * by)
+    if left and right or abs(abs(turn) - 2 * math.pi) > 1e-6:
+        raise ValueError("%s: the polygon is not convex (the writer splits a concave outline into convex ones), not "
+                         "%r" % (what, v))
+    if not area > 0:
+        raise ValueError("%s: the polygon's points must run counter-clockwise, not %r" % (what, v))
+    return _hull(pts)  # the same outline without its points on a side (_inside divides by each side's length)
 
 
 def _plane(points, what):
@@ -154,6 +198,10 @@ class Model:
         if not isinstance(raw, dict) or raw.get("schema") != 1 or isinstance(raw.get("schema"), bool):
             raise ValueError("%s must be a schema 1 model, a JSON object with \"schema\": 1, not %s" % (
                 w, "schema %r" % (raw.get("schema"),) if isinstance(raw, dict) else type(raw).__name__))
+        try:  # the host's clock, as the engine's: the stamps are wall-clock ms (never the sim's clock)
+            _scan(raw, w, time.time() * 1000 + 60000)
+        except RecursionError:
+            raise ValueError(TOO_DEEP % w) from None
         self.version = raw.get("version")
         if isinstance(self.version, bool) or not isinstance(self.version, int):
             raise ValueError("%s.version must be an integer, not %r" % (w, self.version))
@@ -166,18 +214,22 @@ class Model:
         bed_pts = _outline(bed.get("outline"), w + ".bed.outline")
         ss = _get(raw, "seesaw", w)
         n1, needle = _get(ss, "n1", w + ".seesaw"), _get(ss, "needle", w + ".seesaw")
-        self.k1, self.k2 = _num(n1.get("kneeRaw"), w + ".seesaw.n1.kneeRaw"), \
-            _num(needle.get("kneeRaw"), w + ".seesaw.needle.kneeRaw")
+        # the engine's proof takes no K or knee as the worst case; the truth cannot place a tip without them (design §2)
+        for side, key in (("n1", "kneeRaw"), ("needle", "kneeRaw"), ("K", "raw")):
+            if key not in _get(ss, side, w + ".seesaw"):
+                raise ValueError("%s.seesaw.%s.%s is required: lumen-sim cannot place a tip without it" % (w, side, key))
+        self.k1, self.k2 = _num(n1["kneeRaw"], w + ".seesaw.n1.kneeRaw"), \
+            _num(needle["kneeRaw"], w + ".seesaw.needle.kneeRaw")
         self.g1, self.g2 = _num(n1.get("mmPerRaw"), w + ".seesaw.n1.mmPerRaw"), \
             _num(needle.get("mmPerRaw"), w + ".seesaw.needle.mmPerRaw")
         if self.g1 <= 0 or self.g2 <= 0:
             raise ValueError("%s.seesaw: mmPerRaw must be > 0, not %r and %r" % (w, self.g1, self.g2))
-        self.K = _num(_get(ss, "K", w + ".seesaw").get("raw"), w + ".seesaw.K.raw")
+        self.K = _num(ss["K"]["raw"], w + ".seesaw.K.raw")
         stops = _get(ss, "endStopsRaw", w + ".seesaw", list)
         self.stops = tuple(_num(v, w + ".seesaw.endStopsRaw") for v in stops)
         if len(self.stops) != 2 or not self.stops[0] < self.stops[1]:
             raise ValueError("%s.seesaw.endStopsRaw must be [low, high] with low < high, not %r" % (w, stops))
-        self.rest = None if ss.get("restRaw") is None else _num(ss["restRaw"], w + ".seesaw.restRaw")
+        self.rest = _num(ss["restRaw"], w + ".seesaw.restRaw") if "restRaw" in ss else None  # absent: no rest model
         self.objects, ids = [], {"bed"}  # "bed" is the bed's
         for i, o in enumerate(_get(raw, "objects", w, list)):
             what = "%s.objects[%d]" % (w, i)
@@ -186,10 +238,22 @@ class Model:
                     what, " or ".join(KINDS), ", ".join(STATES), o))
             _id(o, ids, what)
             pts = _outline(o.get("outline"), what + ".outline")
-            top = None if o.get("topZ") is None else _num(o["topZ"], what + ".topZ")
+            top = _num(o["topZ"], what + ".topZ") if "topZ" in o else None  # absent: not measured
+            if "name" in o and not (isinstance(o["name"], str) and o["name"]):  # absent: the id (shown nowhere)
+                raise ValueError("%s (%s).name is required (text), not %r" % (what, o["id"], o["name"]))
+            if o["state"] == "measured" and top is not None:  # the engine's proof needs the record's error
+                rec = o["measured"].get("top") if isinstance(o.get("measured"), dict) else None
+                if not isinstance(rec, dict):
+                    raise ValueError("%s (%s): a measured object with a topZ needs measured.top {how, errMm, ...}"
+                                     % (what, o["id"]))
+                if not (isinstance(rec.get("how"), str) and rec["how"].strip()):
+                    raise ValueError("%s (%s).measured.top.how must say how it was measured, not %r"
+                                     % (what, o["id"], rec.get("how")))
+                if _num(rec.get("errMm"), what + ".measured.top.errMm") < 0:
+                    raise ValueError("%s.measured.top.errMm must be >= 0, not %r" % (what, rec["errMm"]))
             if o["state"] != "measured":
                 top = None  # added, moved or removed: it blocks its outline at every height
-            touchable = False if o.get("touchable") is None else o["touchable"]  # absent or null: not touchable
+            touchable = o.get("touchable", False)  # absent: not touchable
             if not isinstance(touchable, bool):
                 raise ValueError("%s.touchable must be true or false, not %r" % (what, touchable))
             self.objects.append(Object(o["id"], pts, _box(pts), top, top is not None and touchable))
@@ -219,7 +283,14 @@ class Model:
                 above = _num(la["aboveTipMm"], lw + ".aboveTipMm") if "aboveTipMm" in la else None
                 bottom = _num(la["bottomZ"], lw + ".bottomZ") if "bottomZ" in la else None
                 layers.append(Layer(la["name"], pts, above, bottom, la["at"] == "tip-end"))
+            if t["moves"] != "fixed" and not any(la.tip and la.above == 0 for la in layers):
+                raise ValueError("%s (%s): a tool on the see-saw needs its tip: a tip-end layer with aboveTipMm 0"
+                                 % (what, t["id"]))
             self.tools.append(Tool(t["id"], t["moves"], dx, dy, layers))
+        n1s, needles = (sum(t.moves == m for t in self.tools) for m in ("n1", "needle"))
+        if (n1s, needles) != (1, 1):  # the engine's words; tip() and n1_sealed() read one of each
+            raise ValueError("%s.tools: exactly one with moves n1 and one with moves needle (here %d and %d): every leg "
+                             "sweeps both tips" % (w, n1s, needles))
         self.colliding = set()  # (object, tool, layer) in collision where the last leg ended
 
     def rc(self, x, y):

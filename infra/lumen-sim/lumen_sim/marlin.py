@@ -596,7 +596,10 @@ class Firmware:
         p = self.machine.physical
         if model.rest is not None and not self.enabled["Z"]:
             p[2] = model.rest
-        p[2] = self.machine.limit_z(p[2])
+        # the new stops hold the head where it is now, not the leg's start: after a z_shift mid-move that start is
+        # virtual and may lie past a stop; the steps past one stay lost (as jump()). With no leg under way: a clamp.
+        counts = self.stepper.realtime_counts(self.now)
+        p[2] += self.stepper._at(counts)[2] - self.stepper._at(counts, held=False)[2]
         self.pa5(self.now)  # the head at that Z, under the switch or off it
         if old is not None:
             model.colliding = set(old.colliding)

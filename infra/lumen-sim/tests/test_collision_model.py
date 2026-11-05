@@ -11,8 +11,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
+from lumen_sim import collision
 from lumen_sim.bench import Bench
 from tests.simproc import PKG_ROOT, SimProcess
 
@@ -20,12 +22,13 @@ PARK = (100.0, 50.0, 31.5)  # whole steps from the switches: homes land exactly 
 FLAT = [[0, 0, 4.0], [100, 0, 4.0], [0, 100, 4.0]]    # N1 meets the bed at raw 4 everywhere
 TILTED = [[0, 0, 4.0], [100, 0, 4.1], [0, 100, 4.2]]  # rc(x, y) = 4 + 0.001 x + 0.002 y
 BLOCK = {"id": "block", "name": "a block", "kind": "fixed", "role": "fixture", "outline": {"box": [170, 70, 190, 90]},
-         "topZ": 15.4, "marginMm": 1.0, "noPaste": False, "surface": None, "touchable": False,
+         "topZ": 15.4, "marginMm": 1.0, "noPaste": False, "touchable": False,
          "measured": {"top": {"how": "n1-touch", "by": "Infra", "atMs": 0, "errMm": 0.05}}, "state": "measured",
          "invalidatedBy": ["moved", "touched"]}
 BLANK = {"id": "blank", "name": "the front blank", "kind": "movable", "role": "blank",
          "outline": {"box": [200, 200, 260, 260]}, "topZ": 1.6, "marginMm": 1.0, "noPaste": False,
-         "surface": "blank-front", "touchable": True, "state": "measured", "invalidatedBy": ["moved"]}
+         "surface": "blank-front", "touchable": True, "measured": {"top": {"how": "n1-touch", "errMm": 0.025}},
+         "state": "measured", "invalidatedBy": ["moved"]}
 MODEL = {
     "schema": 1, "version": 7, "changedAtMs": 0, "changedBy": "Infra", "frame": {"xy": "machine", "z": "above-bed"},
     "bed": {"outline": {"box": [-30, -70, 450, 490]},
@@ -40,12 +43,13 @@ MODEL = {
                     {"name": "hub", "at": "head", "outline": {"circle": [20, -70, 6]}, "aboveTipMm": 5}]},
         {"id": "camera", "moves": "fixed",
          "layers": [{"name": "camera and light", "at": "head", "outline": {"circle": [0, 0, 20]}, "bottomZ": 40}]}],
-    "seesaw": {"endStopsRaw": [-1, 66], "restRaw": None, "n1": {"kneeRaw": 31.5, "mmPerRaw": 1},
+    "seesaw": {"endStopsRaw": [-1, 66], "n1": {"kneeRaw": 31.5, "mmPerRaw": 1},
                "needle": {"kneeRaw": 31.5, "mmPerRaw": 1}, "K": {"raw": 64.0, "homeAtMs": 0, "surface": "blank-front"},
                "homeRepeatMm": 0.1,
                "measured": {"how": "n1-touch", "by": "Infra", "atMs": 0, "errMm": 0.05, "homeAtMs": 0}}}
 # On the flat bed the needle's hub bottom is 4 + (64 - 4 - r) + 5 = 69 - r for r >= 31.5: 19 at r 50, 0.4 mm below
 # the block's top (4 + 15.4); its edge, 6 mm from the tip, overlaps the block's x 170..190 when the head is at x 145.
+TOP = {"top": {"how": "n1-touch", "errMm": 0.05}}  # a measured top's record (the engine's rule)
 DELETE = object()
 
 
@@ -159,6 +163,34 @@ class Load(unittest.TestCase):
         [(("seesaw", "endStopsRaw"), [66, -1])],
         [(("seesaw", "K"), DELETE)],
         [(("seesaw", "restRaw"), "60")],
+        # round 5, as the engine's loader (BedModelTest.BAD_FILES): null nowhere, a key is given a value or left out
+        [(("objects", 0, "topZ"), None)], [(("seesaw", "restRaw"), None)], [(("tools", 1, "layers", 1, "bottomZ"), None)],
+        [(("tools", 2, "tipEnd"), None)], [(("contactDepthMm",), None)], [(("objects", 1, "touchable"), None)],
+        [(("objects", 0, "name"), None)], [(("bed", "plane", "points", 0, 2), None)],
+        # N1 and the needle each have their tip: a tip-end layer with aboveTipMm 0
+        [(("tools", 1, "layers"), MODEL["tools"][1]["layers"][1:])], [(("tools", 0, "layers", 0, "aboveTipMm"), 0.5)],
+        [(("tools", 1, "layers", 0, "at"), "head")],
+        # every atMs a time in ms, no later than now + 1 min (microseconds are not ms)
+        [(("tools", 1, "tipEnd", "atMs"), time.time() * 1000 + 120000)],
+        [(("objects", 0, "measured", "top", "atMs"), time.time() * 1e6)], [(("bed", "plane", "atMs"), "0")],
+        [(("seesaw", "measured", "atMs"), True)],
+        # a measured top's record: how it was measured and its error
+        [(("objects", 0, "measured", "top"), DELETE)], [(("objects", 0, "measured"), DELETE)],
+        [(("objects", 0, "measured", "top", "how"), " ")], [(("objects", 0, "measured", "top", "how"), 7)],
+        [(("objects", 0, "measured", "top", "errMm"), DELETE)],
+        [(("objects", 0, "name"), 3)], [(("objects", 0, "name"), "")],
+        # exactly one N1 and one needle: every leg sweeps both tips
+        [(("tools",), [MODEL["tools"][0], MODEL["tools"][2]])], [(("tools", 1, "moves"), "n1")],
+        # strict JSON has no NaN or Infinity, not even in a key lumen-sim does not read
+        [(("zMarginMm",), float("nan"))], [(("objects", 0, "note"), [float("inf")])],
+        # a star winding twice, every turn left: not one whole turn, not convex in the engine's rule (a point on a
+        # straight edge loads, below)
+        [(("objects", 0, "outline"), {"polygon": [[180, 90], [174.12, 71.91], [189.51, 83.09], [170.49, 83.09],
+                                                  [185.88, 71.91]]})],
+        # the deliberate differences (design 2): the engine's proof takes no K or knee as the worst case; the truth
+        # cannot place a tip without them
+        [(("seesaw", "K", "raw"), DELETE)], [(("seesaw", "n1", "kneeRaw"), DELETE)],
+        [(("seesaw", "needle", "kneeRaw"), DELETE)],
     ]
 
     def test_a_bad_model_changes_nothing(self):
@@ -177,9 +209,44 @@ class Load(unittest.TestCase):
         self.assertEqual(cm(b), before)
 
     def test_keys_it_does_not_use_load(self):
-        """The engine's zMarginMm (lumen-sim uses no margins), notes; a fixed part's tipEnd null is no tipEnd."""
-        b = loaded(model((("zMarginMm",), 2.0), (("_comment",), ["a fixture"]), (("objects", 0, "note"), "a guess"),
-                         (("tools", 2, "tipEnd"), None)))
+        """The engine's zMarginMm (lumen-sim uses no margins), notes."""
+        b = loaded(model((("zMarginMm",), 2.0), (("_comment",), ["a fixture"]), (("objects", 0, "note"), "a guess")))
+        self.assertEqual(cm(b)["version"], 7)
+
+    def test_what_the_engine_loads_loads(self):
+        """A tip end stamped 30 s ahead (another host's clock); a how with a '+'; a measured object with no topZ, or a
+        moved one with no record (neither measured: each blocks its outline at every height); the block as a polygon
+        with a point on a straight edge, repeated (the engine's rule: no turn), the box it outlines."""
+        for edits in ([(("tools", 1, "tipEnd", "atMs"), time.time() * 1000 + 30000)],
+                      [(("objects", 0, "measured", "top", "how"), "caliper height + margin")]):
+            with self.subTest(edits):
+                self.assertEqual(cm(loaded(model(*edits)))["version"], 7)
+        for edits in ([(("objects", 0, "topZ"), DELETE)], [(("objects", 0, "state"), "moved"),
+                                                          (("objects", 0, "measured"), DELETE)]):
+            with self.subTest(edits):
+                b = loaded(model(*edits))
+                to(b, 145, 150)
+                self.assertEqual(hits(b), [("block", "needle", "hub", None)])  # its edge over x 170..190, any height
+        b = loaded(model((("objects", 0, "outline"), {"polygon": [[170, 70], [180, 70], [180, 70], [190, 70], [190, 90],
+                                                                  [170, 90]]})))
+        to(b, 145, 150)
+        to(b, z=50)  # as test_the_ids_and_depths_backend_allows_load, with the box
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
+        b = loaded(model((("objects", 1, "outline"), {"polygon": [[200, 200], [260, 200], [260, 260], [200, 260],
+                                                                  [200, 230], [200, 230]]})))
+        self.assertEqual(sealed(b, 222, 290, (5.625, 5.6)), [False, True], "2 mm inside the side the point repeats on")
+
+    def test_a_model_nested_too_deep_is_refused(self):
+        """As the engine's (a bed model is a few levels deep): refused, never the simulator's own error."""
+        deep = []
+        for _ in range(5000):
+            deep = [deep]
+        m = model()
+        m["_comment"] = deep
+        b = loaded()
+        reply = b.sim.control({"cmd": "set", "collision_model": m}, b.t)
+        self.assertEqual(reply["error"], "ValueError: collision_model: nested too deep to read (a bed model is a few "
+                                          "levels deep)")
         self.assertEqual(cm(b)["version"], 7)
 
     def test_the_ids_and_depths_backend_allows_load(self):
@@ -220,9 +287,17 @@ class Load(unittest.TestCase):
         bad = os.path.join(tmp, "bad.json")
         with open(bad, "w") as f:
             json.dump(model((("schema",), 2)), f)
+        texts = {}
+        for name, text in (("comment", '{"schema": 1, // the first schema\n}'), ("deep", "[" * 20000)):
+            texts[name] = os.path.join(tmp, name + ".json")
+            with open(texts[name], "w") as f:
+                f.write(text)
         link = os.path.join(tmp, "ttyLUMEN")
         for path, why in ((bad, "collision_model must be a schema 1 model"),
-                          (os.path.join(tmp, "missing.json"), "No such file")):
+                          (os.path.join(tmp, "missing.json"), "No such file"),
+                          (texts["comment"], r"collision_model: not JSON: Expecting property name"),
+                          (texts["deep"], r"collision_model: nested too deep to read \(a bed model is a few levels "
+                                          r"deep\)")):
             out = subprocess.run([sys.executable, "-m", "lumen_sim", "--link", link, "--collision-model", path],
                                  cwd=PKG_ROOT, capture_output=True, text=True, timeout=10)
             self.assertEqual(out.returncode, 2, out.stderr)
@@ -250,7 +325,7 @@ class TipHeights(unittest.TestCase):
         above the bed at the head, moves on in Y over a block 40.1 high 10 to 12 mm to its right, which stands
         0.5 x 0.01 x 12 = 0.06 mm higher on the bed: 0.16 mm into it."""
         tall = {"id": "tall", "kind": "fixed", "outline": {"box": [210, 299, 212, 301]}, "topZ": 40.1,
-                "state": "measured"}
+                "state": "measured", "measured": TOP}
         b = loaded(model((("bed", "plane", "points"), [[0, 0, 4.0], [100, 0, 5.0], [0, 100, 4.0]]),
                          (("seesaw", "n1", "mmPerRaw"), 0.5), (("seesaw", "needle", "mmPerRaw"), 2),
                          (("objects",), [tall])))
@@ -314,7 +389,7 @@ class Sweep(unittest.TestCase):
         """rc(x, y) = 4 + 0.001 x + 0.002 y. The hub's path covers all of a 4 mm block (topZ 15): its top is highest at
         (164, 84), 4.332 + 15 = 19.332; the hub's bottom is 19 wherever it is (equal gains)."""
         small = {"id": "small", "kind": "fixed", "outline": {"box": [160, 80, 164, 84]}, "topZ": 15.0,
-                 "state": "measured"}
+                 "state": "measured", "measured": TOP}
         b = self.at_the_start(model((("bed", "plane", "points"), TILTED), (("objects",), [small])))
         to(b, y=190)
         self.assertEqual(hits(b), [("small", "needle", "hub", 0.332)])
@@ -417,9 +492,9 @@ class Sweep(unittest.TestCase):
         """The hub (r 6) as the 64-gon around it, a vertex at 6 / cos(pi / 64) = 6.0072 mm on X each side of its
         centre: a block 6.004 mm to its right is hit, 0.4 mm below its top; one 6.008 mm to its left is not."""
         near = {"id": "near", "kind": "fixed", "outline": {"box": [126.004, 129, 140, 131]}, "topZ": 15.4,
-                "state": "measured"}
+                "state": "measured", "measured": TOP}
         far = {"id": "far", "kind": "fixed", "outline": {"box": [100, 129, 113.992, 131]}, "topZ": 15.4,
-               "state": "measured"}
+               "state": "measured", "measured": TOP}
         b = loaded(model((("objects",), [near, far])))
         to(b, 100, 200)  # the hub at (120, 130)
         to(b, z=50)
@@ -427,7 +502,7 @@ class Sweep(unittest.TestCase):
 
     def test_an_unmeasured_object_blocks_at_every_height(self):
         """Added (no topZ) or moved (a topZ it no longer has): the camera, 40 mm up, is over it."""
-        added = {"id": "added", "kind": "movable", "outline": {"box": [300, 300, 320, 320]}, "topZ": None,
+        added = {"id": "added", "kind": "movable", "outline": {"box": [300, 300, 320, 320]},
                  "state": "added"}
         moved = {"id": "moved", "kind": "movable", "outline": {"box": [300, 360, 320, 380]}, "topZ": 1.0,
                  "state": "moved"}
@@ -483,7 +558,7 @@ class Sweep(unittest.TestCase):
             to(b, *end)
             self.assertEqual(hits(b), [("blank", "n1", "tip", 0.2)], start)
         switch = {"id": "height-switch", "kind": "fixed", "outline": {"circle": [165, 80, 5]}, "topZ": 12.0,
-                  "state": "measured", "touchable": True}
+                  "state": "measured", "measured": TOP, "touchable": True}
         b = loaded(model((("objects",), [switch])))
         to(b, 145, 150)  # the needle's tip at the switch's centre
         to(b, z=48.2)
@@ -513,8 +588,8 @@ class Sweep(unittest.TestCase):
         to(b, z=49.7)
         to(b, y=190)
         self.assertEqual(hits(b), [("block", "needle", "hub", 0.1)])
-        b = loaded(model(touchable, (("tools", 1, "layers"), MODEL["tools"][1]["layers"][1:])))
-        to(b, 160, 150)  # the hub (r 6) at (180, 80), the block's centre
+        b = loaded(model(touchable, (("tools", 1, "tipEnd", "dy"), -90)))
+        to(b, 160, 150)  # the hub (r 6) at (180, 80), the block's centre; the tip at (180, 60), in front of it
         to(b, z=49.7)
         self.assertEqual(hits(b), [("block", "needle", "hub", 0.1)])
 
@@ -696,7 +771,7 @@ class SeeSaw(unittest.TestCase):
         b.send("M400")
         self.assertEqual(z(b), 42.0)
         post = {"id": "post", "kind": "fixed", "outline": {"box": [220, 70, 240, 90]}, "topZ": 16.0,
-                "state": "measured"}
+                "state": "measured", "measured": TOP}
         b = loaded(model((("seesaw", "endStopsRaw"), [-1, 46]), (("objects",), [post])))
         to(b, 100, 150)
         to(b, z=30)
@@ -704,6 +779,31 @@ class SeeSaw(unittest.TestCase):
         self.assertEqual(shift_at(60), 36.0)
         b.send("M400")
         self.assertEqual((z(b), hits(b)), (38.0, []))
+
+    def test_a_model_set_mid_move_after_a_z_shift_leaves_the_head_where_it_is(self):
+        """A set holds the head where the new stops hold it now, not the leg's start: after a z_shift mid-move that
+        start is virtual (the head less the counts so far) and may lie past a stop (round 4's re-check NIT). Each case
+        sets the same file again right after the shift. From raw 5, G1 Z60 at (145, 150), -20 at count 40: 20, ends at
+        40 with the hub's bottom (69 - 40) clear of the block's top (19.4); from 60, G1 Z40, +8 at count 50: 58, ends
+        at 48; stops [-1, 46], from 10 G1 Z63, -10 at count 60: 36 (the stop held it at 46), ends at 39."""
+        for stops, xy, start, line, count, shift, after, end in (
+                ([-1, 66], (145, 150), 5, "G1 Z60 F60", 40, -20.0, 20.0, 40.0),
+                ([-1, 66], (100, 300), 60, "G1 Z40 F60", 50, 8.0, 58.0, 48.0),
+                ([-1, 46], (100, 300), 10, "G1 Z63 F60", 60, -10.0, 36.0, 39.0)):
+            with self.subTest(line=line, shift=shift):
+                m = model((("seesaw", "endStopsRaw"), stops))
+                b = loaded(m)
+                to(b, *xy)
+                to(b, z=start)
+                b.send(line)
+                while (state(b)["head"]["logical"]["Z"] - count) * (count - start) < 0:
+                    b.run(0.005)
+                self.assertEqual(state(b)["head"]["logical"]["Z"], count)
+                self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": shift}, b.t)["ok"])
+                put(b, m)
+                self.assertEqual(z(b), after)
+                b.send("M400")
+                self.assertEqual((z(b), hits(b)), (end, []))
 
     def test_without_a_rest_the_z_drop_applies(self):
         b = loaded()
@@ -751,6 +851,138 @@ class NoModel(unittest.TestCase):
         self.assertAlmostEqual(z(b), 62.6, places=6)
         to(b, z=80)
         self.assertEqual(hits(b), [])
+
+
+SHARED = os.path.join(PKG_ROOT, "..", "..", "src", "test", "resources", "config", "DispenseSimMachine",
+                      "instancelabs", "collision-model.json")  # Backend's fixture, the one the engine's BedModelTest reads
+
+
+def tree(change):
+    """A change to the fixture's tree (the engine's Bad(what, change, says)); text edits are plain functions."""
+    def file(text):
+        j = json.loads(text)
+        change(j)
+        return json.dumps(j)
+    return file
+
+
+def obj(j, i):
+    return j["objects"][i]
+
+
+def tool(j, i):
+    return j["tools"][i]
+
+
+def layer(j, t, i):
+    return j["tools"][t]["layers"][i]
+
+
+def plane(j):
+    return j["bed"]["plane"]
+
+
+@unittest.skipUnless(os.path.exists(SHARED), "the shared fixture comes with Backend's #66 (BR-98)")
+class SameAsTheEngine(unittest.TestCase):
+    """The engine's bad files (BedModelTest.BAD_FILES at #66's 6e84566965, the same 47 edits of the shared fixture, by
+    the same names), each refused here too. says: the engine's words where lumen-sim's are the same, else the key
+    lumen-sim names. Two load on purpose: lumen-sim uses no margins."""
+    BAD = [
+        ("schema 2", tree(lambda j: j.update(schema=2)), "schema"),
+        ("a concave polygon", tree(lambda j: obj(j, 3).update(outline={"polygon": [
+            [300, 130], [460, 130], [380, 180], [460, 270], [300, 270]]})), "convex"),
+        ("a clockwise polygon", tree(lambda j: obj(j, 3).update(outline={"polygon": [
+            [462.2, 276.8], [461.0, 127.8], [304.1, 129.7], [305.3, 278.7]]})), "counter-clockwise"),
+        ("a box with x0 > x1", tree(lambda j: obj(j, 0).update(outline={"box": [30, 95, 10, 115]})), "x0 < x1"),
+        ("a circle of radius 0", tree(lambda j: obj(j, 1).update(outline={"circle": [65, 25, 0]})),
+         "objects[1].outline"),
+        ("an id twice", tree(lambda j: obj(j, 1).update(id="holder-left")), "objects[1].id"),
+        ("an object with the bed's id", tree(lambda j: obj(j, 1).update(id="bed")), "objects[1].id"),
+        ("a state not in the list", tree(lambda j: obj(j, 1).update(state="gone")), "state"),
+        ("a measured top without its record", tree(lambda j: obj(j, 1)["measured"].pop("top")), "measured.top"),
+        ("a how of spaces", tree(lambda j: obj(j, 1)["measured"]["top"].update(how=" ")), "how"),
+        ("two plane points", tree(lambda j: plane(j).update(points=[[60, 120, -3], [300, 120, -2.96]])),
+         "3 points"),
+        ("three plane points in a line", tree(lambda j: plane(j).update(points=[
+            [60, 120, -3], [180, 120, -2.98], [300, 120, -2.96]])), "on one line"),
+        ("a layer with aboveTipMm and bottomZ", tree(lambda j: layer(j, 1, 1).update(bottomZ=30)),
+         "tools[1].layers[1]"),
+        ("a layer with neither", tree(lambda j: layer(j, 1, 1).pop("aboveTipMm")), "tools[1].layers[1]"),
+        ("a fixed tool's layer above its tip", tree(lambda j: (layer(j, 2, 0).pop("bottomZ"),
+                                                               layer(j, 2, 0).update(aboveTipMm=3))),
+         "tools[2].layers[0]"),
+        ("the needle without its tipEnd", tree(lambda j: tool(j, 1).pop("tipEnd")), "tipEnd"),
+        ("moves both", tree(lambda j: tool(j, 1).update(moves="both")), "moves"),
+        ("no mmPerRaw", tree(lambda j: j["seesaw"]["n1"].pop("mmPerRaw")), "mmPerRaw"),
+        ("end stops high to low", tree(lambda j: j["seesaw"].update(endStopsRaw=[63, 0])), "endStopsRaw"),
+        ("N1 and no needle", tree(lambda j: j.update(tools=[tool(j, 0), tool(j, 2)])), "moves needle (here 1 and 0)"),
+        ("the needle and no N1", tree(lambda j: j.update(tools=[tool(j, 1), tool(j, 2)])),
+         "moves needle (here 0 and 1)"),
+        ("two N1s", tree(lambda j: tool(j, 1).update(moves="n1")), "moves needle (here 2 and 0)"),
+        ("a contact depth of 1.5 mm", tree(lambda j: j.update(contactDepthMm=1.5)), "contactDepthMm must be 0 to 1.0"),
+        ("a negative contact depth", tree(lambda j: j.update(contactDepthMm=-0.1)), "contactDepthMm must be 0 to 1.0"),
+        ("an id with a trailing space", tree(lambda j: obj(j, 0).update(id="holder-left ")), "objects[0].id"),
+        ("an id with a newline", tree(lambda j: obj(j, 0).update(id="holder-left\n")), "objects[0].id"),
+        ("an id that is a number", tree(lambda j: obj(j, 0).update(id=3)), "objects[0].id"),
+        ("a kind with a leading space", tree(lambda j: obj(j, 2).update(kind=" movable")), "objects[2] needs a kind"),
+        ("a state with a newline", tree(lambda j: obj(j, 0).update(state="measured\n")), "objects[0] needs a kind"),
+        ("a name that is a number", tree(lambda j: obj(j, 0).update(name=3)),
+         "objects[0] (holder-left).name is required (text)"),
+        ("a how that is a number", tree(lambda j: obj(j, 0)["measured"]["top"].update(how=7)),
+         "objects[0] (holder-left).measured.top.how must say how"),
+        ("bottomZ null beside aboveTipMm", tree(lambda j: layer(j, 1, 1).update(bottomZ=None)),
+         "tools[1].layers[1].bottomZ is null"),
+        ("topZ null", tree(lambda j: obj(j, 0).update(topZ=None)), "objects[0].topZ is null"),
+        ("restRaw null", tree(lambda j: j["seesaw"].update(restRaw=None)), "seesaw.restRaw is null"),
+        ("N1 without its tip layer", tree(lambda j: tool(j, 0).update(layers=[layer(j, 0, 1)])),
+         "tools[0] (n1): a tool on the see-saw needs its tip"),
+        ("the needle's tip layer above its tip", tree(lambda j: layer(j, 1, 0).update(aboveTipMm=0.5)),
+         "tools[1] (needle): a tool on the see-saw needs its tip"),
+        ("the needle's tip layer at the head", tree(lambda j: layer(j, 1, 0).update(at="head")),
+         "tools[1] (needle): a tool on the see-saw needs its tip"),
+        ("a tip end measured in the future", tree(lambda j: tool(j, 1)["tipEnd"].update(
+            atMs=int(time.time() * 1000) + 120000)), "tools[1].tipEnd.atMs is later than now + 1 min"),
+        ("a record's time in microseconds", tree(lambda j: obj(j, 0)["measured"]["top"].update(
+            atMs=int(time.time() * 1000) * 1000)), "objects[0].measured.top.atMs is later than now + 1 min"),
+        ("a time that is text", tree(lambda j: plane(j).update(atMs="0")), "bed.plane.atMs must be a time"),
+        ("an unquoted value", lambda t: t.replace('"kind": "fixed"', '"kind": fixed'), "not JSON"),
+        ("single quotes", lambda t: t.replace('"id": "holder-left"', "'id': 'holder-left'"), "not JSON"),
+        ("a comment", lambda t: t.replace('"schema": 1,', '"schema": 1, // the first schema'), "not JSON"),
+        ("text after the model", lambda t: t + "\n{}", "not JSON"),
+        ("nested 20 000 deep", lambda t: "[" * 20000, "nested too deep"),
+    ]
+    LOADS = [  # the engine refuses the first two (its margins); it loads the others too
+        ("no zMarginMm", tree(lambda j: j.pop("zMarginMm"))),
+        ("no marginMm", tree(lambda j: obj(j, 1).pop("marginMm"))),
+        ("a tip end 30 s ahead (another host's clock)", tree(lambda j: tool(j, 1)["tipEnd"].update(
+            atMs=int(time.time() * 1000) + 30000))),
+        ("how: caliper height + margin", tree(lambda j: obj(j, 0)["measured"]["top"].update(
+            how="caliper height + margin"))),
+    ]
+
+    def setUp(self):
+        with open(SHARED, encoding="utf-8") as f:
+            self.text = f.read()
+
+    def test_the_fixture_loads(self):
+        self.assertEqual(collision.parse(self.text).version, 1)
+
+    def test_each_bad_file_is_refused(self):
+        self.assertEqual(len(self.BAD) + 2, 47, "the engine's list, all but the two margins")
+        for what, file, says in self.BAD:
+            with self.subTest(what):
+                text = file(self.text)
+                self.assertNotEqual(text, self.text, "the edit found its text")
+                with self.assertRaises(ValueError) as e:
+                    collision.parse(text)
+                self.assertIn(says, str(e.exception))
+
+    def test_the_rest_loads(self):
+        for what, file in self.LOADS:
+            with self.subTest(what):
+                text = file(self.text)
+                self.assertNotEqual(text, self.text)
+                self.assertEqual(collision.parse(text).version, 1)
 
 
 if __name__ == "__main__":
