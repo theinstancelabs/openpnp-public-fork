@@ -151,11 +151,16 @@ final class GcodePassthrough {
             throw ApiException.badRequest("'what' is required with Z moves while not homed (levelling the see-saw): "
                     + "say why, e.g. \"see-saw levelling, needle tip y 494 to 486\"");
         }
+        DispenseService svc = ctx.svcOrNull();
+        if (levelling && svc == null) {
+            throw ApiException.refused("Z moves while not homed (levelling the see-saw) need the dispense engine, which "
+                    + "journals each call and keeps the controller's reset on record: it is not running (see the "
+                    + "OpenPnP log)");
+        }
         if (!m.isEnabled()) {
             throw ApiException.refused("the machine is not started: press Start (POST /api/machine/enable) first");
         }
         ctx.requireNotSwitchingOff();
-        DispenseService svc = ctx.svcOrNull();
         if (svc != null) {
             ctx.requireEngineIdle(svc);
         }
@@ -170,7 +175,7 @@ final class GcodePassthrough {
         }
         try {
             if (levelling) {
-                checkLevelling(m, d, raw, lines, holder, what);
+                checkLevelling(m, d, svc, raw, lines, holder, what);
             }
             Future<Outcome> f = m.submit(() -> execute(m, d, b, lines, timeoutMs), null, true);
             long bound = lines.size() * (timeoutMs + 1000L) + 30000L;
@@ -202,8 +207,8 @@ final class GcodePassthrough {
      * passthrough move was not) by {@link PassthroughLines#level}: a refused one sends nothing, else the call is
      * journaled (events {@code Z_LEVEL}: the holder, the lines, the reason).
      */
-    private void checkLevelling(Machine m, GcodeDriver d, List<String> raw, List<PassthroughLines.Line> lines,
-            MachineLock.Holder holder, String what) throws ApiException {
+    private void checkLevelling(Machine m, GcodeDriver d, DispenseService svc, List<String> raw,
+            List<PassthroughLines.Line> lines, MachineLock.Holder holder, String what) throws ApiException {
         if (positionStale()) {
             resyncNow(m, d);
         }
@@ -230,11 +235,8 @@ final class GcodePassthrough {
                 sent.append(sent.length() == 0 ? "" : "; ").append(l.text);
             }
         }
-        DispenseService svc = ctx.svcOrNull();
-        if (svc != null) {
-            svc.getDb().event(null, "INFO", "Z_LEVEL", "Z levelling while not homed, by " + (holder == null ? "?"
-                    : holder.who) + " (" + what + "): " + sent);
-        }
+        svc.getDb().event(null, "INFO", "Z_LEVEL", "Z levelling while not homed, by " + (holder == null ? "?"
+                : holder.who) + " (" + what + "): " + sent);
     }
 
     /** The controller axis Z's coordinate as OpenPnP knows it (raw mm): the controller's own once re-read. */

@@ -1259,6 +1259,37 @@ public class PowerCycleSimTest {
         assertEquals(33.0, believedZ(), 1e-6);
     }
 
+    /**
+     * BR-97 review: without the engine nothing journals a levelling call (Z_LEVEL) or keeps the reset on record: the
+     * call is refused (409) and nothing is sent.
+     */
+    @Test
+    public void levellingIsRefusedWithoutTheEngine() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+        DispenseService old = svc;
+        TipSim.hook(p -> {
+            if ("shutdown".equals(p)) {
+                throw new IllegalStateException("the old engine did not stop");
+            }
+        });
+        try {
+            assertThrows(IllegalStateException.class, () -> DispenseService.start(Configuration.get()));
+        }
+        finally {
+            TipSim.hook(null);
+        }
+        old.shutdown();
+        assertEquals(null, DispenseService.get(), "no engine");
+        sim.server.mark();
+        call("POST", "/api/gcode", level("w", 1));
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("dispense engine"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "nothing sent");
+        svc = DispenseService.start(Configuration.get());
+    }
+
     /** BR-97: a levelling move counts for BR-02's idle clock: it keeps the screw's motor on, as any move does. */
     @Test
     public void aLevellingMoveKeepsTheScrewMotorOn() throws Exception {
