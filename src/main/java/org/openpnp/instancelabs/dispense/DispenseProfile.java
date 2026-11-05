@@ -47,6 +47,12 @@ public class DispenseProfile {
     public double startAngleDeg = 298;
     /** When the start angle was set or confirmed (epoch ms); null = never. */
     public Long startAngleSetAtMs = null;
+    /**
+     * BR-75: when the start angle's value was last set (a set, or a settings change of it; a confirm keeps it): the
+     * partial-turn records made before it are stale. Null in settings from before it: {@link #startAngleSetAtMs} counts,
+     * and the first confirm takes it from there.
+     */
+    public Long startAngleChangedAtMs = null;
     /** Screw speed: G1 B feed = rpm x 360 deg/min (the bench's 180 rpm = F64800). */
     public double screwRpm = 180;
     /** Screw acceleration (deg/s²), sent as M204 S around the B moves only (M204 S also caps B). */
@@ -265,6 +271,17 @@ public class DispenseProfile {
         return p;
     }
 
+    /**
+     * The start angle and its set and change times from {@code from}: they belong to the controller's power-up and the
+     * screw, not to a tip's recipe (§22.3), so a mount and its undo keep the live ones (BR-75 review). Returns this.
+     */
+    public DispenseProfile withStartAngleOf(DispenseProfile from) {
+        startAngleDeg = from.startAngleDeg;
+        startAngleSetAtMs = from.startAngleSetAtMs;
+        startAngleChangedAtMs = from.startAngleChangedAtMs;
+        return this;
+    }
+
     public DispenseProfile copy() {
         DispenseProfile x = new DispenseProfile();
         x.name = name;
@@ -273,6 +290,7 @@ public class DispenseProfile {
         x.suckBackDeg = suckBackDeg;
         x.startAngleDeg = startAngleDeg;
         x.startAngleSetAtMs = startAngleSetAtMs;
+        x.startAngleChangedAtMs = startAngleChangedAtMs;
         x.screwRpm = screwRpm;
         x.screwAccelDegS2 = screwAccelDegS2;
         x.dwellMs = dwellMs;
