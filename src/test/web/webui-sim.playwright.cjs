@@ -765,11 +765,13 @@ async function runFirstDots(page, n) {
       {
         const coupon = await page.evaluate(() => (((IL.S.config || {}).padCalibration || {}).couponPlaces || ['coupon1'])[0]);
         const extra = ['backup', 'cup1', 'cupboard', 'scale-2', 'towel', coupon, 'park'];
+        let noWaste = false;
         await page.route('**/api/status', async (route) => {
           try {
             const res = await route.fetch();
             const body = await res.json();
             extra.forEach((n, i) => { body.dispense.locations[n] = { x: 200 + 8 * i, y: 200, z: 10 }; });
+            if (noWaste) delete body.dispense.locations[body.dispense.wasteLocationName || 'waste'];
             await route.fulfill({ response: res, json: body });
           } catch (e) { /* unrouted while it was being answered */ }
         });
@@ -795,6 +797,17 @@ async function runFirstDots(page, n) {
           return sel && sel.options.length && ![...sel.options].some((o) => o.value === 'cup1') ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value } : null; },
         null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
         check('Scale shots without a cup place: the waste is chosen, not the first name (the blank)', !!shots2 && shots2.chosen === 'waste', shots2);
+        // no sink at all (no cup, waste or towel): nothing is chosen, never the blank or a coupon by default; Run asks for a cup
+        // place (the re-check's MINOR on e25fbf864a: the engine takes shots on the blank, 30 whole turns)
+        extra.splice(extra.indexOf('towel'), 1);
+        noWaste = true;
+        const shots3 = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
+          return sel && sel.options.length && ![...sel.options].some((o) => o.value === 'waste' || o.value === 'towel')
+            ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value, runOff: document.getElementById('btn-shots-run').disabled,
+              why: (document.getElementById('shots-reason') || {}).textContent || '' } : null; },
+        null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        check('Scale shots with no sink place: nothing chosen (not the blank or a coupon), Run locked', !!shots3
+          && shots3.opts.includes('blank') && shots3.chosen === '' && shots3.runOff, shots3);
         await page.unroute('**/api/status');
       }
       await nav(page, 'calibrate');
