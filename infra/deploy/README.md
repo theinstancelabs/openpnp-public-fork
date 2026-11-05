@@ -279,11 +279,14 @@ Exit codes:
 - Never stops, starts or homes a machine whose controller link is lost (BR-93: `machine.linkLost` in `/api/status`
   and `/api/machine`, absent before BR-93, null while the link is fine, anything else counts as lost): the idle
   check is not idle, so no deploy (its restart would clear it). The health check reads it before its stop of an
-  enabled machine and its Start, before its home, after the home, and before and after its last stop (#53's planned
-  stop answers 200 on a lost link: nothing reaches the controller). Set at any of them, the check fails with kind
-  `link-lost`, handled like a home that never ends: no STOP, no config put back, no restart (each would clear
-  linkLost, and the config from before the deploy lacks the engine's journal rows of the loss); OpenPnP is left
-  running with the loss showing, the build installed but not verified, the hold set, the build not marked bad.
+  enabled machine and its Start, before its home, and before and after its last stop (#53's planned stop answers 200
+  on a lost link: nothing reaches the controller; after one that passed, a read without an answer counts as lost),
+  and at every step that fails after the status step (a Start, home or read that failed on a link lost meanwhile:
+  #53's 409 `MACHINE: …`, `homing failed: … IO Error …`, homed reading false). Set at any of them, the check fails
+  with kind `link-lost`, handled like a home that never ends: no STOP (nothing reaches the controller), no config put
+  back (the config from before the deploy lacks the engine's journal rows of the loss), no restart (it clears
+  linkLost, as a connect does; a STOP does not); OpenPnP is left running with the loss showing, the build installed
+  but not verified, the hold set, the build not marked bad.
 - Never homes a controller that shows the power-cycle signature. It reports `controller was reset; a person
   must check the machine` and sets the hold.
 - **The deployer's own stops are planned (BR-75):** the health check's last stop, its stop of a machine left enabled

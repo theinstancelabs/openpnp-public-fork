@@ -164,7 +164,7 @@ class Health(HealthLab, unittest.TestCase):
     def lost_link_check(self, enabled):
         """BR-93: with machine.linkLost set the check sends nothing: its planned stop answers 200 on a lost link
         (nothing reaches the controller), Start would connect again and clear it, and the home after it would home a
-        controller that may have reset. A machine problem: a person checks."""
+        controller that may have reset. Kind link-lost: left as it is for a person."""
         self.start(link_lost=self.LINK_LOST)
         self.fake.enabled = enabled
         rep = self.check()
@@ -186,8 +186,8 @@ class Health(HealthLab, unittest.TestCase):
         return posts[posts.index(("POST", path)) + 1:]
 
     def test_a_link_lost_after_the_enable_is_not_homed_or_stopped(self):
-        """Nothing reaches a lost link, and a stop or the recovery's restart would clear linkLost: OpenPnP is left as
-        it is, for a person (kind link-lost, handled like a home that never ends)."""
+        """Nothing reaches a lost link, and the recovery's restart would clear linkLost: OpenPnP is left as it is, for
+        a person (kind link-lost, handled like a home that never ends)."""
         self.start(jar_fail=["link-lost-after-enable"])
         rep = self.check()
         self.assertFalse(rep["ok"])
@@ -208,6 +208,45 @@ class Health(HealthLab, unittest.TestCase):
         rep = self.check()
         self.assertFalse(rep["ok"])
         self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "stop"), rep)
+
+    def link_s(self, fail, step, path):
+        """The check fails at step on a link lost meanwhile: kind link-lost, nothing sent after path (no STOP)."""
+        self.start(jar_fail=[fail])
+        rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", step), rep)
+        self.assertIn("the controller left USB", rep["failure"])
+        self.assertEqual(self.after(path), [], "no STOP")
+        return rep["failure"]
+
+    def test_a_home_refused_on_a_link_lost_just_before_it_is_the_link_s(self):
+        """#53 refuses a home on a lost link (409 "MACHINE: <why>: <next>"): not a machine problem to STOP."""
+        self.assertIn("HTTP 409: MACHINE: ", self.link_s("link-lost-at-home", "home", "/api/machine/home"))
+
+    def test_a_home_that_failed_on_a_link_lost_during_it_is_the_link_s(self):
+        self.assertIn("IO Error on reading", self.link_s("link-lost-during-home", "home", "/api/machine/home"))
+
+    def test_a_start_that_failed_on_a_link_lost_as_it_connected_is_the_link_s(self):
+        """Not the build's: the rollback's check would Start and home the previous build unattended."""
+        failure = self.link_s("link-lost-at-enable", "enable", "/api/machine/enable")
+        self.assertIn("could not start the machine", failure)
+
+    def test_a_link_lost_after_the_homed_read_gets_no_stop(self):
+        """The read before the last stop finds it: no planned stop is sent to a lost link."""
+        self.link_s("link-lost-after-homed", "stop", "/api/machine/home")
+
+    def test_no_answer_on_the_link_after_the_last_stop_is_no_pass(self):
+        """#53's planned stop answers 200 on a lost link: only a read after it shows the stop reached the controller."""
+        self.start(jar_fail=["link-lost-at-planned-stop"])
+        get = il_deploy.Api.get
+
+        def no_answer_after_the_stop(api, path, timeout=10):
+            if path == "/api/machine" and ("POST", "/api/stop/planned") in self.posts():
+                raise il_deploy.ApiTimeout(f"GET {path}: no answer within {timeout:g} s")
+            return get(api, path, timeout)
+        with mock.patch.object(il_deploy.Api, "get", no_answer_after_the_stop):
+            rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("link-lost", "stop"), rep)
+        self.assertIn("no answer within 10 s", rep["failure"])
 
     def test_a_locked_answer_is_proof_enough(self):
         """409 locked is someone else's session even if the status read after it fails."""
@@ -674,6 +713,15 @@ class Health(HealthLab, unittest.TestCase):
         h = self.lab.holder()
         self.assertTrue(h.idle, h.value)
         self.assertIn("released by Infra resume", h.value)
+
+    def test_health_cli_link_lost_keeps_the_holder(self):
+        """BR-93: a lost link is left for a person, held as a machine problem is."""
+        self.start(jar_fail=["link-lost-after-enable"])
+        self.assertEqual(self.lab.main("health", "--sha7", SHA[:7]), 1)
+        self.assertEqual(json.loads(self.lab.last_out)["kind"], "link-lost")
+        h = self.lab.holder()
+        self.assertFalse(h.idle, h.value)
+        self.assertIn("a person must check the machine", h.value)
 
     def test_health_cli_refuses_when_busy(self):
         self.start(fail=["run"])

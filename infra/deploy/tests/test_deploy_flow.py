@@ -488,8 +488,8 @@ class Flow(unittest.TestCase):
 
     def test_a_link_lost_in_the_health_check_leaves_openpnp_alone(self):
         """BR-93: the new build loses the controller link after its Start. No STOP to the lost link, no config put back
-        and no restart (both would clear linkLost, and the old config lacks the engine's journal rows of the loss):
-        OpenPnP left running with the loss showing, the build installed but not verified, held, not marked bad."""
+        and no restart (the restart would clear linkLost, and the old config lacks the engine's journal rows of the
+        loss): OpenPnP left running with the loss showing, the build installed but not verified, held, not bad."""
         a = self.release(4, self.lab.b)
         self.deploy()
         b = self.release(5, self.lab.c, fail=["link-lost-after-enable"])
@@ -506,6 +506,23 @@ class Flow(unittest.TestCase):
         self.assertEqual(self.lab.link("current"), b)
         self.assertIn(f"{b} installed but NOT verified", self.deployed_line())
         self.assertNotEqual(self.lab.link("current"), a)
+
+    def test_a_link_lost_in_the_rollbacks_check_leaves_openpnp_alone(self):
+        """The new build fails as the build's; the previous build, put back and checked, loses the link after its Start:
+        OpenPnP left running with the loss showing (_left_after), no STOP."""
+        a = self.release(4, self.lab.b)
+        self.deploy()
+        self.lab.machine(fail_for={self.lab.b[:7]: ["link-lost-after-enable"]})  # a's check, in b's pre-deploy config
+        self.release(5, self.lab.c, fail=["home-404"])
+        self.deploy(rc=5)
+        self.assertEqual([r["kind"] for r in self.lab.journal() if r["event"] == "health"][-2:], ["build", "link-lost"])
+        posts = [r.get("path") for r in self.lab.requests() if r.get("method") == "POST"]
+        last_enable = len(posts) - 1 - posts[::-1].index("/api/machine/enable")
+        self.assertEqual(posts[last_enable + 1:], [], "nothing after a's Start: no home, no STOP")
+        self.assertTrue(self.lab.service().is_active())
+        self.assertEqual(self.lab.link("current"), a)
+        self.assertIn("lost controller link showing", self.deployed_line())
+        self.assert_held()
 
     def test_slow_home_the_server_gives_up_on_still_deploys(self):
         self.release(4, self.lab.b)

@@ -2527,6 +2527,10 @@ class Deployer:
             steps.append({"step": name, "ok": True, "detail": detail})
 
         def fail(name, detail, kind="build", stop=True):
+            # BR-93: after the status step, a Start, home or read that failed on a link lost meanwhile is the link's
+            lost = link_lost(name, detail) if steps and kind in ("build", "machine") else None
+            if lost:
+                return lost
             steps.append({"step": name, "ok": False, "detail": detail})
             rep.update(failure=f"{name}: {detail}", kind=kind, finished_at=self.iso())
             if stop:
@@ -2542,16 +2546,21 @@ class Deployer:
             return fail(name, f"OpenPnP's API went away after the enable ({why}{'; ' + more if more else ''}); a person "
                               "must check the machine", "machine")
 
-        def link_lost(name, what, m=None):
-            """BR-93: machine.linkLost set: nothing reaches the controller, and a stop (#53's planned stop answers
-            200) or the recovery's restart would clear it and the journal rows of the loss: OpenPnP is left as it is
-            for a person, handled like a home that never ends (kind link-lost). m: /api/machine already read."""
+        def link_lost(name, what, m=None, closed=False):
+            """BR-93: machine.linkLost set: nothing reaches the controller (#53's planned stop answers 200 all the
+            same), the recovery's restart would clear it (a connect does; a STOP does not) and its config put back lacks
+            the engine's journal rows of the loss: OpenPnP is left as it is for a person, handled like a home that never
+            ends (kind link-lost). m: /api/machine already read, else read now; a read without an answer is no loss
+            unless closed (after the last stop: nothing reads it again)."""
             if m is None:
                 try:
                     code, m = self.api.get("/api/machine", timeout=10)
-                except ApiDown:
-                    return None  # the step after it finds out
-                m = m if code == 200 else {}
+                    unread = None if code == 200 else f"HTTP {code}"
+                except ApiDown as e:
+                    unread = str(e)
+                if unread:
+                    why = f"machine.linkLost not read ({unread})"
+                    return fail(name, f"{why}: {what}", "link-lost", stop=False) if closed else None
             lost = api_link_lost_reasons(m)
             return fail(name, f"{lost[0]}: {what}", "link-lost", stop=False) if lost else None
 
@@ -2690,10 +2699,7 @@ class Deployer:
             code, m = self.api.get("/api/machine", timeout=10)
         except ApiDown as e:
             return gone("homed", e)
-        lost = link_lost("homed", "not stopping it", m)
-        if lost:  # homed reads false while it is set: never the build's
-            return lost
-        if m.get("homed") is not True or m.get("busy") is not False:
+        if m.get("homed") is not True or m.get("busy") is not False:  # false while linkLost is set: fail() finds it
             return fail("home" if late else "homed", f"homed {m.get('homed')}, busy {m.get('busy')}",
                         "machine" if late else "build")
         step("home", "homed" + (f" (ended after the request: {answer})" if late else ""))
@@ -2703,8 +2709,8 @@ class Deployer:
         if lost:
             return lost
         ok, d = self.planned_stop(lambda: api_stop_and_wait(self.api, cfg.stop_timeout, cfg.poll_interval, self.clock))
-        lost = link_lost("stop", f"its planned stop ({d}) reached nothing")
-        if lost:  # #53's planned stop answers 200 on a lost link (until Backend's follow-up)
+        lost = link_lost("stop", f"its planned stop ({d}) may have reached nothing", closed=ok)
+        if lost:  # #53's planned stop answers 200 on a lost link (until Backend's follow-up): only this read shows it
             return lost
         if not ok:
             if self._gone(watch_service):

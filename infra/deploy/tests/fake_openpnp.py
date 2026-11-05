@@ -51,7 +51,11 @@ BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the 
 planned-lines-failed (the planned stop's M107 P3 gets no ok: linesFailed), planned-slow (the first planned stop
 of an enabled machine switches it off but answers 409 refused: its task outlived the API's 20 s wait),
 link-lost-after-enable (the controller's link is lost right after the enable), link-lost-after-home (right after
-the home), link-lost-at-planned-stop (as the planned stop runs; it still answers 200, as #53's does).
+the home), link-lost-at-planned-stop (as the planned stop runs; it still answers 200, as #53's does),
+link-lost-at-enable (as the Start connects: it answers 409 "could not start the machine: ... IO Error ..."),
+link-lost-at-home (just before the home: #53 refuses it), link-lost-during-home (mid-G28: "homing failed: ... IO
+Error ..."), link-lost-after-homed (right after the health check's homed read: the second GET /api/machine that reads
+homed, after the not-busy wait's).
 BR-93's machine.linkLost {atMs, why, next} (fake-machine.json "link_lost", null while the link is fine): while set
 connected and homed read false and a home answers 409 refused "MACHINE: <why>: <next>"; a Start clears it (a connect).
 As #53, the planned stop does not look at it (it answers 200 on a lost link).
@@ -132,6 +136,7 @@ class FakeOpenPnP:
         self.pressure_state = "on" if "pressure" in self.fail else "off"  # PressureHold: a STOP vents it
         self.planned_refusals = int(machine.get("planned_refusals", 0))
         self.link_lost = machine.get("link_lost")  # BR-93's machine.linkLost, None while the link is fine
+        self.homed_reads = 0  # GET /api/machine answers that read homed ("link-lost-after-homed")
         log_dir = os.path.join(config_dir, "log")
         os.makedirs(log_dir, exist_ok=True)
         # OpenPnP's tinylog RollingFileWriter (StartupPolicy) starts a new OpenPnP.log at each start
@@ -305,6 +310,10 @@ class FakeOpenPnP:
             return 409, {"error": "taking-over", "reason": "The user is taking control: wait for it to finish."}
         if "enable" in self.fail:
             return 409, {"error": "refused", "reason": "could not start the machine: fake port not found"}
+        if "link-lost-at-enable" in self.fail:  # the reader ends on an IO error as Start connects (BR-93)
+            self.lose_link()
+            return 409, {"error": "refused", "reason": "could not start the machine: GcodeDriver:ttyACM0 IO Error on "
+                                                       "reading from the controller."}
         with self.lock:
             relink = self.connected and self.link_dead
             if relink and not self.br44:
@@ -344,6 +353,8 @@ class FakeOpenPnP:
         with self.lock:
             if not self.enabled:
                 return 409, {"error": "refused", "reason": "the machine is not started: press Start first"}
+            if "link-lost-at-home" in self.fail:
+                self.lose_link()
             if self.link_lost:  # BR-93 (ApiContext): every route that moves refuses before anything is tried
                 return 409, {"error": "refused", "reason": f"MACHINE: {self.link_lost['why']}: {self.link_lost['next']}"}
             if self.pressure_state != "off":
@@ -363,6 +374,9 @@ class FakeOpenPnP:
                     self.g28_until = time.time() + float(self.machine.get("g28_more_s", 3.0))
                     result["error"] = ("homing failed: GcodeDriver:ttyACM0 timeout waiting for response to G28 ; "
                                        "Home all axes")
+                elif "link-lost-during-home" in self.fail:  # the reader ends on an IO error mid-G28 (BR-93)
+                    self.lose_link()
+                    result["error"] = "homing failed: GcodeDriver:ttyACM0 IO Error on reading from the controller."
                 elif "home" in self.fail:
                     result["error"] = "homing failed: fake endstop not reached"
                 else:
@@ -531,7 +545,12 @@ class FakeOpenPnP:
         if method == "GET" and path == "/api/status":
             return 200, self.status()
         if method == "GET" and path == "/api/machine":
-            return 200, self.machine_status()
+            m = self.machine_status()
+            if "link-lost-after-homed" in self.fail and m["homed"]:
+                self.homed_reads += 1
+                if self.homed_reads == 2:  # the not-busy wait's read, then the homed read: lost before the stop
+                    self.lose_link()
+            return 200, m
         if method == "POST" and path == "/api/machine/enable":
             return self.enable()
         if method == "POST" and path == "/api/machine/home":
