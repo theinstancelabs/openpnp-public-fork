@@ -2931,7 +2931,8 @@
       IL.refuse(e, { host, what: o.what });
       return undefined;
     } finally {
-      if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
+      // a button its gate locked meanwhile (IL.gate keeps its title) stays locked until the render frees it
+      if (btn) { btn.disabled = btn.dataset.titleIdle !== undefined; btn.removeAttribute('aria-busy'); }
       IL.pollNow();
       IL.render();
     }
