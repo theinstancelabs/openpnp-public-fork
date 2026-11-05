@@ -115,6 +115,8 @@ public final class VacuumProber {
         public long releaseTimeoutMs = 1500;
         /** Fine steps a lagging line can hide below the first touch (Process: lag <= 1 s, ~4 steps). */
         public int maxLagSteps = 4;
+        /** A mean further above open air is a fault read, not the line's overshoot after a seal (journal max +26 k). */
+        public int maxOvershootCounts = 50000;
         public int maxSpreadCounts = 15000;
         public int maxDeltaFirstCounts = 50000;
         public int maxDeltaMemoryCounts = 60000;
@@ -697,7 +699,8 @@ public final class VacuumProber {
     /**
      * Moves to {@code z} and reads until the mean is less than {@code within} below the baseline (the seal let
      * go there), at most {@link Settings#releaseTimeoutMs}. Above the baseline is let go too: the real line
-     * overshoots open air for ~1.5 s after a seal lets go (+20-26 k at 78 of 167 journal touches).
+     * overshoots open air for ~1.5 s after a seal lets go (+20-26 k at 78 of 167 journal touches); more than
+     * {@link Settings#maxOvershootCounts} above it is a fault read (a stray FF FF FF reply), never let go.
      */
     private boolean released(Point p, Window w, double z, double within) throws Exception {
         moveZ(z, s.zProbeFeedMmMin, w);
@@ -707,7 +710,7 @@ public final class VacuumProber {
             double m = mean(reads(s.stepReads));
             p.readings.add(new double[] {z, m});
             report(p);
-            if (p.baseline - m < within) {
+            if (p.baseline - m < within && m - p.baseline < s.maxOvershootCounts) {
                 return true;
             }
             if (s.clock.getAsLong() - t0 >= s.releaseTimeoutMs) {

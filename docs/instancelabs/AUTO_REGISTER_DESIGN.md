@@ -837,13 +837,14 @@ M400
 G1 Z{zo} F300
 M400
 3-read means every 70 ms until baseline - mean < drop/2 (above open air is let go: the line overshoots it after a
-seal); at most 1.5 s (else refuse "N1 did not release")
+seal; over 50 k above it is a fault read); at most 1.5 s (else refuse "N1 did not release")
 ; fine (changed): z = zo-0.025, zo-0.05, ... down to max(zc-0.10, floor)
 G1 Z{z} F300
 M400
 3 x read ... contact = the first z whose mean, and the next step's mean, are both < baseline - drop
 ; re-read (BR-100): each step above the contact, entered from one step higher, until one lets go (baseline - mean
-; < drop within 1.5 s); the step below it is the contact; a seal still holding 4 steps up is refused
+; < drop within 1.5 s); the step below it is the contact: up to 4 steps up are lag-hidden, a seal still holding 5
+; steps up is refused; the climb stops below the release height
 ; end of the point (also after no contact, and after any refusal inside the point)
 G1 Z31.5000 F600
 M400

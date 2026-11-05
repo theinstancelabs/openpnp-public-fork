@@ -696,6 +696,7 @@ public class VacuumProberTest {
     /**
      * After a seal lets go, the real line overshoots open air (less vacuum) for ~1.5 s: 78 of 167 journal touches read
      * over +20 k there (10-31 13:59: -84, +13, +24, +25, +25, +24, +17 k). A reading above open air is never a seal.
+     * The series below is 13:59's with its second mean raised to +21 k and its tail held over +20 k.
      */
     @Test
     public void theLineOvershootingOpenAirAfterTheSealIsLetGo() throws Exception {
@@ -714,6 +715,24 @@ public class VacuumProberTest {
         assertTrue(p.notes.stream().noneMatch(x -> x.contains("still drawing")), String.valueOf(p.notes));
         assertEquals("contact", p.state);
         assertEquals(4.50, p.z, 1e-9);
+    }
+
+    /**
+     * A stray FF FF FF reply (-1) in the first mean after the lift lifts that mean ~0.5 M above open air while the line
+     * still draws: it is a fault read, not let go, or the fine pass would start in the seal and touch 4.725.
+     */
+    @Test
+    public void aFaultReadFarAboveOpenAirIsNotLetGo() throws Exception {
+        Rig rig = new Rig();
+        java.util.Map<Double, Integer> visits = new java.util.HashMap<>();
+        rig.ch.byZ = (z, n) -> {
+            int visit = n == 0 ? visits.merge(z, 1, Integer::sum) : visits.get(z);
+            return Math.abs(z - 4.75) < 1e-9 && visit > 1 && n == 0 ? -1 : null;
+        };
+        VacuumProber.Point p = rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)).get(0);
+        assertEquals(4.75, p.releaseZ, 1e-9);
+        assertEquals("contact", p.state);
+        assertEquals(4.50, p.z, 1e-9, "the fine pass starts once the line let go");
     }
 
     /** A seal that holds above the contact (a blocked tip) is refused after the steps a 1 s lag can hide. */
