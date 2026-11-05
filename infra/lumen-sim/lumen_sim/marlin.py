@@ -29,7 +29,6 @@ KILL_DELAY_S = 0.6              # minkill(): messages get out, the stepper ISR s
 STEPPERS_OFF_DELAY_S = 0.25     # minkill(): after cli(), DELAY_US(250000), then disable_all_steppers() (M112)
 DFU_DRAIN_S = 0.1               # il/safety flashFirmware(): 20 x delay(5) for USB CDC to send, then the reset into DFU
 DEFAULT_STEPPER_TIMEOUT_MS = 3600 * 1000  # DEFAULT_STEPPER_TIMEOUT_SEC (Configuration_adv.h)
-DISABLE_IDLE = AXES             # DISABLE_IDLE_X/Y/Z/I/J: an idle timeout releases every axis
 MILLIS_HALF = 2 ** 31           # ELAPSED()/PENDING() compare millis_t as int32_t (core/millis_t.h:32-33)
 # Passes of the loop at one instant with nothing to wait for: a wait that never moves on is a model bug. It ends
 # as a sim error (the board halts, the process stays up and answers SIGTERM) instead of a spin.
@@ -378,7 +377,8 @@ class Firmware:
         return math.inf
 
     def _manage_inactivity(self):
-        """The M18/M84 idle timeout: once the planner has been empty that long, release every axis, once."""
+        """The M18/M84 idle timeout: once the planner has been empty that long, release the build's DISABLE_IDLE axes
+        (all five; il-holdB keeps B), once."""
         if self.stepper.blocks:
             self.previous_move = self.now
         else:  # the board polls without pause, so its last look at a queued block was when the last one ended
@@ -388,7 +388,7 @@ class Firmware:
         if not self.stepper.blocks and self._idle_timed_out():
             if not self.idle_released:
                 self.idle_released = True
-                for a in DISABLE_IDLE:
+                for a in self.p.disable_idle:
                     self.release(a)
         else:
             self.idle_released = False

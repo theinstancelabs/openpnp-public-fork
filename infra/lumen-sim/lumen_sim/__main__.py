@@ -1,7 +1,7 @@
 """Run a simulated LumenPnP Marlin controller on a pseudo-terminal, or talk to a running one.
 
 usage:
-  python3 -m lumen_sim --link PATH [--personality stock|il-safety] [--control SOCK] [--io-log FILE]
+  python3 -m lumen_sim --link PATH [--personality stock|il-safety|il-holdB] [--control SOCK] [--io-log FILE]
                        [--time-scale 1.0] [--park X,Y,Z] [--kill-messages] [--vacuum N] [--surface-z Z]
                        [--seed N] [--sim-cap]
   python3 -m lumen_sim ctl --control SOCK state
@@ -44,7 +44,7 @@ def _park(text):
 def run(argv):
     ap = argparse.ArgumentParser(prog="python3 -m lumen_sim", description="Simulated LumenPnP Marlin controller")
     ap.add_argument("--link", required=True, help="symlink to publish the pty slave at (name ttyLUMEN*)")
-    ap.add_argument("--personality", default="stock", choices=["stock", "il-safety"])
+    ap.add_argument("--personality", default="stock", choices=["stock", "il-safety", "il-holdB"])
     ap.add_argument("--control", help="Unix socket for the JSON control channel")
     ap.add_argument("--io-log", help="append the serial traffic here, serial.log style")
     ap.add_argument("--time-scale", type=_finite, default=1.0, help="simulator seconds per wall second")
