@@ -12,6 +12,8 @@ import java.util.regex.Pattern;
  * (M42 takes the Arduino pin) and {@code M43 P5} reads it (M43 takes the pin table's entry). The pull-up is set again
  * before every read: M43 may read an analog-capable pin through analogRead, which leaves it in analog mode. The level
  * read with both tools at travel height is the idle level, so a normally open and a normally closed switch both work.
+ * The needle's measure switches the valve and then the pump off before it moves (the passthrough may have left them
+ * on): paste must never touch the switch.
  *
  * <p>One press: a coarse descent from the start (N1 0.25 mm, the needle 0.10) to the first step that reads pressed,
  * 0.40 mm back (still pressed there: the switch sticks or the tool is caught, refused), then a fine descent of 0.025 mm
@@ -55,7 +57,7 @@ public final class HeightSwitch {
 
     /** One measure: the tool's head position over the switch and the window, all raw controller mm. */
     public static final class Plan {
-        /** "n1" or "needle" (the result's name only). */
+        /** "n1" or "needle" (the result's name; the needle's measure switches the valve and the pump off first). */
         public String tool;
         public double rawX, rawY, travelZ;
         /** −1: the tool goes down as raw Z falls (N1); +1: as it rises (the needle). */
@@ -165,6 +167,11 @@ public final class HeightSwitch {
     }
 
     private static void presses(Io io, Plan p, Result r) throws Exception {
+        if ("needle".equals(p.tool)) {
+            // the passthrough may have left them on: valve, then pump, as STOP orders them; no pressure at the switch
+            io.send(ControllerCommands.VALVE_OFF);
+            io.send(ControllerCommands.PUMP_OFF);
+        }
         io.send(move(p.travelZ, 600));
         io.send(String.format(Locale.ROOT, "G1 X%.3f Y%.3f F6000", p.rawX, p.rawY));
         io.send("M42 P" + M42_PIN + " T2");

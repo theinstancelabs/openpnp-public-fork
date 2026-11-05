@@ -126,6 +126,17 @@ public class HeightSwitchTest {
         assertTrue(sw.deepestPast() <= 0.10 + 1e-9, "the needle's coarse step is 0.10: " + sw.deepestPast());
     }
 
+    /**
+     * Review MAJOR 2: the needle's measure switches the valve and then the pump off (the order STOP uses) before its
+     * first move: the passthrough may have left them on, and paste must never touch the switch.
+     */
+    @Test
+    public void theNeedlesMeasureSwitchesTheValveAndThePumpOffBeforeItsFirstMove() throws Exception {
+        FakeSwitch sw = new FakeSwitch(52.0, 1);
+        HeightSwitch.measure(sw, plan("needle", 1, 51.0, 53.0, 1));
+        assertEquals(Arrays.asList("M107 P3", "M107 P2", "G1 Z31.500 F600"), sw.lines.subList(0, 3), sw.lines.toString());
+    }
+
     @Test
     public void everyReadSetsThePullUpFirstAfterTheMoveHasEnded() throws Exception {
         FakeSwitch sw = new FakeSwitch(12.0, -1);

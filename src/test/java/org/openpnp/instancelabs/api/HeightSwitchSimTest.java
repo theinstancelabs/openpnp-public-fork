@@ -275,6 +275,22 @@ public class HeightSwitchSimTest {
         assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "the status sends nothing");
     }
 
+    /**
+     * Review MAJOR 2: the needle's measure switches the valve and then the pump off (as STOP orders them) before its
+     * first move, through the engine's gate: the passthrough may have left them on.
+     */
+    @Test
+    public void theNeedlesMeasureSwitchesTheValveAndThePumpOffFirst() throws Exception {
+        svc.setLocation(HeightSwitch.PLACE, 150, 200, 0);
+        sim.server.mark();
+        HeightSwitch.Result r = svc.measureHeightSwitch("needle", 1, NEEDLE_TRIP - 1, NEEDLE_TRIP + 0.5, true).get(
+                120, TimeUnit.SECONDS);
+        assertEquals(1, r.trips.size(), String.valueOf(r.why));
+        List<String> l = sim.server.sinceMark();
+        int valve = l.indexOf("M107 P3"), pump = l.indexOf("M107 P2"), move = l.indexOf(moves().get(0));
+        assertTrue(valve >= 0 && valve < pump && pump < move, l.toString());
+    }
+
     /** The needle without the clean-tip word: refused before anything is sent (paste must never touch the switch). */
     @Test
     public void theEngineRefusesTheNeedleWithoutACleanTip() throws Exception {
