@@ -29,7 +29,8 @@ public final class ScrewPhaseFit {
     static final double HIGH_SE_DEG = 10, LOW_SE_DEG = 20, RIPPLE_SE = 3;
     /**
      * Halves (Process 11-04 20:5x): the smallest ripple that needs a start angle. A ripple a moves a half-turn dose by
-     * up to (2/π)·a, so with a ±10 % dose tolerance any a ≥ 0.15 does. A fit below 3 errors hides up to (π/2)·3·maxSe.
+     * up to (2/π)·a, so with a ±10 % dose tolerance any a above ≈ 0.157 does (0.15: the safe side). A fit below 3
+     * errors hides up to (π/2)·3·maxSe.
      */
     static final double ANGLE_RIPPLE = 0.15;
     /**
@@ -171,7 +172,8 @@ public final class ScrewPhaseFit {
         // the error of atan2(−x1, −x2) by x1 and x2
         h.peakSeDeg = k == 0 ? null : Math.toDegrees(Math.hypot(x2 * r1.xSe, x1 * r2.xSe) / (k * k));
         if (k == 0 || k < RIPPLE_SE * maxSe) {
-            // too few dots in a half, or a second blob, widen the error until a real ripple hides in it
+            // a ripple up to this hides in the error: too few dots in a half, a second blob, or scatter can widen it
+            double hidden = Math.PI / 2 * RIPPLE_SE * maxSe;
             if (fewest < MIN_PAIRS) {
                 h.why.add("too few dots per half to see a ripple: " + dots(fewest) + " at " + deg(fewestAt));
             }
@@ -179,12 +181,12 @@ public final class ScrewPhaseFit {
                 notes.remove(outlier);
                 h.why.add("no ripple can be told from these dots: " + outlier);
             }
-            else if (Math.PI / 2 * RIPPLE_SE * maxSe > ANGLE_RIPPLE) {
+            else if (hidden > ANGLE_RIPPLE) {
                 h.why.add("too few dots to rule out a ripple that needs a start angle");
             }
             else {
                 h.why.add(String.format(Locale.ROOT, "no ripple above ≈ %.2f: a whole-turn recipe needs no start "
-                        + "angle", Math.PI / 2 * RIPPLE_SE * maxSe));
+                        + "angle", hidden));
             }
         }
         else if (h.peakSeDeg > LOW_SE_DEG) {

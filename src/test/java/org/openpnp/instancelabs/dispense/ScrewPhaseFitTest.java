@@ -150,6 +150,14 @@ public class ScrewPhaseFitTest {
         assertEquals(ScrewPhaseFit.NONE, noisy(0.1, 0.1).confidence);
         // 3·maxSe 0.063 hides up to 0.10, below 0.15: no ripple worth an angle, and the limit said
         assertEquals("no ripple above ≈ 0.10: a whole-turn recipe needs no start angle", noisy(0, 0.05).why.get(0));
+        // the 0.15 itself, between 0.139 and 0.159 (review: 0.10 or 0.19 in its place pass the cases above)
+        assertEquals("no ripple above ≈ 0.14: a whole-turn recipe needs no start angle", noisy(0, 0.07).why.get(0));
+        assertEquals("too few dots to rule out a ripple that needs a start angle", noisy(0, 0.08).why.get(0));
+        // the larger row's error decides: row 2's hides 0.16, row 1's alone 0.04
+        assertEquals("too few dots to rule out a ripple that needs a start angle", ScrewPhaseFit.halves(row(298, 1, 1,
+                8), 298, row(28, 0.25, 0.25, 8), 28).why.get(0));
+        // at exactly MIN_PAIRS dots a half (6 at 118°) it is this branch, not "too few dots per half"
+        assertEquals("too few dots to rule out a ripple that needs a start angle", noisy(0.1, 0.1, 2).why.get(0));
     }
 
     /**
