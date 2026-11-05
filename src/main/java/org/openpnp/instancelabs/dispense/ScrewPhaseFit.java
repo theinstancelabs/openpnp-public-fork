@@ -28,6 +28,11 @@ public final class ScrewPhaseFit {
     /** Halves: the peak's standard error (deg) for high, for low; a ripple below 3 standard errors of x is none. */
     static final double HIGH_SE_DEG = 10, LOW_SE_DEG = 20, RIPPLE_SE = 3;
     /**
+     * Halves (Process 11-04 20:5x): the smallest ripple that needs a start angle. A ripple a moves a half-turn dose by
+     * up to (2/π)·a, so with a ±10 % dose tolerance any a ≥ 0.15 does. A fit below 3 errors hides up to (π/2)·3·maxSe.
+     */
+    static final double ANGLE_RIPPLE = 0.15;
+    /**
      * Halves (Process 11-04 15:0x): a dot this many times its half's median left after the trim is a second outlier in
      * that half, and the angle is low (normal scatter is 10-15 % cv, the blobs 1.7-2.9×). It misses some (Monte Carlo,
      * cv 0.10-0.15): a 1.7× second blob in 23-36 % of 8-dot halves, 36-49 % at 5; it cannot fire with 3 dots, and
@@ -174,8 +179,12 @@ public final class ScrewPhaseFit {
                 notes.remove(outlier);
                 h.why.add("no ripple can be told from these dots: " + outlier);
             }
+            else if (Math.PI / 2 * RIPPLE_SE * maxSe > ANGLE_RIPPLE) {
+                h.why.add("too few dots to rule out a ripple that needs a start angle");
+            }
             else {
-                h.why.add("no ripple: a whole-turn recipe needs no start angle");
+                h.why.add(String.format(Locale.ROOT, "no ripple above ≈ %.2f: a whole-turn recipe needs no start "
+                        + "angle", Math.PI / 2 * RIPPLE_SE * maxSe));
             }
         }
         else if (h.peakSeDeg > LOW_SE_DEG) {
