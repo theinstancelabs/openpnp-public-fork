@@ -559,7 +559,8 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   start of a home through the API or the engine (its G28 may move the frame even if the home ends unhomed) or a home;
   a Stop and Start keeps it (OpenPnP's own Home button is not seen starting: one that ends unhomed keeps it too); such a call needs `what` (400 without it)
   and the dispense engine (409 without it: nothing would journal it), and is an `events` row `Z_LEVEL` (the holder,
-  the lines, `what`); on that line any other axis is refused; pump P2 /
+  the lines, `what`); on that line any other axis is refused, and in that call `M410` (it may end a move short, so the next
+  line would travel further: send it in a call of its own; the STOP is `POST /api/stop`); pump P2 /
   valve P3 only full on; `M906 B` ≤ 670; `G4` ≤ 60 s; the bed's height switch on PA5 only (the HACK header's pin 3):
   `M42 [I] P53 T0|T2|T3` (an input mode; `T2` its pull-up) and `M43 [I] P5` (its read: M43 numbers the pin by the
   firmware's pin table, so not 53; send `M400` first, as M43 does not wait for moves); refused with the route to use:

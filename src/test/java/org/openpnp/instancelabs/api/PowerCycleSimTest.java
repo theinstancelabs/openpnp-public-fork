@@ -1227,6 +1227,8 @@ public class PowerCycleSimTest {
         refusedLevel("{\"lines\":[\"G91\",\"G1 Z0.5 F300\"],\"what\":\"w\"}", "absolute");
         refusedLevel("{\"lines\":[\"G92 Z0\"],\"what\":\"w\"}", "G92");
         refusedLevel("{\"lines\":[\"G28 Z\"],\"what\":\"w\"}", "/api/machine/home");
+        // review: an M410 may stop a move short, and the next line would then travel up to 2 mm
+        refusedLevel("{\"lines\":[\"G1 Z1.5 F300\",\"M410\",\"G1 Z2.5 F300\"],\"what\":\"w\"}", "M410");
         for (String body : new String[] {"{\"lines\":[\"G1 Z1.5 F300\"]}",
                 "{\"lines\":[\"G1 Z1.5 F300\"],\"what\":\" \"}"}) {
             sim.server.mark();

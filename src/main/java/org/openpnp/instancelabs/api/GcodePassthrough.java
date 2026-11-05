@@ -209,6 +209,12 @@ final class GcodePassthrough {
         StringBuilder sent = new StringBuilder();
         for (int i = 0; i < lines.size(); i++) {
             PassthroughLines.Line l = lines.get(i);
+            if ("M410".equals(l.text)) {
+                // each step counts from the last target: a move a quick stop ended short makes the next one longer
+                throw refusedLine(i, raw.get(i), l.text, "no M410 in a levelling call: it may end a move short, and the "
+                        + "next line would travel more than 1 mm; send it in a call of its own (the STOP is POST "
+                        + "/api/stop)");
+            }
             if (l.levelZ != null) {
                 String why = PassthroughLines.level(z, l.levelZ, first, ref);
                 if (why != null) {
