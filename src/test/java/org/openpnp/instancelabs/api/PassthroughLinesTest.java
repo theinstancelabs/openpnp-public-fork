@@ -156,6 +156,13 @@ public class PassthroughLinesTest {
         refused("M43");
         refused("M42 P53 S255");
         refused("M42 P53 T1");
+        // #50 review: T4 is analog mode and T5 an open-drain output (it can pull PA5 low); no pin at all; M43's watch
+        // mode holds the firmware until a reset (its toggle test too)
+        refused("M42 P53 T4");
+        refused("M42 P53 T5");
+        refused("M42 T2");
+        refused("M43 P5 W");
+        refused("M43 P5 T");
         refused("M201 X5000");
         refused("M203 X100");
         refused("G1 E5");
