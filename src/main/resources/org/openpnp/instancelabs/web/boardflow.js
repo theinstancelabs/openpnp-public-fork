@@ -175,7 +175,7 @@
     const lab = st.fid.lastChild;
     if (lab.textContent !== 'Camera is on ' + name) lab.textContent = 'Camera is on ' + name;
     const why = job ? 'Job boards take their position from OpenPnP'
-      : !e ? 'Choose a board file first'
+      : !e ? 'Choose a design from the list first'   // also after "Other board file…": its fiducials come from the list
         : !f ? (e.fiducials ? 'This board has no fiducials: use the camera X/Y on its origin, or type it' : 'The board list has no fiducial positions for this board')
           : IL.lockReason(s, { connected: true, pressureOff: false }) || (!cam ? 'No top camera position' : null);
     IL.gate(st.fid, why);

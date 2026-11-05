@@ -609,15 +609,15 @@
     let eb = '', ebCls = 'eyebrow', title = '', meta = [];
     if (mode === 'empty' && R.pending) {
       eb = 'Run · not planned yet';
-      title = (selectedBoard() || {}).name || 'Choose a board';
+      title = (selectedBoard() || {}).name || 'Choose a design';
       meta = [el('span', { text: 'Enter where it sits on the right, then Plan. Until then the plan of ' + boardShort(R.pending.boardName)
         + ' stays. Planning moves nothing.' })];
     } else if (mode === 'empty') {
       const sel = selectedBoard();
       eb = S.planForgotten ? 'Plan forgotten (OpenPnP restarted)' : 'Run · no board planned';
       ebCls += S.planForgotten ? ' eyebrow--need' : '';
-      title = sel ? sel.name : 'Choose a board';
-      meta = [el('span', { text: 'Choose the board and where it sits on the right, then Plan. Planning moves nothing.' })];
+      title = sel ? sel.name : 'Choose a design';
+      meta = [el('span', { text: 'Choose the design and where the board sits on the right, then Plan. Planning moves nothing.' })];
     } else if (mode === 'live') {
       eb = 'Board ' + no + ' this session · running since ' + IL.fmtTimeS(run.startedAtMs - S.skewMs);
       ebCls += ' eyebrow--live';
@@ -818,8 +818,8 @@
           el('span', { text: 'OpenPnP keeps plans in memory. Plan the board again: nothing moves.' }),
           el('div', { class: 'btn-row', 'data-refusals': '' }, fixBtn({ fix: 'plan-again', label: 'Plan again', primary: true })));
       }
-      return el('div', {}, IL.icon('i-run'), el('b', { text: sel ? 'Plan to see the dots' : 'Choose a board on the right' }),
-        el('span', { text: sel ? 'Enter where the board sits, then Plan. The board is drawn to scale with every planned dot.' : 'Pick a job board or a board file in the Board step, enter its position, then Plan.' }));
+      return el('div', {}, IL.icon('i-run'), el('b', { text: sel ? 'Plan to see the dots' : 'Choose a design on the right' }),
+        el('span', { text: sel ? 'Enter where the board sits, then Plan. The board is drawn to scale with every planned dot.' : 'Pick a design (or a job board) in the Board step, enter where the board sits, then Plan.' }));
     });
     if (!p) { IL.show(n.stageBar, drawn); IL.show(n.timeline, false); return; }
     IL.show(n.stageBar, true);
@@ -1212,13 +1212,13 @@
     if (rebuild || !sel.options.length) {
       const opts = [];
       const b = R.boards;
-      if (!b && R.boardsLoading) opts.push(el('option', { value: '', text: 'Loading boards…' }));
+      if (!b && R.boardsLoading) opts.push(el('option', { value: '', text: 'Reading the designs…' }));
       if (b && (b.job || []).length) {
         opts.push(el('optgroup', { label: 'Job open in OpenPnP' }, b.job.map((x) => el('option', { value: 'job:' + x.boardLocationId,
           text: x.name + ' · ' + (x.fiducialTransform && x.fiducialTransform !== 'NotSet' ? 'fiducials checked' : 'run a fiducial check in OpenPnP') }))));
       }
       if (b && (b.files || []).length) {
-        opts.push(el('optgroup', { label: 'Board files' }, b.files.filter((x) => x.file).map((x) => {
+        opts.push(el('optgroup', { label: 'Designs' }, b.files.filter((x) => x.file).map((x) => {
           // the folder tells boards of one name apart; an upload's folder is its name ("mobo · mobo" said it twice)
           const dir = x.file.split('/').slice(-2, -1)[0];
           const own = !!dir && String(x.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').startsWith(dir);
@@ -1226,7 +1226,7 @@
         })));
       }
       if (!b && !R.boardsLoading && R.form.sel && R.form.sel !== 'other') opts.push(el('option', { value: R.form.sel, text: (selectedBoard() || {}).name || R.form.sel }));
-      if (!R.form.sel) opts.unshift(el('option', { value: '', text: 'Choose a board…' }));
+      if (!R.form.sel) opts.unshift(el('option', { value: '', text: 'Choose a design…' }));
       opts.push(el('option', { value: 'other', text: 'Other board file…' }));
       sel.replaceChildren(...opts);
     }
@@ -1317,7 +1317,7 @@
         el('button', { type: 'button', id: 'board-seat-same', 'aria-pressed': 'false', onclick: () => { R.seatSame = seatSince(); IL.setNewSeat(null); IL.render(); } }, 'No, same seat')),
       el('div', { class: 'field__h', id: 'board-seat-h' }));
     body.append(
-      el('div', { class: 'board-sel-row' }, el('div', { class: 'field' }, el('label', { class: 'field__l', for: 'board-select' }, el('span', { text: 'Board' }), el('span', { class: 'unit', id: 'board-count' })), sel), refresh),
+      el('div', { class: 'board-sel-row' }, el('div', { class: 'field' }, el('label', { class: 'field__l', for: 'board-select' }, el('span', { text: 'Design' }), el('span', { class: 'unit', id: 'board-count' })), sel), refresh),
       fileRow,
       el('div', { class: 'reason', id: 'board-hint' }),
       seatQ,
@@ -1361,7 +1361,7 @@
   async function doPlan(btn) {
     const c = selectedBoard();
     let body;
-    if (!c) { IL.toast('Choose a board first.', 'need'); return; }
+    if (!c) { IL.toast('Choose a design first.', 'need'); return; }
     if (c.kind === 'job') body = { source: 'job', boardLocationId: c.id };
     else {
       const num = (k) => (String(R.form[k]).trim() === '' ? undefined : Number(String(R.form[k]).replace('−', '-')));
@@ -1388,7 +1388,7 @@
     prefillZ(s);
     fillForm();
     const b = R.boards;
-    IL.setText($('board-count'), R.boardsLoading ? 'loading…' : b ? ((b.job || []).length ? (b.job || []).length + ' job · ' : '') + IL.plural((b.files || []).length, 'file') : '');
+    IL.setText($('board-count'), R.boardsLoading ? 'loading…' : b ? ((b.job || []).length ? (b.job || []).length + ' job · ' : '') + IL.plural((b.files || []).length, 'design') : '');
     IL.show($('board-file-row'), R.form.sel === 'other');
     const job = c && c.kind === 'job';
     for (const id of ['board-x', 'board-y', 'board-z', 'board-rot']) {
@@ -1398,7 +1398,7 @@
     }
     const hint = R.boardsErr ? IL.listReadError(R.boardsErr, !!b && ((b.files || []).length + (b.job || []).length) > 0)
       : job ? 'Position from the OpenPnP job. Register board checks the fiducials again with the top camera.'
-        : c ? 'Enter roughly where the board origin (its 0,0 corner) sits. After planning, Register board finds the fiducials with the top camera and probes this seat.' : 'Choose the board to dispense.';
+        : c ? 'Enter roughly where the board origin (its 0,0 corner) sits. After planning, Register board finds the fiducials with the top camera and probes this seat.' : 'Choose the design to paste.';
     IL.setText($('board-hint'), hint);
     IL.setClass($('board-hint'), 'reason' + (R.boardsErr ? ' reason--block' : ''));
     // dirty fields: differ from the remembered (or planned) values
@@ -1436,7 +1436,7 @@
     IL.setText(why, !job && capLock ? capLock : '');
     IL.show(why, !job && !!capLock);
     // Plan: locked while a task runs
-    const lock = IL.lockReason(s, { pressureOff: false }) || (!c ? 'Choose a board first' : null);
+    const lock = IL.lockReason(s, { pressureOff: false }) || (!c ? 'Choose a design first' : null);
     IL.gate($('btn-plan'), lock, $('plan-why'));
     IL.setText($('plan-next-hint'), S.newSeatAtMs && !job ? 'then: register the board' : '');
     // under the Board top Z: where a prefill came from, and the window and needle-frame check of the plan shown

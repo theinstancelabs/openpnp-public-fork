@@ -281,7 +281,7 @@ panel only; the board stays in view. This replaces the ~5 tab switches per board
 
 | State | Main | Panel |
 |---|---|---|
-| No board chosen | hero shows the picker hint `Choose a board on the right` and a faint outline | Board step |
+| No design chosen | hero shows the picker hint `Choose a design on the right` and a faint outline | Board step |
 | Board chosen, no plan | outline, `Plan to see the dots`; as built: the board's drawing at the form's seat (Full), the live top camera and a 5 mm scale bar (`#board-preplan`) | Board step with Plan primary |
 | Planned, this seat not registered / tie missing | board + expected fiducials and probe targets | Register step |
 | Registering | live fiducials and probe points on the board | Register step (phases, tables) |
@@ -294,9 +294,9 @@ panel only; the board stays in view. This replaces the ~5 tab switches per board
 
 #### 8.1.2 Board step (`data-view=board`)
 
-- `Board` select `#board-select` (job boards first with `fiducials checked hh:mm` or `run a fiducial check in
-  OpenPnP`; board files; `Other board file…` → `#board-file`), **Refresh** `#btn-board-refresh` (reloads
-  `GET /api/boards`).
+- `Design` select `#board-select` (job boards first with `fiducials checked hh:mm` or `run a fiducial check in
+  OpenPnP`; `Designs` (the board files, as Start and Designs call them); `Other board file…` → `#board-file`),
+  **Refresh** `#btn-board-refresh` (reloads `GET /api/boards`).
 - Position (file boards): `#board-x`, `#board-y`, `#board-z` (N1 Z touching the board top, required), `#board-rot`,
   each a 46 px field with its unit on the label line. Capture buttons that name the live value:
   `Use camera X/Y 387.06, 165.17` (`#btn-board-use-cam`), `Use live N1 Z 5.62` (`#btn-board-use-n1z`). Job boards:
