@@ -3679,7 +3679,9 @@ public final class DispenseService {
     /**
      * Needle touch-off by dot ladder at stepped gaps (plan §6.1). Applies the new offset if found and asked. Each dot
      * is found at its spot with the strings cut off; paste at a spot that is not one dot refuses the conclusion
-     * ({@link NeedleTouchOff#analyze}). A pitch with no room between the dots is refused before anything is sent.
+     * ({@link NeedleTouchOff#analyze}). A pitch with no room between the dots, or a start gap that puts the reference
+     * pair after the recipe's skipped dots below {@link NeedleTouchOff#REFERENCE_GAP_MM}, is refused before anything is
+     * sent.
      */
     public Future<TouchOffResult> runNeedleTouchOff(NeedleTouchOff.Request req, boolean apply) throws Exception {
         requireAvailable();
@@ -3693,6 +3695,11 @@ public final class DispenseService {
             String pitch = NeedleTouchOff.pitchProblem(req, c);
             if (pitch != null) {
                 throw refused(pitch);
+            }
+            // BR-85: under the skip this task's analysis leaves out
+            String start = NeedleTouchOff.startGapProblem(req, c.profile.touchOffSkipDots, c.tip.name);
+            if (start != null) {
+                throw refused(start);
             }
             double dotMm = NeedleTouchOff.expectedDotDiameterMm(req, c);
             // BR-85: the reference is judged against the mounted tip's own dots of the dose when it has them
