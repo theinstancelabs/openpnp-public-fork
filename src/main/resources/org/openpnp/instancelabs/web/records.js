@@ -624,8 +624,10 @@
           const dot = pcr.touchOffDot(a, i);   // "not measured" (its note as the tooltip), "no dot" only for no paste
           return el('tr', { class: isNum(a.contactGapMm) && Math.abs(g - a.contactGapMm) < 1e-9 ? 'is-contact' : null },
             el('td', { class: 'r', text: IL.fmtSigned(g, 3) }), el('td', { class: 'r', text: dot.text, title: dot.note }));
-        }))),
-      el('p', { class: 'panel__lead', text: isNum(a.contactGapMm) ? 'Contact at a gap of ' + IL.fmtSigned(a.contactGapMm, 3) + ' mm.' + (a.reason ? ' ' + a.reason : '') : (a.reason || 'No contact found.') })] : null,
+        }), pcr.touchOffCheckRows(a, 2))),
+      el('p', { class: 'panel__lead', text: isNum(a.contactGapMm) ? 'Contact at a gap of ' + IL.fmtSigned(a.contactGapMm, 3) + ' mm.' + (a.reason ? ' ' + a.reason : '') : (a.reason || 'No contact found.') }),
+      // BR-89: its check dots say the tip may have moved, so the engine kept it without applying it (as Calibrate says)
+      a.landingProblem ? el('p', { class: 'panel__lead', text: 'Not applied: ' + a.landingProblem + '.' }) : null] : null,
       v.note ? el('p', { class: 'panel__lead rec-note', text: v.note }) : null,
       v.det && v.det.blank ? el('p', { class: 'panel__lead', text: 'On “' + v.det.blank + '”' + (isNum(v.det.blankPlaneMaxResidualMm) ? ', surface worst residual ' + IL.fmt(v.det.blankPlaneMaxResidualMm, 3) + ' mm' : '') + '.' }) : null];
     });

@@ -161,7 +161,8 @@ class Terminated(BaseException):
 # STATE.md: '- **Label:** value' bullets, continued on lines indented deeper than the bullet
 # ------------------------------------------------------------------------------------------------
 Holder = namedtuple("Holder", "value idle reason")
-_NOBODY = re.compile(r"(?i)^nobody(?![\w?!-])")
+# emphasis around it (**nobody**, _nobody_) is still nobody; struck through (~~) or 'nobody?' is not
+_NOBODY = re.compile(r"(?i)^[*_]*nobody[*_]*(?![\w?!*-])")
 _WANTS = re.compile(r"(?i)\bwants?\b")
 
 
@@ -371,7 +372,14 @@ def released_value(action, hhmm, note=None, prev=None):
     text = base + (f"; {_safe_note(note)})" if note else ")")
     rest = " ".join((prev or "").split())
     m = _INFRA_STAMP.match(rest)
-    rest = rest[m.end():] if m else _NOBODY.sub("", rest, count=1).strip(" ;,.:-")
+    if m:
+        rest = rest[m.end():]
+    else:
+        lead, n = re.match(r"[*_]*", rest).group(), _NOBODY.match(rest)
+        rest = rest[n.end():] if n else rest
+        if n and lead and not n.group().endswith(("*", "_")):  # '**nobody since …** (…)': its closing '**' goes too
+            rest = rest.replace(lead[::-1], "", 1)
+        rest = rest.strip(" ;,.:-")
     if rest:
         text += "; earlier: " + rest
     return text if parse_holder("- **Holder:** " + text).idle else base + ")"
@@ -605,8 +613,21 @@ def _json(raw):
     return v if isinstance(v, dict) else {"value": v}
 
 
+def api_link_lost_reasons(m):
+    """BR-93: OpenPnP lost the controller's link unasked (machine.linkLost {atMs, why, next} of /api/status or
+    /api/machine; absent before BR-93, null while the link is fine): nothing the deployer sends reaches the controller
+    (#41's planned stop still answers 200), a Start would connect again and clear it, and the home after it would home
+    a controller that may have reset. Anything else than null is taken as lost."""
+    lost = m.get("linkLost") if isinstance(m, dict) else None
+    if lost is None:
+        return []
+    if not isinstance(lost, dict) or not lost:
+        return [f"the controller link is lost (machine.linkLost {json.dumps(lost)[:80]})"]
+    return [f"the controller link is lost (machine.linkLost): {lost.get('why')}; {lost.get('next')}"]
+
+
 def api_busy_reasons(st):
-    """Why OpenPnP's /api/status says the machine is in use (fail closed on a missing machine)."""
+    """Why OpenPnP's /api/status says the machine is in use, or its link is lost (fail closed on a missing machine)."""
     r = []
     m = st.get("machine")
     if not isinstance(m, dict):
@@ -615,6 +636,7 @@ def api_busy_reasons(st):
         r.append("OpenPnP's machine is busy")
     elif machine_homing(m):
         r.append("OpenPnP is homing (machine.homing)")
+    r += api_link_lost_reasons(m)
     run = st.get("run")
     if run is not None and (not isinstance(run, dict) or run.get("running") is not False):
         r.append("a run is running (%s)" % (run.get("kind") if isinstance(run, dict) else run))
@@ -722,7 +744,7 @@ NAMED_ACTIVITY_FIELDS = (("place '{}' set", "dispense.locations"), ("surface '{}
 # check's status step, the STOP rule). BR-44's (server.startedAtMs, machine.homing, dispense.state, startError) are
 # always there on a build since; on an older one their rules fall back to the earlier ones (a rollback can land there)
 STATE_FIELDS = ("server.version", "server.simulated", "server.startedAtMs", "machine.enabled", "machine.busy",
-                "machine.homing", "run?.running", "pressure.state", "pressure.on", "pressure.lastEvent",
+                "machine.homing", "machine.linkLost", "run?.running", "pressure.state", "pressure.on", "pressure.lastEvent",
                 "pressure.lastEventAtMs", "dispense.state", "dispense.startError", "dispense.running",
                 "dispense.available", "dispense.busy", "padCalibration?.state", "boardImport.reading")
 # Every key path il_deploy reads in /api/status with the dispense engine running. A missing time is skipped (fail open),
@@ -1280,6 +1302,77 @@ def api_stop_and_wait(api, timeout, poll=0.2, clock=None):
         return False, f"POST /api/stop: {e}"
     if code != 200:
         return False, f"POST /api/stop: HTTP {code} {body.get('reason', '')}"
+    return wait_stopped(api, timeout, poll, clock, "/api/stop")
+
+
+PLANNED_STOP = "/api/stop/planned"  # BR-75
+PLANNED_STOP_RETRY_S = 5  # a refusal lasts while something works: asked again this often, not every poll
+NO_PLANNED_STOP = f"no {PLANNED_STOP} to use (a build before BR-75, or no connection to the API)"
+PLANNED_LOCKED = "no planned stop, someone has the machine lock: "  # 409 locked: their session, whatever else reads
+LINES_UNANSWERED = f"POST {PLANNED_STOP}: no ok from the controller for "  # the valve or pump may be on
+PLANNED_MAY_HAVE_RUN = "the planned stop may have run, its outputs not known to be off: "  # no answer, or a lost one
+
+
+def api_planned_stop(api, timeout, poll=0.2, clock=None, off_is_done=False):
+    """BR-75, the deployer's own stop: POST /api/stop/planned is OpenPnP's STOP without the screw's motor-off line
+    (M18 B), so the screw keeps its timing. (ok, detail) as api_stop_and_wait; a 200 whose lines went unanswered
+    (detail LINES_UNANSWERED: the valve or pump may still be on) is a failure, and so (detail PLANNED_MAY_HAVE_RUN)
+    are a request that timed out and, after the switch, a 200 that sent nothing after a refusal of this call: #41's
+    409 for a task that outlived its wait (its lines out, their acks lost), then "already stopped". A refusal is
+    answered by waiting, never by a real STOP: 409 locked returns ok None at once (detail PLANNED_LOCKED); 409 refused
+    (something works) is asked again every PLANNED_STOP_RETRY_S, and ok None when timeout s have passed, nothing sent.
+    off_is_done (before the switch only, where the idle check found the machine off): a refusal while /api/status
+    shows the machine stopped, idle and nobody holding the lock is nothing to stop (ok True); #41 refuses without its
+    engine or a machine before it looks. NO_PLANNED_STOP when the build has none (404 "no such endpoint") or the API
+    gives no connection: the caller's own stop decides, as before BR-75."""
+    clock = clock or Clock()
+    end = clock.monotonic() + timeout
+    refused = None  # this call's first refusal
+    while True:
+        try:
+            code, body = api.post(PLANNED_STOP, timeout=60)  # the API gives its task 20 s to start and end
+        except ApiTimeout as e:
+            return False, PLANNED_MAY_HAVE_RUN + str(e)
+        except ApiDown:
+            return None, NO_PLANNED_STOP
+        error, reason = body.get("error"), str(body.get("reason") or "")
+        if code == 404 and reason.startswith("no such endpoint"):
+            return None, NO_PLANNED_STOP
+        if code == 409 and error in LOCK_REFUSALS:
+            return None, PLANNED_LOCKED + reason
+        if code == 409 and error == "refused":
+            refused = refused or reason
+            if off_is_done:
+                try:
+                    st_code, st = api.get("/api/status", timeout=5)
+                except ApiDown:
+                    st_code, st = None, {}
+                if st_code == 200 and not (stop_left(st) or api_busy_reasons(st) or api_lock_reasons(st)):
+                    return True, f"{STOP_DONE} (already: the planned stop answered {reason})"
+            if clock.monotonic() >= end:
+                first = f" (first: {refused})" if refused != reason else ""  # it may have run
+                return None, f"no planned stop for {timeout:g} s: {reason}{first}"
+            clock.sleep(max(poll, min(PLANNED_STOP_RETRY_S, end - clock.monotonic())))
+            continue
+        if code != 200:
+            return False, f"POST {PLANNED_STOP}: HTTP {code} {reason}"
+        failed = body.get("linesFailed") or []
+        if failed:
+            return False, LINES_UNANSWERED + ", ".join(map(str, failed))
+        # before the switch the idle check found the machine off: a refused try had nothing on to switch off
+        if refused and not off_is_done and not body.get("linesSent"):
+            return False, f"{PLANNED_MAY_HAVE_RUN}refused ({refused}), then the machine was already stopped"
+        return wait_stopped(api, timeout, poll, clock, PLANNED_STOP)
+
+
+def planned_stop_kind(ok, detail):
+    """A failed planned stop in the health check: a refusal (ok None), unanswered lines or a stop that may have run
+    are the machine's (a person checks; nothing restarts unattended), anything else the build's."""
+    return "machine" if ok is None or detail.startswith((LINES_UNANSWERED, PLANNED_MAY_HAVE_RUN)) else "build"
+
+
+def wait_stopped(api, timeout, poll, clock, sent):
+    """After POST <sent>: wait up to timeout until /api/status shows the stop done (stop_left). (ok, detail)."""
     end = clock.monotonic() + timeout
     while True:
         try:
@@ -1292,7 +1385,7 @@ def api_stop_and_wait(api, timeout, poll=0.2, clock=None):
                 return True, STOP_DONE
             why = "; ".join(left)
         if clock.monotonic() >= end:
-            return False, f"{why} {timeout:g} s after POST /api/stop"
+            return False, f"{why} {timeout:g} s after POST {sent}"
         clock.sleep(poll)
 
 
@@ -1349,7 +1442,8 @@ def stop_sequence(api, wait_s, stop_timeout, poll, clock):
 # watchdog trip always are (a rollback's old database would lose them).
 ENGINE_DB = os.path.join("instancelabs", "dispense.db")
 ROUTINE_JOURNAL = ("SCREW_MOTOR_OFF", "SCREW_MOTION", "SCREW_COUNT_EPOCH", "HOST_WATCHDOG_ARMED", "POSITION_KNOWN",
-                   "RESET_JOURNAL")
+                   "RESET_JOURNAL", "HOME_STARTED",  # HOME_STARTED: BR-97, every home's start, the health check's too
+                   "SCREW_IDLE_CUT", "SCREW_IDLE_HOLD")  # SCREW_IDLE_*: BR-92, the holdB marker read at every connect
 JOURNAL_SETTLE_S, JOURNAL_SETTLE_MAX_S = 1.0, 5.0  # the engine writes its journal on a thread, a moment later
 ENGINE_DB_TIMEOUT_S = 5.0  # a database another writer holds locked: give up (compared by bytes), never wait forever
 
@@ -2214,14 +2308,43 @@ class Deployer:
         return stop_sequence(self.api, self.cfg.home_busy_wait, self.cfg.stop_timeout, self.cfg.poll_interval,
                              self.clock)
 
+    def planned_stop(self, stop=None, off_is_done=False):
+        """The deployer's own stop of an idle machine (BR-75, api_planned_stop); without a planned stop to use (a
+        build before BR-75, no connection to the API) stop() decides, as before (default stop_machine). (ok,
+        detail); ok None: nothing sent, someone holds the lock or the machine still works."""
+        ok, detail = api_planned_stop(self.api, self.cfg.stop_timeout, self.cfg.poll_interval, self.clock, off_is_done)
+        if ok is None and detail == NO_PLANNED_STOP:
+            return (stop or self.stop_machine)()
+        return ok, detail
+
+    def _link_lost_now(self, closed):
+        """BR-93: why /api/machine says the controller link is lost, or None. Read just before anything that clears
+        machine.linkLost (a Start connects; a service stop restarts). A read without an answer is a loss only if
+        closed (nothing reads it again before that)."""
+        try:
+            code, m = self.api.get("/api/machine", timeout=10)
+            unread = None if code == 200 else f"HTTP {code}"
+        except ApiDown as e:
+            unread = str(e)
+        if unread:
+            return f"machine.linkLost not read ({unread})" if closed else None
+        lost = api_link_lost_reasons(m)
+        return lost[0] if lost else None
+
     def stop_service(self):
-        """Stop the running service gracefully. None if stopped, else (rc, note) for the caller to return."""
-        ok, detail = self.stop_machine()
+        """Stop the running service gracefully, the machine first by the planned stop. None if stopped, else (rc,
+        note) for the caller to return."""
+        ok, detail = self.planned_stop(off_is_done=True)
         self.record("stop", ok=ok, detail=detail)
+        if ok is None:  # someone has the machine lock, or it works: nothing sent, a later run deploys
+            return self.not_idle([detail]), f"{detail}; nothing changed"
         if not ok:
             note = f"OpenPnP did not switch the machine off ({detail}); nothing changed, a person must check"
             self.set_hold(note)
             return 1, note
+        lost = self._link_lost_now(closed=True)
+        if lost:  # #53's planned stop answers 200 on a lost link; the service stop would clear it
+            return self.not_idle([lost]), f"{lost}; OpenPnP left running, nothing changed"
         self.svc.stop()
         self.record("service-stop")
         end = self.clock.monotonic() + 15
@@ -2237,15 +2360,19 @@ class Deployer:
             self.clock.sleep(self.cfg.poll_interval)
 
     def stop_after_failure(self):
-        """STOP, then stop the service. False, with OpenPnP left running, unless the STOP was confirmed or the API
-        is gone: SIGTERM sends no STOP and leaves the outputs as they are."""
+        """STOP, then stop the service: (True, None). (False, why), with OpenPnP left running, unless the STOP was
+        confirmed or the API is gone: SIGTERM sends no STOP and leaves the outputs as they are."""
         ok, detail = self.stop_machine()
         self.record("stop", ok=ok, detail=detail)
         if not ok:
-            return False
+            return False, f"its STOP was not confirmed ({detail})"
+        lost = self._link_lost_now(closed=False)
+        if lost:  # BR-93: the restart would clear it, and the recovery would Start and home a build on it
+            self.record("link-lost", detail=lost)
+            return False, lost
         self.svc.stop()
         self.record("service-stop")
-        return True
+        return True, None
 
     def restore_running(self, was_running):
         if not was_running and self.svc.is_active():
@@ -2430,6 +2557,10 @@ class Deployer:
             steps.append({"step": name, "ok": True, "detail": detail})
 
         def fail(name, detail, kind="build", stop=True):
+            # BR-93: after the status step, a Start, home or read that failed on a link lost meanwhile is the link's
+            lost = link_lost(name, detail) if steps and kind in ("build", "machine") else None
+            if lost:
+                return lost
             steps.append({"step": name, "ok": False, "detail": detail})
             rep.update(failure=f"{name}: {detail}", kind=kind, finished_at=self.iso())
             if stop:
@@ -2444,6 +2575,15 @@ class Deployer:
             more = self._gone(watch_service)
             return fail(name, f"OpenPnP's API went away after the enable ({why}{'; ' + more if more else ''}); a person "
                               "must check the machine", "machine")
+
+        def link_lost(name, what, m=None, closed=False):
+            """BR-93: machine.linkLost set: nothing reaches the controller (#53's planned stop answers 200 all the
+            same), the recovery's restart would clear it (a connect does; a STOP does not) and its config put back lacks
+            the engine's journal rows of the loss: OpenPnP is left as it is for a person, handled like a home that never
+            ends (kind link-lost). m: /api/machine already read, else read now; a read without an answer is no loss
+            unless closed (after the last stop: nothing reads it again)."""
+            why = self._link_lost_now(closed) if m is None else next(iter(api_link_lost_reasons(m)), None)
+            return fail(name, f"{why}: {what}", "link-lost", stop=False) if why else None
 
         def claim_lost(name, enabled):
             why = self._claim_lost()
@@ -2484,12 +2624,23 @@ class Deployer:
 
         try:
             code, m = self.api.get("/api/machine", timeout=10)
+            lost = link_lost("enable", "not stopping, starting or homing it", m if code == 200 else {})
+            if lost:  # before its stop, its Start and its home
+                return lost
             if code == 200 and m.get("enabled"):
                 if m.get("busy") is not False or machine_homing(m):
                     return fail("enable", "the machine is already enabled and busy; not touching it", "machine", False)
-                ok, d = self.stop_machine()
+                ok, d = self.planned_stop()
                 if not ok:
-                    return fail("enable", f"could not stop the already enabled machine first: {d}", stop=False)
+                    taken = d.startswith(PLANNED_LOCKED) or self._lock_taken()
+                    if taken:  # someone started it and holds the lock (BR-72): their session, left alone
+                        return fail("enable", d if taken is True else f"{d}; {taken}", "claim-lost", stop=False)
+                    return fail("enable", f"could not stop the already enabled machine first: {d}",
+                                planned_stop_kind(ok, d), stop=False)
+                lost = link_lost("enable", f"its planned stop ({d}) may have reached nothing; not starting or homing it",
+                                 closed=True)
+                if lost:  # #53's planned stop answers 200 on a lost link, and the Start next would clear it
+                    return lost
             offset = os.path.getsize(self._log_path()) if os.path.exists(self._log_path()) else 0
         except ApiDown as e:
             return fail("enable", str(e))
@@ -2522,6 +2673,9 @@ class Deployer:
             code, m = self.api.get("/api/machine", timeout=10)
         except ApiDown as e:
             return gone("axes", e)
+        lost = link_lost("axes", "not homing or stopping it", m if code == 200 else {})
+        if lost:
+            return lost
         axes = m.get("axes") or []
         coords = {str(a.get("letter")).upper(): a.get("driverCoordinate") for a in axes if a.get("letter")}
         # all four: reset_signature needs B too, and a controller whose position is not known is never homed
@@ -2570,20 +2724,26 @@ class Deployer:
             code, m = self.api.get("/api/machine", timeout=10)
         except ApiDown as e:
             return gone("homed", e)
-        if m.get("homed") is not True or m.get("busy") is not False:
+        if m.get("homed") is not True or m.get("busy") is not False:  # false while linkLost is set: fail() finds it
             return fail("home" if late else "homed", f"homed {m.get('homed')}, busy {m.get('busy')}",
                         "machine" if late else "build")
         step("home", "homed" + (f" (ended after the request: {answer})" if late else ""))
         step("homed", {"homed": True, "busy": False, "positions": m.get("positions")})
 
-        ok, d = api_stop_and_wait(self.api, cfg.stop_timeout, cfg.poll_interval, self.clock)
+        lost = link_lost("stop", "not stopping it")
+        if lost:
+            return lost
+        ok, d = self.planned_stop(lambda: api_stop_and_wait(self.api, cfg.stop_timeout, cfg.poll_interval, self.clock))
+        lost = link_lost("stop", f"its planned stop ({d}) may have reached nothing", closed=ok)
+        if lost:  # #53's planned stop answers 200 on a lost link (until Backend's follow-up): only this read shows it
+            return lost
         if not ok:
             if self._gone(watch_service):
                 return gone("stop", d)
-            taken = self._lock_taken()
+            taken = d.startswith(PLANNED_LOCKED) or self._lock_taken()
             if taken:  # the machine re-enabled under someone else's lock (BR-72): their session, left alone
-                return fail("stop", f"{d}; {taken}", "claim-lost", stop=False)
-            return fail("stop", d, stop=False)
+                return fail("stop", d if taken is True else f"{d}; {taken}", "claim-lost", stop=False)
+            return fail("stop", d, planned_stop_kind(ok, d), stop=False)
         step("stop", d)
         rep.update(ok=True, finished_at=self.iso())
         return rep
@@ -2973,15 +3133,17 @@ class Deployer:
         failure, kind = rep["failure"], rep["kind"]
         prev = os.path.basename(before["current"]) if before["current"] else None
         back = f"; `il_deploy.py rollback` returns to {prev} with its config" if prev else ""
-        if kind in ("home-stuck", "claim-lost"):
-            # a home that may still run, or someone else's Holder: nothing more is done to OpenPnP
+        if kind in ("home-stuck", "claim-lost", "link-lost"):
+            # a home that may still run, someone else's Holder, or a lost link (a restart would clear it): nothing more
+            # is done to OpenPnP
             note = f"{tag} health check: {failure}"
             self.set_hold(note)
             self.state_line(f"{tag} installed but NOT verified: its health check did not finish ({failure}); "
                             f"OpenPnP left running, a person must check the machine{back}.")
             return 5, note
-        if not self.stop_after_failure():
-            note = f"{tag} failed its health check ({failure}) and OpenPnP could not be stopped safely; left alone"
+        stopped, why = self.stop_after_failure()
+        if not stopped:
+            note = f"{tag} failed its health check ({failure}); OpenPnP left running: {why}"
             self.set_hold(note)
             self.state_line(f"{tag} installed but NOT verified: {note}; a person must check the machine{back}.")
             return 5, note
@@ -3125,7 +3287,10 @@ class Deployer:
             return "OpenPnP left alone mid-home"
         if rep["kind"] == "claim-lost":
             return "OpenPnP left running (the Holder is no longer il_deploy's)"
-        return "OpenPnP stopped" if self.stop_after_failure() else "OpenPnP could not be stopped safely, left alone"
+        if rep["kind"] == "link-lost":
+            return "OpenPnP left running with its lost controller link showing (BR-93)"
+        stopped, why = self.stop_after_failure()
+        return "OpenPnP stopped" if stopped else f"OpenPnP left running: {why}"
 
     # --- state snapshots -------------------------------------------------------------------------
     def _snapname(self, label):
@@ -3328,7 +3493,7 @@ class Deployer:
             if rep["ok"]:
                 self._settle_pending(rep)
                 return 0, None
-            if rep["kind"] in ("machine", "home-stuck", "claim-lost"):
+            if rep["kind"] in ("machine", "home-stuck", "claim-lost", "link-lost"):
                 self.set_hold(f"health check: {rep['failure']}")
             return 1, f"health check failed: {rep['failure']}"
 

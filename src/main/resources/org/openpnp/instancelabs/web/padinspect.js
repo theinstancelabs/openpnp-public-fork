@@ -20,7 +20,7 @@
   };
   const WHY = { fiducial: 'Fiducial for Register board: no paste.', art: 'Through-hole or drawn-only part: not dispensed.',
     dnp: 'Do not populate: not placed, so no paste.', pasteOnly: 'Paste only: no part is placed here.',
-    bottom: 'Bottom-side part: only the top is dispensed.' };
+    bottom: 'Bottom side: only the top is dispensed.' };
 
   const plan = () => IL.S.plan;
   const short = (fam) => String(fam || '').replace(/\s*\(.*\)\s*$/, '');

@@ -246,7 +246,7 @@ Source: `wt/marlin-stock-7776c73/Marlin/`. This is what the board runs. Every M1
 - `validate_homing_move()` calls `kill(GET_TEXT_F(MSG_KILL_HOMING_FAILED))` whenever the endstop is not triggered at the end of a homing move toward it (`endstops.cpp:261-264`, `motion.cpp:1900-1908`).
 - `kill()` prints `echo:Homing Failed` and `Error:Printer halted. kill() called!` (`MarlinCore.cpp:908-925`).
 - `minkill()` then waits 0.6 s, calls `cli()`, and loops forever (`:934-964`).
-- On this path (`steppers_off` false) only the E steppers are disabled, so the motors stay energised but no longer step. Fan outputs (pump and valve) stay as they were.
+- The stepper interrupt runs until that `cli()`, so the move in progress coasts on for 0.6 s; nothing steps after it. On this path (`steppers_off` false) minkill() then disables only the E steppers (0.25 s after the `cli()`): X, Y and Z stay energised. Fan outputs (pump and valve) stay as they were. (il-safety's kill switches all four outputs off and stops the planner first: README "Personalities".)
 
 ### Strings
 | Event | Text |
@@ -374,7 +374,7 @@ M261 reply styles (`twibus.cpp`):
 | `G28` | Wait for motion. Home X, then Y, then Z (safe point 0,0) toward min at 150 mm/s and the current M204 accel, with bump 10/10/2 mm at feed/2, /2, /4. Then Z to 31.5. A and B untouched. Print a report, then `ok`. |
 | `M410` | Quick-stop: drop the planner, stop at once, recompute logical position from counts (giving values like `720.05`), refuse moves for 1 s, then `ok` about 1.0 s later. **Stock:** also acts when the line is read during any wait (G4, M400, G28, full planner), then once more when dequeued (knob: ack after 1 s or 2 s). **il:** acts on receipt; the queued copy does nothing. Valve and pump go off immediately. |
 | `M990` | Stock: unknown command. il: as section 5. |
-| `M112` | Stock: early kill with steppers off. il: on receipt. |
+| `M112` | Kill (stock: when the line is read; il: on receipt). The drivers hold through minkill() and every stepper lets go 0.85 s after the kill (`cli()` at 0.6 s, `disable_all_steppers()` 0.25 s later); stock coasts until the `cli()`, il-safety stops the motion at once. |
 
 ### Keepalive
 `echo:busy: processing` at 2.0 s after any command starts blocking, then every 2.0 s. This applies to G4, M400, G28 and a full planner. Golden evidence: 559 of 559 first-busy gaps were 2.0 s.

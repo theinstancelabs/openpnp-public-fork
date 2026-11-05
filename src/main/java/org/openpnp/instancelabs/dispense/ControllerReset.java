@@ -52,6 +52,13 @@ import java.util.regex.Pattern;
  * last move is journaled now and then ({@link #EVENT_SCREW_MOTION}), so the idle clock outlives a restart that left
  * the motor on.</p>
  *
+ * <p>BR-92: whether the controller's idle timeout switches the screw's motor off at all is read from M115 at every
+ * connect ({@link #firmwareAtConnect}): the holdB build (its FIRMWARE_NAME carries {@link #HOLD_B_MARKER}; built
+ * without DISABLE_IDLE_J) keeps the motor on, so no idle switch-off is counted; any other firmware, or an M115 not
+ * read, keeps the timeout (the safe side). Each connect decides afresh, on record ({@link #EVENT_IDLE_CUT}, {@link
+ * #EVENT_IDLE_HOLD}): the next engine starts with the last decision, so its status polls before the next connect count
+ * no idle switch-off on the holdB build (a planned stop across a deploy, BR-75).</p>
+ *
  * <p>The il/safety firmware's host watchdog switches the screw's driver off when it trips, and its M990 report keeps
  * the trip until the host arms it again (never, without the keepalive): a reported trip goes on record once per arm
  * ({@link #EVENT_WATCHDOG_TRIP}, {@link #EVENT_WATCHDOG_ARMED}); a reset ends it too (the firmware boots without it).</p>
@@ -64,6 +71,9 @@ import java.util.regex.Pattern;
  * <p>After a switch-off or a reset a start angle can only be set once the screw has turned since (the dot pair that
  * measures it turns it; {@link #whyNoAngle}): the angle shown before it, one click away, would otherwise clear I11.</p>
  *
+ * <p>BR-97: the see-saw's levelling before a home stays within 32 mm of where the position became unknown
+ * ({@link #levelReference}): Marlin's boot Z 0 after a detected reset, also after a restart (it is on record, and so
+ * is a home's start, which ends it: {@link #EVENT_HOME_STARTED}).</p>
  * <p>BR-93: a link to the controller lost unasked (the board left USB, a read or a write failed) may have been a reset
  * too (a board that leaves USB has often lost power): {@link #linkLost} makes the position unknown and dates the screw
  * count and the motor's switch-off, as an unread connect and a switch-off do, until the attested home.</p>
@@ -72,14 +82,15 @@ import java.util.regex.Pattern;
  */
 public final class ControllerReset {
     /**
-     * What the home after a reset does, and what the operator checks first: the board's G28 homes X, then Y, at the
+     * What the home after a reset does, and what must be true before it: the board's G28 homes X, then Y, at the
      * current height (no Z clearance: Z_HOMING_HEIGHT and HOME_Z_FIRST off), then Z at its Z_SAFE_HOMING point. The
-     * see-saw is levelled by hand first, both tips up (the process engineer, 11-04).
+     * see-saw is levelled first, both tips up (the process engineer, 11-04). BR-96: whoever checks it (an agent's
+     * cameras or a person) attests it with the home ({@link #attest}).
      */
     public static final String HOME_CHECK = "the home first drives the head to its homing corner (X, then Y) at the "
-            + "height the tools are at now, then homes Z there: check that nothing is under either tool (N1 or the "
-            + "needle) or in their way to that corner, and level N1 and the needle by hand before Home: the see-saw "
-            + "levelled, both tips up";
+            + "height the tools are at now, then homes Z there: before Home, nothing is under either tool (N1 or the "
+            + "needle) or in their way to that corner, and the see-saw is levelled, both tips up (by hand, or by "
+            + "Z-only moves through the G-code passthrough)";
     /** Where stock Marlin believes A and B are at power-up (J_MAX_POS), until a G92. */
     public static final double BOOT_B_DEG = 720;
     /** Journal codes (the events table's {@code code}): a connect read the boot position. */
@@ -114,11 +125,23 @@ public final class ControllerReset {
      * (I4).
      */
     public static final String EVENT_FRAME_MOVED = "Z_FRAME_MOVED";
+    /** BR-92: the marker in the M115 FIRMWARE_NAME of the build that keeps the screw's motor on when idle. */
+    public static final String HOLD_B_MARKER = "il-holdB";
+    /** BR-92: a connect read no holdB build (other firmware, or no M115): the idle timeout switches the motor off. */
+    public static final String EVENT_IDLE_CUT = "SCREW_IDLE_CUT";
+    /** BR-92: a connect read the holdB build: the screw's motor has no idle switch-off. */
+    public static final String EVENT_IDLE_HOLD = "SCREW_IDLE_HOLD";
+    /** BR-97: a home started: its G28 may have moved the controller's frame, even if the home ended unhomed. */
+    public static final String EVENT_HOME_STARTED = "HOME_STARTED";
     /** BR-93: the way back after a lost link (the refusals while it is lost). */
     public static final String LINK_LOST_REMEDY = "once the board is back on USB: Stop, then Start (or restart "
             + "il-openpnp), then Home as after a reset";
     private static final double TOL = 1e-3;
     private static final Pattern WORD = Pattern.compile("(?:^|\\s)([A-Z]):(-?\\d+(?:\\.\\d+)?)");
+    /** Marlin's M115 FIRMWARE_NAME: its value runs to the next "KEY:" word. */
+    private static final Pattern FIRMWARE_NAME = Pattern.compile("FIRMWARE_NAME:(.*?)(?=\\s+[A-Z_]+:|$)");
+    /** A whole word: a build named on from it ({@code il-holdB-rollback}, {@code il-holdB.2}) is another build. */
+    private static final Pattern HOLD_B = Pattern.compile("\\b" + Pattern.quote(HOLD_B_MARKER) + "(?![\\w.-])");
 
     /** One journaled change: its code (EVENT_*), when, and the reason in plain words. */
     public static final class Event {
@@ -160,8 +183,23 @@ public final class ControllerReset {
     private boolean resetUnhomed;
     /** When the last home after a detected reset moved the Z frame, or null. */
     private Long frameMovedAtMs;
+    /** BR-96: who attests the next home, and their evidence (JSON text, or null); null: nobody. */
+    private String attestedBy;
+    private String attestedEvidence;
+    /** The last home that ended an unknown position on someone's word: {by, evidence, atMs}; null: none here. */
+    private Map<String, Object> lastAttestation;
+    /**
+     * BR-97: the levelling's reference ({@link #levelReference}): 0 after a detected reset (also read back after a
+     * restart); null: the next levelling call's Z. A Stop and Start keeps it, and so does a lost link (BR-93).
+     */
+    private Double levelRefZ;
     /** BR-93: the last lost link put on record (the driver's time of it), or null. */
     private Long linkLostAtMs;
+    /** BR-92: whether the controller's idle timeout switches the screw's motor off (the last connect's M115). */
+    private boolean idleCut = true;
+    /** BR-92: that M115's FIRMWARE_NAME (null: none read) and when it was read (null: no connect on record). */
+    private String firmware;
+    private Long firmwareReadAtMs;
     /** The changes made and not written yet (under this lock), in their order. */
     private final List<Event> toWrite = new ArrayList<>();
     /** One journal writer at a time, outside this lock (a stream's move never waits for an insert). */
@@ -215,6 +253,7 @@ public final class ControllerReset {
                 tripEndedAt = later(tripEndedAt, e.atMs); // it boots without the trip
                 detectedAtMs = e.atMs; // what it reported is not journaled: reported stays null
                 unknown(e.message, e.atMs);
+                levelRefZ = 0.0; // BR-97: the boot Z, until a newer possible reset, home or home's start clears it
                 stopIdleClock(e.atMs); // the controller boots with its motors off
             }
             else if (EVENT_MOTOR_OFF.equals(e.code)) {
@@ -238,6 +277,15 @@ public final class ControllerReset {
             else if (EVENT_KNOWN.equals(e.code)) {
                 positionKnown = true;
                 unknownWhy = null;
+                levelRefZ = null;
+            }
+            else if (EVENT_HOME_STARTED.equals(e.code)) {
+                levelRefZ = null;
+            }
+            else if (EVENT_IDLE_CUT.equals(e.code) || EVENT_IDLE_HOLD.equals(e.code)) {
+                idleCut = EVENT_IDLE_CUT.equals(e.code);
+                firmware = firmwareName(Collections.singletonList(e.message)); // its message ends with it
+                firmwareReadAtMs = e.atMs;
             }
         }
         watchdogTripAt(tripAt, tripEndedAt);
@@ -353,11 +401,47 @@ public final class ControllerReset {
             }
             unknown(String.format(Locale.ROOT, "the controller was reset (a power cycle: at connect it reported "
                     + "X 0, Y 0, Z 0 and %s), so the head may be anywhere", rot), now);
+            levelRefZ = 0.0; // BR-97: Marlin boots at Z 0 where the see-saw stands
             stopIdleClock(now); // it boots with its motors off: the count's epoch covers the screw
             watchdogTripAtMs = null; // and without a host watchdog trip
             resetUnhomed = true; // its home will move the Z frame
             record(EVENT_RESET, now, unknownWhy);
         }
+    }
+
+    /**
+     * BR-92: right after a connect, the controller's M115 reply, or null with {@code readError} when it could not be
+     * read. A FIRMWARE_NAME carrying {@link #HOLD_B_MARKER} (the holdB build) keeps the screw's motor on when idle: no
+     * idle switch-off is counted until a connect reads other firmware. Any other reply keeps the controller's idle
+     * timeout, the safe side. On record at every connect.
+     */
+    public void firmwareAtConnect(List<String> m115, String readError) {
+        synchronized (this) {
+            long now = clock.getAsLong();
+            idleCheck(now); // a switch-off under the last connect's firmware goes on record first
+            firmware = firmwareName(m115);
+            idleCut = firmware == null || !HOLD_B.matcher(firmware).find();
+            firmwareReadAtMs = now;
+            String read = firmware != null ? "M115 FIRMWARE_NAME:" + firmware : m115 != null
+                    ? "its M115 named no FIRMWARE_NAME" : "its M115 was not read at the connect (" + readError + ")";
+            record(idleCut ? EVENT_IDLE_CUT : EVENT_IDLE_HOLD, now, (idleCut
+                    ? "the screw motor goes off after the controller's idle timeout; "
+                    : "the screw motor stays on when idle (the " + HOLD_B_MARKER + " build): no idle switch-off; ")
+                    + read);
+        }
+        writeOut();
+    }
+
+    /** The FIRMWARE_NAME of an M115 reply, or null: none. */
+    private static String firmwareName(List<String> lines) {
+        for (String l : lines == null ? Collections.<String> emptyList() : lines) {
+            Matcher m = FIRMWARE_NAME.matcher(l == null ? "" : l);
+            if (m.find()) {
+                String name = m.group(1).trim();
+                return name.isEmpty() ? null : name;
+            }
+        }
+        return null;
     }
 
     /** BR-93: "the link to the controller was lost at 15:07 (the controller left USB: … is gone)". */
@@ -378,7 +462,9 @@ public final class ControllerReset {
         }
         linkLostAtMs = atMs;
         idleCheck(clock.getAsLong()); // an idle switch-off before it goes on record first
+        Double ref = levelRefZ;
         unknown(why + ", so the controller may have been reset", atMs);
+        levelRefZ = ref; // BR-97: a lost link moves no frame by itself; the reconnect decides (a detected reset: boot Z)
         resetUnhomed = true; // and its home may move the Z frame
         watchdogTripAtMs = null; // maybe a reset: a trip reported now is a new one
         record(EVENT_UNREAD, atMs, unknownWhy);
@@ -546,8 +632,14 @@ public final class ControllerReset {
 
     /** ": the controller switches it off after 60 min without one", or "" without a timeout. */
     private String idleNote() {
-        Long t = idleOffMs == null ? null : idleOffMs.getAsLong();
-        return t == null || t <= 0 ? "" : ": the controller switches it off after " + duration(t) + " without one";
+        Long t = idleTimeoutMs();
+        return t == null ? "" : ": the controller switches it off after " + duration(t) + " without one";
+    }
+
+    /** The controller's idle timeout of the screw's motor now (ms), or null: none (the holdB build; tests). */
+    private Long idleTimeoutMs() {
+        Long t = idleOffMs == null || !idleCut ? null : idleOffMs.getAsLong();
+        return t == null || t <= 0 ? null : t;
     }
 
     /** "the screw motor was switched off at 16:20 (a STOP)". */
@@ -567,8 +659,8 @@ public final class ControllerReset {
      * stream's line).
      */
     private void idleCheck(long now) {
-        Long t = idleOffMs == null ? null : idleOffMs.getAsLong();
-        if (lastMoveMs == null || t == null || t <= 0 || now - lastMoveMs < t) {
+        Long t = idleTimeoutMs();
+        if (lastMoveMs == null || t == null || now - lastMoveMs < t) {
             return;
         }
         long at = lastMoveMs + t;
@@ -635,6 +727,10 @@ public final class ControllerReset {
         boolean moved;
         synchronized (this) {
             long now = clock.getAsLong();
+            String by = attestedBy;
+            String evidence = attestedEvidence;
+            attestedBy = null; // this home's only
+            attestedEvidence = null;
             moved = resetUnhomed;
             if (moved) {
                 resetUnhomed = false;
@@ -643,13 +739,63 @@ public final class ControllerReset {
                         + "shift): record the needle frame again");
             }
             if (!positionKnown) {
-                record(EVENT_KNOWN, now, "homed: the position is known again");
+                record(EVENT_KNOWN, now, "homed: the position is known again" + (by == null ? "" : ", attested by " + by
+                        + (evidence == null ? " (no evidence given)" : " (evidence: " + evidence + ")")));
+                if (by != null) {
+                    lastAttestation = new LinkedHashMap<>();
+                    lastAttestation.put("by", by);
+                    lastAttestation.put("evidence", evidence);
+                    lastAttestation.put("atMs", now);
+                }
             }
             positionKnown = true;
             unknownWhy = null;
+            levelRefZ = null;
         }
         writeOut();
         return moved;
+    }
+
+    /**
+     * BR-96: who attests that the head may home now (what {@link #HOME_CHECK} names), and their evidence as JSON text
+     * (null: none). Only the next {@link #homed} uses it; null clears it (a home that ended without one).
+     */
+    public synchronized void attest(String who, String evidenceJson) {
+        attestedBy = who;
+        attestedEvidence = evidenceJson;
+    }
+
+    /**
+     * BR-97: the Z (the controller's frame) the see-saw's levelling before a home stays within 32 mm of: where the
+     * position became unknown. Marlin's boot Z 0 after a detected reset; else {@code zNow}, taken at the first levelling
+     * call since a possible reset, a home's start or a home (a lost link keeps it: the reconnect decides).
+     */
+    public synchronized double levelReference(double zNow) {
+        if (levelRefZ == null) {
+            levelRefZ = zNow;
+        }
+        return levelRefZ;
+    }
+
+    /**
+     * BR-97: a home starts (its G28 next): its G28 may move the controller's frame even if the home ends unhomed, so the
+     * next levelling takes its reference afresh, also after a restart (journaled). Its row is written here, before the
+     * G28: when the journal throws, this throws and the home must not start (unrecorded, a restart would bring back the
+     * reset's boot Z), and the reference stays.
+     */
+    public void homeStarted() {
+        long now = clock.getAsLong();
+        Event e = new Event(EVENT_HOME_STARTED, now, "a home started at " + ZCheck.clock(now) + ": its G28 may move the "
+                + "controller's Z frame, so the see-saw's levelling takes its reference afresh");
+        writeOut(); // the rows before it first, in order
+        synchronized (writeLock) {
+            if (journal != null) {
+                journal.accept(e);
+            }
+        }
+        synchronized (this) {
+            levelRefZ = null;
+        }
     }
 
     /** When the last home after a detected reset moved the Z frame (also before a restart), or null. */
@@ -685,8 +831,9 @@ public final class ControllerReset {
     }
 
     /**
-     * The status's view, read at once: positionKnown, positionUnknownWhy, powerCycle {detected, atMs, reported} and
-     * screwMotorOff {atMs, why} (field by field, a home in between could show an unknown position without its reason).
+     * The status's view, read at once: positionKnown, positionUnknownWhy, powerCycle {detected, atMs, reported},
+     * screwMotorOff {atMs, why}, screwIdleCut {cut, firmware, readAtMs} and lastAttestation {by, evidence, atMs}
+     * (field by field, a home in between could show an unknown position without its reason).
      */
     public Map<String, Object> view() {
         Map<String, Object> v;
@@ -706,11 +853,17 @@ public final class ControllerReset {
         Map<String, Object> off = new LinkedHashMap<>();
         off.put("atMs", motorOff == null ? null : motorOff.atMs);
         off.put("why", motorOff == null ? null : motorOff.message);
+        Map<String, Object> cut = new LinkedHashMap<>();
+        cut.put("cut", idleCut);
+        cut.put("firmware", firmware);
+        cut.put("readAtMs", firmwareReadAtMs);
         Map<String, Object> v = new LinkedHashMap<>();
         v.put("positionKnown", positionKnown);
         v.put("positionUnknownWhy", unknownWhy());
         v.put("powerCycle", pc);
         v.put("screwMotorOff", off);
+        v.put("screwIdleCut", cut);
+        v.put("lastAttestation", lastAttestation == null ? null : new LinkedHashMap<>(lastAttestation));
         return v;
     }
 
@@ -738,6 +891,7 @@ public final class ControllerReset {
         positionKnown = false;
         unknownWhy = why;
         countEpochMs = later(countEpochMs, atMs);
+        levelRefZ = null; // BR-97: maybe a new frame (a detected reset then sets its boot Z)
     }
 
     /** A change to journal: written after the lock is released, after the changes made before it. */

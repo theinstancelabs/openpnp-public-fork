@@ -674,13 +674,251 @@ public class ControllerResetTest {
         assertTrue(ms < 1000, "the moves waited " + ms + " ms for the journal");
     }
 
-    /** The confirm before the home after a reset (the process engineer, 11-04): the see-saw levelled, both tips up. */
+    // ------------------------------------------------------------------------------------------
+    // BR-92: whether the firmware cuts the screw's motor when idle (M115 at every connect)
+    // ------------------------------------------------------------------------------------------
+
+    /** Marlin's M115 line of the holdB build (firmware/holdB/README.md) and of the board's firmware before it. */
+    static final String HOLD_B_M115 = "FIRMWARE_NAME:Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24) "
+            + "SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 MACHINE_TYPE:Opulo LumenPnP "
+            + "EXTRUDER_COUNT:0 AXIS_COUNT:5";
+    static final String STOCK_M115 = HOLD_B_M115.replace("bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24)",
+            "bugfix-2.1.x (Sep 19 2024 13:39:21)");
+
+    static List<String> m115(String firmwareLine) {
+        return Arrays.asList(firmwareLine, "Cap:HOST_WATCHDOG:1", "ok");
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> idleCut(ControllerReset r) {
+        return (Map<String, Object>) r.view().get("screwIdleCut");
+    }
+
+    /**
+     * The holdB build keeps the screw's motor on when idle: no idle switch-off. A connect that reads other firmware
+     * brings the timeout back, dated from the last move as before.
+     */
+    @Test
+    public void theHoldBBuildHasNoIdleSwitchOffUntilAConnectReadsOtherFirmware() {
+        ControllerReset r = withIdle();
+        Map<String, Object> none = idleCut(r);
+        assertEquals(Boolean.TRUE, none.get("cut"), "before any connect: the safe side");
+        assertNull(none.get("firmware"));
+        assertNull(none.get("readAtMs"));
+
+        now = 1000;
+        r.firmwareAtConnect(m115(HOLD_B_M115), null);
+        Map<String, Object> c = idleCut(r);
+        assertEquals(Boolean.FALSE, c.get("cut"));
+        assertEquals("Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24)", c.get("firmware"));
+        assertEquals(1000L, c.get("readAtMs"));
+        assertEquals(Arrays.asList(ControllerReset.EVENT_IDLE_HOLD), codes());
+        assertTrue(journal.get(0).message.contains("Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24)"),
+                journal.get(0).message);
+        r.screwMoved();
+        r.journalScrewMotion();
+        assertFalse(journal.get(1).message.contains("switches it off"), "no timeout to name: "
+                + journal.get(1).message);
+        now = 1000 + 5 * HOUR;
+        assertNull(r.countEpochMs(), "no idle switch-off");
+        assertNull(r.lastScrewMotorOff());
+
+        now = 1000 + 6 * HOUR;
+        r.firmwareAtConnect(m115(STOCK_M115), null);
+        assertEquals(Boolean.TRUE, idleCut(r).get("cut"));
+        assertEquals("Marlin bugfix-2.1.x (Sep 19 2024 13:39:21)", idleCut(r).get("firmware"));
+        assertEquals(Long.valueOf(1000 + HOUR), r.countEpochMs(), "the last move + the timeout");
+        assertEquals(Arrays.asList(ControllerReset.EVENT_IDLE_HOLD, ControllerReset.EVENT_SCREW_MOTION,
+                ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_MOTOR_OFF), codes());
+    }
+
+    /**
+     * The last connect's decision outlives an engine restart (a deploy): the status polls before the next connect
+     * count no idle switch-off on the holdB build. An M115 not read keeps the cut, the safe side.
+     */
+    @Test
+    public void theLastConnectsDecisionOutlivesAnEngineRestart() {
+        ControllerReset first = withIdle();
+        now = 1000;
+        first.firmwareAtConnect(m115(HOLD_B_M115), null);
+        first.screwMoved();
+        first.journalScrewMotion();
+        now = 1000 + 3 * HOUR;
+        ControllerReset second = withIdle();
+        Map<String, Object> c = idleCut(second);
+        assertEquals(Boolean.FALSE, c.get("cut"), "the last connect's, until the next reads M115");
+        assertEquals("Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24)", c.get("firmware"));
+        assertEquals(1000L, c.get("readAtMs"));
+        assertNull(second.countEpochMs(), "no idle switch-off before the connect");
+
+        second.firmwareAtConnect(null, "timeout waiting for response");
+        assertEquals(Long.valueOf(1000 + HOUR), second.countEpochMs(), "an M115 not read keeps the cut");
+        assertEquals(Arrays.asList(ControllerReset.EVENT_IDLE_HOLD, ControllerReset.EVENT_SCREW_MOTION,
+                ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_MOTOR_OFF), codes());
+        assertTrue(journal.get(2).message.contains("timeout waiting for response"), journal.get(2).message);
+        ControllerReset third = withIdle();
+        assertEquals(Boolean.TRUE, idleCut(third).get("cut"));
+        assertNull(idleCut(third).get("firmware"));
+        assertEquals(1000L + 3 * HOUR, idleCut(third).get("readAtMs"));
+    }
+
+    /** A switch-off the last connect's firmware made goes on record before a connect reads the holdB build. */
+    @Test
+    public void aSwitchOffUnderTheLastConnectsFirmwareStaysOnRecord() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.firmwareAtConnect(m115(STOCK_M115), null);
+        r.screwMoved();
+        now = 1000 + 2 * HOUR; // nothing read the state meanwhile
+        r.firmwareAtConnect(m115(HOLD_B_M115), null);
+        assertEquals(Arrays.asList(ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_MOTOR_OFF,
+                ControllerReset.EVENT_IDLE_HOLD), codes());
+        assertEquals(1000 + HOUR, r.lastScrewMotorOff().atMs, "the timeout of the firmware read before");
+    }
+
+    /**
+     * Only the marker in FIRMWARE_NAME, as a whole word, holds the screw; an M115 without FIRMWARE_NAME keeps the cut.
+     */
+    @Test
+    public void onlyTheMarkerInFirmwareNameHoldsTheScrew() {
+        ControllerReset r = withIdle();
+        r.firmwareAtConnect(Arrays.asList("Cap:HOST_WATCHDOG:1", "ok"), null);
+        assertEquals(Boolean.TRUE, idleCut(r).get("cut"));
+        assertNull(idleCut(r).get("firmware"));
+        assertTrue(journal.get(0).message.contains("no FIRMWARE_NAME"), journal.get(0).message);
+        r.firmwareAtConnect(m115(STOCK_M115.replace("MACHINE_TYPE:Opulo LumenPnP", "MACHINE_TYPE:il-holdB")), null);
+        assertEquals(Boolean.TRUE, idleCut(r).get("cut"), "the marker outside FIRMWARE_NAME");
+        r.firmwareAtConnect(m115(HOLD_B_M115.replace("il-holdB", "il-holdB2")), null);
+        assertEquals(Boolean.TRUE, idleCut(r).get("cut"), "another marker");
+        // review MINOR 2: a build named on from the marker (hyphen, dot) or ending in it is another build
+        for (String other : new String[] {"il-holdB-rollback", "il-holdB.2", "xil-holdB"}) {
+            r.firmwareAtConnect(m115(HOLD_B_M115.replace("il-holdB", other)), null);
+            assertEquals(Boolean.TRUE, idleCut(r).get("cut"), other);
+        }
+        r.firmwareAtConnect(m115(HOLD_B_M115), null);
+        assertEquals(Boolean.FALSE, idleCut(r).get("cut"));
+    }
+
+    /**
+     * The confirm before the home after a reset (the process engineer, 11-04): the see-saw levelled, both tips up.
+     * BR-96: it says what must be true, for whoever checks (an agent's cameras, or a person), not who checks.
+     */
     @Test
     public void theHomeCheckLevelsTheSeeSawFirst() {
-        assertTrue(ControllerReset.HOME_CHECK.contains("homing corner")
-                && ControllerReset.HOME_CHECK.contains("check that nothing is under either tool")
-                && ControllerReset.HOME_CHECK.contains("level N1 and the needle by hand before Home: the see-saw "
-                        + "levelled, both tips up"), ControllerReset.HOME_CHECK);
+        String c = ControllerReset.HOME_CHECK;
+        assertTrue(c.contains("homing corner (X, then Y) at the height the tools are at now, then homes Z there"), c);
+        assertTrue(c.contains("before Home, nothing is under either tool (N1 or the needle) or in their way to that "
+                + "corner, and the see-saw is levelled, both tips up"), c);
+        assertTrue(c.contains("by hand") && c.contains("Z-only moves"), "either way of levelling: " + c);
+        assertFalse(c.contains("check that"), c);
+    }
+
+    /** BR-96: the home that ends an unknown position journals who attested it and their evidence, once. */
+    @Test
+    public void theHomeAfterAResetSaysWhoAttestedIt() {
+        ControllerReset r = run(false, false);
+        now = 1000;
+        r.connected(reply(BOOT), 'B', null);
+        r.attest("Process", "{\"run\":\"r-17\",\"pictures\":[3,4]}");
+        assertNull(r.view().get("lastAttestation"), "not before the home");
+        now = 2000;
+        r.homed();
+        ControllerReset.Event known = journal.get(journal.size() - 1);
+        assertEquals(ControllerReset.EVENT_KNOWN, known.code);
+        assertTrue(known.message.contains("attested by Process (evidence: {\"run\":\"r-17\",\"pictures\":[3,4]})"),
+                known.message);
+        Map<?, ?> last = (Map<?, ?>) r.view().get("lastAttestation");
+        assertEquals("Process", last.get("by"));
+        assertEquals("{\"run\":\"r-17\",\"pictures\":[3,4]}", last.get("evidence"));
+        assertEquals(2000L, last.get("atMs"));
+
+        // a later reset homed without a word of its own (OpenPnP's own Home): the old attestation is not reused
+        now = 3000;
+        r.connected(reply(BOOT), 'B', null);
+        now = 4000;
+        r.homed();
+        known = journal.get(journal.size() - 1);
+        assertEquals(ControllerReset.EVENT_KNOWN, known.code);
+        assertFalse(known.message.contains("attested"), known.message);
+        assertEquals(2000L, ((Map<?, ?>) r.view().get("lastAttestation")).get("atMs"), "the last one stays shown");
+
+        // nor one a home took while the position was known, nor one cleared (a home that failed before its end)
+        r.attest("Process", null);
+        now = 5000;
+        r.homed();
+        r.attest("UI", "\"picture 9\"");
+        r.attest(null, null);
+        now = 6000;
+        r.connected(reply(BOOT), 'B', null);
+        now = 7000;
+        r.homed();
+        assertFalse(journal.get(journal.size() - 1).message.contains("attested"), journal.toString());
+    }
+
+    /** BR-96: no evidence given reads so. */
+    @Test
+    public void anAttestationWithoutEvidenceSaysSo() {
+        ControllerReset r = run(false, false);
+        r.connected(reply(BOOT), 'B', null);
+        r.attest("the web UI's user", null);
+        r.homed();
+        String m = journal.get(journal.size() - 1).message;
+        assertTrue(m.contains("attested by the web UI's user (no evidence given)"), m);
+    }
+
+    /**
+     * BR-97 review (MAJOR): the see-saw's levelling is bounded around the Z where the position became unknown: Marlin's
+     * boot Z 0 after a detected reset (on record, so also after a restart), else the first levelling call's Z. A reset,
+     * a possible one (an unread connect), a home's start and a home take it afresh; a Stop and Start keeps it.
+     */
+    @Test
+    public void theLevellingReferenceIsWhereThePositionBecameUnknown() {
+        ControllerReset r = run(false, false);
+        assertEquals(20.0, r.levelReference(20), 1e-9, "no reset: the first call's Z");
+        assertEquals(20.0, r.levelReference(25), 1e-9, "kept");
+        now = 1000;
+        r.connected(reply(BOOT), 'B', null);
+        assertEquals(0.0, r.levelReference(30), 1e-9, "a detected reset: Marlin's boot Z 0, not the call's Z");
+        now = 1500;
+        r.connected(reply("X:0.0000 Y:0.0000 Z:30.0000 A:720.0000 B:720.0000 Count X:0 Y:0 Z:0"), 'B', null);
+        assertEquals(0.0, r.levelReference(30), 1e-9, "a Stop and Start, the controller powered: kept");
+        ControllerReset restarted = run(false, false);
+        assertEquals(0.0, restarted.levelReference(30), 1e-9, "an OpenPnP restart: the reset is on record");
+        restarted.homeStarted();
+        assertEquals(31.5, restarted.levelReference(31.5), 1e-9, "a home's G28 moved the frame, homed or not");
+        assertEquals(31.5, run(false, false).levelReference(31.5), 1e-9, "a home's start is on record (re-review)");
+        now = 2000;
+        restarted.connected(null, 'B', "no answer");
+        assertEquals(12.0, restarted.levelReference(12), 1e-9, "a possible reset: taken afresh");
+        now = 3000;
+        restarted.homed();
+        assertEquals(7.0, restarted.levelReference(7), 1e-9, "a home: taken afresh");
+        assertEquals(9.0, run(false, false).levelReference(9), 1e-9, "homed since the reset: no boot Z after a restart");
+    }
+
+    /**
+     * BR-97 x BR-93: a lost link keeps the levelling reference and the reconnect decides: a powered controller keeps
+     * it, the boot position read sets Marlin's boot Z 0, an unread reconnect (a possible reset) takes it afresh. Not
+     * checked here, a known gap filed under BR-97: after a restart the loss's row clears it, as an unread connect's does.
+     */
+    @Test
+    public void aLostLinkKeepsTheLevellingReferenceUntilTheReconnectDecides() {
+        ControllerReset r = run(false, false);
+        assertEquals(20.0, r.levelReference(20), 1e-9);
+        now = 1000;
+        r.linkLost(1000, "the link ended");
+        assertEquals(20.0, r.levelReference(5), 1e-9, "a lost link moves no frame by itself");
+        now = 1500;
+        r.connected(reply("X:0.0000 Y:0.0000 Z:5.0000 A:720.0000 B:720.0000 Count X:0 Y:0 Z:0"), 'B', null);
+        assertEquals(20.0, r.levelReference(5), 1e-9, "a powered controller: kept");
+        now = 2000;
+        r.linkLost(2000, "the link ended");
+        r.connected(reply(BOOT), 'B', null);
+        assertEquals(0.0, r.levelReference(5), 1e-9, "a reset the reconnect detects: Marlin's boot Z 0");
+        now = 3000;
+        r.linkLost(3000, "the link ended");
+        r.connected(null, 'B', "timeout");
+        assertEquals(12.0, r.levelReference(12), 1e-9, "an unread reconnect: a possible reset, taken afresh");
     }
 
     /**

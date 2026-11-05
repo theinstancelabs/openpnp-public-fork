@@ -127,6 +127,8 @@ public final class Interlocks {
          * {@link #LANDING_CHECK}; null = none (refused while the landing is not checked).
          */
         public String landingWaiver;
+        /** The named I11 waiver (BR-77): the run measures the start angle, so it cannot need it; never a board run. */
+        public boolean startAngleWaiver;
         /** Places whose Z must agree with the needle frame (waste, blank). */
         public final List<String> referencePlaces = new java.util.ArrayList<>();
         /**
@@ -686,7 +688,10 @@ public final class Interlocks {
         // I11: the start angle of a partial turn is a calibration of the current controller power-up
         // (board runs and calibration blocks: any block of a partial turn).
         boolean partial = in.partialTurn != null ? in.partialTurn : in.boardRun && DoseBlocks.anyPartial(blocks, cfg);
-        if (partial) {
+        if (partial && in.scope.startAngleWaiver && !in.boardRun) {
+            r.notes.add("I11: waived: this run measures the start angle");
+        }
+        else if (partial) {
             if (prof.startAngleSetAtMs == null) {
                 r.add("I11", "the screw start angle has never been set: set or confirm it (Profiles)");
             }

@@ -18,6 +18,7 @@ import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseDb;
 import org.openpnp.instancelabs.dispense.DispensePlan;
+import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DoseBlocks;
 import org.openpnp.instancelabs.dispense.DotLadder;
@@ -75,15 +76,17 @@ final class DispenseEndpoints {
             "profile", "purgeRow", "cleanPadCheck", "fiducialCheck", "vacuumProbe", "paste", "calibrationArea",
             "padCalibration", "outputZones"));
     /**
-     * Nested fields only the engine or their own endpoints change: the start angle's set and change times (I11:
-     * POST /api/screw/start-angle, or a changed angle), the time of the purge reset,
+     * Nested fields only the engine or their own endpoints change: the start angle, its set and change times and the
+     * feature of the measure it was set from (I11, BR-02's checks, BR-77: POST /api/screw/start-angle), the time of
+     * the purge reset,
      * and the used purge spots (runs reserve them, POST /api/purge-row/reset frees them: a stale
      * full-settings save must not put paste-covered spots back in use); likewise the used calibration
      * area and its wipe (POST /api/calibration-area/reset), and when the paste was loaded (POST /api/paste).
      */
     static final java.util.Set<String> PROTECTED_NESTED = new java.util.HashSet<>(java.util.Arrays.asList(
-            "profile.startAngleSetAtMs", "profile.startAngleChangedAtMs", "purgeRow.resetAtMs", "purgeRow.usedSpots",
-            "calibrationArea.usedMm", "calibrationArea.resetAtMs", "paste.loadedAtMs"));
+            "profile.startAngleDeg", "profile.startAngleSetAtMs", "profile.startAngleChangedAtMs",
+            "profile.startAngleFeature", "purgeRow.resetAtMs", "purgeRow.usedSpots", "calibrationArea.usedMm",
+            "calibrationArea.resetAtMs", "paste.loadedAtMs"));
 
     /** How long OpenPnP's thread may take to start a read of its board list (BOARD_IMPORT_DESIGN.md §3.6). */
     static final long EDT_START_MS = 10_000;
@@ -827,6 +830,10 @@ final class DispenseEndpoints {
         if (next.locations == null) {
             next.locations = new LinkedHashMap<>();
         }
+        if (next.nozzle != null && !next.nozzle.equals(live.nozzle) && svc.namesProbeNozzle(next.nozzle)) {
+            throw ApiException.badRequest("'nozzle' is the needle's nozzle: '" + next.nozzle + "' is N1, the probe "
+                    + "nozzle");
+        }
         if (next.padCalibration != null && !simulated) {
             // the shortened statistics of the SIM tests are refused on the machine (PROFILE_CALIBRATION_DESIGN.md §5.4)
             List<String> floors = next.padCalibration.realMachineProblems();
@@ -1319,7 +1326,9 @@ final class DispenseEndpoints {
     /**
      * I11: set ({"startAngleDeg": a}) or confirm ({} or {"confirm": true}) the screw start angle for
      * the current controller power-up (the B step count restarts at power-up). {@code measuredAtMs}: when the evidence
-     * of a set angle was made (BR-02: refused when it is from before the screw's motor last went off).
+     * of a set angle was made (BR-02: refused when it is from before the screw's motor last went off). BR-77
+     * {@code evidence: {runId}}: a start-angle measure of this session (its job id); its feature is stored with the angle
+     * and its own measuredAtMs dates the set (a client's feature value is never taken).
      */
     Object startAngle(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();
@@ -1332,7 +1341,24 @@ final class DispenseEndpoints {
             throw ApiException.badRequest("startAngleDeg must be 0 to < 360");
         }
         Double measured = Json.num(b, "measuredAtMs", null); // BR-02: when its evidence (the dot pair) was made
-        svc.setStartAngle(a, Json.str(b, "note", null), measured == null ? null : measured.longValue());
+        DispenseProfile.StartAngleFeature f = null;
+        if (b.has("evidence")) {
+            JsonElement ev = b.get("evidence");
+            String runId = ev.isJsonObject() ? Json.str(ev.getAsJsonObject(), "runId", null) : null;
+            if (runId == null || a == null || measured != null) {
+                throw ApiException.badRequest("'evidence' is {runId} (the job of POST /api/screw/start-angle/measure), "
+                        + "with startAngleDeg and without measuredAtMs (the measure's own)");
+            }
+            PadCalibrationJob j = ctx.padCalJobs.get(runId);
+            f = j == null ? null : j.measuredFeature();
+            if (f == null) {
+                throw ApiException.refused("measure first: " + (j == null ? "no measure " + runId + " among the last "
+                        + PadCalibrationJobs.KEEP + " pad calibrations of this session (newer ones and a restart drop it: "
+                        + "measure again)" : runId + " is no finished start-angle measure that found an angle"));
+            }
+        }
+        svc.setStartAngle(a, Json.str(b, "note", null), f != null ? f.measuredAtMs : measured == null ? null
+                : measured.longValue(), f);
         return Views.profile(svc.getConfig(), svc.getControllerConnectedAtMs(),
                 svc.getControllerResetAtMs());
     }

@@ -73,7 +73,8 @@ final class HeightSwitchEndpoints {
         String who = !thisHome(n1, home) ? "N1" : !thisHome(needle, home) ? "the needle" : null;
         String why = svc.positionUnknownWhy();
         if (why == null && who != null) {
-            why = who + " has no accepted trip on the height switch in this home";
+            why = who + " has no accepted trip on the height switch " + ("the needle".equals(who) && needle == null
+                    && c.heightSwitch.needle != null ? "since it was put on" : "in this home");
         }
         HeightSwitch.Read last = svc.getLastHeightSwitchRead();
         return Views.map("place", c.location(HeightSwitch.PLACE), "n1", n1, "needle", needle, "kSwitch",

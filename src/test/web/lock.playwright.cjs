@@ -185,7 +185,7 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     await page.evaluate(() => IL.go('#run/board'));
     await page.waitForSelector('#btn-board-upload', { state: 'attached', timeout: 5000 }).catch(() => null);
     const up = await page.evaluate(() => { const b = document.getElementById('btn-board-upload'); return b ? { disabled: b.disabled, title: b.title } : null; });
-    check('(2) data-only work stays free: Upload KiCad board is not locked', up && !up.disabled && !/has the machine/.test(up.title), up);
+    check('(2) data-only work stays free: Upload a design… is not locked', up && !up.disabled && !/has the machine/.test(up.title), up);
     await page.evaluate(() => IL.go('#run'));
     // idle: no command for 5 minutes
     stub.holder = agent(12, 300);

@@ -54,17 +54,23 @@
     const d = (status && status.dispense) || {};
     return Object.keys(d.locations || {}).filter((n) => n !== 'waste-test-dot').sort();
   };
-  /** Fills a place <select>, keeps the chosen value; preferred when nothing is chosen yet. */
-  pcr.fillPlaces = function (sel, status, preferred) {
-    const names = pcr.places(status);
+  /** Fills a place <select>, keeps the chosen value; preferred when nothing is chosen yet, or when the value was this
+   *  function's own pick (dataset.auto: a cup added after the waste was chosen for want of one), never over a person's
+   *  choice; only(name): the places offered; bare: with neither offered, nothing is chosen (the caller's gate asks for a
+   *  place) instead of the first; none offered: the select's data-none text. */
+  pcr.fillPlaces = function (sel, status, preferred, only, bare) {
+    const names = pcr.places(status).filter(only || Boolean);
     const key = names.join('|');
     if (sel.dataset.key !== key) {
-      const keep = sel.value;
+      if (sel.dataset.key === undefined) sel.addEventListener('change', () => delete sel.dataset.auto);   // a person chose
+      const keep = sel.value, mine = keep === sel.dataset.auto;
       sel.dataset.key = key;
       sel.replaceChildren(...(names.length ? names.map((n) => el('option', { value: n, text: n }))
-        : [el('option', { value: '', text: 'No places yet' })]));
-      if (keep && names.includes(keep)) sel.value = keep;
+        : [el('option', { value: '', text: sel.dataset.none || 'No places yet' })]));
+      if (keep && names.includes(keep) && !(mine && names.includes(preferred))) sel.value = keep;
       else if (preferred && names.includes(preferred)) sel.value = preferred;
+      else if (bare && names.length) sel.selectedIndex = -1;
+      if (sel.value !== keep) sel.dataset.auto = sel.value;
     }
     return names;
   };
@@ -203,6 +209,8 @@
       check: (v) => v >= 0 && v <= 5000, err: 'Must be 0 to 5000 ms.', help: 'Waits at the lift height before moving on, so the paste breaks off there, not across the board. The 25G recipe waits 500 ms.' },
     { id: 'pf-lift', key: 'liftMm', optional: true, dec: 1, label: 'Lift after a dot', unit: 'mm', range: '0.1 to 10, or blank', step: '0.1', min: '0.1', max: '10',
       check: (v) => v > 0 && v <= 10, err: 'Must be above 0 and at most 10 mm, or blank.', help: 'Blank: the machine’s hop height, with no pause after it. The 25G recipe lifts 3 mm.' },
+    { id: 'pf-skip', key: 'touchOffSkipDots', int: true, label: 'Dots not counted after the prime', unit: 'dots', range: '0 to 5', step: '1', min: '0', max: '5',
+      check: (v) => v >= 0 && v <= 5, err: 'Must be 0 to 5 dots.', help: 'The needle touch-off leaves these out: the first dots after a prime come out too big on some tips (the 25G: 3). Its ladder then starts that many steps higher. 0 counts every dot.' },
   ];
   const FINGERPRINT_KEYS = new Set(['pressurePsi', 'netStepsPerDot', 'suckBackDeg', 'screwRpm', 'screwAccelDegS2', 'dwellMs', 'gapMm', 'purgeDots', 'liftPauseMs', 'liftMm']);
   const PF = { dirty: new Set(), expect: null, expectUntil: 0, turnKey: null, errors: {}, tipKey: null };
@@ -325,6 +333,7 @@
     d(F.purgeDots, 'purge', String, ' dots');
     d(F.liftMm, 'lift after a dot', (v) => (isNum(v) ? IL.fmt(v, 1) + ' mm' : 'the machine’s hop height'));
     d(F.liftPauseMs, 'pause after the lift', String, ' ms');
+    d(F.touchOffSkipDots, 'dots not counted after the prime', String);
     if (!same(F.notes, b.notes, e.notes)) parts.push('notes edited');
     const stale = FIELDS.some((f) => FINGERPRINT_KEYS.has(f.key) && !same(f, b[f.key], e[f.key]));
     const psiChanged = !same(F.pressurePsi, b.pressurePsi, e.pressurePsi);
@@ -427,7 +436,7 @@
     const v = (i) => readVal(FIELDS[i]);
     return { name: String(v(0) || '').trim(), pressurePsi: v(1), netStepsPerDot: v(2), dwellMs: v(3), suckBackDeg: v(4), gapMm: v(5),
       screwRpm: v(6), screwAccelDegS2: v(7), purgeDots: v(8), notes: v(9) || '', liftPauseMs: v(10),
-      liftMm: v(11) === undefined ? null : v(11) };
+      liftMm: v(11) === undefined ? null : v(11), touchOffSkipDots: v(12) };
   }
   async function doSave(body) {
     const s0 = S.status;
@@ -511,6 +520,7 @@
         group('One dot', 'Each dot: lower to the gap, turn the screw forward, wait the dwell, turn back, lift, pause.',
           field(F('pf-turn')), field(F('pf-dwell')), field(F('pf-suck')), field(F('pf-gap')), field(F('pf-lift')), field(F('pf-liftpause')),
           el('div', { class: 'pf-derived span2' }, IL.icon('i-angle'), el('span', { id: 'pf-turn-info' }))),
+        group('Needle touch-off', null, field(F('pf-skip'))),
         group('Screw motion', null, field(F('pf-rpm')), field(F('pf-accel'))),
         group('Before each board', null, field(F('pf-purge')), field(F('pf-notes')))),
       el('div', { class: 'card__foot pf-foot', id: 'pf-foot' },

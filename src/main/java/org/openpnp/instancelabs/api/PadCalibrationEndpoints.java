@@ -63,6 +63,7 @@ final class PadCalibrationEndpoints {
         s.route("GET", "/api/dose-records", this::doseRecords);
         s.route("GET", "/api/coupons/pending", r -> pendingView(ctx.svc()));
         s.route("POST", "/api/coupons/([0-9]{1,12})/reading", this::reading);
+        s.route("POST", "/api/screw/start-angle/measure", this::measureStartAngle);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -98,7 +99,42 @@ final class PadCalibrationEndpoints {
         }
         q.measure = Json.str(b, "measure", null);
         q.wide = Json.bool(b, "wide", false);
+        if (Json.has(b, "expectedLanding")) {
+            JsonElement e = b.get("expectedLanding");
+            if (!e.isJsonObject()) {
+                throw ApiException.badRequest("'expectedLanding' is {dxMm, dyMm, evidence}");
+            }
+            JsonObject o = e.getAsJsonObject();
+            q.expectedLanding = expectedLanding(q, Json.reqNum(o, "dxMm"), Json.reqNum(o, "dyMm"),
+                    Json.str(o, "evidence", null));
+        }
         return q;
+    }
+
+    /**
+     * BR-103: a landing check's expected landing (mm from N2's head offset) and where it comes from. Only for the
+     * landing check, never with 'wide', within the ±9 mm a wide search covers, its evidence named.
+     */
+    static PadCalibrationJob.ExpectedLanding expectedLanding(PadCalibrationJob.Request q, double dx, double dy,
+            String evidence) throws ApiException {
+        if (!PadCalibrationJob.MEASURE_LANDING.equals(q.measure)) {
+            throw ApiException.badRequest("'expectedLanding' is for the landing check (measure: landing)");
+        }
+        if (q.wide) {
+            throw ApiException.badRequest("'expectedLanding' searches ±2 mm around it and 'wide' ±9 mm: one or the other");
+        }
+        double max = org.openpnp.instancelabs.padprofile.LandingFit.SEARCH_WIDE_MM;
+        if (!Double.isFinite(dx) || !Double.isFinite(dy) || Math.abs(dx) > max || Math.abs(dy) > max) {
+            throw ApiException.badRequest("'expectedLanding' dxMm and dyMm are within ±" + Texts.num(max, 0) + " mm");
+        }
+        if (evidence == null || evidence.isBlank() || evidence.length() > 200) {
+            throw ApiException.badRequest("'expectedLanding.evidence' says where it comes from (1-200 characters)");
+        }
+        PadCalibrationJob.ExpectedLanding x = new PadCalibrationJob.ExpectedLanding();
+        x.dxMm = dx;
+        x.dyMm = dy;
+        x.evidence = evidence;
+        return x;
     }
 
     /** The preview's query: the same fields, lists comma-separated, suggestionIds as group:id pairs. */
@@ -147,6 +183,20 @@ final class PadCalibrationEndpoints {
         }
         q.measure = r.query("measure", null);
         q.wide = "true".equals(r.query("wide", "false"));
+        String expected = r.query("expectedLanding", null); // "dx,dy", with &evidence=
+        if (expected != null) {
+            String[] xy = expected.split(",");
+            try {
+                if (xy.length != 2) {
+                    throw new NumberFormatException(expected);
+                }
+                q.expectedLanding = expectedLanding(q, Double.parseDouble(xy[0].trim()), Double.parseDouble(xy[1].trim()),
+                        r.query("evidence", null));
+            }
+            catch (NumberFormatException ex) {
+                throw ApiException.badRequest("'expectedLanding' is dx,dy (mm)");
+            }
+        }
         return q;
     }
 
@@ -217,6 +267,68 @@ final class PadCalibrationEndpoints {
         accepted.put("finished", finished);
         accepted.put("result", job.view());
         return finished ? accepted : ApiServer.Response.json(202, accepted);
+    }
+
+    /**
+     * BR-77: POST /api/screw/start-angle/measure, a pad calibration job of its own (the lock, STOP, cancel, busy and the
+     * status as every job): 400 for the request's shape, 409 refused before anything moves; with {@code wait} 200 and
+     * the result when it ended, else 202.
+     */
+    Object measureStartAngle(ApiServer.Request r) throws Exception {
+        JsonObject b = r.json();
+        DispenseService svc = ctx.availableSvc();
+        PadCalibrationJob.Request q = new PadCalibrationJob.Request();
+        q.measure = PadCalibrationJob.MEASURE_START_ANGLE;
+        q.operator = Json.str(b, "operator", null);
+        q.startAngle = new PadCalibrationJob.StartAngle();
+        q.startAngle.mode = Json.str(b, "mode", null);
+        q.startAngle.targets = spots(b, "targets", 2);
+        q.startAngle.throwaways = spots(b, "throwaways", 3);
+        q.startAngle.surface = Json.str(b, "surface", null);
+        q.startAngle.startDeg = Json.num(b, "startDeg", null);
+        q.startAngle.pairs = Json.integer(b, "pairs", null);
+        q.startAngle.turns = Json.integer(b, "turns", null);
+        q.startAngle.apply = Json.bool(b, "apply", false);
+        PadCalibrationJob job = PadCalibrationJob.prepare(ctx, profile, dispense, svc, q);
+        if (job.refusal != null) {
+            throw new ApiException(409, job.refusalCode, job.refusal).with("preview", job.preview());
+        }
+        ctx.padCalJobs.start(job);
+        Map<String, Object> accepted = Views.map("kind", "start-angle measure", "job", job.id, "started", true);
+        if (!Json.bool(b, "wait", false)) {
+            return ApiServer.Response.json(202, accepted);
+        }
+        boolean finished = await(job);
+        Map<String, Object> result = job.startAngleView();
+        result.put("sentence", job.sentence());
+        accepted.put("finished", finished);
+        accepted.put("result", result);
+        return finished ? accepted : ApiServer.Response.json(202, accepted);
+    }
+
+    /** [[x, y], …] machine mm, up to {@code n} numbers each (the ones left out are 0): a 400 otherwise. */
+    private static List<double[]> spots(JsonObject b, String key, int n) throws ApiException {
+        JsonElement e = b.get(key);
+        String shape = "'" + key + "' must be [[x, y" + (n > 2 ? ", layers?" : "") + "], …] (N2 machine mm)";
+        if (e == null || !e.isJsonArray()) {
+            throw ApiException.badRequest(shape);
+        }
+        List<double[]> l = new ArrayList<>();
+        for (JsonElement p : e.getAsJsonArray()) {
+            if (!p.isJsonArray() || p.getAsJsonArray().size() < 2 || p.getAsJsonArray().size() > n) {
+                throw ApiException.badRequest(shape);
+            }
+            double[] v = new double[n];
+            for (int i = 0; i < p.getAsJsonArray().size(); i++) {
+                JsonElement x = p.getAsJsonArray().get(i);
+                if (!x.isJsonPrimitive() || !x.getAsJsonPrimitive().isNumber() || !Double.isFinite(x.getAsDouble())) {
+                    throw ApiException.badRequest(shape);
+                }
+                v[i] = x.getAsDouble();
+            }
+            l.add(v);
+        }
+        return l;
     }
 
     /** Waits (bounded) until the job ends or waits for the operator. */

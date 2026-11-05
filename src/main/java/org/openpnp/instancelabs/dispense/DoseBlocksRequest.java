@@ -37,13 +37,26 @@ public final class DoseBlocksRequest {
      * and every new blob in its frames is kept ({@link DoseBlocksResult#newBlobs}).
      */
     public boolean landingCheck;
-    /** Explicit N2 X/Y of the purge dots (the landing check purges in its own band); null = the purge row's next spots. */
+    /**
+     * Explicit N2 X/Y of the purge dots (the landing check purges in its own band); null = the purge row's next spots.
+     * BR-77: {x, y, raiseMm}: a throwaway on wet paste is laid that much higher.
+     */
     public List<double[]> purgeXy;
     /**
      * Explicit spots the camera looks at before and after (frame centres covering the landing check's band, which must
      * be bare as a whole); null = the tiles around the dots.
      */
     public List<double[]> lookXy;
+    /**
+     * BR-77: the start angle this step's blocks start at (deg, count angle), in place of the profile's; null = the
+     * profile's. The stored angle does not change.
+     */
+    public Double startAngleDeg;
+    /**
+     * BR-77: this step measures the start angle: I11 is waived ({@link Interlocks.Scope#startAngleWaiver}), and its
+     * blocks may be smaller than the tip's smallest dose ({@code tip.minDotSteps}), as a quarter, half or whole turn.
+     */
+    public boolean measuresStartAngle;
 
     /** Dots of one dose, laid together. */
     public static final class Block {

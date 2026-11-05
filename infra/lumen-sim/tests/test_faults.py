@@ -3,6 +3,7 @@ import unittest
 
 from lumen_sim.bench import Bench
 from lumen_sim.machine import OPEN_AIR_VACUUM
+from tests.hang import within
 
 
 def fault(b, **spec):
@@ -186,77 +187,84 @@ class Injections(unittest.TestCase):
 
 class LinkAndPower(unittest.TestCase):
     def test_halt_is_a_dead_link(self):
-        b = Bench()
-        fault(b, fault="halt")
-        self.assertIsNone(b.send("M115", timeout=3.0).ok_at)
-        self.assertTrue(b.sim.state(b.t)["halted"])
+        with within(self, 5):
+            b = Bench()
+            fault(b, fault="halt")
+            self.assertIsNone(b.send("M115", timeout=3.0).ok_at)
+            self.assertTrue(b.sim.state(b.t)["halted"])
 
     def test_halt_answers_nothing_at_all_until_a_power_cycle(self):
         """BR-09's dead link: no ok, no busy line, no report for any line, however long the host waits."""
-        b = Bench()
-        b.send("G28")
-        fault(b, fault="halt")
-        said = len(b.rx)
-        for line in ("M105", "M114", "M115", "M503", "G4 P10", "M400", "G1 X10 F6000", "M410", "M112"):
-            b.write(line + "\n")
-        b.run(10.0)
-        self.assertEqual(b.rx[said:], [])
-        b.sim.power_cycle(b.t)
-        self.assertEqual(b.send("M105").lines, ["ok T:0"])
+        with within(self, 5):
+            b = Bench()
+            b.send("G28")
+            fault(b, fault="halt")
+            said = len(b.rx)
+            for line in ("M105", "M114", "M115", "M503", "G4 P10", "M400", "G1 X10 F6000", "M410", "M112"):
+                b.write(line + "\n")
+            b.run(10.0)
+            self.assertEqual(b.rx[said:], [])
+            b.sim.power_cycle(b.t)
+            self.assertEqual(b.send("M105").lines, ["ok T:0"])
 
     def test_a_halt_drops_the_ok_a_delay_ok_still_holds(self):
         """A dead board sends nothing more: not even an ok it was late with (review round 2)."""
-        b = Bench()
-        fault(b, fault="delay_ok", s=5.0, match="^M115")
-        b.run_until(0.1)
-        b.write("M115\n")
-        b.run_until(1.0)
-        said = [line for _, line in b.rx]
-        self.assertTrue(said and not any(line.startswith("ok") for line in said), said)
-        fault(b, fault="halt")
-        b.run(10.0)
-        self.assertEqual([line for _, line in b.rx], said)
+        with within(self, 5):
+            b = Bench()
+            fault(b, fault="delay_ok", s=5.0, match="^M115")
+            b.run_until(0.1)
+            b.write("M115\n")
+            b.run_until(1.0)
+            said = [line for _, line in b.rx]
+            self.assertTrue(said and not any(line.startswith("ok") for line in said), said)
+            fault(b, fault="halt")
+            b.run(10.0)
+            self.assertEqual([line for _, line in b.rx], said)
 
     def test_a_halt_drops_pending_injections(self):
-        b = Bench()
-        fault(b, fault="inject", kind="start", after_s=2.0)
-        b.run_until(0.5)
-        fault(b, fault="halt")
-        b.run(5.0)
-        self.assertEqual(b.rx, [])
+        with within(self, 5):
+            b = Bench()
+            fault(b, fault="inject", kind="start", after_s=2.0)
+            b.run_until(0.5)
+            fault(b, fault="halt")
+            b.run(5.0)
+            self.assertEqual(b.rx, [])
 
     def test_a_kill_drops_a_held_ok_too(self):
         """Stock M410 inside G28 kills the board; an ok a delay_ok held from before never comes."""
-        b = Bench(park=(100.0, 50.0, 31.5))
-        fault(b, fault="delay_ok", s=5.0, match="^M105")
-        b.write("M105\nG28\n")
-        b.run_until(0.3)
-        self.assertEqual(b.sim.state(b.t)["homing_phase"], "X_APPROACH")
-        b.write("M410\n")
-        b.run(10.0)
-        self.assertTrue(b.sim.state(b.t)["halted"])
-        self.assertNotIn("ok T:0", [line for _, line in b.rx])
+        with within(self, 5):
+            b = Bench(park=(100.0, 50.0, 31.5))
+            fault(b, fault="delay_ok", s=5.0, match="^M105")
+            b.write("M105\nG28\n")
+            b.run_until(0.3)
+            self.assertEqual(b.sim.state(b.t)["homing_phase"], "X_APPROACH")
+            b.write("M410\n")
+            b.run(10.0)
+            self.assertTrue(b.sim.state(b.t)["halted"])
+            self.assertNotIn("ok T:0", [line for _, line in b.rx])
 
     def test_inject_on_a_halted_board_is_refused(self):
-        b = Bench()
-        fault(b, fault="halt")
-        for spec in ({"fault": "inject", "kind": "start"}, {"fault": "inject_bytes", "hex": "ff"},
-                     {"fault": "partial", "text": "X:1"}):
-            reply = b.sim.control(dict(cmd="fault", **spec), b.t)
-            self.assertFalse(reply["ok"], spec)
-            self.assertIn("halted", reply["error"])
-        b.run(1.0)
-        self.assertEqual(b.raw, b"")
+        with within(self, 5):
+            b = Bench()
+            fault(b, fault="halt")
+            for spec in ({"fault": "inject", "kind": "start"}, {"fault": "inject_bytes", "hex": "ff"},
+                         {"fault": "partial", "text": "X:1"}):
+                reply = b.sim.control(dict(cmd="fault", **spec), b.t)
+                self.assertFalse(reply["ok"], spec)
+                self.assertIn("halted", reply["error"])
+            b.run(1.0)
+            self.assertEqual(b.raw, b"")
 
     def test_a_halt_mid_move_stops_the_head_there(self):
-        b = Bench()
-        b.write("G1 X200 F6000\n")  # about 2 s
-        b.run_until(1.0)
-        fault(b, fault="halt")
-        x = b.sim.state(b.t)["head"]["physical"]["X"]
-        self.assertTrue(0.0 < x < 200.0, x)
-        b.run(5.0)
-        self.assertEqual(b.sim.state(b.t)["head"]["physical"]["X"], x)
+        with within(self, 5):
+            b = Bench()
+            b.write("G1 X200 F6000\n")  # about 2 s
+            b.run_until(1.0)
+            fault(b, fault="halt")
+            x = b.sim.state(b.t)["head"]["physical"]["X"]
+            self.assertTrue(0.0 < x < 200.0, x)
+            b.run(5.0)
+            self.assertEqual(b.sim.state(b.t)["head"]["physical"]["X"], x)
 
     def test_transport_faults_are_handed_to_the_transport(self):
         b = Bench()
@@ -318,27 +326,40 @@ class LinkAndPower(unittest.TestCase):
         self.assertEqual(b.rx, [])
 
     def test_dfu_drops_the_port_again_after_a_power_cycle(self):
-        b = Bench(personality="il-safety")
-        for _ in range(2):
+        with within(self, 5):
+            b = Bench(personality="il-safety")
+            for _ in range(2):
+                b.write("M997\n")
+                b.run(0.1)
+                self.assertEqual(b.sim.take_transport_actions(), [{"action": "disconnect", "down_s": None}])
+                b.sim.power_cycle(b.t)
+
+    def test_a_power_cycle_inside_m997_s_wait_for_usb_boots_as_usual(self):
+        """Reset before flashFirmware()'s 0.1 s for USB CDC ends: no DFU, the port stays."""
+        with within(self, 5):
+            b = Bench(personality="il-safety")
             b.write("M997\n")
-            b.run(0.1)
-            self.assertEqual(b.sim.take_transport_actions(), [{"action": "disconnect", "down_s": None}])
+            b.run(0.05)
             b.sim.power_cycle(b.t)
+            b.run(1.0)
+            self.assertEqual(b.sim.take_transport_actions(), [])
+            self.assertFalse(b.sim.state(b.t)["halted"])
 
 
 class Set(unittest.TestCase):
     def test_set_vacuum_rs485_kill_messages(self):
-        b = Bench()
-        reply = b.sim.control({"cmd": "set", "vacuum": -1_200_000, "rs485": {"AA": "BB"},
-                               "kill_messages": True}, b.t)
-        self.assertTrue(reply["ok"], reply)
-        self.assertIn("data:ED B0 80", b.send("M261 A109 B3 S1").lines[0])
-        self.assertEqual(b.send("M485 AA").lines, ["rs485-reply: BB", "ok"])
-        self.assertTrue(b.sim.state(b.t)["kill_messages"])
-        b.write("M112\n")  # the running board prints them from now on, not only the next one booted
-        b.run(1.0)
-        self.assertEqual([line for _, line in b.rx[-2:]],
-                         ["echo:M112 Shutdown", "Error:Printer halted. kill() called!"])
+        with within(self, 5):
+            b = Bench()
+            reply = b.sim.control({"cmd": "set", "vacuum": -1_200_000, "rs485": {"AA": "BB"},
+                                   "kill_messages": True}, b.t)
+            self.assertTrue(reply["ok"], reply)
+            self.assertIn("data:ED B0 80", b.send("M261 A109 B3 S1").lines[0])
+            self.assertEqual(b.send("M485 AA").lines, ["rs485-reply: BB", "ok"])
+            self.assertTrue(b.sim.state(b.t)["kill_messages"])
+            b.write("M112\n")  # the running board prints them from now on, not only the next one booted
+            b.run(1.0)
+            self.assertEqual([line for _, line in b.rx[-2:]],
+                             ["echo:M112 Shutdown", "Error:Printer halted. kill() called!"])
 
     def test_unknown_requests_are_refused(self):
         b = Bench()

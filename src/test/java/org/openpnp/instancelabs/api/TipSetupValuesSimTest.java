@@ -215,12 +215,20 @@ public class TipSetupValuesSimTest {
     /**
      * BR-85 review (BR-89's item 1): without a number of steps a ladder that skips dots lays 8 after its reference
      * pair, down to -0.1 mm in the default steps of 0.025 mm; with a skip of 5 it was refused for too few dots. The
-     * answer names the steps and the start gap the server chose.
+     * answer names the steps and the start gap the server chose, and the dots laid (BR-89: + 2 check dots). The SIM
+     * scene has no paste: no contact, nothing kept, and the run message adds the check dots' problem to the reason.
      */
     @Test
     public void aLadderThatSkipsDotsLaysEightAfterItsReferencePair() throws Exception {
         layingWith(5);
+        int rows = t.svc.getDb().query("SELECT id FROM needle_touchoff").size();
         JsonObject res = laid("{\"wait\":true}");
+        assertEquals(17, res.get("dotsLaid").getAsInt(), res.toString());
+        assertEquals("no dot at gap 0.125 mm, the first after the 5 not counted: the needle is at or below the surface "
+                + "from there, or nothing dispensed; raise startGapMm; the 2nd check dot at gap 0.125 mm left no dot: "
+                + "the landing cannot be checked; look at the tip from below and run the touch-off again", TipSim.str(
+                        res.getAsJsonObject("result").getAsJsonObject("run"), "message"));
+        assertEquals(rows, t.svc.getDb().query("SELECT id FROM needle_touchoff").size(), "nothing kept");
         double[] g = gaps(res);
         assertEquals(15, g.length, "5 skipped, the reference pair and 8 after it");
         assertEquals(0.25, g[0], 1e-12);
@@ -229,6 +237,181 @@ public class TipSetupValuesSimTest {
         assertTrue(res.has("steps") && res.has("startGapMm"), res.toString());
         assertEquals(15, res.get("steps").getAsInt());
         assertEquals(0.25, res.get("startGapMm").getAsDouble(), 1e-12);
+    }
+
+    /**
+     * The camera of a touch-off on the 25G (skip 3, 13 dots from 0.20 mm): 3 droplets, the reference pair and 4 steady
+     * dots at 1.2 mm landing where the pair did, then squashed dots at 1.8 mm (contact between 0.000 and -0.025 mm);
+     * the 2nd check dot at {@code check2} from the pair's landing, the deepest dot at {@code floor}. Spots by the order
+     * the before tour first visits them.
+     */
+    static final class LandingCamera extends ApiServerSimTest.FakeImager {
+        final java.util.List<String> spots = new java.util.concurrent.CopyOnWriteArrayList<>();
+        volatile double[] check2 = {0, 0}, floor = {0, 0};
+        /** The 2nd check dot's diameter against the steady dots' (Process 15:1x: its area against the pair's). */
+        volatile double check2Scale = 1;
+
+        @Override
+        public Frame capture(double xMm, double yMm) {
+            String k = key(xMm, yMm);
+            if (!spots.contains(k)) {
+                spots.add(k);
+            }
+            return super.capture(xMm, yMm);
+        }
+
+        @Override
+        public java.util.List<org.openpnp.instancelabs.vision.Dot> inspect(Frame before, Frame after) {
+            int i = spots.indexOf(key(after.xMm, after.yMm));
+            double[] at = i == 12 ? floor : i == 14 ? check2 : new double[] {0, 0};
+            double d = (i < 3 ? 0.5 : i < 9 || i > 12 ? 1.2 : 1.8) * (i == 14 ? check2Scale : 1);
+            return java.util.Collections.singletonList(new org.openpnp.instancelabs.vision.Dot(at[0], at[1], d,
+                    Math.PI * d * d / 4, 0.9));
+        }
+
+        /** The frame's own dot at every spot (only its own is read): the nearest-dot default drops a NaN centroid. */
+        @Override
+        public java.util.List<org.openpnp.instancelabs.vision.SpotDot> inspectSpots(Frame before, Frame after,
+                java.util.List<double[]> spotsMm, double cutMm, double radiusMm) {
+            return java.util.Collections.nCopies(spotsMm.size(), org.openpnp.instancelabs.vision.SpotDot.dot(inspect(
+                    before, after).get(0)));
+        }
+    }
+
+    /**
+     * BR-89: every ladder ends with 2 check dots at the reference gap. The 2nd landing 0.15 mm from where the reference
+     * pair landed (a tip pushed sideways or slipping in its Luer at the floor) is not applied, the frame unchanged, the
+     * analysis kept; 0.05 mm is applied; a squashed dot's shift alone is information. 15 dots laid, the last two at the
+     * first counted dot's Z.
+     */
+    @Test
+    public void aTipThatMovedBeforeItsCheckDotsIsNotApplied() throws Exception {
+        layingWith(3);
+        LandingCamera cam = new LandingCamera();
+        t.svc.setDotImager(cam);
+        double before = t.svc.getConfig().needleZOffsetMm;
+        String body = "{\"startGapMm\":0.2,\"stepMm\":0.025,\"steps\":13,\"apply\":true,\"wait\":true}";
+        cam.check2 = new double[] {0.15, 0};
+        t.sim.server.mark();
+        JsonObject moved = laid(body).getAsJsonObject("result");
+        JsonObject a = moved.getAsJsonObject("analysis");
+        assertFalse(moved.get("applied").getAsBoolean(), moved.toString());
+        assertEquals(before, t.svc.getConfig().needleZOffsetMm, 0, "the frame unchanged");
+        assertEquals(0.15, a.get("landingShiftMm").getAsDouble(), 1e-6);
+        assertEquals("the 2nd check dot landed 0.150 mm from where the first two counted dots landed (at most 0.1 mm): "
+                + "the tip may have moved; look at it from below and run the touch-off again", TipSim.str(a,
+                        "landingProblem"));
+        assertEquals(-0.0125, a.get("contactGapMm").getAsDouble(), 1e-9, "the contact is still reported");
+        assertTrue(TipSim.str(moved.getAsJsonObject("run"), "message").startsWith("dot squashed between 0.000 and -0.025 "
+                + "mm; not applied: the 2nd check dot landed 0.150 mm"), moved.toString());
+        String kept = String.valueOf(t.svc.getDb().query("SELECT method FROM needle_touchoff ORDER BY id DESC LIMIT 1")
+                .get(0).get("method"));
+        assertTrue(kept.startsWith("dot-ladder-touch-off (not applied: the 2nd check dot landed 0.150 mm"), kept);
+        assertEquals(15, a.get("dotsLaid").getAsInt());
+        assertEquals(15, cam.spots.size(), "15 spots photographed");
+        java.util.List<Double> z = dotZ(sent());
+        assertEquals(1 + 15, z.size(), "the prime at the waste, then 15 dots: " + z);
+        assertEquals(z.get(1 + 3), z.get(1 + 13), 0.002, "the 1st check dot at the first counted dot's Z: " + z);
+        assertEquals(z.get(1 + 3), z.get(1 + 14), 0.002, "and the 2nd");
+        assertEquals(z.get(1 + 2) + 0.025, z.get(1 + 3), 0.002, "a step deeper than the last dot not counted");
+        cam.check2 = new double[] {0.05, 0};
+        cam.floor = new double[] {0.2, 0};
+        JsonObject held = laid(body).getAsJsonObject("result");
+        JsonObject h = held.getAsJsonObject("analysis");
+        assertTrue(held.get("applied").getAsBoolean(), held.toString());
+        assertEquals(0.05, h.get("landingShiftMm").getAsDouble(), 1e-6);
+        assertEquals(0.2, h.get("squashedShiftMm").getAsDouble(), 1e-6, "information only");
+        assertTrue(h.get("landingProblem").isJsonNull(), h.toString());
+        assertEquals(before - 0.0125, t.svc.getConfig().needleZOffsetMm, 1e-9, "applied: the contact gap");
+        // Process 15:1x: every ladder dot's landing and area are in the result (and the kept record), the check dots'
+        // areas too
+        assertEquals(13, h.getAsJsonArray("landingsMm").size(), h.toString());
+        assertEquals(13, h.getAsJsonArray("areasMm2").size());
+        assertEquals(Math.PI * 1.8 * 1.8 / 4, h.getAsJsonArray("areasMm2").get(9).getAsDouble(), 1e-9, "a squashed dot");
+        assertEquals(Math.PI * 1.2 * 1.2 / 4, h.getAsJsonArray("checkDots").get(1).getAsJsonObject().get("areaMm2")
+                .getAsDouble(), 1e-9);
+        assertEquals(0, h.get("checkAreaOffPct").getAsDouble(), 1e-9);
+        // a 2nd check dot 15 % wider (32 % more area) where the pair landed: the needle's height may have changed
+        cam.check2 = new double[] {0, 0};
+        cam.floor = new double[] {0, 0};
+        cam.check2Scale = 1.15;
+        double now = t.svc.getConfig().needleZOffsetMm;
+        JsonObject tall = laid(body).getAsJsonObject("result");
+        assertFalse(tall.get("applied").getAsBoolean(), tall.toString());
+        assertEquals(now, t.svc.getConfig().needleZOffsetMm, 0, "the frame unchanged");
+        assertTrue(TipSim.str(tall.getAsJsonObject("analysis"), "landingProblem").startsWith(
+                "the 2nd check dot's area is off by 32 % from the reference pair's"), tall.toString());
+        assertTrue(TipSim.str(tall.getAsJsonObject("run"), "message").contains("not applied: the 2nd check dot's area"),
+                tall.toString());
+    }
+
+    /**
+     * BR-89 review: a 2nd check dot whose centroid or area is no number fails closed and is kept as not applied: the
+     * analysis holds null there (the record's JSON refuses NaN: the run ended in ERROR with nothing kept).
+     */
+    @Test
+    public void aCheckDotThatIsNoNumberIsKeptNotApplied() throws Exception {
+        layingWith(3);
+        LandingCamera cam = new LandingCamera();
+        t.svc.setDotImager(cam);
+        String body = "{\"startGapMm\":0.2,\"stepMm\":0.025,\"steps\":13,\"apply\":true,\"wait\":true}";
+        cam.check2 = new double[] {Double.NaN, 0};
+        JsonObject a = laid(body).getAsJsonObject("result").getAsJsonObject("analysis");
+        assertTrue(TipSim.str(a, "landingProblem").startsWith("the 2nd check dot landed "), a.toString());
+        assertTrue(a.get("landingShiftMm").isJsonNull(), a.toString());
+        assertTrue(a.getAsJsonArray("checkDots").get(1).getAsJsonObject().get("dxMm").isJsonNull(), a.toString());
+        assertEquals("dot-ladder-touch-off (not applied: " + TipSim.str(a, "landingProblem") + ")", lastMethod());
+        cam.check2 = new double[] {0, 0};
+        cam.check2Scale = Double.NaN; // its diameter and area
+        a = laid(body).getAsJsonObject("result").getAsJsonObject("analysis");
+        assertEquals("the 2nd check dot's area cannot be compared with the reference pair's: look at the tip from "
+                + "below and run the touch-off again", TipSim.str(a, "landingProblem"));
+        assertTrue(a.getAsJsonArray("checkDots").get(1).getAsJsonObject().get("areaMm2").isJsonNull(), a.toString());
+        assertTrue(a.get("checkAreaOffPct").isJsonNull(), a.toString());
+        assertEquals("dot-ladder-touch-off (not applied: " + TipSim.str(a, "landingProblem") + ")", lastMethod());
+    }
+
+    /** The newest touch-off record's method. */
+    String lastMethod() throws Exception {
+        return String.valueOf(t.svc.getDb().query("SELECT method FROM needle_touchoff ORDER BY id DESC LIMIT 1").get(0)
+                .get("method"));
+    }
+
+    private static final java.util.regex.Pattern Z = java.util.regex.Pattern.compile("\\bZ(-?\\d+(?:\\.\\d+)?)");
+    private static final java.util.regex.Pattern B = java.util.regex.Pattern.compile("\\bB(-?\\d+(?:\\.\\d+)?)");
+
+    /** The raw Z each dot of the stream was laid at: the Z in force at its first B move. */
+    static java.util.List<Double> dotZ(java.util.List<String> sent) {
+        java.util.List<Double> l = new java.util.ArrayList<>();
+        Double z = null;
+        boolean inDot = false;
+        for (String s : sent) {
+            if (!s.startsWith("G0 ") && !s.startsWith("G1 ")) {
+                continue;
+            }
+            java.util.regex.Matcher mz = Z.matcher(s), mb = B.matcher(s);
+            if (mz.find()) {
+                z = Double.parseDouble(mz.group(1));
+                inDot = false;
+            }
+            if (mb.find() && !inDot && z != null) {
+                l.add(z);
+                inDot = true;
+            }
+        }
+        return l;
+    }
+
+    /** The lines the SIM controller got since the mark, without comments. */
+    java.util.List<String> sent() {
+        java.util.List<String> l = new java.util.ArrayList<>();
+        for (String s : t.sim.server.sinceMark()) {
+            String c = s.contains(";") ? s.substring(0, s.indexOf(';')).trim() : s.trim();
+            if (!c.isEmpty()) {
+                l.add(c);
+            }
+        }
+        return l;
     }
 
     @Test
