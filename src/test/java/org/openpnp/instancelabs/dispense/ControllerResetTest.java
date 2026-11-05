@@ -636,13 +636,71 @@ public class ControllerResetTest {
         assertTrue(ms < 1000, "the moves waited " + ms + " ms for the journal");
     }
 
-    /** The confirm before the home after a reset (the process engineer, 11-04): the see-saw levelled, both tips up. */
+    /**
+     * The confirm before the home after a reset (the process engineer, 11-04): the see-saw levelled, both tips up.
+     * BR-96: it says what must be true, for whoever checks (an agent's cameras, or a person), not who checks.
+     */
     @Test
     public void theHomeCheckLevelsTheSeeSawFirst() {
-        assertTrue(ControllerReset.HOME_CHECK.contains("homing corner")
-                && ControllerReset.HOME_CHECK.contains("check that nothing is under either tool")
-                && ControllerReset.HOME_CHECK.contains("level N1 and the needle by hand before Home: the see-saw "
-                        + "levelled, both tips up"), ControllerReset.HOME_CHECK);
+        String c = ControllerReset.HOME_CHECK;
+        assertTrue(c.contains("homing corner (X, then Y) at the height the tools are at now, then homes Z there"), c);
+        assertTrue(c.contains("before Home, nothing is under either tool (N1 or the needle) or in their way to that "
+                + "corner, and the see-saw is levelled, both tips up"), c);
+        assertTrue(c.contains("by hand") && c.contains("Z-only moves"), "either way of levelling: " + c);
+        assertFalse(c.contains("check that"), c);
+    }
+
+    /** BR-96: the home that ends an unknown position journals who attested it and their evidence, once. */
+    @Test
+    public void theHomeAfterAResetSaysWhoAttestedIt() {
+        ControllerReset r = run(false, false);
+        now = 1000;
+        r.connected(reply(BOOT), 'B', null);
+        r.attest("Process", "{\"run\":\"r-17\",\"pictures\":[3,4]}");
+        assertNull(r.view().get("lastAttestation"), "not before the home");
+        now = 2000;
+        r.homed();
+        ControllerReset.Event known = journal.get(journal.size() - 1);
+        assertEquals(ControllerReset.EVENT_KNOWN, known.code);
+        assertTrue(known.message.contains("attested by Process (evidence: {\"run\":\"r-17\",\"pictures\":[3,4]})"),
+                known.message);
+        Map<?, ?> last = (Map<?, ?>) r.view().get("lastAttestation");
+        assertEquals("Process", last.get("by"));
+        assertEquals("{\"run\":\"r-17\",\"pictures\":[3,4]}", last.get("evidence"));
+        assertEquals(2000L, last.get("atMs"));
+
+        // a later reset homed without a word of its own (OpenPnP's own Home): the old attestation is not reused
+        now = 3000;
+        r.connected(reply(BOOT), 'B', null);
+        now = 4000;
+        r.homed();
+        known = journal.get(journal.size() - 1);
+        assertEquals(ControllerReset.EVENT_KNOWN, known.code);
+        assertFalse(known.message.contains("attested"), known.message);
+        assertEquals(2000L, ((Map<?, ?>) r.view().get("lastAttestation")).get("atMs"), "the last one stays shown");
+
+        // nor one a home took while the position was known, nor one cleared (a home that failed before its end)
+        r.attest("Process", null);
+        now = 5000;
+        r.homed();
+        r.attest("UI", "\"picture 9\"");
+        r.attest(null, null);
+        now = 6000;
+        r.connected(reply(BOOT), 'B', null);
+        now = 7000;
+        r.homed();
+        assertFalse(journal.get(journal.size() - 1).message.contains("attested"), journal.toString());
+    }
+
+    /** BR-96: no evidence given reads so. */
+    @Test
+    public void anAttestationWithoutEvidenceSaysSo() {
+        ControllerReset r = run(false, false);
+        r.connected(reply(BOOT), 'B', null);
+        r.attest("the web UI's user", null);
+        r.homed();
+        String m = journal.get(journal.size() - 1).message;
+        assertTrue(m.contains("attested by the web UI's user (no evidence given)"), m);
     }
 
     /**

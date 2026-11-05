@@ -68,14 +68,15 @@ import java.util.regex.Pattern;
  */
 public final class ControllerReset {
     /**
-     * What the home after a reset does, and what the operator checks first: the board's G28 homes X, then Y, at the
+     * What the home after a reset does, and what must be true before it: the board's G28 homes X, then Y, at the
      * current height (no Z clearance: Z_HOMING_HEIGHT and HOME_Z_FIRST off), then Z at its Z_SAFE_HOMING point. The
-     * see-saw is levelled by hand first, both tips up (the process engineer, 11-04).
+     * see-saw is levelled first, both tips up (the process engineer, 11-04). BR-96: whoever checks it (an agent's
+     * cameras or a person) attests it with the home ({@link #attest}).
      */
     public static final String HOME_CHECK = "the home first drives the head to its homing corner (X, then Y) at the "
-            + "height the tools are at now, then homes Z there: check that nothing is under either tool (N1 or the "
-            + "needle) or in their way to that corner, and level N1 and the needle by hand before Home: the see-saw "
-            + "levelled, both tips up";
+            + "height the tools are at now, then homes Z there: before Home, nothing is under either tool (N1 or the "
+            + "needle) or in their way to that corner, and the see-saw is levelled, both tips up (by hand, or by "
+            + "Z-only moves through the G-code passthrough)";
     /** Where stock Marlin believes A and B are at power-up (J_MAX_POS), until a G92. */
     public static final double BOOT_B_DEG = 720;
     /** Journal codes (the events table's {@code code}): a connect read the boot position. */
@@ -153,6 +154,11 @@ public final class ControllerReset {
     private boolean resetUnhomed;
     /** When the last home after a detected reset moved the Z frame, or null. */
     private Long frameMovedAtMs;
+    /** BR-96: who attests the next home, and their evidence (JSON text, or null); null: nobody. */
+    private String attestedBy;
+    private String attestedEvidence;
+    /** The last home that ended an unknown position on someone's word: {by, evidence, atMs}; null: none here. */
+    private Map<String, Object> lastAttestation;
     /** The changes made and not written yet (under this lock), in their order. */
     private final List<Event> toWrite = new ArrayList<>();
     /** One journal writer at a time, outside this lock (a stream's move never waits for an insert). */
@@ -597,6 +603,10 @@ public final class ControllerReset {
         boolean moved;
         synchronized (this) {
             long now = clock.getAsLong();
+            String by = attestedBy;
+            String evidence = attestedEvidence;
+            attestedBy = null; // this home's only
+            attestedEvidence = null;
             moved = resetUnhomed;
             if (moved) {
                 resetUnhomed = false;
@@ -605,13 +615,29 @@ public final class ControllerReset {
                         + "shift): record the needle frame again");
             }
             if (!positionKnown) {
-                record(EVENT_KNOWN, now, "homed: the position is known again");
+                record(EVENT_KNOWN, now, "homed: the position is known again" + (by == null ? "" : ", attested by " + by
+                        + (evidence == null ? " (no evidence given)" : " (evidence: " + evidence + ")")));
+                if (by != null) {
+                    lastAttestation = new LinkedHashMap<>();
+                    lastAttestation.put("by", by);
+                    lastAttestation.put("evidence", evidence);
+                    lastAttestation.put("atMs", now);
+                }
             }
             positionKnown = true;
             unknownWhy = null;
         }
         writeOut();
         return moved;
+    }
+
+    /**
+     * BR-96: who attests that the head may home now (what {@link #HOME_CHECK} names), and their evidence as JSON text
+     * (null: none). Only the next {@link #homed} uses it; null clears it (a home that ended without one).
+     */
+    public synchronized void attest(String who, String evidenceJson) {
+        attestedBy = who;
+        attestedEvidence = evidenceJson;
     }
 
     /** When the last home after a detected reset moved the Z frame (also before a restart), or null. */
@@ -647,8 +673,9 @@ public final class ControllerReset {
     }
 
     /**
-     * The status's view, read at once: positionKnown, positionUnknownWhy, powerCycle {detected, atMs, reported} and
-     * screwMotorOff {atMs, why} (field by field, a home in between could show an unknown position without its reason).
+     * The status's view, read at once: positionKnown, positionUnknownWhy, powerCycle {detected, atMs, reported},
+     * screwMotorOff {atMs, why} and lastAttestation {by, evidence, atMs} (field by field, a home in between could show
+     * an unknown position without its reason).
      */
     public Map<String, Object> view() {
         Map<String, Object> v;
@@ -673,6 +700,7 @@ public final class ControllerReset {
         v.put("positionUnknownWhy", unknownWhy());
         v.put("powerCycle", pc);
         v.put("screwMotorOff", off);
+        v.put("lastAttestation", lastAttestation == null ? null : new LinkedHashMap<>(lastAttestation));
         return v;
     }
 

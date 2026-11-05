@@ -197,9 +197,9 @@ public class PowerCycleSimTest {
         assertTrue(lastBody.contains("nothing is under either tool"), lastBody);
         // #11 final review MAJOR: G28 drives X, then Y, at the tools' height first (no Z clearance on this firmware)
         assertTrue(lastBody.contains("homing corner") && lastBody.contains("at the height the tools are at now")
-                && lastBody.contains("level N1 and the needle by hand"), lastBody);
+                && lastBody.contains("by hand, or by Z-only moves"), lastBody);
         // the process engineer, 11-04: the see-saw levelled (both tips up) before Home
-        assertTrue(lastBody.contains("before Home: the see-saw levelled, both tips up"), lastBody);
+        assertTrue(lastBody.contains("the see-saw is levelled, both tips up"), lastBody);
         assertFalse(lastBody.contains("nothing moves before it"), lastBody);
         assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
 
@@ -1132,6 +1132,41 @@ public class PowerCycleSimTest {
         old.shutdown(); // the rest of its stop: its listeners
         svc = DispenseService.start(Configuration.get());
         assertEquals("running", DispenseService.startState());
+    }
+
+    /**
+     * BR-96 (the PM 16:1x): after a reset an agent attests the home itself (the side camera: tips up and level; the top
+     * camera: G28's path clear). The home's journal row says who and with what evidence, and so does the status; who
+     * is the lock holder unless the call names someone.
+     */
+    @Test
+    public void anAgentsAttestedHomeJournalsWhoAndTheEvidence() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"reset home\"}").get("token")
+                .getAsString();
+        String big = new String(new char[4100]).replace('\0', 'x');
+        call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"evidence\":\"" + big + "\"}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("evidence"), lastBody);
+        assertFalse(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean(), "nothing homed");
+
+        String evidence = "{\"run\":\"r-17\",\"pictures\":[\"side-1\",\"top-2\"]}";
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"evidence\":" + evidence + "}");
+        List<java.util.Map<String, Object>> known = events(ControllerReset.EVENT_KNOWN);
+        String row = String.valueOf(known.get(known.size() - 1).get("message"));
+        assertTrue(row.contains("attested by Process (evidence: " + evidence + ")"), row);
+        JsonObject last = ok("GET", "/api/machine", null).getAsJsonObject("lastAttestation");
+        assertEquals("Process", last.get("by").getAsString(), last.toString());
+        assertEquals(evidence, last.get("evidence").getAsString());
+        assertFalse(last.get("atMs").isJsonNull(), last.toString());
+
+        // another name, said by the call
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"attestedBy\":\"Process (side "
+                + "camera)\",\"evidence\":\"run r-18\"}");
+        known = events(ControllerReset.EVENT_KNOWN);
+        row = String.valueOf(known.get(known.size() - 1).get("message"));
+        assertTrue(row.contains("attested by Process (side camera) (evidence: \"run r-18\")"), row);
     }
 
     /** The response to a refused passthrough line: 400 refused-line, its rule, nothing sent. */
