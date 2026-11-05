@@ -178,7 +178,7 @@ class Firmware:
         self.keepalive_interval = 2.0
         self.next_busy = now + self.keepalive_interval
         self.halted, self.halt_reason, self.halt_time = False, None, None
-        self.steppers_off_at = None  # a stock kill's disable_all_steppers(), after its coast
+        self.steppers_off_at = None  # an M112 kill's disable_all_steppers(), at the end of minkill()
         self.homing_phase, self.in_g28 = None, False
         # il/safety
         self.wd_timeout, self.wd_last, self.wd_tripped = 0, now, False
@@ -207,9 +207,11 @@ class Firmware:
     def next_wake(self):
         if not self.halted:
             return self._wake
-        # a halted board still ends a kill's coast and then lets its steppers go, each at its own time
+        # a halted board still runs a kill's coast (each move's end, then its freeze) and then lets its steppers go,
+        # each at its own time (next_event is inf once frozen)
         coast = self.stepper.freeze_at if self.stepper.freeze_at is not None and not self.stepper.frozen else math.inf
-        return min(coast, math.inf if self.steppers_off_at is None else self.steppers_off_at)
+        off = math.inf if self.steppers_off_at is None else self.steppers_off_at
+        return min(coast, self.stepper.next_event(self.now), off)
 
     def advance(self, t):
         """Run everything due up to simulator time t."""
@@ -563,14 +565,11 @@ class Firmware:
             self._emit("Error:Printer halted. kill() called!")
         if self.p.outputs_off_on_kill:
             self._outputs_off("kill")
-            self.stepper.freeze(self.now)
-            if steppers_off:
-                for a in AXES:
-                    self.release(a)
+            self.stepper.freeze(self.now)  # planner.quick_stop() first: the motion ends now, the drivers stay on
         else:
             self.stepper.freeze(self.now + KILL_DELAY_S)
-            if steppers_off:  # the drivers hold until then (advance lets them go)
-                self.steppers_off_at = self.now + KILL_DELAY_S + STEPPERS_OFF_DELAY_S
+        if steppers_off:  # both: minkill() holds the drivers until then (advance lets them go)
+            self.steppers_off_at = self.now + KILL_DELAY_S + STEPPERS_OFF_DELAY_S
         self._dead(reason)
         raise Halted(reason)
 

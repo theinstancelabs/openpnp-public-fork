@@ -8,6 +8,7 @@ import unittest
 
 from lumen_sim import machine
 from lumen_sim.bench import Bench
+from tests.hang import within
 
 # The real board's answer to M43 P5 (runs/serial.log, 11-02, nothing wired: 0), byte for byte
 PA5_LINE = "PIN: PA5  (A9)   M42 P53          <unused/unknown>                       Input  = %d"
@@ -51,6 +52,11 @@ def pa5(b):
 
 def errors(b):
     return [e["error"] for e in b.sim.state(b.t)["sim_errors"]]
+
+
+def errors_since(b, t0):
+    """Each error with its time after t0 (s, to 0.01)."""
+    return [(round(e["t"] - t0, 2), e["error"]) for e in b.sim.state(b.t)["sim_errors"]]
 
 
 class Pa5Switch(unittest.TestCase):
@@ -266,7 +272,7 @@ class Pa5Switch(unittest.TestCase):
         """A z_shift, a Z release after M112 (z_drop) and a home_offset while a move runs: the switch is read where
         the head is then, not where the move began."""
         for fault, then in (({"fault": "z_shift", "z": -0.4}, None), ({"fault": "z_drop", "z": -0.4}, "M112")):
-            with self.subTest(fault["fault"]):
+            with self.subTest(fault["fault"]), within(self, 5):
                 b = switch(homed())
                 to(b, 100, 50, 11.8)  # pressed, 0.2 mm deep
                 b.send("G1 Z20 F60")  # 1 mm/s up: off the switch within 0.2 s
@@ -287,51 +293,73 @@ class Pa5Switch(unittest.TestCase):
     def test_a_kill_drops_z_after_its_coast(self):
         """Stock Marlin's minkill() turns the steppers off only after its 0.6 s coast: an M112 0.15 s into a move up
         off the switch drops Z where the coast ends, above the trip (nothing to report)."""
-        b = switch(homed())
-        to(b, 100, 50, 11.8)
-        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
-        b.send("G1 Z20 F60")
-        b.run(0.15)
-        b.write("M112\n")
-        b.run(1.0)
-        self.assertEqual(errors(b), [])
-        self.assertFalse(pa5(b)["pressed"])
+        with within(self, 5):
+            b = switch(homed())
+            to(b, 100, 50, 11.8)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+            b.send("G1 Z20 F60")
+            b.run(0.15)
+            b.write("M112\n")
+            b.run(1.0)
+            self.assertEqual(errors(b), [])
+            self.assertFalse(pa5(b)["pressed"])
 
     def test_a_kill_at_rest_drops_z_onto_the_switch(self):
-        """Stock: when its steppers go off, 0.85 s after the kill; il-safety (its kill freezes at once): at the kill."""
-        for personality, at_kill in (("stock", []), ("il-safety", [OVER_06])):
-            with self.subTest(personality):
+        """minkill() lets the steppers go 0.85 s after the kill (cli() at 0.6 s, then 0.25 s): Z is held until then and
+        drops onto the switch then. il-safety too: its kill()'s planner.quick_stop() ends the motion at once, not the
+        drivers (il/safety MarlinCore.cpp kill(), minkill())."""
+        for personality in ("stock", "il-safety"):
+            with self.subTest(personality), within(self, 5):
                 b = switch(homed(personality=personality))
                 to(b, 100, 50, 11.8)
                 self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+                t_kill = b.t
                 b.write("M112\n")  # no ok comes: send would wait 60 s
                 b.run(0.1)
-                self.assertEqual(errors(b), at_kill)
+                held = b.sim.state(b.t)
+                self.assertEqual((held["head"]["physical"]["Z"], held["enabled"]["Z"], errors(b)), (11.8, True, []))
                 b.run(1.0)
-                self.assertEqual(errors(b), [OVER_06])
+                self.assertEqual(errors_since(b, t_kill), [(0.85, OVER_06)])
 
     def test_a_kill_holds_z_through_its_coast(self):
         """minkill() turns the steppers off 0.25 s after its 0.6 s coast: until then Z is held. A move that ends in
         the coast went 0.4 mm into the switch, not 0.8; a read in the coast (a fault) sees Z where it is."""
-        b = switch(homed())
-        to(b, 100, 50, 12.3)
-        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
-        b.send("G1 Z11.6 F600")
-        b.send("G1 Z13 F600")
-        b.run(0.005)
-        b.write("M112\n")
-        b.run(2.0)
-        self.assertEqual(errors(b), [])
-        b = switch(homed())
-        to(b, 100, 50, 11.8)
-        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
-        b.send("G1 Z20 F60")
-        b.run(0.15)
-        b.write("M112\n")
-        b.run(0.01)
-        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "home_offset", "x": 0.1}, b.t)["ok"])
-        b.run(1.0)
-        self.assertEqual(errors(b), [])
+        with within(self, 5):
+            b = switch(homed())
+            to(b, 100, 50, 12.3)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+            b.send("G1 Z11.6 F600")
+            b.send("G1 Z13 F600")
+            b.run(0.005)
+            b.write("M112\n")
+            b.run(2.0)
+            self.assertEqual(errors(b), [])
+            b = switch(homed())
+            to(b, 100, 50, 11.8)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+            b.send("G1 Z20 F60")
+            b.run(0.15)
+            b.write("M112\n")
+            b.run(0.01)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "home_offset", "x": 0.1}, b.t)["ok"])
+            b.run(1.0)
+            self.assertEqual(errors(b), [])
+
+    def test_a_move_that_ends_in_the_coast_is_seen_when_it_ends(self):
+        """Stock minkill() spins 0.6 s with the stepper ISR on: a move that ends in that coast reaches the switch at its
+        own end, as without the kill, not when the coast ends."""
+        def run(kill):
+            b = switch(homed())
+            to(b, 100, 50, 12.3)
+            t0 = b.t
+            b.send("G1 Z11.4 F600")  # 0.6 mm past the trip
+            if kill:
+                b.write("M112\n")
+            b.run(2.0)
+            return errors_since(b, t0)
+        with within(self, 5):
+            self.assertEqual(run(kill=False), [(0.19, OVER_06)])
+            self.assertEqual(run(kill=True), [(0.19, OVER_06)])
 
     def test_a_kills_drop_is_seen_when_it_happens_whoever_looks(self):
         """The steppers go off at the kill + 0.85 s (stock) whether or not anything reads the state meanwhile."""
@@ -347,9 +375,41 @@ class Pa5Switch(unittest.TestCase):
                 pa5(b)
             b.run(5.0)
             self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": 1.0}, b.t)["ok"])
-            return [(round(e["t"] - t_kill, 2), e["error"]) for e in b.sim.state(b.t)["sim_errors"]]
-        self.assertEqual(run(poll=False), [(0.85, OVER_06)])
-        self.assertEqual(run(poll=True), [(0.85, OVER_06)])
+            return errors_since(b, t_kill)
+        with within(self, 5):
+            self.assertEqual(run(poll=False), [(0.85, OVER_06)])
+            self.assertEqual(run(poll=True), [(0.85, OVER_06)])
+
+    def test_a_power_cycle_in_a_kills_window_drops_z_once(self):
+        """Power off 0.3 s after an M112, while minkill() still holds Z: Z drops then, once (the dead board's
+        disable_all_steppers() at 0.85 s never comes)."""
+        with within(self, 5):
+            b = switch(homed())
+            to(b, 100, 50, 11.8)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+            t_kill = b.t
+            b.write("M112\n")
+            b.run(0.3)
+            self.assertTrue(b.sim.control({"cmd": "power_cycle"}, b.t)["ok"])
+            b.run(2.0)
+            self.assertEqual(errors_since(b, t_kill), [(0.3, OVER_06)])
+            self.assertAlmostEqual(b.sim.state(b.t)["head"]["physical"]["Z"], 11.4, places=6)
+
+    def test_a_kill_without_steppers_off_keeps_z_held(self):
+        """validate_homing_move()'s kill("Homing Failed") passes no steppers_off (endstops.cpp:263; false by default,
+        MarlinCore.h:41), so minkill() turns only the E steppers off: Z stays energised and does not drop. Stock: an
+        M410 that cuts a move toward a switch."""
+        with within(self, 5):
+            b = homed()
+            to(b, x=100)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+            b.write("G28 X\n")
+            b.run(0.2)         # X's approach toward its switch
+            b.write("M410\n")  # on read: the approach ends short of the switch, and G28 kills
+            b.run(3.0)
+            st = b.sim.state(b.t)
+            self.assertEqual((st["halt_reason"], st["enabled"]["Z"], st["head"]["physical"]["Z"]),
+                             ("Homing Failed", True, 31.5))
 
     def test_another_tools_window_clears_the_release_point(self):
         """N1 released and lifted in its window to Z 53 (its release point follows), then the head moves into the

@@ -137,9 +137,10 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
   `lost_steps` or `home_offset` that lands while a homing move runs toward a switch is checked again at once: the
   move ends where the switch now triggers (at once if the head is already past it), and so does its wait.
 - A power cycle resets the belief and the counts; the head stays where it is (a released Z drops, below).
-- Releasing an energised Z (`M18`/`M84` with Z or no axis, the idle timeout, `M112`, a power cycle) moves the head
-  by the `z_drop` fault's distance (default 0). It stays there: the next block with Z steps re-energises Z (at once
-  when planned: `Z_LATE_ENABLE` is off, planner.cpp), as does `M17`. A move with no Z steps leaves Z released.
+- Releasing an energised Z (`M18`/`M84` with Z or no axis, the idle timeout, `M112` 0.85 s after the kill, a power
+  cycle) moves the head by the `z_drop` fault's distance (default 0). It stays there: the next block with Z steps
+  re-energises Z (at once when planned: `Z_LATE_ENABLE` is off, planner.cpp), as does `M17`. A move with no Z steps
+  leaves Z released.
 - The control state's `head` gives X/Y/Z `physical`, `logical` (the step counts now, in G92 coordinates; M114 prints
   the planned end) and `offset` = physical - logical: what the controller does not know. At boot the offset is the
   park position; after a true home and no faults it is 0. Values are rounded to 1e-6 mm.
@@ -195,13 +196,14 @@ nothing.
   switch the next press trips at its own point. `pressed_level` is the pin's level pressed, the other one released,
   whatever M42 set (the real polarity: Process's check on the machine).
 - A press deeper than `overtravel_mm` past its point is reported once in `sim_errors` ("PA5 switch overtravel: n1 0.62
-  mm past its trip point (overtravel 0.50 mm)", `line` null), seen at the end of each move (a quick stop's too), at
-  each read, at a Z release (`z_drop`) and at a physical fault (where the head is then, also mid-move), and when it is
-  wired under the head (a new switch wired under a head already past its point reports it once more). At M112 the
-  stock firmware holds Z through its coast and lets every stepper go 0.85 s after the kill (minkill(): cli() at 0.6 s,
-  disable_all_steppers() 0.25 s later), so its `z_drop` lands then, where the coast ended, whether or not anything
-  reads the state (il-safety: at once). Not seen: an X/Y move that crosses a window deep and ends outside it. The head
-  is not stopped (no hard stop is modelled).
+  mm past its trip point (overtravel 0.50 mm)", `line` null), seen at the end of each move (a quick stop's too, and
+  one that ends in a stock kill's coast), at each read, at a Z release (`z_drop`) and at a physical fault (where the
+  head is then, also mid-move), and when it is wired under the head (a new switch wired under a head already past its
+  point reports it once more). At M112 both personalities hold Z and let every stepper go 0.85 s after the kill
+  (minkill(): cli() at 0.6 s, disable_all_steppers() 0.25 s later; stock coasts until the cli(), il-safety's kill
+  stops the motion at once), so a `z_drop` lands then, where the motion ended, whether or not anything reads the
+  state. Not seen: an X/Y move that crosses a window deep and ends outside it. The head is not stopped (no hard stop
+  is modelled).
 - The state's `pa5`: the settings, `level`, `pressed`, `tool`, `trip_z` and `depth_mm` (the deepest of this press),
   `overtravels`, as of the last observation (from its wiring on): the state request reads nothing. The switch is the
   machine's: it outlives a power cycle and `clear`.
@@ -243,7 +245,10 @@ nothing.
     does. RESEARCH.md section 7 says "any phase". An M410 in `Z_AFTER` is a plain quick-stop.
 - **il-safety:** below.
 
-**`M112`.** It kills at once (stock: on read) with the steppers off.
+**`M112`.** It kills at once (stock: on read). In both personalities the drivers hold through minkill() and every
+stepper lets go 0.85 s after the kill (`cli()` at 0.6 s, then 0.25 s); a power cycle before then lets them go at the
+power off (a released Z drops once). How the motion ends: "kill" below. The `Homing Failed` kill leaves the motors
+energised.
 
 ## Personalities
 

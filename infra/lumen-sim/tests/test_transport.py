@@ -741,21 +741,23 @@ class RunnerFaults(unittest.TestCase):
         self.assertEqual(read_some(host, 0.3), b"")  # the next host starts clean, as on a USB port
 
     def test_a_disconnect_does_not_bring_back_the_port_of_a_board_in_dfu(self):
-        tmp = temp_dir(self)
-        self.clock = [0.0]
-        r = Runner(Simulator("il-safety"), os.path.join(tmp, "ttyLUMEN"), clock=lambda: self.clock[0])
-        self.addCleanup(r.shutdown)
-        r.link.open()
-        r.sim.receive(b"M997\n", 0.0)
-        r._service()
-        self.assertFalse(os.path.lexists(r.link.link))
-        self.assertTrue(r._handle_control({"cmd": "fault", "fault": "disconnect", "down_s": 0.5})["ok"])
-        self.clock[0] = 1.0
-        r._service()
-        self.assertFalse(os.path.lexists(r.link.link))  # the bootloader has no serial port: down until a power cycle
-        self.assertTrue(r.transport_state()["link_down"])
-        self.assertTrue(r._handle_control({"cmd": "power_cycle"})["ok"])
-        self.assertEqual(os.path.realpath(r.link.link), r.link.pts)
+        with within(self, 5):
+            tmp = temp_dir(self)
+            self.clock = [0.0]
+            r = Runner(Simulator("il-safety"), os.path.join(tmp, "ttyLUMEN"), clock=lambda: self.clock[0])
+            self.addCleanup(r.shutdown)
+            r.link.open()
+            r.sim.receive(b"M997\n", 0.0)
+            r._service()
+            self.assertFalse(os.path.lexists(r.link.link))
+            self.assertTrue(r._handle_control({"cmd": "fault", "fault": "disconnect", "down_s": 0.5})["ok"])
+            self.clock[0] = 1.0
+            r._service()
+            # the bootloader has no serial port: down until a power cycle
+            self.assertFalse(os.path.lexists(r.link.link))
+            self.assertTrue(r.transport_state()["link_down"])
+            self.assertTrue(r._handle_control({"cmd": "power_cycle"})["ok"])
+            self.assertEqual(os.path.realpath(r.link.link), r.link.pts)
 
     def test_the_io_log_takes_any_byte_a_model_error_quotes(self):
         """A line the model cannot run is noted in the I/O log with its bytes, whatever they are; the board answers."""

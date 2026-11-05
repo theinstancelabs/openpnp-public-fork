@@ -246,18 +246,19 @@ class OutOfRangeValues(unittest.TestCase):
         self.assertFalse(b.sim.state(b.t)["halted"])
 
     def test_an_error_outside_a_command_halts_with_a_reason(self):
-        b = Bench()
+        with within(self, 5):
+            b = Bench()
 
-        def broken():
-            raise RuntimeError("loop gap")
-        b.sim.fw._keepalive = broken
-        b.write("M400\n")
-        b.run(0.1)
-        st = b.sim.state(b.t)
-        self.assertTrue(st["halted"])
-        self.assertEqual(st["halt_reason"], "sim error: RuntimeError: loop gap")
-        b.sim.power_cycle(b.t)
-        self.assertEqual(b.send("M400").lines, ["ok"])
+            def broken():
+                raise RuntimeError("loop gap")
+            b.sim.fw._keepalive = broken
+            b.write("M400\n")
+            b.run(0.1)
+            st = b.sim.state(b.t)
+            self.assertTrue(st["halted"])
+            self.assertEqual(st["halt_reason"], "sim error: RuntimeError: loop gap")
+            b.sim.power_cycle(b.t)
+            self.assertEqual(b.send("M400").lines, ["ok"])
 
 
 if __name__ == "__main__":
