@@ -14,6 +14,7 @@ import org.openpnp.instancelabs.board.BoardArtStore;
 import org.openpnp.instancelabs.board.EdtRunner;
 import org.openpnp.instancelabs.board.KeepOut;
 import org.openpnp.instancelabs.dispense.BoardFeatures;
+import org.openpnp.instancelabs.dispense.BoardOutlines;
 import org.openpnp.instancelabs.dispense.BoardRegistration;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispensePlan;
@@ -41,8 +42,9 @@ import com.google.gson.JsonObject;
 
 /**
  * Register board (fiducials, N1 vacuum probe, plan again), the automatic probe of the blank, Check Z
- * and the engine's new-seat flag (docs/instancelabs/AUTO_REGISTER_DESIGN.md §7). The plan, run and
- * status changes live in {@link DispenseEndpoints}, the home in {@link MachineEndpoints}.
+ * and the engine's new-seat flag (docs/instancelabs/AUTO_REGISTER_DESIGN.md §7); the boards on the bed whose outlines
+ * refuse paste places (BR-81). The plan, run and status changes live in {@link DispenseEndpoints}, the home in
+ * {@link MachineEndpoints}.
  */
 final class RegistrationEndpoints {
     private final ApiContext ctx;
@@ -60,6 +62,9 @@ final class RegistrationEndpoints {
         s.route("GET", "/api/surfaces/([A-Za-z0-9_-]{1,40})/probe-targets", this::probeTargets);
         s.route("POST", "/api/machine/z-check", this::zCheck);
         s.route("POST", "/api/board/new-seat", this::newSeat);
+        s.route("DELETE", "/api/board-registrations/([A-Za-z0-9-]{1,64})", this::forgetRegistration);
+        s.route("PUT", "/api/tiles/([a-z0-9-]{1,40})/outline", this::putTile);
+        s.route("DELETE", "/api/tiles/([a-z0-9-]{1,40})", this::deleteTile);
     }
 
     // ------------------------------------------------------------------------------------------
@@ -488,6 +493,67 @@ final class RegistrationEndpoints {
             throw ApiException.badRequest("'newSeat' must be true or false");
         }
         return Views.map("newSeatAtMs", svc.setNewSeat(b.get("newSeat").getAsBoolean()));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // BR-81: the boards on the bed, whose outlines refuse paste places
+    // ------------------------------------------------------------------------------------------
+
+    /** DELETE /api/board-registrations/{id}: the board left the bed; its outline refuses no place any more. */
+    Object forgetRegistration(ApiServer.Request r) throws Exception {
+        DispenseService svc = idleEngine("registrations");
+        BoardRegistration[] gone = {null};
+        svc.updateConfigAtomically(c -> {
+            gone[0] = c.boardRegistrationById(r.group(1));
+            return gone[0] == null || c.boardRegistrations.remove(gone[0].boardKey) == null ? null : c;
+        });
+        if (gone[0] == null) {
+            throw ApiException.notFound("no board registration " + r.group(1));
+        }
+        return Views.map("forgotten", Views.map("id", gone[0].id, "boardKey", gone[0].boardKey, "boardName",
+                gone[0].boardName));
+    }
+
+    /**
+     * PUT /api/tiles/{id}/outline {label, outline, boards, checkPoints, source?}: a tile of boards on the bed, in
+     * machine mm, imported or replaced whole; 400 with the first problem, nothing stored.
+     */
+    Object putTile(ApiServer.Request r) throws Exception {
+        DispenseService svc = idleEngine("tiles");
+        DispenseConfig.Tile t = Json.fromJson(r.json(), DispenseConfig.Tile.class);
+        String why = t.problem();
+        if (why != null) {
+            throw ApiException.badRequest("the tile " + why);
+        }
+        t.atMs = System.currentTimeMillis();
+        DispenseConfig c = svc.updateConfigAtomically(live -> {
+            live.tiles.put(r.group(1), t);
+            return live;
+        });
+        return Views.map("tile", c.tiles.get(r.group(1)), "placesOnBoards", BoardOutlines.of(c).placesOnBoards());
+    }
+
+    /** DELETE /api/tiles/{id}: the tile left the bed. */
+    Object deleteTile(ApiServer.Request r) throws Exception {
+        DispenseService svc = idleEngine("tiles");
+        boolean[] had = {false};
+        svc.updateConfigAtomically(c -> {
+            had[0] = c.tiles.remove(r.group(1)) != null;
+            return had[0] ? c : null;
+        });
+        if (!had[0]) {
+            throw ApiException.notFound("no tile '" + r.group(1) + "'");
+        }
+        return Views.map("removed", r.group(1));
+    }
+
+    /** The engine, refused (409) while a dispense task runs: the boards on the bed do not change under a run. */
+    private DispenseService idleEngine(String what) throws ApiException {
+        DispenseService svc = ctx.svc();
+        if (svc.isBusy()) {
+            throw ApiException.refused(what + " cannot change while a dispense task runs");
+        }
+        return svc;
     }
 
     /** The probe checks of §4.4 before anything moves, as a 409. */

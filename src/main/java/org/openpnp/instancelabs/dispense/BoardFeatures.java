@@ -136,6 +136,24 @@ public final class BoardFeatures {
         return widthMm > 0 && heightMm > 0;
     }
 
+    /**
+     * BR-81: the board's outline {x0, y0, x1, y1} in board mm: its dimensions from the origin, else the box of its
+     * pads' and fiducials' centres; null without either.
+     */
+    public double[] rectMm() {
+        if (hasOutline()) {
+            return new double[] {0, 0, widthMm, heightMm};
+        }
+        List<double[]> at = new ArrayList<>();
+        for (Pad p : pads) {
+            at.add(new double[] {p.x, p.y});
+        }
+        for (Fiducial fd : fiducials) {
+            at.add(new double[] {fd.x, fd.y});
+        }
+        return BoardOutlines.bounds(at);
+    }
+
     @Override
     public String toString() {
         return String.format(Locale.ROOT, "board %s %.1f x %.1f mm: %d fiducials, %d pads", boardName, widthMm,

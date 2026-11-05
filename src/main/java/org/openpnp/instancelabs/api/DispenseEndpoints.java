@@ -12,6 +12,7 @@ import org.openpnp.gui.MainFrame;
 import org.openpnp.instancelabs.board.BoardArtStore;
 import org.openpnp.instancelabs.board.BoardImporter;
 import org.openpnp.instancelabs.board.EdtRunner;
+import org.openpnp.instancelabs.dispense.BoardOutlines;
 import org.openpnp.instancelabs.dispense.BoardRegistration;
 import org.openpnp.instancelabs.dispense.Calibration;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
@@ -62,12 +63,12 @@ final class DispenseEndpoints {
     /**
      * Settings that only their own endpoints may change: the needle's (they record a needle_touchoff row), and since
      * the tip setups (§22.1) the mounted tip, what the other tips keep, and where the needle lands with its trim; the
-     * mounted tip's dose anchor (BR-85); the tools' height-switch trips (BR-94).
+     * mounted tip's dose anchor (BR-85); the tools' height-switch trips (BR-94); the tiles on the bed (BR-81).
      */
     static final java.util.Set<String> PROTECTED_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "needleZOffsetMm", "needleZOffsetSetAtMs", "needleZOffsetHomeAtMs", "needleChangedAtMs", "needleAnchor",
             "surfaces", "schemaVersion", "boardRegistrations", "newSeatAtMs", "tip", "parkedTips", "needleLanding",
-            "needleXyTrim", "zFrameMovedAtMs", "doseAnchor", "heightSwitch"));
+            "needleXyTrim", "zFrameMovedAtMs", "doseAnchor", "heightSwitch", "tiles"));
     /** Protected settings that Register board and POST /api/board/new-seat stamp (not the needle's). */
     static final java.util.Set<String> REGISTRATION_SETTINGS = new java.util.HashSet<>(java.util.Arrays.asList(
             "boardRegistrations", "newSeatAtMs"));
@@ -307,6 +308,17 @@ final class DispenseEndpoints {
                 : "the needle's position is unknown" + (unknown == null ? "" : ": " + unknown);
         l.add(Views.map("id", "I12", "name", "Valve and screw only over a place where paste may go", "state",
                 out == null ? "ok" : "info", "text", out == null ? "the needle is over " + zone : out, "zone", zone));
+        // BR-81: the readiness of the paste places; a run that uses one on a board is refused by its own I13 violation
+        BoardOutlines boards = BoardOutlines.of(cfg);
+        List<BoardOutlines.Place> on = boards.placesOnBoards();
+        List<String> texts = new ArrayList<>();
+        for (BoardOutlines.Place p : on) {
+            texts.add(p.text);
+        }
+        l.add(Views.map("id", "I13", "name", "Paste places off every board", "state", on.isEmpty() ? "ok" : "warning",
+                "text", on.isEmpty() ? "no paste place lies on a board" : on.size() + (on.size() == 1
+                        ? " paste place lies" : " paste places lie") + " on a board: " + String.join("; ", texts),
+                "places", on, "outlines", boards.view()));
         return l;
     }
 
@@ -863,6 +875,9 @@ final class DispenseEndpoints {
         }
         if ("heightSwitch".equals(key)) {
             return "The tools' height-switch trips are recorded by POST /api/height-switch/measure.";
+        }
+        if ("tiles".equals(key)) {
+            return "The tiles on the bed are imported with PUT /api/tiles/{id}/outline (BR-81).";
         }
         if ("doseAnchor".equals(key)) {
             return "The tip's dose anchor is set with PUT /api/tip-setups/{key}/dose-anchor.";

@@ -425,7 +425,41 @@ public class DispenseConfig {
 
         /** The first reason this tile does not hold together, or null. */
         public String problem() {
-            return null;
+            if (label == null || label.trim().isEmpty() || label.length() > 40) {
+                return "needs a label of 1 to 40 characters";
+            }
+            String why = BoardOutlines.polygonProblem(outline, 64);
+            if (why != null) {
+                return "outline " + why;
+            }
+            if (boards == null || boards.size() > 64) {
+                return "needs a list of at most 64 boards (empty for none)";
+            }
+            java.util.Set<String> names = new java.util.HashSet<>();
+            for (TileBoard b : boards) {
+                if (b == null || b.name == null || b.name.trim().isEmpty() || b.name.length() > 12
+                        || !names.add(b.name)) {
+                    return "needs a name of 1 to 12 characters for each board, each name once";
+                }
+                why = BoardOutlines.polygonProblem(b.outline, 16);
+                if (why != null) {
+                    return "board " + b.name + " " + why;
+                }
+                double[] m = BoardOutlines.bounds(b.outline);
+                if (!BoardOutlines.inside(outline, (m[0] + m[2]) / 2, (m[1] + m[3]) / 2)) {
+                    return "board " + b.name + " lies outside the tile's outline";
+                }
+            }
+            if (checkPoints == null || checkPoints.size() < 3) {
+                return "needs at least 3 check points (points measured on the tile)";
+            }
+            for (int i = 0; i < checkPoints.size(); i++) {
+                double[] p = checkPoints.get(i);
+                if (p == null || p.length != 2 || !BoardOutlines.inside(outline, p[0], p[1])) {
+                    return "check point " + (i + 1) + " lies outside the tile's outline: check its transform";
+                }
+            }
+            return source != null && source.length() > 300 ? "source: at most 300 characters" : null;
         }
     }
 
@@ -775,6 +809,9 @@ public class DispenseConfig {
         }
         if (c.boardRegistrations == null) {
             c.boardRegistrations = new LinkedHashMap<>();
+        }
+        if (c.tiles == null) {
+            c.tiles = new LinkedHashMap<>();
         }
         if (c.tip == null) {
             c.tip = new TipSpec();
@@ -1131,6 +1168,18 @@ public class DispenseConfig {
             if (r == null || !e.getKey().equals(r.boardKey) || !r.isAffineValid()) {
                 p.add("boardRegistrations['" + e.getKey() + "'] must carry its board key and a finite, invertible "
                         + "affine (6 numbers)");
+            }
+            else if (r.boardRectMm != null && !(r.boardRectMm.length == 4 && java.util.Arrays.stream(r.boardRectMm)
+                    .allMatch(Double::isFinite) && r.boardRectMm[0] <= r.boardRectMm[2]
+                    && r.boardRectMm[1] <= r.boardRectMm[3])) {
+                p.add("boardRegistrations['" + e.getKey() + "'].boardRectMm must be 4 numbers x0 <= x1, y0 <= y1 "
+                        + "(board mm)");
+            }
+        }
+        for (Map.Entry<String, Tile> e : tiles.entrySet()) {
+            String why = e.getValue() == null ? "is not a tile" : e.getValue().problem();
+            if (why != null) {
+                p.add("tiles['" + e.getKey() + "']: " + why);
             }
         }
     }

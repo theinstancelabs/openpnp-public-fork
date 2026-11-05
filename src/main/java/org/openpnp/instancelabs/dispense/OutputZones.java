@@ -23,9 +23,11 @@ import java.util.regex.Pattern;
  * height switch (BR-94: a circle of {@code heightSwitchRadiusMm} around its place, once set) and the configured
  * circles. With the valve on the needle never crosses a forbidden zone. The pressure hold, which may drool for minutes,
  * opens the valve only over a sink: the waste, the towel, a cup, the purge row, the calibration area or a
- * coupon (never over a board or another surface: #12's final review). The refusals say what to do in their context:
- * the hold where the needle is ({@link #refusal}), its park ({@link #parkRefusal}), a program's line
- * ({@link #lineRefusal}) and move ({@link #crossing}).
+ * coupon (never over a board or another surface: #12's final review). BR-81: within {@code marginMm} of a board on
+ * the bed ({@link BoardOutlines}: a registration's, an imported tile) paste goes only from that board's own run (the
+ * planned dots of a board run's scope), whatever place covers it; the hold never opens there. The refusals say what to
+ * do in their context: the hold where the needle is ({@link #refusal}), its park ({@link #parkRefusal}), a program's
+ * line ({@link #lineRefusal}) and move ({@link #crossing}).
  */
 public final class OutputZones {
     /** A circle, a box or a probed surface, in machine X/Y (mm). */
@@ -117,6 +119,12 @@ public final class OutputZones {
     private final List<Zone> other = new ArrayList<>();
     /** Where paste may go, in words, with the settings' surface names. */
     private String where;
+    /** BR-81: the boards on the bed and the margin they keep; a board run's planned dots, which its own board takes. */
+    private BoardOutlines boards;
+    private double boardMarginMm;
+    private final List<double[]> ownDots = new ArrayList<>();
+    /** A board run's own dot: within this of a planned target (mm; the G-code's rounding is far below it). */
+    static final double OWN_DOT_MM = 0.5;
 
     private OutputZones() {
     }
@@ -139,6 +147,11 @@ public final class OutputZones {
         OutputZones z = new OutputZones();
         DispenseConfig.OutputZoneSettings s = c.outputZones != null ? c.outputZones
                 : new DispenseConfig.OutputZoneSettings();
+        z.boards = BoardOutlines.of(c);
+        z.boardMarginMm = s.marginMm;
+        if (scope != null && scope.checkPlanSurface) {
+            z.ownDots.addAll(scope.surfaceTargets);
+        }
         if (bottomCameraXY != null) {
             z.forbid.add(Zone.circle(BOTTOM_CAMERA, "the " + BOTTOM_CAMERA, false, bottomCameraXY[0],
                     bottomCameraXY[1], s.forbidRadiusMm));
@@ -227,11 +240,15 @@ public final class OutputZones {
                 || CUP.matcher(name).find());
     }
 
-    /** "forbidden: <name>", the name of the allowed zone the point is in, or null when it is in none. */
+    /** "forbidden: <name>", "board: <board>", the name of the allowed zone the point is in, or null when in none. */
     public String zoneAt(double x, double y) {
         Zone f = first(forbid, x, y);
         if (f != null) {
             return "forbidden: " + f.name;
+        }
+        String b = onBoard(x, y);
+        if (b != null) {
+            return "board: " + b;
         }
         Zone a = first(allow, x, y);
         return a == null ? null : a.name;
@@ -265,6 +282,12 @@ public final class OutputZones {
         if (f != null) {
             return at + String.format(Locale.ROOT, "over %s, where the valve and the screw stay off: set that place "
                     + "or surface %.0f mm or more away from it", f.label, f.c);
+        }
+        String b = onBoard(x, y);
+        if (b != null) {
+            Zone a = first(allow, x, y);
+            String place = a != null && a.sink ? a.label : "it";
+            return at + "on " + b + ", where only the board's own run puts paste: set " + place + " again off the board";
         }
         return first(allow, x, y) != null ? null : at + why(x, y);
     }
@@ -312,6 +335,10 @@ public final class OutputZones {
         if (f != null) {
             return "over " + f.label + ", where the valve and the screw stay off";
         }
+        String b = onBoard(x, y);
+        if (b != null) {
+            return "on " + b;
+        }
         for (Zone a : allow) {
             if (a.sink && a.contains(x, y)) {
                 return null;
@@ -321,6 +348,19 @@ public final class OutputZones {
         over = over != null ? over : first(other, x, y);
         return (over != null ? "over " + over.label + ", " : "") + "not over a place that takes paste while the "
                 + "pressure is held (the waste, the towel, a cup, the purge row, the calibration area or a coupon)";
+    }
+
+    /** The board (x, y) lies on within the margin (BR-81), or null: also for a board run's own planned dot. */
+    private String onBoard(double x, double y) {
+        String b = boards.on(x, y, boardMarginMm);
+        if (b != null) {
+            for (double[] d : ownDots) {
+                if (Math.hypot(x - d[0], y - d[1]) <= OWN_DOT_MM) {
+                    return null;
+                }
+            }
+        }
+        return b;
     }
 
     /** The first of the zones that holds (x, y), or null. */

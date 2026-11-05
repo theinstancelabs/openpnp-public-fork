@@ -29,7 +29,7 @@
    *  switch's measures by their own steps. WebEditorSettingsListsTest keeps these lists covering the server's. */
   const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleZOffsetHomeAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces',
     'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs', 'doseAnchor',
-    'heightSwitch']);
+    'heightSwitch', 'tiles']);
   const STAMPED_NESTED = new Set(['profile.startAngleDeg', 'profile.startAngleSetAtMs', 'profile.startAngleChangedAtMs',
     'profile.startAngleFeature', 'purgeRow.resetAtMs', 'purgeRow.usedSpots', 'calibrationArea.usedMm', 'calibrationArea.resetAtMs',
     'paste.loadedAtMs']);

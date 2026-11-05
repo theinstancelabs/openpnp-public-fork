@@ -478,6 +478,35 @@ public final class Interlocks {
     }
 
     /**
+     * I13 (BR-81): a paste place the run uses lies on a board on the bed ({@link BoardOutlines}): the waste, the test
+     * dot's spot, a cup or the blank it references or dispenses at, the purge row when it lays purge dots, the
+     * calibration area or a coupon when one of its dots lies in it (never a board run's: its dots are its board's).
+     */
+    static void checkPlacesOnBoards(Inputs in, InterlockReport r) {
+        Scope sc = in.scope == null ? new Scope() : in.scope;
+        for (BoardOutlines.Place p : BoardOutlines.of(in.cfg).placesOnBoards()) {
+            boolean uses = p.rect != null ? !sc.checkPlanSurface && dotIn(sc, p.rect)
+                    : "purge-row".equals(p.kind) ? in.purgeDots > 0
+                            : sc.referencePlaces.contains(p.place) || sc.dispensePlaces.contains(p.place);
+            if (uses) {
+                r.add("I13", p.text);
+            }
+        }
+    }
+
+    /** One of the scope's dots lies in the box {x0, y0, x1, y1}. */
+    private static boolean dotIn(Scope sc, double[] box) {
+        List<double[]> dots = new java.util.ArrayList<>(sc.surfaceTargets);
+        sc.moreSurfaces.values().forEach(dots::addAll);
+        for (double[] d : dots) {
+            if (d[0] >= box[0] && d[0] <= box[2] && d[1] >= box[1] && d[1] <= box[3]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * CONFIG and MACHINE only: the tasks that never dispense (Register board, the blank probe, the Z
      * check). I4/I5/I7/I9-I11 are about dispensing.
      */
@@ -623,6 +652,7 @@ public final class Interlocks {
             r.add("I3", in.nozzleName + " has nozzle tip '" + in.loadedNozzleTip + "' loaded");
         }
         checkI4(in, r);
+        checkPlacesOnBoards(in, r);
         // I5: barrel pressure window (disabled by default: no sensor fitted).
         if (cfg.pressureInterlockEnabled) {
             Double psi = null;

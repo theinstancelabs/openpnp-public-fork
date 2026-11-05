@@ -4704,6 +4704,7 @@ public final class DispenseService {
             reg.simulated = sim;
             reg.runId = r.runId;
         }
+        reg.boardRectMm = f.rectMm(); // BR-81: a same seat's record from before it gets its outline too
         if (aborted.getAsBoolean()) {
             throw new DispenseExecutor.AbortedException(abortReason(s.exec, "stopped during the fiducial check"));
         }
