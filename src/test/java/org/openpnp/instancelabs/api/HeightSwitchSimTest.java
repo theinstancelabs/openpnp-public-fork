@@ -200,12 +200,17 @@ public class HeightSwitchSimTest {
         assertFalse(again.get("accepted").getAsBoolean(), "3 presses: a mean, not a recorded trip");
         List<String> z = new ArrayList<>();
         for (String l : moves()) {
-            if (l.startsWith("G1 Z") && l.endsWith(" F600")) {
+            if (l.startsWith("G1 Z")) {
                 z.add(l);
             }
         }
         assertEquals("G1 Z31.500 F600", z.get(0), "travel height first: " + z);
-        assertEquals(String.format(java.util.Locale.ROOT, "G1 Z%.3f F600", trip + 1.0), z.get(1), "1.0 above: " + z);
+        // the stepped way down (review MAJOR 4) ends at the start, 1.0 above the trip; nothing went lower before it
+        int start = z.indexOf(String.format(java.util.Locale.ROOT, "G1 Z%.3f F300", trip + 1.0));
+        assertTrue(start > 0, "1.0 above: " + z);
+        for (String l : z.subList(1, start)) {
+            assertTrue(Double.parseDouble(l.split(" ")[1].substring(1)) > trip + 1.0, "lower on the way down: " + l);
+        }
         assertEquals(trip, heightSwitchStatus().getAsJsonObject("n1").get("tripRawZ").getAsDouble(), 0,
                 "a measure that is not accepted keeps the trip");
     }
@@ -241,6 +246,28 @@ public class HeightSwitchSimTest {
         assertEquals("G1 Z31.500 F600", l.get(at + 1), "lifted right after the line that timed out: " + l);
         assertEquals(31.5, sim.server.position('Z'), 1e-9);
         assertTrue(heightSwitchStatus().get("n1").isJsonNull());
+    }
+
+    /**
+     * Review MAJOR 4 through the engine: the needle (trip 43) asked to start at 45 stops on its stepped way down within
+     * one coarse step (0.10) of the trip, and the measure is refused.
+     */
+    @Test
+    public void aStartPastTheTripIsRefusedOnTheWayDown() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"zStart\":45,\"zFloor\":46,\"tipClean\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("already pressed") && lastBody.contains("start higher"), lastBody);
+        double deepest = 0;
+        for (String l : moves()) {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\bZ(-?\\d+(?:\\.\\d+)?)").matcher(l);
+            if (m.find()) {
+                deepest = Math.max(deepest, Double.parseDouble(m.group(1)));
+            }
+        }
+        assertTrue(deepest <= NEEDLE_TRIP + 0.10 + 1e-9, "at most one coarse step past the trip: " + moves());
+        assertEquals(31.5, sim.server.position('Z'), 1e-9);
     }
 
     @Test

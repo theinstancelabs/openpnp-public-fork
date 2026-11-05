@@ -179,6 +179,19 @@ public class HeightSwitchTest {
         assertEquals("G1 Z31.500 F600", sw.lines.get(sw.lines.size() - 2), sw.lines.toString());
     }
 
+    /**
+     * Review MAJOR 4: the way down to the start is stepped and read like a descent, so a start past the trip (the
+     * needle's trip 43, zStart 45) stops at most one coarse step past the trip and is refused, not driven 2 mm into it.
+     */
+    @Test
+    public void aStartPastTheTripStopsWithinOneCoarseStepOfItOnTheWayDown() throws Exception {
+        FakeSwitch sw = new FakeSwitch(43.0, 1);
+        HeightSwitch.Result r = HeightSwitch.measure(sw, plan("needle", 1, 45.0, 46.0, 5));
+        assertTrue(r.refused && r.why.contains("already pressed") && r.why.contains("start higher"), r.why);
+        assertTrue(sw.deepestPast() <= 0.10 + 1e-9, "at most one coarse step past the trip: " + sw.deepestPast());
+        assertEquals(31.5, sw.z, 1e-9, "back up");
+    }
+
     @Test
     public void aSwitchThatSticksIsRefused() throws Exception {
         FakeSwitch sw = new FakeSwitch(12.0, -1) {

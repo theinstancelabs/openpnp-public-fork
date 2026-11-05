@@ -15,10 +15,12 @@ import java.util.regex.Pattern;
  * The needle's measure switches the valve and then the pump off before it moves (the passthrough may have left them
  * on): paste must never touch the switch.
  *
- * <p>One press: a coarse descent from the start (N1 0.25 mm, the needle 0.10) to the first step that reads pressed,
- * 0.40 mm back (still pressed there: the switch sticks or the tool is caught, refused), then a fine descent of 0.025 mm
- * from 0.30 above that step to one fine step past it: the trip is the first fine step that reads pressed, so the tool
- * goes at most one coarse and one fine step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. Every step is
+ * <p>The way down from travel Z to the start is stepped and read as a coarse descent is (a press on it is refused:
+ * start higher), so a start past the trip goes at most one coarse step past it. One press: a coarse descent from the
+ * start (N1 0.25 mm, the needle 0.10) to the first step that reads pressed, 0.40 mm back (still pressed there: the
+ * switch sticks or the tool is caught, refused), then a fine descent of 0.025 mm from 0.30 above that step to one fine
+ * step past it: the trip is the first fine step that reads pressed, so the tool goes at most one coarse and one fine
+ * step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. Every step is
  * a move, M400 and 50 ms before its read. Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's other side) as
  * it rises ({@link Plan#down}). Travel Z at the end, also after a refusal and after a failure (a reply with no level
  * twice, a line that timed out: the tool goes up, Z only, before the failure is thrown); a STOP's abort ends it where
@@ -178,13 +180,12 @@ public final class HeightSwitch {
         io.send("M400");
         io.send("G4 P300");
         r.idleLevel = read(io); // both tools up: nothing presses the switch here
-        io.send(move(p.zStart, 600));
-        io.send("M400");
-        io.send("G4 P200");
-        if (read(io) != r.idleLevel) {
+        // down to the start in coarse steps, each read: a start past the trip stops within one step of it
+        Double early = descend(io, p, p.travelZ, p.zStart, p.coarseMm, r.idleLevel);
+        if (early != null) {
             r.refused = true;
-            r.why = String.format(Locale.ROOT, "the switch is already pressed at the start (Z %.3f): start higher, or "
-                    + "the switch is stuck or wired wrong", p.zStart);
+            r.why = String.format(Locale.ROOT, "the switch is already pressed at the start (Z %.3f) or above it (at Z "
+                    + "%.3f): start higher, or the switch is stuck or wired wrong", p.zStart, early);
             return;
         }
         double from = p.zStart;
