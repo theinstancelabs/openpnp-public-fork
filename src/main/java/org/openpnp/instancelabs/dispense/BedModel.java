@@ -1,5 +1,7 @@
 package org.openpnp.instancelabs.dispense;
 
+import java.io.IOException;
+import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -9,10 +11,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
 
 /**
  * BR-98: the machine collision model, {@code <config>/instancelabs/collision-model.json} (collision-model-design.md
@@ -330,10 +335,18 @@ public final class BedModel {
     public static BedModel parse(String json) {
         JsonElement e;
         try {
-            e = new JsonParser().parse(json);
+            // strict, as lumen-sim's loader reads it: Gson's JsonParser is always lenient, so a hand-edited comment,
+            // single quotes or unquoted text would load here and fail there (review 3 NIT 3)
+            JsonReader r = new JsonReader(new StringReader(json));
+            r.setLenient(false);
+            e = new Gson().getAdapter(JsonElement.class).read(r);
+            if (r.peek() != JsonToken.END_DOCUMENT) {
+                throw new IOException("more after the model");
+            }
         }
-        catch (RuntimeException x) {
-            throw new IllegalArgumentException("not JSON: " + x.getMessage());
+        catch (IOException | RuntimeException x) {
+            throw new IllegalArgumentException("not JSON (strict JSON: no comments, single quotes or unquoted text): "
+                    + x.getMessage());
         }
         if (e == null || !e.isJsonObject()) {
             throw new IllegalArgumentException("the model is a JSON object");

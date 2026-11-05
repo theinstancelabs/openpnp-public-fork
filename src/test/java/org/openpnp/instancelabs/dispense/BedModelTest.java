@@ -2,13 +2,13 @@ package org.openpnp.instancelabs.dispense;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 
 import org.junit.jupiter.api.Test;
 
@@ -41,68 +41,82 @@ public class BedModelTest {
         assertEquals(5 / Math.cos(Math.PI / 64), Math.hypot(c.x(0) - 65, c.y(0) - 25), 1e-9);
     }
 
-    /** Every rule of the loader refuses with the first problem, in words. */
-    @Test
-    public void theLoaderRefusesWhatTheCheckCannotTrust() throws Exception {
-        refused("schema", j -> j.addProperty("schema", 2));
-        refused("zMarginMm", j -> j.remove("zMarginMm"));
-        refused("convex", j -> obj(j, 3).add("outline", outline("polygon",
-                "[[300,130],[460,130],[380,180],[460,270],[300,270]]")));
-        refused("counter-clockwise", j -> obj(j, 3).add("outline", outline("polygon",
-                "[[462.2,276.8],[461.0,127.8],[304.1,129.7],[305.3,278.7]]")));
-        refused("x0 < x1", j -> obj(j, 0).add("outline", outline("box", "[30,95,10,115]")));
-        refused("radius", j -> obj(j, 1).add("outline", outline("circle", "[65,25,0]")));
-        refused("twice", j -> obj(j, 1).addProperty("id", "holder-left"));
-        refused("reserved", j -> obj(j, 1).addProperty("id", "bed"));
-        refused("state", j -> obj(j, 1).addProperty("state", "gone"));
-        refused("marginMm", j -> obj(j, 1).remove("marginMm"));
-        refused("measured.top", j -> obj(j, 1).getAsJsonObject("measured").remove("top"));
-        refused("how", j -> obj(j, 1).getAsJsonObject("measured").getAsJsonObject("top").addProperty("how", " "));
-        refused("3 points", j -> plane(j).add("points", new JsonParser().parse("[[60,120,-3],[300,120,-2.96]]")));
-        refused("on one line", j -> plane(j).add("points", new JsonParser().parse(
-                "[[60,120,-3],[180,120,-2.98],[300,120,-2.96]]")));
-        refused("aboveTipMm or bottomZ", j -> layer(j, 1, 1).addProperty("bottomZ", 30));
-        refused("aboveTipMm or bottomZ", j -> layer(j, 1, 1).remove("aboveTipMm"));
-        refused("see-saw", j -> {
-            layer(j, 2, 0).remove("bottomZ");
-            layer(j, 2, 0).addProperty("aboveTipMm", 3);
-        });
-        refused("tipEnd", j -> tool(j, 1).remove("tipEnd"));
-        refused("moves", j -> tool(j, 1).addProperty("moves", "both"));
-        refused("mmPerRaw", j -> j.getAsJsonObject("seesaw").getAsJsonObject("n1").remove("mmPerRaw"));
-        refused("endStopsRaw", j -> j.getAsJsonObject("seesaw").add("endStopsRaw", new JsonParser().parse("[63,0]")));
-        // the check sweeps N1 and the needle on every leg: exactly one of each (#66 review MAJOR 4), the counts naming
-        // which is wrong (review 2 NIT: N1 and no needle, no N1 and the needle, two N1s)
-        refused("moves needle (here 1 and 0)", j -> j.add("tools", tools(j, 0, 2)));
-        refused("moves needle (here 0 and 1)", j -> j.add("tools", tools(j, 1, 2)));
-        refused("moves needle (here 2 and 0)", j -> tool(j, 1).addProperty("moves", "n1"));
-        // both loaders cap the contact depth (Infra and Backend 11-04)
-        refused("contactDepthMm must be 0 to 1.0", j -> j.addProperty("contactDepthMm", 1.5));
-        refused("contactDepthMm must be 0 to 1.0", j -> j.addProperty("contactDepthMm", -0.1));
-        // Process's per-part methods: any non-empty how, never a fixed list (Backend 20:5x)
-        JsonObject ok = BedFixture.json();
-        obj(ok, 0).getAsJsonObject("measured").getAsJsonObject("top").addProperty("how", "caliper height + margin");
-        assertNotNull(BedModel.parse(ok));
-    }
-
-    /** A file the loaders refuse: what is wrong, the change to the fixture that makes it, words of the refusal. */
+    /** A file the loaders refuse: what is wrong, how the fixture's text becomes it, words of the refusal. */
     static final class Bad {
         final String what, says;
-        final Consumer<JsonObject> change;
+        final UnaryOperator<String> file;
 
+        /** A change to the fixture's tree. */
         Bad(String what, Consumer<JsonObject> change, String says) {
+            this(what, says, t -> {
+                JsonObject j = new JsonParser().parse(t).getAsJsonObject();
+                change.accept(j);
+                return j.toString();
+            });
+        }
+
+        private Bad(String what, String says, UnaryOperator<String> file) {
             this.what = what;
-            this.change = change;
             this.says = says;
+            this.file = file;
+        }
+
+        /** An edit of the fixture's text, for what a tree cannot hold (comments, quotes). */
+        static Bad text(String what, UnaryOperator<String> edit, String says) {
+            return new Bad(what, says, edit);
         }
     }
 
     /**
-     * The bad files, in one list so lumen-sim's loader can mirror them (Infra): every string an exact JSON string (no
-     * trimming, no number taken as text) and null nowhere, a key given a value or left out (design §2 "Strings and
-     * null", 11-05), and the rest below.
+     * Every file the loaders refuse, the first problem in words, in one list so lumen-sim's loader can mirror it
+     * (Infra): the model's rules, every string an exact JSON string (no trimming, no number taken as text) and null
+     * nowhere, a key given a value or left out (design §2 "Strings and null", 11-05), each tip's layer, the times, and
+     * strict JSON.
      */
     static final List<Bad> BAD_FILES = Arrays.asList(
+            new Bad("schema 2", j -> j.addProperty("schema", 2), "schema"),
+            new Bad("no zMarginMm", j -> j.remove("zMarginMm"), "zMarginMm"),
+            new Bad("a concave polygon", j -> obj(j, 3).add("outline", outline("polygon",
+                    "[[300,130],[460,130],[380,180],[460,270],[300,270]]")), "convex"),
+            new Bad("a clockwise polygon", j -> obj(j, 3).add("outline", outline("polygon",
+                    "[[462.2,276.8],[461.0,127.8],[304.1,129.7],[305.3,278.7]]")), "counter-clockwise"),
+            new Bad("a box with x0 > x1", j -> obj(j, 0).add("outline", outline("box", "[30,95,10,115]")), "x0 < x1"),
+            new Bad("a circle of radius 0", j -> obj(j, 1).add("outline", outline("circle", "[65,25,0]")), "radius"),
+            new Bad("an id twice", j -> obj(j, 1).addProperty("id", "holder-left"), "twice"),
+            new Bad("an object with the bed's id", j -> obj(j, 1).addProperty("id", "bed"), "reserved"),
+            new Bad("a state not in the list", j -> obj(j, 1).addProperty("state", "gone"), "state"),
+            new Bad("no marginMm", j -> obj(j, 1).remove("marginMm"), "marginMm"),
+            new Bad("a measured top without its record", j -> obj(j, 1).getAsJsonObject("measured").remove("top"),
+                    "measured.top"),
+            new Bad("a how of spaces", j -> obj(j, 1).getAsJsonObject("measured").getAsJsonObject("top").addProperty(
+                    "how", " "), "how"),
+            new Bad("two plane points", j -> plane(j).add("points", new JsonParser().parse(
+                    "[[60,120,-3],[300,120,-2.96]]")), "3 points"),
+            new Bad("three plane points in a line", j -> plane(j).add("points", new JsonParser().parse(
+                    "[[60,120,-3],[180,120,-2.98],[300,120,-2.96]]")), "on one line"),
+            new Bad("a layer with aboveTipMm and bottomZ", j -> layer(j, 1, 1).addProperty("bottomZ", 30),
+                    "aboveTipMm or bottomZ"),
+            new Bad("a layer with neither", j -> layer(j, 1, 1).remove("aboveTipMm"), "aboveTipMm or bottomZ"),
+            new Bad("a fixed tool's layer above its tip", j -> {
+                layer(j, 2, 0).remove("bottomZ");
+                layer(j, 2, 0).addProperty("aboveTipMm", 3);
+            }, "see-saw"),
+            new Bad("the needle without its tipEnd", j -> tool(j, 1).remove("tipEnd"), "tipEnd"),
+            new Bad("moves both", j -> tool(j, 1).addProperty("moves", "both"), "moves"),
+            new Bad("no mmPerRaw", j -> j.getAsJsonObject("seesaw").getAsJsonObject("n1").remove("mmPerRaw"),
+                    "mmPerRaw"),
+            new Bad("end stops high to low", j -> j.getAsJsonObject("seesaw").add("endStopsRaw", new JsonParser()
+                    .parse("[63,0]")), "endStopsRaw"),
+            // the check sweeps N1 and the needle on every leg: exactly one of each (#66 review MAJOR 4), the counts
+            // naming which is wrong (review 2 NIT)
+            new Bad("N1 and no needle", j -> j.add("tools", tools(j, 0, 2)), "moves needle (here 1 and 0)"),
+            new Bad("the needle and no N1", j -> j.add("tools", tools(j, 1, 2)), "moves needle (here 0 and 1)"),
+            new Bad("two N1s", j -> tool(j, 1).addProperty("moves", "n1"), "moves needle (here 2 and 0)"),
+            // both loaders cap the contact depth (Infra and Backend 11-04)
+            new Bad("a contact depth of 1.5 mm", j -> j.addProperty("contactDepthMm", 1.5),
+                    "contactDepthMm must be 0 to 1.0"),
+            new Bad("a negative contact depth", j -> j.addProperty("contactDepthMm", -0.1),
+                    "contactDepthMm must be 0 to 1.0"),
             new Bad("an id with a trailing space", j -> obj(j, 0).addProperty("id", "holder-left "),
                     "the id 'holder-left ' must be"),
             new Bad("an id with a newline", j -> obj(j, 0).addProperty("id", "holder-left\n"),
@@ -138,17 +152,21 @@ public class BedModelTest {
             new Bad("a record's time in microseconds", j -> obj(j, 0).getAsJsonObject("measured").getAsJsonObject(
                     "top").addProperty("atMs", System.currentTimeMillis() * 1000),
                     "objects[0].measured.top.atMs is later than now + 1 min"),
-            new Bad("a time that is text", j -> plane(j).addProperty("atMs", "0"), "bed.plane.atMs must be a time"));
+            new Bad("a time that is text", j -> plane(j).addProperty("atMs", "0"), "bed.plane.atMs must be a time"),
+            // strict JSON, as lumen-sim reads it (review 3 NIT 3)
+            Bad.text("an unquoted value", t -> t.replace("\"kind\": \"fixed\"", "\"kind\": fixed"), "not JSON"),
+            Bad.text("single quotes", t -> t.replace("\"id\": \"holder-left\"", "'id': 'holder-left'"), "not JSON"),
+            Bad.text("a comment", t -> t.replace("\"schema\": 1,", "\"schema\": 1, // the first schema"), "not JSON"),
+            Bad.text("text after the model", t -> t + "\n{}", "not JSON"));
 
     /** Each of {@link #BAD_FILES} is refused with its own words; every case is run, the wrong ones listed together. */
     @Test
     public void theBadFilesAreRefused() throws Exception {
         List<String> wrong = new ArrayList<>();
+        String fixture = BedFixture.text();
         for (Bad b : BAD_FILES) {
-            JsonObject j = BedFixture.json();
-            b.change.accept(j);
             try {
-                BedModel.parse(j);
+                BedModel.parse(b.file.apply(fixture));
                 wrong.add(b.what + ": loaded");
             }
             catch (IllegalArgumentException e) {
@@ -161,6 +179,10 @@ public class BedModelTest {
         JsonObject ahead = BedFixture.json();
         tool(ahead, 1).getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis() + 30000);
         assertNotNull(BedModel.parse(ahead), "30 s ahead (another host's clock) loads");
+        // Process's per-part methods: any non-empty how, never a fixed list (Backend 20:5x)
+        JsonObject how = BedFixture.json();
+        obj(how, 0).getAsJsonObject("measured").getAsJsonObject("top").addProperty("how", "caliper height + margin");
+        assertNotNull(BedModel.parse(how));
     }
 
     /** U2: N1 and the needle below, in and above their knees, on the tilted plane, each at its own tip. */
@@ -213,13 +235,6 @@ public class BedModelTest {
         assertEquals(0.1 + 2 * 0.1, m.tipErrMm(m.tool("n1"), 5L), 1e-12, "plane and knees of another home");
         assertEquals(0.1 + 4 * 0.1, m.tipErrMm(m.tool("needle"), 5L), 1e-12, "plane, K twice, knees");
         assertEquals(0, m.tipErrMm(m.tool("camera"), 5L), 0);
-    }
-
-    static void refused(String text, Consumer<JsonObject> change) throws Exception {
-        JsonObject j = BedFixture.json();
-        change.accept(j);
-        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> BedModel.parse(j), text);
-        assertTrue(e.getMessage().contains(text), "'" + text + "' in: " + e.getMessage());
     }
 
     static JsonObject obj(JsonObject j, int i) {
