@@ -103,6 +103,8 @@ public class ScrewPhaseFitTest {
         assertEquals("[too few dots per half to see a ripple: 4 dots at 118°, 4 dots not found at 118° (a half turn "
                 + "always lays paste): left out]", noisy(0.47, 0.1, 4).why.toString());
         assertEquals(ScrewPhaseFit.NONE, noisy(0.47, 0.1, 4).confidence);
+        // the boundary: 5 dots in a half are still too few (MIN_PAIRS is 6; re-review NIT 11-04)
+        assertEquals("too few dots per half to see a ripple: 5 dots at 118°", noisy(0.3, 0.15, 3).why.get(0));
         // 2 of the 8 dots at 118 found
         List<ScrewPhaseFit.Dot> r1 = modelRow(298, 179.1, 0.47);
         for (int i = 1; i < r1.size(); i += 2) {
