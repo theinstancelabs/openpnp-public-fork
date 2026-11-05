@@ -35,6 +35,8 @@ public final class BedModel {
     /** Circles are swept as their circumscribed 64-gon (design §2, both implementations). */
     static final int CIRCLE_SIDES = 64;
     private static final Pattern ID = Pattern.compile("[A-Za-z0-9._-]{1,64}");
+    /** How far ahead of this host's clock a time may be (another host's clock). */
+    static final long AHEAD_MS = 60000;
 
     private final JsonObject json;
     public final int version;
@@ -351,7 +353,7 @@ public final class BedModel {
 
     private BedModel(JsonObject j) {
         this.json = j;
-        scan(j, "");
+        scan(j, "", System.currentTimeMillis() + AHEAD_MS);
         if (integer(j, "schema", "") != SCHEMA) {
             throw new IllegalArgumentException("schema must be " + SCHEMA);
         }
@@ -706,19 +708,33 @@ public final class BedModel {
         return path.isEmpty() ? key : path + "." + key;
     }
 
-    /** The whole document, before any field is read: null nowhere. */
-    private static void scan(JsonElement e, String path) {
+    /**
+     * The whole document, before any field is read: null nowhere, and every {@code atMs} a time in ms no later than
+     * {@code latest} (review 2 MINOR 4: microseconds sent as ms would open the needle gate for every later change).
+     */
+    private static void scan(JsonElement e, String path, long latest) {
         if (e.isJsonNull()) {
             throw new IllegalArgumentException(path + " is null: give the key a value or leave it out");
         }
         if (e.isJsonArray()) {
             for (int i = 0; i < e.getAsJsonArray().size(); i++) {
-                scan(e.getAsJsonArray().get(i), path + "[" + i + "]");
+                scan(e.getAsJsonArray().get(i), path + "[" + i + "]", latest);
             }
         }
         else if (e.isJsonObject()) {
             for (Map.Entry<String, JsonElement> m : e.getAsJsonObject().entrySet()) {
-                scan(m.getValue(), at(path, m.getKey()));
+                String p = at(path, m.getKey());
+                JsonElement v = m.getValue();
+                scan(v, p, latest);
+                if (!"atMs".equals(m.getKey())) {
+                    continue;
+                }
+                if (!v.isJsonPrimitive() || !v.getAsJsonPrimitive().isNumber() || !Double.isFinite(v.getAsDouble())) {
+                    throw new IllegalArgumentException(p + " must be a time (ms since 1970, a number)");
+                }
+                if (v.getAsDouble() > latest) {
+                    throw new IllegalArgumentException(p + " is later than now + 1 min: a time is ms since 1970");
+                }
             }
         }
     }

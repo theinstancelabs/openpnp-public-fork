@@ -13,6 +13,7 @@ import org.openpnp.instancelabs.dispense.BedModel;
 import org.openpnp.instancelabs.dispense.BedModelStore;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.Photo;
+import org.openpnp.instancelabs.dispense.ZCheck;
 import org.openpnp.spi.Machine;
 
 import com.google.gson.JsonArray;
@@ -291,6 +292,8 @@ final class BedEndpoints {
     /** What {@code after} frees against {@code before} without the new record that frees it, in words. */
     private List<String> freed(BedModel before, BedModel after, String cleared) throws SQLException, ApiException {
         List<String> needs = new ArrayList<>();
+        // what rests on the needle (its tip end, K) is measured with the needle on now (review 2 MINOR 4)
+        Long needle = ctx.svc().getConfig().needleChangedAtMs;
         JsonObject bj = before.json(), aj = after.json();
         for (BedModel.Obj o : before.obstacles()) {
             if (BedModel.BED_ID.equals(o.id) || o.id.equals(cleared)) {
@@ -313,20 +316,20 @@ final class BedEndpoints {
             JsonObject om = member(find(bj, "objects", o.id), "measured"), nm = member(find(aj, "objects", o.id),
                     "measured");
             if (top) {
-                need(needs, "objects '" + o.id + "'.measured.top", member(om, "top"), member(nm, "top"));
+                need(needs, "objects '" + o.id + "'.measured.top", member(om, "top"), member(nm, "top"), null);
             }
             if (xy) {
-                need(needs, "objects '" + o.id + "'.measured.xy", member(om, "xy"), member(nm, "xy"));
+                need(needs, "objects '" + o.id + "'.measured.xy", member(om, "xy"), member(nm, "xy"), null);
             }
         }
         JsonObject bp = bj.getAsJsonObject("bed").getAsJsonObject("plane");
         JsonObject ap = aj.getAsJsonObject("bed").getAsJsonObject("plane");
         if (!bp.equals(ap) || !after.obstacles().get(0).poly.contains(before.obstacles().get(0).poly)) {
-            need(needs, "bed.plane", bp, ap);
+            need(needs, "bed.plane", bp, ap, null);
         }
         if (!bj.get("seesaw").equals(aj.get("seesaw"))) {
             need(needs, "seesaw.measured", member(bj.getAsJsonObject("seesaw"), "measured"), member(aj.getAsJsonObject(
-                    "seesaw"), "measured"));
+                    "seesaw"), "measured"), needle);
         }
         for (BedModel.Tool t : before.tools()) {
             BedModel.Tool n = after.tool(t.id);
@@ -335,8 +338,9 @@ final class BedEndpoints {
                 continue;
             }
             // a new tipEnd.atMs too: it lets the needle prove again after a needle change (#66 review MAJOR 3)
-            boolean freed = !t.moves.equals(n.moves) || Double.compare(t.tipDx, n.tipDx) != 0 || Double.compare(t.tipDy,
-                    n.tipDy) != 0 || !Objects.equals(t.tipEndAtMs, n.tipEndAtMs);
+            boolean tipEnd = Double.compare(t.tipDx, n.tipDx) != 0 || Double.compare(t.tipDy, n.tipDy) != 0
+                    || !Objects.equals(t.tipEndAtMs, n.tipEndAtMs);
+            boolean freed = !t.moves.equals(n.moves) || tipEnd;
             for (BedModel.Layer l : t.layers) {
                 BedModel.Layer nl = null;
                 for (BedModel.Layer x : n.layers) {
@@ -348,7 +352,7 @@ final class BedEndpoints {
             }
             if (freed) {
                 need(needs, "tools '" + t.id + "'.measured", member(find(bj, "tools", t.id), "measured"), member(find(aj,
-                        "tools", t.id), "measured"));
+                        "tools", t.id), "measured"), tipEnd && "needle".equals(n.moves) ? needle : null);
             }
         }
         if (after.zMarginMm < before.zMarginMm || after.contactDepthMm > before.contactDepthMm) {
@@ -358,8 +362,12 @@ final class BedEndpoints {
         return needs;
     }
 
-    /** Adds what is missing for {@code rec} to be a new measurement record at {@code path}. */
-    private void need(List<String> needs, String path, JsonObject old, JsonObject rec) throws SQLException {
+    /**
+     * Adds what is missing for {@code rec} to be a new measurement record at {@code path}; {@code needle}: the needle
+     * change its evidence must also be from since (null: none).
+     */
+    private void need(List<String> needs, String path, JsonObject old, JsonObject rec, Long needle)
+            throws SQLException {
         String problem;
         if (rec == null) {
             problem = "there is none";
@@ -374,8 +382,11 @@ final class BedEndpoints {
             problem = "it is not later than the stored record: a new measurement has its own time";
         }
         else {
-            problem = evidence(rec.get("evidence"), old != null && number(old, "atMs") ? Long.valueOf(Math.round(old
-                    .get("atMs").getAsDouble())) : null, "the stored record");
+            Long stored = old != null && number(old, "atMs") ? Long.valueOf(Math.round(old.get("atMs").getAsDouble()))
+                    : null;
+            boolean since = needle != null && (stored == null || needle > stored);
+            problem = evidence(rec.get("evidence"), since ? needle : stored, since ? "the needle change at "
+                    + ZCheck.clock(needle) : "the stored record");
         }
         if (problem != null) {
             needs.add("frees space: a new measurement record at " + path + " is needed (" + problem + ")");

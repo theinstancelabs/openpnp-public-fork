@@ -129,7 +129,15 @@ public class BedModelTest {
             new Bad("the needle's tip layer above its tip", j -> layer(j, 1, 0).addProperty("aboveTipMm", 0.5),
                     "tools[1] (needle): a tool on the see-saw needs its tip"),
             new Bad("the needle's tip layer at the head", j -> layer(j, 1, 0).addProperty("at", "head"),
-                    "tools[1] (needle): a tool on the see-saw needs its tip"));
+                    "tools[1] (needle): a tool on the see-saw needs its tip"),
+            // no time later than now + 1 min: microseconds sent as milliseconds would open the needle gate for good
+            // (review 2 MINOR 4)
+            new Bad("a tip end measured in the future", j -> tool(j, 1).getAsJsonObject("tipEnd").addProperty("atMs",
+                    System.currentTimeMillis() + 120000), "tools[1].tipEnd.atMs is later than now + 1 min"),
+            new Bad("a record's time in microseconds", j -> obj(j, 0).getAsJsonObject("measured").getAsJsonObject(
+                    "top").addProperty("atMs", System.currentTimeMillis() * 1000),
+                    "objects[0].measured.top.atMs is later than now + 1 min"),
+            new Bad("a time that is text", j -> plane(j).addProperty("atMs", "0"), "bed.plane.atMs must be a time"));
 
     /** Each of {@link #BAD_FILES} is refused with its own words; every case is run, the wrong ones listed together. */
     @Test
@@ -149,6 +157,9 @@ public class BedModelTest {
             }
         }
         assertEquals("", String.join("\n", wrong));
+        JsonObject ahead = BedFixture.json();
+        tool(ahead, 1).getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis() + 30000);
+        assertNotNull(BedModel.parse(ahead), "30 s ahead (another host's clock) loads");
     }
 
     /** U2: N1 and the needle below, in and above their knees, on the tilted plane, each at its own tip. */

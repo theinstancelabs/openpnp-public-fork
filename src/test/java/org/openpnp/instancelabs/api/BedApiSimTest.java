@@ -394,6 +394,45 @@ public class BedApiSimTest {
         assertEquals(12.5, object("holder-left").get("topZ").getAsDouble(), 0);
     }
 
+    /**
+     * A record's times (review 2 MINOR 4): an atMs later than now + 1 min is refused (400: microseconds sent as
+     * milliseconds would open the needle gate for good), and after a needle change the needle's new tip end and the
+     * see-saw's K (its record) need evidence from since the change.
+     */
+    @Test
+    public void aRecordsTimesAreBounded() throws Exception {
+        start(true);
+        String early = evidence();
+        Thread.sleep(5);
+        ok("POST", "/api/needle/changed", "{\"why\":\"bed test\"}");
+        JsonObject needle = BedFixture.json().getAsJsonArray("tools").get(1).getAsJsonObject();
+        needle.getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis());
+        needle.add("measured", new JsonParser().parse(record("bottom camera", early)));
+        refused(409, "measurement-needed", "older than the needle change", call("PUT", "/api/bed/tools/needle",
+                needle.toString(), UI));
+        JsonObject seesaw = BedFixture.json().getAsJsonObject("seesaw");
+        seesaw.getAsJsonObject("K").addProperty("raw", 65.2);
+        seesaw.add("measured", new JsonParser().parse(record("n1 and needle touch", early)));
+        refused(409, "measurement-needed", "older than the needle change", call("PUT", "/api/bed/seesaw",
+                seesaw.toString(), UI));
+        int v = version();
+        long micros = System.currentTimeMillis() * 1000;
+        needle.getAsJsonObject("tipEnd").addProperty("atMs", micros);
+        JsonObject rec = new JsonParser().parse(record("bottom camera", evidence())).getAsJsonObject();
+        rec.addProperty("atMs", micros);
+        needle.add("measured", rec);
+        refused(400, "bad-request", "later than now + 1 min", call("PUT", "/api/bed/tools/needle", needle.toString(),
+                UI));
+        assertEquals(v, version(), "nothing written");
+        // evidence from since the change: both written
+        needle.getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis());
+        needle.add("measured", new JsonParser().parse(record("bottom camera", evidence())));
+        ok("PUT", "/api/bed/tools/needle", needle.toString());
+        seesaw.add("measured", new JsonParser().parse(record("n1 and needle touch", evidence())));
+        ok("PUT", "/api/bed/seesaw", seesaw.toString());
+        assertEquals(v + 2, version());
+    }
+
     /** Writes are the lock holder's and never while anything moves. */
     @Test
     public void writesAreTheHoldersAndNeverWhileMoving() throws Exception {
