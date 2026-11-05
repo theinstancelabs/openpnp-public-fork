@@ -68,6 +68,10 @@ public final class HeightSwitch {
         /** The coarse step: 0.25 for N1, 0.10 for the needle. */
         public double coarseMm;
         public int presses;
+        /** Raw Z's soft limits {low, high} (NaN: that side open), null: none: the window lies inside them. */
+        public double[] zLimits;
+        /** Raw Z's safe zone {low, high} (NaN: that side open), null: none: travel Z lies in it. */
+        public double[] safeZone;
     }
 
     /** What a measure found. {@code why}: why nothing (or not everything) was found; {@code refused}: a refusal. */
@@ -150,7 +154,10 @@ public final class HeightSwitch {
         return r;
     }
 
-    /** Why the plan's window is refused before any line (the wrong order, wider than 2 mm, above travel), or null. */
+    /**
+     * Why the plan's window is refused before any line (the wrong order, wider than 2 mm, above travel, outside Z's
+     * soft limits; travel Z outside Z's safe zone), or null.
+     */
     static String windowProblem(Plan p) {
         double span = p.down * (p.zFloor - p.zStart);
         if (!(span > 0)) {
@@ -165,7 +172,27 @@ public final class HeightSwitch {
             return String.format(Locale.ROOT, "the start (Z %.3f) lies above the travel height (Z %.3f)", p.zStart,
                     p.travelZ);
         }
+        for (double z : new double[] {p.zStart, p.zFloor}) {
+            if (outside(p.zLimits, z)) {
+                return String.format(Locale.ROOT, "Z %.3f lies outside Z's soft limits %s: the window from Z %.3f to "
+                        + "%.3f must lie inside them", z, band(p.zLimits), p.zStart, p.zFloor);
+            }
+        }
+        if (outside(p.safeZone, p.travelZ)) {
+            return String.format(Locale.ROOT, "the travel Z %.3f lies outside Z's safe zone %s: check travelSafeZMm",
+                    p.travelZ, band(p.safeZone));
+        }
         return null;
+    }
+
+    /** {@code z} lies outside {@code b} ({low, high}, NaN: that side open; null: no band). */
+    private static boolean outside(double[] b, double z) {
+        return b != null && (z < b[0] - 1e-6 || z > b[1] + 1e-6);
+    }
+
+    private static String band(double[] b) {
+        return (Double.isNaN(b[0]) ? "-" : String.format(Locale.ROOT, "%.3f", b[0])) + ".."
+                + (Double.isNaN(b[1]) ? "-" : String.format(Locale.ROOT, "%.3f", b[1]));
     }
 
     private static void presses(Io io, Plan p, Result r) throws Exception {

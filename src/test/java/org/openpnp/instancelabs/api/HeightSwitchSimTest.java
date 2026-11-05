@@ -22,7 +22,9 @@ import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.HeightSwitch;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
 import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.machine.reference.axis.ReferenceControllerAxis;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.Length;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 
@@ -268,6 +270,31 @@ public class HeightSwitchSimTest {
         }
         assertTrue(deepest <= NEEDLE_TRIP + 0.10 + 1e-9, "at most one coarse step past the trip: " + moves());
         assertEquals(31.5, sim.server.position('Z'), 1e-9);
+    }
+
+    /**
+     * Review MINOR 7 through the engine: a window outside Z's soft limits (N1 zStart 1, zFloor -1 under a low limit of
+     * 0) and a travel Z outside Z's safe zone are refused with a plain reason before anything moves.
+     */
+    @Test
+    public void aWindowOutsideTheSoftLimitsOrATravelZOutsideTheSafeZoneIsRefused() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        for (org.openpnp.spi.Axis a : sim.machine.getAxes()) {
+            if (a instanceof ReferenceControllerAxis && "Z".equals(((ReferenceControllerAxis) a).getLetter())) {
+                ((ReferenceControllerAxis) a).setSoftLimitLow(new Length(0, LengthUnit.Millimeters));
+                ((ReferenceControllerAxis) a).setSoftLimitLowEnabled(true);
+            }
+        }
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":1,\"zFloor\":-1}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z -1.000 lies outside Z's soft limits 0.000..-"), lastBody);
+        assertEquals(new ArrayList<String>(), moves(), "nothing moved");
+        ok("PUT", "/api/config", "{\"travelSafeZMm\":40}"); // N2 at 40: raw Z 23 (z2 = 63 - raw)
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("travel Z 23.000 lies outside Z's safe zone 26.500..36.500"), lastBody);
+        assertEquals(new ArrayList<String>(), moves(), "nothing moved");
     }
 
     @Test

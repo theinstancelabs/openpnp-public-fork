@@ -396,6 +396,36 @@ public class HeightSwitchTest {
     }
 
     /**
+     * Review MINOR 7 and 9: refused before any line, each with a plain reason: a window outside Z's soft limits (N1
+     * zStart 1, zFloor -1 under a low limit of 0; the needle past a high one), a travel Z outside Z's safe zone, a
+     * start above the travel height. An open side limits nothing.
+     */
+    @Test
+    public void aWindowOutsideTheLimitsATravelZOutsideTheSafeZoneOrAStartAboveTravelIsRefused() throws Exception {
+        HeightSwitch.Plan low = plan("n1", -1, 1.0, -1.0, 5);
+        low.zLimits = new double[] {0, 63};
+        String why = HeightSwitch.windowProblem(low);
+        assertTrue(why != null && why.contains("Z -1.000 lies outside Z's soft limits 0.000..63.000"), why);
+        FakeSwitch sw = new FakeSwitch(0.0, -1);
+        HeightSwitch.Result r = HeightSwitch.measure(sw, low);
+        assertTrue(r.refused && sw.lines.isEmpty(), "nothing sent: " + sw.lines);
+        low.zLimits = new double[] {Double.NaN, 63};
+        assertNull(HeightSwitch.windowProblem(low), "no low limit");
+        HeightSwitch.Plan high = plan("needle", 1, 62.0, 63.5, 5);
+        high.zLimits = new double[] {0, 63};
+        why = HeightSwitch.windowProblem(high);
+        assertTrue(why != null && why.contains("Z 63.500 lies outside"), why);
+        HeightSwitch.Plan travel = plan("n1", -1, 13.0, 11.0, 5);
+        travel.safeZone = new double[] {26.5, 30};
+        why = HeightSwitch.windowProblem(travel);
+        assertTrue(why != null && why.contains("travel Z 31.500 lies outside Z's safe zone 26.500..30.000"), why);
+        travel.safeZone = new double[] {26.5, Double.NaN};
+        assertNull(HeightSwitch.windowProblem(travel));
+        why = HeightSwitch.windowProblem(plan("n1", -1, 32.0, 31.0, 5));
+        assertTrue(why != null && why.contains("the start (Z 32.000) lies above the travel height (Z 31.500)"), why);
+    }
+
+    /**
      * The config keeps each tool's accepted trip and the forbidden circle's radius (Gson-saved): a file from before
      * them loads with none and the default radius, a null is put right, a copy keeps them, the radius is bounded.
      */

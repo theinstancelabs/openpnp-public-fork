@@ -5028,6 +5028,8 @@ public final class DispenseService {
         p.zFloor = zFloor != null ? zFloor : last.tripRawZ + p.down * 0.5;
         p.coarseMm = needle ? 0.10 : 0.25;
         p.presses = res.presses;
+        p.zLimits = mapper.zSoftLimitsRaw();
+        p.safeZone = mapper.zSafeZoneRaw();
         // refused here, a measure that returns has sent its lines and ended at travel height over the switch
         String bad = HeightSwitch.windowProblem(p);
         if (bad != null) {
