@@ -12,6 +12,9 @@ import javax.imageio.ImageIO;
 
 import org.junit.jupiter.api.Test;
 import org.opencv.core.Mat;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
+import org.openpnp.instancelabs.dispense.DotImager;
+import org.openpnp.instancelabs.dispense.NeedleEndMeasure;
 
 /**
  * BR-94: the needle's end and N1 from below, in Process's method. On np1.py's real frames (the fixtures' README) the end,
@@ -71,6 +74,124 @@ public class EndFromBelowTest {
         assertEquals(19.729, 19.77 + d[0], 0.001);
         assertEquals(-72.248, -72.184 + d[1], 0.001);
         assertTrue(Math.hypot(d[0], d[1]) <= 0.08, Math.hypot(d[0], d[1]) + " mm from OFF0");
+    }
+
+    /**
+     * A raw-orientation crop at (x0, y0) in a black 1920 x 1080 frame of {@code type} (the crop's bands), turned over its
+     * x-axis as OpenPnP shows it; the samples copied as they are (a grey image's setRGB would change them).
+     */
+    static BufferedImage openPnp(BufferedImage crop, int x0, int y0, int type) {
+        BufferedImage f = new BufferedImage(1920, 1080, type);
+        int[] px = null;
+        for (int y = 0; y < crop.getHeight(); y++) {
+            for (int x = 0; x < crop.getWidth(); x++) {
+                px = crop.getRaster().getPixel(x, y, px);
+                f.getRaster().setPixel(x0 + x, 1079 - (y0 + y), px);
+            }
+        }
+        return f;
+    }
+
+    /**
+     * Review MINOR 5: the camera's pixel pinned on real frames. np1.py's six frames and the clean check's (its first,
+     * tipclean.py's np1_0) as OpenPnP shows them (flipped), through the engine's measure with the default settings
+     * (centrePx, searchMm, the top-hat, the follow window, the checks): the end np1.py found, OFF_true (19.729,
+     * -72.248) from OFF0 (19.77, -72.184), and tipclean.py's verdict on that frame. Process's raw BC (544.2) unflipped
+     * would put the end 0.6 mm off.
+     */
+    @Test
+    public void np1sFramesFlippedGiveItsEndThroughTheDefaultSettings() throws Exception {
+        BufferedImage[] f = new BufferedImage[FRAMES.length + 1];
+        for (int i = 0; i < FRAMES.length; i++) {
+            f[i] = openPnp(load(FRAMES[i]), X0, Y0, BufferedImage.TYPE_3BYTE_BGR);
+        }
+        f[FRAMES.length] = openPnp(TipCleanTest.frame("np1_0"), 0, 0, BufferedImage.TYPE_3BYTE_BGR);
+        NeedleEndMeasure.Plan p = new NeedleEndMeasure.Plan();
+        p.s = new DispenseConfig.NeedleEndSettings();
+        p.s.needleRawZ = new java.util.ArrayList<>(java.util.Arrays.asList(40.4)); // np1's one height
+        p.n1 = false;
+        p.travelZ = 31.5;
+        p.nominalDx = 19.77;
+        p.nominalDy = -72.184;
+        p.clean = new TipClean.Limits();
+        p.setupKey = "plastic-25g-taper";
+        int[] n = {0};
+        NeedleEndMeasure.Result r = NeedleEndMeasure.measure(new NeedleEndMeasure.Io() {
+            @Override
+            public void send(String line) {
+            }
+
+            @Override
+            public DotImager.Frame capture() {
+                return new DotImager.Frame(f[n[0]++], 0.0667, 0.0656, 0, 0); // the machine's units per pixel
+            }
+        }, p);
+        assertTrue(r.ok, r.why);
+        assertEquals(FRAMES.length + 1, n[0]);
+        DispenseConfig.EndHeight h = r.end.heights.get(0);
+        assertEquals(19.729, h.dxMm, 0.0015, "np1.json's OFF_true");
+        assertEquals(-72.248, h.dyMm, 0.0015);
+        assertEquals(15.517, h.pxPerMm, 0.005);
+        assertEquals(0.150, h.residualPx, 0.005);
+        assertEquals(0.149, h.driftPx, 0.005);
+        assertTrue(h.peakToSd >= 10, "check (a) at its default: " + h.peakToSd);
+        assertTrue(r.clean.ok, r.clean.why);
+        assertEquals(140, r.clean.peak, 0.5);
+        assertEquals(0.160, r.clean.spread, 0.003);
+        assertEquals(0.652, r.clean.red, 0.003);
+    }
+
+    /**
+     * Review MINOR 5: N1 followed on Process's real frames (p34/t2_px25: N1 at raw 19, 22 and 25, steps of 5 mm, the
+     * engine's heights and step; the fixtures' README) as OpenPnP shows them (flipped), with the default settings'
+     * template, search and steps: the scales tools/parallax_fit.py gives on the same captures, and with that run's
+     * needle scales K by parallax as parallax_k.py's formula gives it on them (and on all three captures a point).
+     */
+    @Test
+    public void n1OnProcesssFramesGivesParallaxFitsScalesAndK() throws Exception {
+        DispenseConfig.NeedleEndSettings s = new DispenseConfig.NeedleEndSettings();
+        int cx = (int) Math.round(s.centrePx.get(0)), cy = (int) Math.round(s.centrePx.get(1));
+        String[] points = {"c0", "xp", "xm", "yp", "ym", "c1"};
+        double[] want = {17.9173, 16.6039, 15.4549}, n1z = new double[3], k = new double[3];
+        double[][] steps = new double[STEPS.length][];
+        for (int i = 0; i < STEPS.length; i++) {
+            steps[i] = new double[] {s.n1StepMm * STEPS[i][0], s.n1StepMm * STEPS[i][1]};
+        }
+        for (int hgt = 0; hgt < 3; hgt++) {
+            n1z[hgt] = s.n1RawZ.get(hgt);
+            BufferedImage[] f = new BufferedImage[points.length];
+            for (int i = 0; i < points.length; i++) {
+                String name = String.format(java.util.Locale.ROOT, "n1_%.0f_%s", n1z[hgt], points[i]);
+                try (InputStream in = EndFromBelowTest.class.getResourceAsStream("/org/openpnp/instancelabs/vision/"
+                        + "n1-from-below/" + name + ".png")) {
+                    assertNotNull(in, name);
+                    f[i] = openPnp(ImageIO.read(in), 782, 368, BufferedImage.TYPE_BYTE_GRAY);
+                }
+            }
+            Mat t = EndFromBelow.template(f[0], cx, cy, s.n1TemplateHalfPx);
+            double[][] px = new double[points.length][];
+            try {
+                for (int i = 0; i < points.length; i++) {
+                    EndFromBelow.Track tk = EndFromBelow.track(f[i], t, cx, cy, s.n1TemplateHalfPx, s.n1SearchPx);
+                    assertTrue(tk.score > 0.7, points[i] + " at raw " + n1z[hgt] + ": score " + tk.score);
+                    px[i] = new double[] {tk.x, tk.y};
+                }
+            }
+            finally {
+                t.release();
+            }
+            EndFromBelow.StepFit fit = EndFromBelow.fit(steps, px);
+            k[hgt] = fit.pxPerMm();
+            assertEquals(want[hgt], k[hgt], 0.005, "N1's k at raw " + n1z[hgt]);
+            assertTrue(fit.residualPx < 0.3, "residual " + fit.residualPx);
+        }
+        EndFromBelow.Parallax par = EndFromBelow.parallaxK(n1z, k, new double[] {36, 39, 42}, new double[] {
+            14.087065703958002, 15.042154279537822, 16.142743877556});
+        assertEquals(65.131, par.k, 0.005, "parallax_k.py's formula on these captures");
+        assertEquals(65.129, par.k, 0.01, "k_result.json, three captures a point");
+        assertEquals(0.098, par.spread, 0.01);
+        assertEquals(674.7, par.fPx, 2);
+        assertEquals(1.0166, par.needleMmPerRawMm, 0.002);
     }
 
     /** A grey frame with sensor noise. */

@@ -451,6 +451,29 @@ public class NeedleEndMeasureTest {
         assertTrue(p.stream().anyMatch(x -> x.contains("n1SearchPx")), p.toString());
     }
 
+    /**
+     * Review MINOR 5: the clean check's found and z failing through the end measure are "the end was not found (light
+     * or focus)", measure again, never paste: a peak under its limit, then a scale outside its range.
+     */
+    @Test
+    public void foundAndZFailingAreTheEndNotFound() throws Exception {
+        for (String check : new String[] {"found", "z"}) {
+            FromBelowScene sc = new FromBelowScene(18);
+            Camera cam = new Camera(sc);
+            NeedleEndMeasure.Plan p = plan(sc, sc.endDx, sc.endDy);
+            if ("found".equals(check)) {
+                p.clean.peakMin = 1000;
+            }
+            else {
+                p.clean.kLow = 17; // the needle at raw 40.4 is some 15.6 px/mm
+                p.clean.kHigh = 18;
+            }
+            NeedleEndMeasure.Result r = NeedleEndMeasure.measure(cam, p);
+            refused(r, NeedleEndMeasure.NOT_FOUND, "the end was not found (light or focus): " + check + ":", cam);
+            assertEquals(check, r.clean.failed);
+        }
+    }
+
     /** A room-lit frame (the ring's glow not white): the clean check's light, the end not found (light or focus). */
     @Test
     public void aRingThatIsNotWhiteIsTheLight() throws Exception {
