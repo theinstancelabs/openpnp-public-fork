@@ -191,13 +191,17 @@ public class ControlApiSimTest {
         refused(409, "Home first", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
     }
 
-    /** The needle's frame as the bench has it (ApiServerSimTest.setPlaces): contact over a 5.5 surface at Z 2.91. */
+    /**
+     * The needle's frame as the bench has it (ApiServerSimTest.setPlaces): contact over a 5.5 surface at Z 2.91, and
+     * where its tip lands checked (on N2).
+     */
     void needleFrameAndBlank() throws Exception {
         ok(call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}",
                 UI));
         ok(call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}", UI));
         ok(call("PUT", "/api/surfaces/blank", "{\"points\":[[60,30,5.5],[200,30,5.5],[60,50,5.5],[200,50,5.5]]}",
                 UI));
+        landing(0);
     }
 
     /**
@@ -386,6 +390,29 @@ public class ControlApiSimTest {
             instance.set(null, svc);
         }
         assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+    }
+
+    /**
+     * BR-94 follow-up MINOR 2: where the tip lands is the landing in effect, which a needle change keeps (and a change
+     * of N2's head offset makes 0, 0) until a landing check, while a bent tip lands up to 15 mm away. With the frame
+     * recorded again but the landing not checked, the needle's floor is its safe zone.
+     */
+    @Test
+    public void withItsLandingNotCheckedTheNeedleStaysInItsSafeZone() throws Exception {
+        needleFrameAndBlank();
+        ok(call("POST", "/api/needle/changed", "{}", UI));
+        long t = svc.getConfig().needleChangedAtMs;
+        // the new needle's frame recorded again (K is refused after a needle change: both tips on the same spot)
+        ok(call("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":" + t
+                + ",\"surfaceZ\":5.5,\"needleContactZ\":2.91}", UI));
+        ok(call("POST", "/api/needle/offset", "{\"needleChangedAtMs\":" + t + ",\"offsetMm\":-2.59}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":100,\"y\":40}", UI));
+        double z = loc(sim.n2).getZ();
+        refused(409, "where its tip lands is not checked", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}",
+                UI));
+        assertEquals(z, loc(sim.n2).getZ(), 1e-6, "nothing moved");
+        landing(0); // checked: the surface's floor (2.91) again
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
     }
 
     /** #19 review of BR-49, MINOR 7: a real unhomed state (STOP, then Start), not a faked flag. */

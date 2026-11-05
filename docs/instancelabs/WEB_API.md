@@ -573,9 +573,11 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   its safe zone; the camera's `dz`; a Z press while the dispense engine is not running (it holds the floors; a
   configuration load restarts it); a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
   always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current frame (anchored and
-  touched off since the needle change, and no failed Z check of this home), not below the surface where its tip
-  lands (N2 + its landing and trim) nor the one under N2 (the higher holds) + its offset, nor its I4 floor, without
-  one not below its safe zone; over the height switch (BR-94: its place's circle of
+  touched off since the needle change, and no failed Z check of this home) and where its tip lands checked
+  (`needle.xyChecked`: a needle change keeps the old tip's landing, and a change of N2's head offset makes it 0, 0,
+  until a landing check), not below the surface where its tip lands (N2 + its landing and trim) nor the one under N2
+  (the higher holds) + its offset, nor its I4 floor, without them not below its safe zone, anywhere (409 names which
+  is missing); over the height switch (BR-94: its place's circle of
   `outputZones.heightSwitchRadiusMm`; the needle where its tip lands) neither tool below its safe zone, whatever its
   floor, also through the see-saw (only the measure presses it); OpenPnP's soft limits. 404 for an unknown place.
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;

@@ -40,11 +40,11 @@ import com.google.gson.JsonObject;
  * X/Y only with both nozzles at travel height (their safe zones); no Z press without the engine (it holds the
  * floors); a Z press puts BOTH nozzles where OpenPnP's transforms say and holds each to its floor at its own X/Y: N1
  * at most {@value #N1_BELOW_SURFACE_MM} mm below a probed surface under it (it may touch: the by-hand probe), the
- * needle with a current frame not below the surface where its tip lands (N2 + its landing and trim; contact = surface
- * + offset) nor the one under N2, nor its I4 floor, without one not below its safe zone; over the height switch
- * (BR-94: the circle around its place; the needle where its tip lands) neither below its safe zone, whatever its
- * floor. Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel height). A STOP ends either
- * at once; a move that saw one answers 409.</p>
+ * needle with a current frame and its landing checked not below the surface where its tip lands (N2 + its landing and
+ * trim; contact = surface + offset) nor the one under N2, nor its I4 floor, without them not below its safe zone; over
+ * the height switch (BR-94: the circle around its place; the needle where its tip lands) neither below its safe zone,
+ * whatever its floor. Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel height). A STOP
+ * ends either at once; a move that saw one answers 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
@@ -320,11 +320,12 @@ final class ControlEndpoints {
 
     /**
      * The needle with its tip landing at (x, y): with its frame current (anchored and touched off since the last needle
-     * change), not below the surface there (needle contact = surface + offset) nor its I4 floor; without, not below its
-     * safe zone.
+     * change) and where its tip lands checked, not below the surface there (needle contact = surface + offset) nor its
+     * I4 floor; without, not below its safe zone, anywhere (over the switch too: the old tip's landing, or 0, 0 after
+     * N2's head offset changed, puts (x, y) up to 15 mm off for a bent tip).
      */
     private static double needleFloor(DispenseService svc, HeadMountable needle, double x, double y) {
-        if (!needleFrameCurrent(svc)) {
+        if (!needleFrameCurrent(svc) || !svc.isNeedleXyChecked()) {
             return safeLow(needle);
         }
         DispenseConfig c = svc.getConfig();
@@ -337,8 +338,12 @@ final class ControlEndpoints {
     }
 
     private static String needleFloorWhy(DispenseService svc) {
-        return needleFrameCurrent(svc) ? "the surface under its tip or under N2, or its I4 floor"
-                : "its safe zone: its Z frame is not set for this needle, or this home's Z check failed";
+        if (!needleFrameCurrent(svc)) {
+            return "its safe zone: its Z frame is not set for this needle, or this home's Z check failed";
+        }
+        return svc.isNeedleXyChecked() ? "the surface under its tip or under N2, or its I4 floor"
+                : "its safe zone: where its tip lands is not checked (a needle change, or N2's head offset changed): "
+                        + "check where it lands";
     }
 
     /**
