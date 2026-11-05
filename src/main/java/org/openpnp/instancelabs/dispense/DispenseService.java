@@ -5185,6 +5185,8 @@ public final class DispenseService {
         trip.rangeMm = res.rangeMm;
         trip.sdMm = res.sdMm;
         trip.presses = res.trips.size();
+        trip.releases = new ArrayList<>(res.releases);
+        trip.differentialMm = res.differentialMm;
         trip.atMs = res.atMs;
         trip.homeAtMs = res.homeAtMs;
         DispenseConfig c = cfg.copy();
