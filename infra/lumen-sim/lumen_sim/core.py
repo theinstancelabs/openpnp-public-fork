@@ -141,7 +141,8 @@ class Simulator:
         by then (an ok a delay_ok holds, and all queued behind it) and pending injections are dropped. DFU also takes
         the port away, DFU_DRAIN_S later: flashFirmware() lets USB CDC send what was due (its echo with it) first, and
         a pty master closed at once would take the bytes the host had not read yet with it. The drain counts from t,
-        when the runner sees the halt: a late wake must not take the port before that output is written."""
+        when the caller sees the halt, so a late wake of the runner writes that output before the port goes (a stall
+        of DFU_DRAIN_S between a host read or a control request that sees it and the next write can still lose it)."""
         fw = self.fw
         if not fw.halted or self._halt_seen:
             return

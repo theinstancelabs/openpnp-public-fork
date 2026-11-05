@@ -792,23 +792,27 @@ class RunnerFaults(unittest.TestCase):
     def test_a_late_wake_still_sends_the_m997_echo_before_the_port_goes(self):
         """A loaded host can wake the runner late: the drain counts from when the runner sees the halt, not from the
         halt, else the port goes before the echo is written (here M997 runs at 0.05 behind a G4, the runner wakes at
-        0.3, past 0.05 + flashFirmware()'s 0.1 s)."""
-        with within(self, 5):
-            r = self.runner(personality="il-safety")
-            r.link.open()
-            host = open_raw(r.link.link)
-            self.addCleanup(os.close, host)
-            os.write(host, b"G4 P50\nM997\n")
-            r._service()  # read at 0.0: the dwell ends at 0.05, M997 behind it
-            self.clock[0] = 0.3
-            r._service()
-            self.assertEqual(read_some(host, 0.3), b"ok\necho:M997: entering STM32 DFU bootloader (0483:df11)\n")
-            self.clock[0] = 0.35
-            r._service()
-            self.assertTrue(os.path.lexists(r.link.link))  # 0.1 s from 0.3
-            self.clock[0] = 0.45
-            r._service()
-            self.assertFalse(os.path.lexists(r.link.link))
+        0.3, past 0.05 + flashFirmware()'s 0.1 s). Also with an injection due at 0.15, so run_until's injection loop
+        sees the halt (the drain counts from the runner's 0.3, not the injection's 0.15; the halt drops the injection)."""
+        for inject in (None, {"cmd": "fault", "fault": "inject", "text": "x", "after_s": 0.15}):
+            with self.subTest(inject=inject), within(self, 5):
+                r = self.runner(personality="il-safety")
+                r.link.open()
+                host = open_raw(r.link.link)
+                self.addCleanup(os.close, host)
+                if inject:
+                    self.assertTrue(r._handle_control(inject)["ok"])
+                os.write(host, b"G4 P50\nM997\n")
+                r._service()  # read at 0.0: the dwell ends at 0.05, M997 behind it
+                self.clock[0] = 0.3
+                r._service()
+                self.assertEqual(read_some(host, 0.3), b"ok\necho:M997: entering STM32 DFU bootloader (0483:df11)\n")
+                self.clock[0] = 0.35
+                r._service()
+                self.assertTrue(os.path.lexists(r.link.link))  # 0.1 s from 0.3
+                self.clock[0] = 0.45
+                r._service()
+                self.assertFalse(os.path.lexists(r.link.link))
 
     def test_the_io_log_takes_any_byte_a_model_error_quotes(self):
         """A line the model cannot run is noted in the I/O log with its bytes, whatever they are; the board answers."""
