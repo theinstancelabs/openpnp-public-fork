@@ -126,6 +126,18 @@ public class RecordingGcodeServer implements AutoCloseable {
     }
 
     /**
+     * BR-93: the link breaks hard, as a USB device that vanishes mid-read: the connection is reset (RST, not an orderly
+     * end), so OpenPnP's next read fails with an IO error instead of reading the link's end.
+     */
+    public void resetLink() throws Exception {
+        Socket s = client;
+        if (s != null) {
+            s.setSoLinger(true, 0);
+            s.close();
+        }
+    }
+
+    /**
      * The controller prints a line of its own, unasked: the il/safety firmware's "Error:host watchdog" when its host
      * watchdog trips while the host is silent.
      */

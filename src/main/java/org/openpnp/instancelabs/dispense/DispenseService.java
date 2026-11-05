@@ -165,6 +165,8 @@ public final class DispenseService {
     /** BR-02: the driver whose received lines this engine watches (the host watchdog's trip), or null. */
     private volatile GcodeDriver watchedDriver;
     private final java.util.function.Consumer<String> tripWatcher = this::watchForWatchdogTrip;
+    /** BR-93: hears the watched driver's lost link on its reader thread. */
+    private final java.util.function.Consumer<GcodeDriver.LinkLoss> linkLossWatcher = this::noteLinkLoss;
     /**
      * BR-02: writes the journal for the reader thread and the streams (a trip heard there, a stream's arm): no "ok"
      * behind it, a STOP's included, and no line waits for an insert.
@@ -396,6 +398,7 @@ public final class DispenseService {
             disablesSeen.set(screwDriver.getDisableCommandsSent());
             motionsSeen.set(screwDriver.getMotionCommandsSent());
             screwDriver.setReceivedLineWatcher(tripWatcher);
+            screwDriver.setLinkLossWatcher(linkLossWatcher);
             watchedDriver = screwDriver;
         }
         if (machine != null) {
@@ -478,6 +481,9 @@ public final class DispenseService {
             GcodeDriver watched = watchedDriver;
             if (watched != null && watched.getReceivedLineWatcher() == tripWatcher) {
                 watched.setReceivedLineWatcher(null);
+            }
+            if (watched != null && watched.getLinkLossWatcher() == linkLossWatcher) {
+                watched.setLinkLossWatcher(null);
             }
             journalWriter.shutdown(); // a write handed on goes on record before the database closes
             try {
@@ -762,7 +768,7 @@ public final class DispenseService {
     }
 
     /** BR-02: the link to the screw's controller is open (unknown counts as open: the safe side). */
-    private boolean screwDriverConnected() {
+    public boolean screwDriverConnected() {
         ReferenceControllerAxis b = screwAxis(configuration.getMachine());
         return b == null || ((GcodeDriver) b.getDriver()).isConnected();
     }
@@ -794,7 +800,7 @@ public final class DispenseService {
     }
 
     /** The screw's GcodeDriver, or null. */
-    private GcodeDriver screwDriver(Machine m) {
+    public GcodeDriver screwDriver(Machine m) {
         ReferenceControllerAxis b = screwAxis(m);
         return b == null ? null : (GcodeDriver) b.getDriver();
     }
@@ -807,6 +813,46 @@ public final class DispenseService {
             }
         }
         return null;
+    }
+
+    /**
+     * BR-75: the lines of a DISABLE_COMMAND a planned stop sends: every command but the ones that switch the screw's
+     * motor off (an M18/M84 naming {@code letter} or no axis), trimmed; blank and comment-only lines dropped.
+     */
+    public static List<String> plannedStopLines(String disableCommand, String letter) {
+        List<String> l = new ArrayList<>();
+        for (String line : disableCommand == null ? new String[0] : disableCommand.split("\n")) {
+            if (!ControllerCommands.normalize(line).isEmpty() && !ControllerCommands.switchesScrewOff(line, letter)) {
+                l.add(line.trim());
+            }
+        }
+        return l;
+    }
+
+    /**
+     * BR-75: a planned stop on the machine thread. With the machine started, {@code disable} (OpenPnP's Stop) runs with
+     * the screw driver's disable a planned stop's ({@link GcodeDriver#disableAsPlannedStop}): STOP's order, its disable
+     * listeners on the open link, then {@link #plannedStopLines} instead of the DISABLE_COMMAND, and the link closes, so
+     * the screw's motor stays powered and no switch-off goes on record. With the machine off, a link kept open
+     * (connection-keep-alive) closes without a line: OpenPnP's quit would send the DISABLE_COMMAND on it. Returns what
+     * the screw's controller acknowledged, or null with the machine off; throws, sending nothing, when the screw's axis
+     * is not a controller axis of a G-code driver.
+     */
+    public GcodeDriver.PlannedStop plannedStop(Machine m, Runnable disable) {
+        ReferenceControllerAxis b = screwAxis(m);
+        if (b == null) {
+            throw new IllegalStateException("the screw's axis '" + cfg.bAxisName + "' is not a controller axis of a "
+                    + "G-code driver: which line switches its motor off is not known");
+        }
+        GcodeDriver d = (GcodeDriver) b.getDriver();
+        if (!m.isEnabled()) {
+            if (d.isConnected()) {
+                d.disconnect();
+            }
+            return null;
+        }
+        return d.disableAsPlannedStop(String.join("\n", plannedStopLines(d.getCommand(null,
+                GcodeDriver.CommandType.DISABLE_COMMAND), b.getLetter())), disable);
     }
 
     /**
@@ -861,6 +907,16 @@ public final class DispenseService {
         if (ControllerCommands.isHostWatchdogTrip(line)) {
             // in memory now, in the wire's order with the arms and resets around it; never this thread's insert
             controllerReset.watchdogTripHeard("the controller's host watchdog tripped: " + line.trim());
+            flushLater();
+        }
+    }
+
+    /**
+     * BR-93: the controller's link was lost (heard on the driver's reader thread, or found by a status read or a route):
+     * on record once as a possible reset ({@link ControllerReset#linkLost}), written soon after (no I/O on that thread).
+     */
+    public void noteLinkLoss(GcodeDriver.LinkLoss l) {
+        if (controllerReset.linkLost(l.atMs, ControllerReset.linkLostWhy(l.atMs, l.cause))) {
             flushLater();
         }
     }
@@ -1205,6 +1261,7 @@ public final class DispenseService {
         long now = System.currentTimeMillis();
         if (cfg != null && c.profile.startAngleDeg != cfg.profile.startAngleDeg) {
             c.profile.startAngleSetAtMs = now;
+            c.profile.startAngleChangedAtMs = now;
         }
         if (cfg != null && (c.needleXyTrim.dxMm != cfg.needleXyTrim.dxMm || c.needleXyTrim.dyMm != cfg.needleXyTrim.dyMm)) {
             c.needleXyTrim.setAtMs = now;
@@ -1302,10 +1359,15 @@ public final class DispenseService {
             throw new EngineRefusal(409, "refused", noSet);
         }
         DispenseConfig c = cfg.copy();
+        long now = System.currentTimeMillis();
         if (angleDeg != null) {
             c.profile.startAngleDeg = angleDeg;
+            c.profile.startAngleChangedAtMs = now; // BR-75: a measure; a confirm keeps the records made at the angle
         }
-        c.profile.startAngleSetAtMs = System.currentTimeMillis();
+        else if (c.profile.startAngleChangedAtMs == null) {
+            c.profile.startAngleChangedAtMs = c.profile.startAngleSetAtMs; // settings from before BR-75: its last set
+        }
+        c.profile.startAngleSetAtMs = now;
         updateConfig(c);
         db.event(null, "INFO", "I11", String.format(java.util.Locale.ROOT, "screw start angle %s %.1f deg%s",
                 angleDeg == null ? "confirmed" : "set to", c.profile.startAngleDeg, note == null ? "" : ": " + note));
@@ -1640,14 +1702,12 @@ public final class DispenseService {
             c.parkedTips.put(fromKey, park);
             DispenseProfile prof = e.profile == null ? new DispenseProfile() : e.profile.copy();
             // the start angle belongs to the controller's power-up and the screw, not to the needle (§22.3)
-            prof.startAngleDeg = c.profile.startAngleDeg;
-            prof.startAngleSetAtMs = c.profile.startAngleSetAtMs;
+            prof.withStartAngleOf(c.profile);
             List<String> problems = prof.validate(c);
             if (!problems.isEmpty()) {
                 DispenseProfile reset = new DispenseProfile();
                 reset.name = in.name + " (reset: " + problems.get(0) + ")";
-                reset.startAngleDeg = c.profile.startAngleDeg;
-                reset.startAngleSetAtMs = c.profile.startAngleSetAtMs;
+                reset.withStartAngleOf(c.profile);
                 r.warnings.add("The " + in.name + "'s dispense profile no longer validates (" + problems.get(0)
                         + "): it was reset to the default recipe.");
                 prof = reset;
@@ -1745,9 +1805,7 @@ public final class DispenseService {
             DispenseConfig c = cfg.copy();
             DispenseConfig b = u.before;
             c.tip = b.tip;
-            c.profile = b.profile.copy();
-            c.profile.startAngleDeg = cfg.profile.startAngleDeg;
-            c.profile.startAngleSetAtMs = cfg.profile.startAngleSetAtMs;
+            c.profile = b.profile.copy().withStartAngleOf(cfg.profile);
             c.needleAnchor = b.needleAnchor;
             c.needleZOffsetMm = b.needleZOffsetMm;
             c.needleZOffsetSetAtMs = b.needleZOffsetSetAtMs;
@@ -1758,9 +1816,7 @@ public final class DispenseService {
             DispenseConfig.ParkedTip nowParked = c.parkedTips.get(b.tip.key);
             DispenseConfig.DoseAnchor nowOn = c.doseAnchor;
             // the recipe set for the incoming tip while it was on (the start angle aside: the machine's, it stays on)
-            DispenseProfile recipe = cfg.profile.copy();
-            recipe.startAngleDeg = u.after.profile.startAngleDeg;
-            recipe.startAngleSetAtMs = u.after.profile.startAngleSetAtMs;
+            DispenseProfile recipe = cfg.profile.copy().withStartAngleOf(u.after.profile);
             boolean recipeSet = !new Gson().toJson(recipe).equals(new Gson().toJson(u.after.profile));
             // the undo puts back the mount, nothing else: the two entries it changed; the other tips keep theirs as
             // they are now (a setup added since, BR-85 an anchor or a recipe set since)
@@ -1783,9 +1839,7 @@ public final class DispenseService {
             if (off != null) {
                 off.doseAnchor = nowOn;
                 if (recipeSet) {
-                    recipe.startAngleDeg = off.profile.startAngleDeg;
-                    recipe.startAngleSetAtMs = off.profile.startAngleSetAtMs;
-                    off.profile = recipe;
+                    off.profile = recipe.withStartAngleOf(off.profile);
                 }
             }
             writeConfig(c);
@@ -3612,7 +3666,9 @@ public final class DispenseService {
     /**
      * Needle touch-off by dot ladder at stepped gaps (plan §6.1). Applies the new offset if found and asked. Each dot
      * is found at its spot with the strings cut off; paste at a spot that is not one dot refuses the conclusion
-     * ({@link NeedleTouchOff#analyze}). A pitch with no room between the dots is refused before anything is sent.
+     * ({@link NeedleTouchOff#analyze}). A pitch with no room between the dots, or a start gap that puts the reference
+     * pair after the recipe's skipped dots below {@link NeedleTouchOff#REFERENCE_GAP_MM}, is refused before anything is
+     * sent.
      */
     public Future<TouchOffResult> runNeedleTouchOff(NeedleTouchOff.Request req, boolean apply) throws Exception {
         requireAvailable();
@@ -3626,6 +3682,11 @@ public final class DispenseService {
             String pitch = NeedleTouchOff.pitchProblem(req, c);
             if (pitch != null) {
                 throw refused(pitch);
+            }
+            // BR-85: under the skip this task's analysis leaves out
+            String start = NeedleTouchOff.startGapProblem(req, c.profile.touchOffSkipDots, c.tip.name);
+            if (start != null) {
+                throw refused(start);
             }
             double dotMm = NeedleTouchOff.expectedDotDiameterMm(req, c);
             // BR-85: the reference is judged against the mounted tip's own dots of the dose when it has them
@@ -4997,6 +5058,11 @@ public final class DispenseService {
         if (needle && !tipClean) {
             throw refused("the needle presses the height switch only with a clean tip: paste must never touch it");
         }
+        String unchecked = needle ? needleXyProblem(c) : null;
+        if (unchecked != null) {
+            // an unchecked landing may aim it up to 15 mm off: down to zFloor beside the plunger (#60 review)
+            throw refused("the needle is aimed at the switch by where it lands, and " + unchecked);
+        }
         String unknown = positionUnknownWhy();
         if (unknown != null) {
             throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
@@ -5006,7 +5072,7 @@ public final class DispenseService {
         }
         Long home = homeTracker.getLastHomeAtMs();
         res.homeAtMs = home;
-        DispenseConfig.HeightSwitchTrip last = needle ? c.heightSwitch.needle : c.heightSwitch.n1;
+        DispenseConfig.HeightSwitchTrip last = needle ? HeightSwitch.needleTrip(c) : c.heightSwitch.n1;
         if ((zStart == null || zFloor == null) && (last == null || home == null || !home.equals(last.homeAtMs))) {
             throw refused("zStart and zFloor (raw Z) are needed: " + (needle ? "the needle" : "N1")
                     + " has no accepted trip on the height switch in this home");

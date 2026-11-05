@@ -189,6 +189,10 @@ final class ControlEndpoints {
             try {
                 out = f.get(moveTimeoutMs, TimeUnit.MILLISECONDS);
             }
+            catch (InterruptedException e) {
+                claimed.compareAndSet(false, true); // not started yet: it never runs (nobody hears its answer)
+                throw e;
+            }
             catch (TimeoutException e) {
                 // no f.cancel: a cancelled task left in OpenPnP's queue keeps the machine busy after the task ahead of
                 // it ends (follow-up review); a task the timeout claimed returns null when it runs

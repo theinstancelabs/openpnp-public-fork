@@ -100,7 +100,7 @@ export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/il-webui-pw-br
 # BR-03: §7 of docs/backend-requests.md; the new status fields stubbed, the writes caught: nothing moves)
 # lock and lock-real: who has the machine and Take control (P0, BR-72), the stubbed states, then the engine's own lock
 # (lock presses STOP on the SIM at its end)
-ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups tip-flow jog jog-real reset-home-pressure lock lock-real tip-values clean-pads"
+ALL_SCRIPTS="webui-sim board-import pad-profile tip-setups tip-flow run-flow jog jog-real reset-home-pressure lock lock-real tip-values clean-pads"
 WEBUI_SCRIPTS="${WEBUI_SCRIPTS:-$ALL_SCRIPTS}"
 for name in $WEBUI_SCRIPTS; do
   case " $ALL_SCRIPTS " in *" $name "*) ;; *) echo "WEBUI_SCRIPTS: unknown script '$name' (known: $ALL_SCRIPTS)" >&2; exit 2 ;; esac

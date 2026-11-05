@@ -299,6 +299,44 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             new java.util.concurrent.atomic.AtomicLong();
     /** Instance Labs (BR-02): told of every line the controller sends, on the reader thread; or null. */
     private volatile java.util.function.Consumer<String> receivedLineWatcher;
+    /** Instance Labs (BR-93): the open link's loss, or null; a connect that opens the link again clears it. */
+    private final java.util.concurrent.atomic.AtomicReference<LinkLoss> linkLoss =
+            new java.util.concurrent.atomic.AtomicReference<>();
+    /** Instance Labs (BR-93): told once of each loss, on the thread that found it (the reader's); or null. */
+    private volatile java.util.function.Consumer<LinkLoss> linkLossWatcher;
+    /** Instance Labs (BR-93): counts connects; a reader reports only its own link's loss (a connect closes the old one). */
+    private volatile int linkGeneration;
+
+    /** Instance Labs (BR-93): the open link to the controller was lost unasked: when (epoch ms), and why. */
+    public static final class LinkLoss {
+        public final long atMs;
+        /** In plain words: "the link ended", "a read failed (Read error.)", "the controller left USB: … is gone". */
+        public final String cause;
+
+        LinkLoss(long atMs, String cause) {
+            this.atMs = atMs;
+            this.cause = cause;
+        }
+    }
+
+    /** Instance Labs (BR-75): the planned stop {@link #disableAsPlannedStop} runs on this thread, or none. */
+    private final ThreadLocal<PlannedStop> plannedStop = new ThreadLocal<>();
+
+    /**
+     * Instance Labs (BR-75): a planned stop's disable of this driver: the lines it sends instead of the DISABLE_COMMAND,
+     * and what the controller made of them, in order.
+     */
+    public static final class PlannedStop {
+        final String lines;
+        /** The lines the controller acknowledged. */
+        public final List<String> acknowledged = new ArrayList<>();
+        /** The lines that failed or got no answer in time. */
+        public final List<String> failed = new ArrayList<>();
+
+        PlannedStop(String lines) {
+            this.lines = lines;
+        }
+    }
     
     static public class Line {
         final String line;
@@ -511,9 +549,11 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     public synchronized void connect() throws Exception {
         disconnectRequested = false;
+        linkGeneration++; // Instance Labs (BR-93): the old link's reader, closed below, reports nothing
         getCommunications().setDriverName(getName());
         Logger.debug("[{}] Connect", getCommunications().getConnectionName());
         getCommunications().connect();
+        linkLoss.set(null); // Instance Labs (BR-93): the link is open again
         connected = false;
 
         connectThreads();
@@ -560,6 +600,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     @Override
     public void setEnabled(boolean enabled) throws Exception {
+        PlannedStop planned = enabled ? null : plannedStop.get();
         boolean relink = false;
         if (enabled && connected && keptAliveLinkIsDead()) {
             // Instance Labs (BR-44): a link kept open while the machine was off (connection-keep-alive) died meanwhile,
@@ -588,15 +629,21 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                 motionPending = false;
                 sendGcode(getCommand(null, CommandType.ENABLE_COMMAND));
             }
+            else if (planned != null) {
+                // Instance Labs (BR-75): a planned stop's lines instead of the DISABLE_COMMAND: no M18 B
+                sendEveryLine(planned.lines, planned);
+            }
             else {
                 // Instance Labs (BR-66): the Stop's lines one by one, as the dispense engine's I1 shutdown. A controller
                 // error left pending, or a line that fails or gets no answer, no longer keeps the lines after it (M410
                 // first, then the valves and pumps off) from going out.
                 String disable = getCommand(null, CommandType.DISABLE_COMMAND);
-                sendEveryLine(disable);
+                sendEveryLine(disable, null);
                 if (disable != null && !disable.trim().isEmpty()) {
                     disableCommandsSent.incrementAndGet(); // BR-02: its M18 B may have switched the screw off
                 }
+            }
+            if (!enabled) {
                 try {
                     drainCommandQueue(getTimeoutAtMachineSpeed());
                 }
@@ -609,7 +656,9 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         }
 
         if (connected && !enabled) {
-            if (isInSimulationMode() || !connectionKeepAlive) {
+            // Instance Labs (BR-75): a planned stop closes it, keep-alive or not (OpenPnP's quit would send the
+            // DISABLE_COMMAND on it)
+            if (planned != null || isInSimulationMode() || !connectionKeepAlive) {
                 disconnect();
             }
         }
@@ -1254,6 +1303,25 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         return disableCommandsSent.get();
     }
 
+    /**
+     * Instance Labs (BR-75): runs {@code disable} (OpenPnP's Stop) with this driver's disable on this thread a planned
+     * stop's. STOP's order is kept: the machine's disable listeners act on the open link first (outputs off), then this
+     * driver sends {@code lines} (its DISABLE_COMMAND without the line that switches the screw's motor off) as a Stop
+     * sends its own, not counted in {@link #getDisableCommandsSent}, and closes the link, keep-alive or not. A disable
+     * on another thread (a real STOP) still sends the DISABLE_COMMAND.
+     */
+    public PlannedStop disableAsPlannedStop(String lines, Runnable disable) {
+        PlannedStop p = new PlannedStop(lines);
+        plannedStop.set(p);
+        try {
+            disable.run();
+        }
+        finally {
+            plannedStop.remove();
+        }
+        return p;
+    }
+
     /** Instance Labs (BR-02): how many moves and homes this driver sent for OpenPnP (not raw lines). */
     public long getMotionCommandsSent() {
         return motionCommandsSent.get();
@@ -1269,6 +1337,68 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
 
     public java.util.function.Consumer<String> getReceivedLineWatcher() {
         return receivedLineWatcher;
+    }
+
+    /** Instance Labs (BR-93): {@code w} is told once of each lost link, on the thread that found it. Null removes it. */
+    public void setLinkLossWatcher(java.util.function.Consumer<LinkLoss> w) {
+        linkLossWatcher = w;
+    }
+
+    public java.util.function.Consumer<LinkLoss> getLinkLossWatcher() {
+        return linkLossWatcher;
+    }
+
+    /**
+     * Instance Labs (BR-93): the open link to the controller was lost (its reader ended on an IO error or on the link's
+     * end, a write failed, or the serial port's device path is gone), or null. OpenPnP itself still reads started and
+     * homed until a Stop, so whatever moves the machine asks here first. A connect that opens the link again clears it.
+     */
+    public LinkLoss getLinkLoss() {
+        if (linkLoss.get() == null && connected && devicePathGone(openedSerialDevice())) {
+            linkLost(null); // the reader may not have failed yet
+        }
+        return linkLoss.get();
+    }
+
+    /** Instance Labs (BR-93): a loss goes on record once, unless the link is being closed on purpose. */
+    private void linkLost(String cause) {
+        if (disconnectRequested || SerialPortCommunications.jvmShuttingDown) {
+            return; // a disconnect on purpose ends the reader too, and so does OpenPnP's exit
+        }
+        String port = openedSerialDevice();
+        String usb = devicePathGone(port) ? "the controller left USB: " + port + " is gone" : null;
+        LinkLoss l = new LinkLoss(System.currentTimeMillis(), usb == null ? cause : cause == null ? usb
+                : usb + "; " + cause);
+        if (linkLoss.compareAndSet(null, l)) {
+            Logger.warn("[{}] the link to the controller is lost: {}", getCommunications().getConnectionName(), l.cause);
+            java.util.function.Consumer<LinkLoss> w = linkLossWatcher;
+            if (w != null) {
+                try {
+                    w.accept(l);
+                }
+                catch (RuntimeException e) {
+                    Logger.warn(e, "{} link-loss watcher failed", getName()); // never the reader thread's end
+                }
+            }
+        }
+    }
+
+    /**
+     * Instance Labs (BR-93): the serial device the last connect opened (BR-47 may open another than the configured name:
+     * the board's serial number, its description), or null for other links and in simulation mode.
+     */
+    private String openedSerialDevice() {
+        return communicationsType == CommunicationsType.serial && !isInSimulationMode() ? getSerial().getOpenedRealPath()
+                : null;
+    }
+
+    /**
+     * Instance Labs (BR-93): a device opened by its Unix path whose path is gone: the board left USB (udev removes the
+     * device and its /dev/serial/by-id link at once). Anything else (Windows' \\.\COM3, which never "exists" as a file)
+     * is never checked.
+     */
+    static boolean devicePathGone(String port) {
+        return port != null && port.startsWith("/") && !new File(port).exists();
     }
 
     /**
@@ -1315,9 +1445,10 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
      * (no answer within the timeout), the next lines wait at most 1 s each: a silent controller cannot act on them
      * anyway, and the Stop then ends in about the timeout plus a second per line, not the timeout per line.
      * GcodeAsyncDriver (not the live machine's driver) only queues the lines here; its writer thread still drops a
-     * line whose predecessor's ok timed out under confirmation flow control (upstream behaviour).
+     * line whose predecessor's ok timed out under confirmation flow control (upstream behaviour). BR-75: {@code record},
+     * or null, is told which lines the controller acknowledged and which failed.
      */
-    private void sendEveryLine(String gCode) {
+    private void sendEveryLine(String gCode, PlannedStop record) {
         if (gCode == null) {
             return;
         }
@@ -1330,6 +1461,9 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             for (int attempt = 1;; attempt++) {
                 try {
                     sendCommand(command, timeout);
+                    if (record != null) {
+                        record.acknowledged.add(command);
+                    }
                     break;
                 }
                 catch (Exception e) {
@@ -1340,6 +1474,9 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                         continue;
                     }
                     Logger.warn(e, "{} Stop line {} failed; the next lines go out anyway", getName(), command);
+                    if (record != null) {
+                        record.failed.add(command);
+                    }
                     timeout = Math.min(timeout, 1000);
                     break;
                 }
@@ -1399,6 +1536,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
             }
             catch (IOException ex) {
                 Logger.error(ex, "{} failed to write command {}", getCommunications().getConnectionName(), command);
+                linkLost("a write failed (" + ex.getMessage() + ")"); // Instance Labs (BR-93)
                 disconnect();
                 Configuration.get().getMachine().setEnabled(false);
             }
@@ -1638,6 +1776,16 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     }
 
     protected class ReaderThread extends Thread {
+        /** Instance Labs (BR-93): the connect this reader belongs to. */
+        private final int generation = linkGeneration;
+
+        /** Instance Labs (BR-93): a loss of this reader's own link only. */
+        private void lost(String cause) {
+            if (generation == linkGeneration) {
+                linkLost(cause);
+            }
+        }
+
         @Override
         public void run() {
             // Get the copies that are valid for this thread.
@@ -1651,6 +1799,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                     if (receivedLine == null) {
                         // Line read failed eg. due to socket closure
                         Logger.error("[{}] Failed to read gcode response", connectionName);
+                        lost("the link ended"); // Instance Labs (BR-93)
                         return;
                     }
                     receivedLine = receivedLine.trim();
@@ -1665,6 +1814,7 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
                     }
                     else {
                         Logger.error(e, "[{}] Read error", connectionName);
+                        lost("a read failed (" + e.getMessage() + ")"); // Instance Labs (BR-93)
                         return;
                     }
                 }

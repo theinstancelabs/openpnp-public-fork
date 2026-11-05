@@ -107,10 +107,10 @@
                </nozzle>
             </nozzles>
             <actuators>
-               <actuator class="org.openpnp.machine.reference.ReferenceActuator" axis-X-id="AXS169824381580efcb" axis-Y-id="AXS16982438158c4660" axis-Z-id="AXS16982438158d0458" axis-rotation-id="AXS16b068df4e35374e" version="1.1" id="ACT171086c0660cfc3b" name="VAC1" value-type="Boolean" value-type-confirmed="true" default-on-double="0.0" default-on-string="" default-off-double="0.0" default-off-string="" interlock-actuator="false" driver-id="DRV16982438146c1dd4" coordinated-before-actuate="true" coordinated-after-actuate="false" coordinated-before-read="true" coordinated-before-actuate-enum="WaitForStillstand" coordinated-after-actuate-enum="None" coordinated-before-read-enum="WaitForStillstand" enabled-actuation="AssumeUnknown" homed-actuation="LeaveAsIs" disabled-actuation="LeaveAsIs" index="0">
+               <actuator class="org.openpnp.machine.reference.ReferenceActuator" axis-X-id="AXS169824381580efcb" axis-Y-id="AXS16982438158c4660" axis-Z-id="AXS16982438158d0458" axis-rotation-id="AXS16b068df4e35374e" version="1.1" id="ACT171086c0660cfc3b" name="VAC1" value-type="Boolean" value-type-confirmed="true" default-on-double="0.0" default-on-string="" default-off-double="0.0" default-off-string="" interlock-actuator="false" driver-id="DRV16982438146c1dd4" coordinated-before-actuate="true" coordinated-after-actuate="false" coordinated-before-read="true" coordinated-before-actuate-enum="WaitForStillstand" coordinated-after-actuate-enum="None" coordinated-before-read-enum="WaitForStillstand" enabled-actuation="AssumeUnknown" homed-actuation="LeaveAsIs" disabled-actuation="ActuateOff" index="0">
                   <head-offsets units="Millimeters" x="0.0" y="0.0" z="0.0" rotation="0.0"/>
                </actuator>
-               <actuator class="org.openpnp.machine.reference.ReferenceActuator" axis-X-id="AXS169824381580efcb" axis-Y-id="AXS16982438158c4660" axis-Z-id="AXS17108356271a68ac" axis-rotation-id="AXS17108288e61da5fb" version="1.1" id="ACT171086f27295ab60" name="VAC2" value-type="Boolean" value-type-confirmed="true" default-on-double="0.0" default-on-string="" default-off-double="0.0" default-off-string="" interlock-actuator="false" driver-id="DRV16982438146c1dd4" coordinated-before-actuate="true" coordinated-after-actuate="false" coordinated-before-read="true" coordinated-before-actuate-enum="WaitForStillstand" coordinated-after-actuate-enum="None" coordinated-before-read-enum="WaitForStillstand" enabled-actuation="AssumeUnknown" homed-actuation="LeaveAsIs" disabled-actuation="LeaveAsIs" index="0">
+               <actuator class="org.openpnp.machine.reference.ReferenceActuator" axis-X-id="AXS169824381580efcb" axis-Y-id="AXS16982438158c4660" axis-Z-id="AXS17108356271a68ac" axis-rotation-id="AXS17108288e61da5fb" version="1.1" id="ACT171086f27295ab60" name="VAC2" value-type="Boolean" value-type-confirmed="true" default-on-double="0.0" default-on-string="" default-off-double="0.0" default-off-string="" interlock-actuator="false" driver-id="DRV16982438146c1dd4" coordinated-before-actuate="true" coordinated-after-actuate="false" coordinated-before-read="true" coordinated-before-actuate-enum="WaitForStillstand" coordinated-after-actuate-enum="None" coordinated-before-read-enum="WaitForStillstand" enabled-actuation="AssumeUnknown" homed-actuation="LeaveAsIs" disabled-actuation="ActuateOff" index="0">
                   <head-offsets units="Millimeters" x="0.0" y="0.0" z="0.0" rotation="0.0"/>
                </actuator>
             </actuators>
@@ -143,8 +143,8 @@
                <text><![CDATA[{True:M106}{False:M107};]]></text>
             </command>
             <command head-mountable-id="ACT171086f27295ab60" type="ACTUATE_BOOLEAN_COMMAND">
-               <text><![CDATA[{True:M106 P2 S255}{False:M107 P2};]]></text>
-               <text><![CDATA[{True:M106 P3 S255}{False:M107 P3};]]></text>
+               <text><![CDATA[{True:M106 P2 S255}{False:M107 P3};]]></text>
+               <text><![CDATA[{True:M106 P3 S255}{False:M107 P2};]]></text>
             </command>
             <command type="SET_GLOBAL_OFFSETS_COMMAND">
                <text><![CDATA[G92 {X:X%.4f} {Y:Y%.4f} {Z:Z%.4f} {A:A%.4f} {B:B%.4f} ; reset coordinates]]></text>

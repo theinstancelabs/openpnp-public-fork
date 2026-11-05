@@ -66,7 +66,7 @@ final class HeightSwitchEndpoints {
 
     /** {@code dispense.heightSwitch} of the status, from the settings and memory only: it never sends G-code. */
     static Map<String, Object> status(DispenseService svc, DispenseConfig c) {
-        DispenseConfig.HeightSwitchTrip n1 = c.heightSwitch.n1, needle = c.heightSwitch.needle;
+        DispenseConfig.HeightSwitchTrip n1 = c.heightSwitch.n1, needle = HeightSwitch.needleTrip(c);
         // a sum of raw Z heights holds for the home both were measured under only, while it is this home
         Long home = svc.getHomeTracker().getLastHomeAtMs();
         String who = !thisHome(n1, home) ? "N1" : !thisHome(needle, home) ? "the needle" : null;
