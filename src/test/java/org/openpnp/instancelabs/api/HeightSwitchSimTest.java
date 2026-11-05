@@ -557,7 +557,9 @@ public class HeightSwitchSimTest {
         assertNotNull(svc.needleXyProblem(), "its landing is not checked");
         JsonObject hs = heightSwitchStatus();
         assertTrue(hs.get("kSwitch").isJsonNull() && hs.get("needle").isJsonNull(), hs.toString());
-        assertTrue(hs.get("kSwitchWhy").getAsString().startsWith("the needle has no accepted trip"), hs.toString());
+        // #78's reason: its trip is another needle's (merged with the aim's place rule, which names the other one)
+        assertEquals("the needle has no accepted trip on the height switch since it was put on", hs.get("kSwitchWhy")
+                .getAsString(), hs.toString());
         assertTrue(dispenseStatus().get("needleEnd").isJsonNull(), "the old needle's end is void");
         assertTrue(hs.get("needleWindow").isJsonNull(), hs.toString());
         assertTrue(hs.get("needleWindowWhy").getAsString().contains("its end measured from below"), hs.toString());
@@ -849,7 +851,11 @@ public class HeightSwitchSimTest {
         assertTrue(hs.get("kSwitch").isJsonNull(), hs.toString());
         double n1 = ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}")
                 .get("tripRawZ").getAsDouble();
-        assertTrue(heightSwitchStatus().get("kSwitch").isJsonNull(), "the needle's trip is of the old place");
+        JsonObject moved = heightSwitchStatus();
+        assertTrue(moved.get("kSwitch").isJsonNull(), "the needle's trip is of the old place");
+        // of the needle now on, so the place's reason, not #78's "since it was put on"
+        assertEquals("the needle has no accepted trip on the height switch in this home since its place was set",
+                moved.get("kSwitchWhy").getAsString(), moved.toString());
         JsonObject r = ok("POST", "/api/height-switch/measure", "{\"tool\":\"needle\"}");
         assertTrue(r.get("accepted").getAsBoolean(), r.toString());
         JsonObject w = r.getAsJsonObject("window");
