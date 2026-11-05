@@ -114,7 +114,7 @@
   const reasonEl = (id) => el('div', { class: 'reason', id, hidden: true });
   const liveEl = (id) => el('div', { class: 'cal-live', id, hidden: true, role: 'status' });
   const sub = (t) => el('div', { class: 'section-k' }, el('span', { text: t }), el('span', { class: 'rule' }));
-  const placeSel = (id) => el('select', { class: 'input', id }, el('option', { value: '', text: 'No places yet' }));
+  const placeSel = (id, none) => el('select', { class: 'input', id, 'data-none': none }, el('option', { value: '', text: none || 'No places yet' }));
   const abbr = (t, title) => el('abbr', { title, text: t });
 
   // ================================================================================== prerequisites
@@ -442,7 +442,7 @@
         el('div', { class: 'cal-form' },
           el('div', { class: 'cal-step' }, el('span', { class: 'st st--num st--sm', text: '1' }), 'Dispense the shots'),
           el('div', { class: 'fgrid fgrid--3' },
-            pcr.field('shots-place', 'Cup place', null, placeSel('shots-place')),
+            pcr.field('shots-place', 'Cup place', null, placeSel('shots-place', 'No cup place yet')),
             pcr.field('shots-rot', 'Turn per shot', '°', pcr.numInput('shots-rot', '360', '1', { min: '1', max: '3600' })),
             pcr.field('shots-count', 'Shots', '1 to 200', pcr.numInput('shots-count', '30', '1', { min: '1', max: '200' }))),
           el('div', { id: 'shots-noplace', class: 'reason reason--need', hidden: true }, el('span', {}, 'No cup place yet: add the cup in ', el('button', { type: 'button', class: 'link', text: 'Setup › Places', onclick: () => IL.go('#setup/places') }), '.')),
@@ -715,8 +715,8 @@
   }
   function renderTouchOff(s) {
     const d = s.dispense || {}, n = d.needle || {};
-    const place = $('to-place').value;
     pcr.fillPlaces($('to-place'), s, d.blankLocationName);
+    const place = $('to-place').value;
     if (!C.applyTouched) $('to-apply').checked = !n.touchedOff;
     setState('cal-touch-off', !n.anchored ? 'block' : n.touchedOff ? 'ok' : 'need',
       !n.anchored ? 'No needle frame' : n.touchedOff ? offsetWord(n) + ' ' + (n.setAtMs ? IL.fmtTime(n.setAtMs - S.skewMs) : '') : 'Not touched off');
@@ -839,8 +839,8 @@
   }
   function renderLadder(s) {
     const d = s.dispense || {};
-    const place = $('dl-place').value;
     pcr.fillPlaces($('dl-place'), s, d.blankLocationName);
+    const place = $('dl-place').value;
     const p = ladderPlan();
     showErrs(p.errs);
     const ok = !Object.values(p.errs).some(Boolean);

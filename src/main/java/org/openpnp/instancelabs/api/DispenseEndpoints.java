@@ -837,6 +837,10 @@ final class DispenseEndpoints {
         if (next.locations == null) {
             next.locations = new LinkedHashMap<>();
         }
+        if (next.nozzle != null && !next.nozzle.equals(live.nozzle) && svc.namesProbeNozzle(next.nozzle)) {
+            throw ApiException.badRequest("'nozzle' is the needle's nozzle: '" + next.nozzle + "' is N1, the probe "
+                    + "nozzle");
+        }
         if (next.padCalibration != null && !simulated) {
             // the shortened statistics of the SIM tests are refused on the machine (PROFILE_CALIBRATION_DESIGN.md §5.4)
             List<String> floors = next.padCalibration.realMachineProblems();

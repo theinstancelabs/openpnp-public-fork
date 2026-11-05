@@ -836,11 +836,15 @@ M400
 ; release (new): back to the last open step and wait for the seal to let go
 G1 Z{zo} F300
 M400
-3-read means every 70 ms until |mean - baseline| < drop/2; at most 1.5 s (else refuse "N1 did not release")
+3-read means every 70 ms until baseline - mean < drop/2 (above open air is let go: the line overshoots it after a
+seal; over 50 k above it is a fault read); at most 1.5 s (else refuse "N1 did not release")
 ; fine (changed): z = zo-0.025, zo-0.05, ... down to max(zc-0.10, floor)
 G1 Z{z} F300
 M400
 3 x read ... contact = the first z whose mean, and the next step's mean, are both < baseline - drop
+; re-read (BR-100): each step above the contact, entered from one step higher, until one lets go (baseline - mean
+; < drop within 1.5 s); the step below it is the contact: up to 4 steps up are lag-hidden, a seal still holding 5
+; steps up is refused; the climb stops below the release height
 ; end of the point (also after no contact, and after any refusal inside the point)
 G1 Z31.5000 F600
 M400
@@ -871,8 +875,9 @@ number (`tools/probe.py:18-25`).
 - The real reply is `echo:i2c-reply: from:109 bytes:3 data:E8 F2 F6`, then `ok` (`runs/serial.log:5550-5551`).
 - No `data:` line → `PROBE: no vacuum reading from the controller (M261 answered: '<lines>')`.
 
-**Threshold.** `drop = max(40000, 0.15·|baseline|)` (`tools/probe.py:53`); contact is `mean < baseline − drop`. At the
-median baseline (−1.55 M) that is 232 k, under the first seal drop of 9 sequences in 10 (deciles 248–404 k).
+**Threshold (BR-100).** `drop = 40000`, probe.py's ONSET (N1's first touch); contact is `mean < baseline − drop`.
+Open air stays within 9.9 k (161 real touches). The 15 % seal used before (`max(40000, 0.15·|baseline|)`, probe.py's
+CONTACT) came 0.025–0.175 mm lower on the real machine (median 0.05), as the sprung tip's seal builds over Z.
 
 **Open-air checks**, before any descent:
 
@@ -1282,7 +1287,7 @@ and range checks in `validate()` (D/DispenseConfig.java:434-508). Those surface 
 - **Fiducial detection:** the `fid.py` detector numbers; the centring loop (1.0 mm, 3 px, 3 moves); the fit limits
   (1 %, 0.5°, 0.05 mm; 0.15 %, 0.15° against the previous registration).
 - **Probe motion:** the steps (0.25 / 0.025 mm), feeds (F300 / F600 / F6000), reads (5 / 3), the drop rule
-  (40 000, 15 %), the release wait (1.5 s), the spread limit 15 k and the relative baseline limits (50 k, 60 k, 2 h).
+  (40 000, BR-100), the release wait (1.5 s), the re-read's 4 lag steps, the spread limit 15 k and the relative baseline limits (50 k, 60 k, 2 h).
 - **Probe limits:** the 60 s on-time cap, the absolute floor 2.0, the first-contact band 1.0 mm, 3 floor pushes per
   task, the Z-check tolerance 0.03 mm.
 - **Probe targets:** the edge, fiducial and blank keep-outs, the 6 mm target search, 9 points, the 2 mm alternate
@@ -2432,7 +2437,7 @@ Items 1 and 3 should be confirmed in the first real-machine session, before anyo
    - The readings with **no tip**, a **blocked** tip, the **pump off** (the sim assumes 0), and **a 0603 on the tip**.
      That last one confirms the relative limits of 50 k / 60 k against the ≥ 80 k of `tools/place.py:37`.
 8. **Seal and release.**
-   - The seal drop on mask and on bare copper at the chosen spots, vs the 15 % threshold.
+   - The seal drop on mask and on bare copper at the chosen spots, vs the 40 k touch threshold (BR-100).
    - The release time after a seal: is 1.5 s always enough?
    - Does the two-in-a-row fine rule leave contact Z unbiased? Compare with a slow manual descent at one spot.
 9. **VAC1 sensor mode**: the bench writes `M260 B27` (`tools/probe.py:49`), while OpenPnP's actuator read sequence

@@ -261,7 +261,7 @@ energised.
 | M106 P2/P3 | S as given | any S>0 is 255 |
 | Z steps/mm, B max accel, B current | 40, 10000, 200 mA | 160, 20000, 540 mA |
 | kill | fans unchanged, motion runs 0.6 s more | all four outputs off, planner stopped first |
-| M997 | unknown | quick-stop, all four outputs off, every stepper let go, `echo:M997: entering STM32 DFU bootloader (0483:df11)`; then it answers nothing more and, 0.1 s later (the firmware's wait for USB to send what was due, that echo with it), enters DFU: the port goes away until a power cycle |
+| M997 | unknown | quick-stop, all four outputs off, every stepper let go, `echo:M997: entering STM32 DFU bootloader (0483:df11)`; then it answers nothing more and, 0.1 s later (the firmware's wait for USB to send what was due, that echo with it; counted from when lumen-sim sees the halt, so a late wake still sends it), enters DFU: the port goes away until a power cycle |
 
 ## The simulator line (`--sim-cap`, BR-47)
 

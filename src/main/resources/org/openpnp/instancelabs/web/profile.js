@@ -54,19 +54,23 @@
     const d = (status && status.dispense) || {};
     return Object.keys(d.locations || {}).filter((n) => n !== 'waste-test-dot').sort();
   };
-  /** Fills a place <select>, keeps the chosen value; preferred when nothing is chosen yet; only(name): the places offered;
-   *  bare: with neither offered, nothing is chosen (the caller's gate asks for a place) instead of the first. */
+  /** Fills a place <select>, keeps the chosen value; preferred when nothing is chosen yet, or when the value was this
+   *  function's own pick (dataset.auto: a cup added after the waste was chosen for want of one), never over a person's
+   *  choice; only(name): the places offered; bare: with neither offered, nothing is chosen (the caller's gate asks for a
+   *  place) instead of the first; none offered: the select's data-none text. */
   pcr.fillPlaces = function (sel, status, preferred, only, bare) {
     const names = pcr.places(status).filter(only || Boolean);
     const key = names.join('|');
     if (sel.dataset.key !== key) {
-      const keep = sel.value;
+      if (sel.dataset.key === undefined) sel.addEventListener('change', () => delete sel.dataset.auto);   // a person chose
+      const keep = sel.value, mine = keep === sel.dataset.auto;
       sel.dataset.key = key;
       sel.replaceChildren(...(names.length ? names.map((n) => el('option', { value: n, text: n }))
-        : [el('option', { value: '', text: 'No places yet' })]));
-      if (keep && names.includes(keep)) sel.value = keep;
+        : [el('option', { value: '', text: sel.dataset.none || 'No places yet' })]));
+      if (keep && names.includes(keep) && !(mine && names.includes(preferred))) sel.value = keep;
       else if (preferred && names.includes(preferred)) sel.value = preferred;
       else if (bare && names.length) sel.selectedIndex = -1;
+      if (sel.value !== keep) sel.dataset.auto = sel.value;
     }
     return names;
   };
