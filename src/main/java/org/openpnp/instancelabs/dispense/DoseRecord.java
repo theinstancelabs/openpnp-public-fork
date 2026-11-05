@@ -167,7 +167,9 @@ public class DoseRecord {
             if (set == null) {
                 return "the screw start angle has never been set";
             }
-            if (at < set) {
+            // BR-75: a confirm keeps the angle, so only a new value makes these records stale
+            Long changed = cfg.profile.startAngleChangedAtMs;
+            if (at < (changed != null ? changed : set)) {
                 return "made before the screw start angle was set again";
             }
         }
