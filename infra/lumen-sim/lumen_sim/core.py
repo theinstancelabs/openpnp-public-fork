@@ -13,7 +13,7 @@ from . import collision
 from . import personality as personalities
 from .faults import OK_FAULTS, Faults, seconds
 from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, PA5_TOOLS, Machine, Pa5Switch
-from .marlin import AXES, Firmware, f32
+from .marlin import AXES, DFU_DRAIN_S, Firmware, f32
 
 INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": 'echo:Unknown command: "M999999"'}
 # The keys each request takes besides "cmd" (and a fault's "fault"): an unknown one (a misspelt "surfaceZ" or "downs")
@@ -66,6 +66,7 @@ class Simulator:
         self._n = 0
         self._actions = []
         self._halt_seen = False
+        self._dfu_at = None         # when a board in flashFirmware() resets into DFU and its port goes away
         self.seq = 0
         self.boots = 0
         self.sim_errors = deque(maxlen=100)  # lines the model could not run (kept across power cycles)
@@ -96,6 +97,9 @@ class Simulator:
             self._queue(when, data)
         self.fw.advance(t)
         self._check_halt()
+        if self._dfu_at is not None and self._dfu_at <= t:
+            self._dfu_at = None
+            self._actions.append({"action": "disconnect", "down_s": None})
 
     def next_event_time(self):
         nt = self.fw.next_wake()
@@ -103,6 +107,8 @@ class Simulator:
             nt = min(nt, self._timed[0][0])
         if self.out:
             nt = min(nt, self.out[0][0])
+        if self._dfu_at is not None:
+            nt = min(nt, self._dfu_at)
         return nt
 
     def take_output(self, t):
@@ -134,7 +140,8 @@ class Simulator:
     def _check_halt(self):
         """Once the board stops dead (halt fault, kill, DFU, sim error) it sends nothing more: output it had not sent
         by then (an ok a delay_ok holds, and all queued behind it) and pending injections are dropped. DFU also takes
-        the port away."""
+        the port away, DFU_DRAIN_S later: flashFirmware() lets USB CDC send what was due (its echo with it) first, and
+        a pty master closed at once would take the bytes the host had not read yet with it."""
         fw = self.fw
         if not fw.halted or self._halt_seen:
             return
@@ -143,7 +150,7 @@ class Simulator:
         self._last_release = self.out[-1][0] if self.out else -math.inf
         self._timed = []
         if fw.halt_reason == "DFU":
-            self._actions.append({"action": "disconnect", "down_s": None})
+            self._dfu_at = fw.halt_time + DFU_DRAIN_S
 
     # ------------------------------------------------------------------ power
     def power_cycle(self, t):
@@ -161,6 +168,7 @@ class Simulator:
         self._timed = []
         self._last_release = -math.inf
         self._halt_seen = False
+        self._dfu_at = None        # a reset inside flashFirmware()'s wait for USB boots as usual: no DFU
         self.faults.clear()        # the ok faults are the controller's: the reboot ends them (the machine's stay)
         self.fw = self._boot(t)
 

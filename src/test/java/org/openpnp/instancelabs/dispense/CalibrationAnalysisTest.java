@@ -50,9 +50,10 @@ public class CalibrationAnalysisTest {
         NeedleTouchOff.Request req = new NeedleTouchOff.Request();
         List<GcodeStreamBuilder.DotSpec> l = NeedleTouchOff.layout(req, new DispenseConfig.NamedLocation(10, 20, 1.5), c,
                 null);
-        assertEquals(6, l.size());
+        assertEquals(6 + 2, l.size(), "BR-89: the ladder and its 2 check dots");
         assertEquals(1.5 - 0.2 + 0.125, l.get(0).dispenseZ, 1e-12);
         assertEquals(1.5 - 0.2 + 0.0, l.get(5).dispenseZ, 1e-12);
+        assertEquals(1.5 - 0.2 + 0.125, l.get(7).dispenseZ, 1e-12, "no skip: the check dots at the start gap");
         assertEquals(1.6, req.pitchMm, 1e-12, "F14: the default pitch");
         assertEquals(10 + 5 * 1.6, l.get(5).x, 1e-12);
     }
@@ -220,18 +221,18 @@ public class CalibrationAnalysisTest {
         // the refusals name the dots after the skipped ones
         java.util.function.Function<Double[], String> skip2 = x -> NeedleTouchOff.analyze(g, x, u, 0.25, 1.20, 2)
                 .reason;
-        assertEquals("no dot at gap 0.200 mm, the first after the 2 skipped: the needle is at or below the surface "
+        assertEquals("no dot at gap 0.200 mm, the first after the 2 not counted: the needle is at or below the surface "
                 + "from there, or nothing dispensed; raise startGapMm", skip2.apply(new Double[] {1.80, 1.50, null,
                     1.22, 1.21, 1.60, null}));
-        assertEquals("only the first dot after the 2 skipped formed before a missing one (1.200 mm at gap 0.200, none "
+        assertEquals("only the first dot after the 2 not counted formed before a missing one (1.200 mm at gap 0.200, none "
                 + "at gap 0.150): a contact needs two steady dots before it (the first may be a droplet from too "
                 + "high); run the ladder again from another start gap", skip2.apply(new Double[] {1.80, 1.50, 1.20,
                     null, 1.21, 1.60, null}));
         assertTrue(skip2.apply(new Double[] {1.80, 1.50, 1.20, 1.60, 1.21, 1.60, null}).startsWith("the first two dots "
-                + "after the 2 skipped differ too much to be the reference (1.200 mm at gap 0.200, 1.600 mm at gap "
+                + "after the 2 not counted differ too much to be the reference (1.200 mm at gap 0.200, 1.600 mm at gap "
                 + "0.150"));
         assertTrue(skip2.apply(new Double[] {1.80, 1.50, 0.40, 0.42, 1.21, 1.60, null}).startsWith("the first two dots "
-                + "after the 2 skipped (0.400 mm at gap 0.200, 0.420 mm at gap 0.150) are under 60 % of the 1.20 mm"));
+                + "after the 2 not counted (0.400 mm at gap 0.200, 0.420 mm at gap 0.150) are under 60 % of the 1.20 mm"));
         assertEquals("every dot of the ladder is skipped (touchOffSkipDots 2): lay at least 5", NeedleTouchOff
                 .analyze(new double[] {0.30, 0.25}, new Double[] {1.80, 1.50}, new String[2], 0.25, 1.20, 2).reason);
     }
@@ -309,7 +310,8 @@ public class CalibrationAnalysisTest {
                 5.86), c, plane);
         for (int i = 0; i < l.size(); i++) {
             double surface = 5.95 + slope * (l.get(i).x - 340);
-            assertEquals(g[i], l.get(i).dispenseZ - c.needleZOffsetMm - surface, 1e-9, "gap of dot " + i);
+            double gap = i < g.length ? g[i] : NeedleTouchOff.checkGapMm(req, c.profile.touchOffSkipDots);
+            assertEquals(gap, l.get(i).dispenseZ - c.needleZOffsetMm - surface, 1e-9, "gap of dot " + i);
         }
         // flat layout for comparison: the real gap step is 0.025 - 1.6 * 0.0092 = 0.0103 mm
         List<GcodeStreamBuilder.DotSpec> flat = NeedleTouchOff.layout(req, new DispenseConfig.NamedLocation(350, 233.5,

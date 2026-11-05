@@ -328,7 +328,7 @@ public final class SimVacuum {
         return d[i] + (d[i + 1] - d[i]) * (u - i);
     }
 
-    private static List<String[]> words(String code) {
+    static List<String[]> words(String code) {
         List<String[]> out = new ArrayList<>();
         Matcher m = WORD.matcher(code);
         while (m.find()) {
@@ -337,7 +337,7 @@ public final class SimVacuum {
         return out;
     }
 
-    private static Double word(List<String[]> words, char letter) {
+    static Double word(List<String[]> words, char letter) {
         for (int i = 1; i < words.size(); i++) {
             if (words.get(i)[0].charAt(0) == letter) {
                 return Double.parseDouble(words.get(i)[1]);

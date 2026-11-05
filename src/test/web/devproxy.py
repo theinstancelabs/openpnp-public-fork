@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""devproxy.py --web DIR --api http://127.0.0.1:PORT [--port 18990] [--fixtures DIR] [--route-fixtures DIR [--routes FILE]]
+"""devproxy.py --web DIR --api http://127.0.0.1:PORT [--port 18990] [--allow-host NAME] [--fixtures DIR] [--route-fixtures DIR [--routes FILE]]
 
 UI development without rebuilding the jar: serves DIR/index.html at / and DIR/<name> at /static/<name> from disk
 (with the same Content-Security-Policy as the embedded API server), and forwards /api/* to a running OpenPnP web API
-(for example a SIM session from src/test/sim/il_ui_session.py). Listens on 127.0.0.1 only.
+(for example a SIM session from src/test/sim/il_ui_session.py). Listens on 127.0.0.1 only, and answers only the Host
+127.0.0.1:PORT or localhost:PORT (its own port) or --allow-host NAME exactly (host:port, e.g. the tailnet name behind
+tailscale serve): any other Host, or none, is a 403 before anything is served or forwarded (a DNS-rebinding page).
 
 --fixtures DIR (board drawings, docs/instancelabs/BOARD_IMPORT_DESIGN.md §6.6):
   GET /api/board-art/<id>   answered from DIR/art/<id>.json (the art slice's generated drawings), else from
@@ -168,7 +170,7 @@ class RouteFixtures:
         return json.dumps(out).encode()
 
 
-def make_handler(web, api, fx, rf=None):
+def make_handler(web, api, fx, rf=None, allow_host=None):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -193,15 +195,35 @@ def make_handler(web, api, fx, rf=None):
             self.end_headers()
             self.wfile.write(body)
 
+        def _host_ok(self):
+            port = self.server.server_port
+            names = {"127.0.0.1:%d" % port, "localhost:%d" % port} | ({allow_host.lower()} if allow_host else set())
+            return self.headers.get("Host", "").lower() in names
+
+        def _cross_site(self):
+            # devproxy drops Origin and Sec-Fetch-Site, so the API's own guard never sees a page elsewhere in this
+            # browser writing through it: refuse such writes here (no Origin: a test or curl; the page's own: allowed)
+            if self.command in ("GET", "HEAD"):
+                return False
+            if self.headers.get("Sec-Fetch-Site", "") == "cross-site":
+                return True
+            origin, host = self.headers.get("Origin"), self.headers.get("Host", "")
+            return bool(origin) and origin not in ("http://" + host, "https://" + host)
+
         def _proxy(self):
+            if self._cross_site():
+                return self._send(403, b'{"error":"refused","reason":"a write from another site through devproxy"}', "application/json")
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else None
             spec = rf.find(self.command, self.path.split("?")[0]) if rf else None
             if spec and "file" in spec:
                 code, data = rf.answer(spec)
                 return self._send(code, data, "application/json")
-            req = urllib.request.Request(api + self.path, data=body, method=self.command,
-                                         headers={"Content-Type": self.headers.get("Content-Type", "application/json")})
+            headers = {"Content-Type": self.headers.get("Content-Type", "application/json")}
+            # the page's X-IL-Client marks a request as the UI's: the machine lock (BR-72) tells the user from an agent by it
+            if self.headers.get("X-IL-Client"):
+                headers["X-IL-Client"] = self.headers.get("X-IL-Client")
+            req = urllib.request.Request(api + self.path, data=body, method=self.command, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=900) as r:
                     code, data, ctype = r.status, r.read(), r.headers.get("Content-Type", "application/json")
@@ -226,6 +248,8 @@ def make_handler(web, api, fx, rf=None):
             self._send(200, data, "application/json; charset=utf-8", IMMUTABLE)
 
         def _any(self):
+            if not self._host_ok():
+                return self._send(403, b'{"error":"refused","reason":"this Host is not served by devproxy (see --allow-host)"}', "application/json")
             path = self.path.split("?")[0]
             m = ART_ID.match(path)
             if fx and m and self.command == "GET":
@@ -247,13 +271,14 @@ def main():
                                                   "resources", "org", "openpnp", "instancelabs", "web"))
     ap.add_argument("--api", required=True, help="base URL of the OpenPnP web API, e.g. http://127.0.0.1:33693")
     ap.add_argument("--port", type=int, default=18990)
+    ap.add_argument("--allow-host", help="one more Host to answer, exactly host:port (e.g. lumen-thinkpad.tail3e978a.ts.net:8443)")
     ap.add_argument("--fixtures", help="board drawings and board-map.json (e.g. src/test/web/fixtures)")
     ap.add_argument("--route-fixtures", help="canned answers per route (e.g. src/test/web/fixtures/padprofile)")
     ap.add_argument("--routes", default="routes.json", help="the routes file in --route-fixtures (default routes.json)")
     a = ap.parse_args()
     fx = Fixtures(a.fixtures) if a.fixtures else None
     rf = RouteFixtures(a.route_fixtures, a.routes) if a.route_fixtures else None
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(os.path.abspath(a.web), a.api.rstrip("/"), fx, rf))
+    srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(os.path.abspath(a.web), a.api.rstrip("/"), fx, rf, a.allow_host))
     print("devproxy http://127.0.0.1:%d/ -> %s (web %s%s%s)" % (a.port, a.api, os.path.abspath(a.web),
                                                                 ", fixtures %s: %d drawings, %d boards" % (fx.root, len(fx.arts), len(fx.map)) if fx else "",
                                                                 ", routes %s" % rf.file if rf else ""),

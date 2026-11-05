@@ -59,7 +59,11 @@ class SimProcess:
                     self.proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     self.proc.terminate()
-                    self.proc.wait(timeout=5)
+                    try:
+                        self.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:  # spinning past SIGTERM: never left behind
+                        self.proc.kill()
+                        self.proc.wait()
             self.proc.stderr.close()
         finally:
             shutil.rmtree(self.dir, ignore_errors=True)

@@ -165,6 +165,8 @@ public final class DispenseService {
     /** BR-02: the driver whose received lines this engine watches (the host watchdog's trip), or null. */
     private volatile GcodeDriver watchedDriver;
     private final java.util.function.Consumer<String> tripWatcher = this::watchForWatchdogTrip;
+    /** BR-93: hears the watched driver's lost link on its reader thread. */
+    private final java.util.function.Consumer<GcodeDriver.LinkLoss> linkLossWatcher = this::noteLinkLoss;
     /**
      * BR-02: writes the journal for the reader thread and the streams (a trip heard there, a stream's arm): no "ok"
      * behind it, a STOP's included, and no line waits for an insert.
@@ -215,6 +217,8 @@ public final class DispenseService {
     private volatile BooleanSupplier pressureHoldActive = () -> false;
     /** Set by {@link #abort}: stops a camera-only clean-pad check (it has no executor). */
     private volatile boolean cameraTourAbort;
+    /** BR-94: the height switch's last read; in memory only. */
+    private volatile HeightSwitch.Read lastHeightSwitchRead;
     /**
      * Counts every {@link #abort}: a task queued before a STOP refuses at its start, so a step a job
      * queued in the gap between two steps never pressurises (profile calibration design §7.8).
@@ -394,6 +398,7 @@ public final class DispenseService {
             disablesSeen.set(screwDriver.getDisableCommandsSent());
             motionsSeen.set(screwDriver.getMotionCommandsSent());
             screwDriver.setReceivedLineWatcher(tripWatcher);
+            screwDriver.setLinkLossWatcher(linkLossWatcher);
             watchedDriver = screwDriver;
         }
         if (machine != null) {
@@ -476,6 +481,9 @@ public final class DispenseService {
             GcodeDriver watched = watchedDriver;
             if (watched != null && watched.getReceivedLineWatcher() == tripWatcher) {
                 watched.setReceivedLineWatcher(null);
+            }
+            if (watched != null && watched.getLinkLossWatcher() == linkLossWatcher) {
+                watched.setLinkLossWatcher(null);
             }
             journalWriter.shutdown(); // a write handed on goes on record before the database closes
             try {
@@ -694,14 +702,23 @@ public final class DispenseService {
         }
     }
 
-    /** BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. */
+    /**
+     * BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. A
+     * home's start that cannot be written throws: that home must not start (BR-97, {@link ControllerReset#homeStarted}).
+     */
     private void journalReset(ControllerReset.Event e) {
         try {
             String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
-                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code) ? "INFO" : "WARN";
+                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code)
+                    || ControllerReset.EVENT_HOME_STARTED.equals(e.code) ? "INFO" : "WARN";
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
         catch (SQLException ex) {
+            if (ControllerReset.EVENT_HOME_STARTED.equals(e.code)) {
+                Logger.error(ex, "dispense: a home's start could not be journaled: the home is refused");
+                throw new IllegalStateException("its start could not be journaled (" + ex.getMessage() + "), so its "
+                        + "G28 was not sent", ex);
+            }
             Logger.error(ex, "dispense: the controller reset journal could not be written ({}): after a restart the "
                     + "engine will not know about it", e.code);
         }
@@ -709,8 +726,8 @@ public final class DispenseService {
 
     /**
      * BR-02: what earlier engines journaled about controller resets and the screw's motor (the newest of each kind),
-     * so a restart keeps the screw count's epoch, an unknown position and the controller's idle clock. Unreadable, it
-     * counts as an unread connect: unknown until a home.
+     * so a restart keeps the screw count's epoch, an unknown position, the controller's idle clock and BR-97's
+     * levelling reference. Unreadable, it counts as an unread connect: unknown until a home.
      */
     private List<ControllerReset.Event> resetHistory(boolean dbExisted) {
         List<ControllerReset.Event> h = new ArrayList<>();
@@ -731,7 +748,8 @@ public final class DispenseService {
             for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
                     ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH, ControllerReset.EVENT_MOTOR_OFF,
                     ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_WATCHDOG_TRIP,
-                    ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED)) {
+                    ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED,
+                    ControllerReset.EVENT_HOME_STARTED)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }
@@ -899,6 +917,16 @@ public final class DispenseService {
         if (ControllerCommands.isHostWatchdogTrip(line)) {
             // in memory now, in the wire's order with the arms and resets around it; never this thread's insert
             controllerReset.watchdogTripHeard("the controller's host watchdog tripped: " + line.trim());
+            flushLater();
+        }
+    }
+
+    /**
+     * BR-93: the controller's link was lost (heard on the driver's reader thread, or found by a status read or a route):
+     * on record once as a possible reset ({@link ControllerReset#linkLost}), written soon after (no I/O on that thread).
+     */
+    public void noteLinkLoss(GcodeDriver.LinkLoss l) {
+        if (controllerReset.linkLost(l.atMs, ControllerReset.linkLostWhy(l.atMs, l.cause))) {
             flushLater();
         }
     }
@@ -1319,6 +1347,15 @@ public final class DispenseService {
      */
     public synchronized DispenseProfile setStartAngle(Double angleDeg, String note, Long measuredAtMs)
             throws IOException {
+        return setStartAngle(angleDeg, note, measuredAtMs, null);
+    }
+
+    /**
+     * As above; BR-77: a set from a measure stores the feature it found ({@code feature}), a set without one drops the
+     * stored feature, a confirm keeps it.
+     */
+    public synchronized DispenseProfile setStartAngle(Double angleDeg, String note, Long measuredAtMs,
+            DispenseProfile.StartAngleFeature feature) throws IOException {
         Long reset = controllerReset.detectedAtMs();
         ControllerReset.Event off = controllerReset.lastScrewMotorOff();
         Long setAt = cfg.profile.startAngleSetAtMs;
@@ -1344,6 +1381,7 @@ public final class DispenseService {
         long now = System.currentTimeMillis();
         if (angleDeg != null) {
             c.profile.startAngleDeg = angleDeg;
+            c.profile.startAngleFeature = feature; // null: set without a measure, the recipe's offset from it is unknown
             c.profile.startAngleChangedAtMs = now; // BR-75: a measure; a confirm keeps the records made at the angle
         }
         else if (c.profile.startAngleChangedAtMs == null) {
@@ -1354,6 +1392,25 @@ public final class DispenseService {
         db.event(null, "INFO", "I11", String.format(java.util.Locale.ROOT, "screw start angle %s %.1f deg%s",
                 angleDeg == null ? "confirmed" : "set to", c.profile.startAngleDeg, note == null ? "" : ": " + note));
         return c.profile.copy();
+    }
+
+    /**
+     * BR-77: a measure's apply under this lock (a set between a read and the write would be lost): new start = start +
+     * (measured feature - stored feature), set with the measured feature as {@link #setStartAngle} sets it (BR-02's
+     * checks). Refused when the stored feature is gone or of the other mode. Returns {from, to} (deg).
+     */
+    public synchronized double[] applyStartAngle(DispenseProfile.StartAngleFeature measured) throws IOException {
+        DispenseProfile p = cfg.profile;
+        DispenseProfile.StartAngleFeature old = p.startAngleFeature;
+        if (old == null || !old.mode.equals(measured.mode)) {
+            throw new EngineRefusal(409, "refused", "the start angle has no measured " + measured.mode + " feature (it "
+                    + "was set " + (old == null ? "without a measure" : "from a " + old.mode + " measure") + " since): "
+                    + "nothing was set");
+        }
+        double from = p.startAngleDeg, to = ScrewPhaseFit.norm(from + measured.deg - old.deg);
+        setStartAngle(to, String.format(java.util.Locale.ROOT, "measure %s: %s %.1f→%.1f", measured.runId,
+                measured.mode, from, to), measured.measuredAtMs, measured);
+        return new double[] {from, to};
     }
 
     /** The purge row was wiped: all its spots are free again. */
@@ -1437,8 +1494,13 @@ public final class DispenseService {
             return null;
         }
         org.openpnp.model.Location at = n.getLocation().convertToUnits(LengthUnit.Millimeters);
+        return needleXY(at.getX(), at.getY());
+    }
+
+    /** Where the needle's paste lands with N2 at (x, y): N2 plus the mounted tip's landing + trim, as programs aim. */
+    public double[] needleXY(double x, double y) {
         double[] l = landingAndTrim(cfg);
-        return new double[] {at.getX() + l[0], at.getY() + l[1]};
+        return new double[] {x + l[0], y + l[1]};
     }
 
     /**
@@ -1501,6 +1563,9 @@ public final class DispenseService {
         token = Math.max(token, measuredStamp(before.needleAnchor, before.needleZOffsetSetAtMs, before.needleLanding) + 1);
         for (DispenseConfig.ParkedTip p : before.parkedTips.values()) {
             token = Math.max(token, measuredStamp(p.needleAnchor, p.needleZOffsetSetAtMs, p.needleLanding) + 1);
+        }
+        if (before.heightSwitch.needle != null) { // BR-94: the old needle's switch trip, also after a clock set back
+            token = Math.max(token, before.heightSwitch.needle.atMs + 1);
         }
         DispenseConfig c = before.copy();
         c.needleChangedAtMs = token;
@@ -3022,6 +3087,13 @@ public final class DispenseService {
         return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope, false, false));
     }
 
+    /** As above for a task that checks Z itself after its home (BR-77's measure): Z data older than the home are a note. */
+    public InterlockReport checkInterlocks(Interlocks.Scope scope, double estimatedPressurisedSeconds,
+            boolean zCheckFirst) {
+        return Interlocks.check(interlockInputs(cfg.copy(), null, estimatedPressurisedSeconds, scope, false,
+                zCheckFirst));
+    }
+
     /** CONFIG and MACHINE only (Register board, the surface probe, the Z check): they never dispense. */
     public InterlockReport checkBasicInterlocks(boolean homeFirst) {
         return Interlocks.checkBasic(interlockInputs(cfg.copy(), null, 0, null, homeFirst, false));
@@ -3651,7 +3723,8 @@ public final class DispenseService {
         requireAvailable();
         String blankName = req.locationName == null ? cfg.blankLocationName : req.locationName;
         DispenseConfig.NamedLocation blank = requireLocation(blankName);
-        RunResult r = newRun("touch-off", null, "blank", getCurrentCalibration().id, req.steps);
+        RunResult r = newRun("touch-off", null, "blank", getCurrentCalibration().id, req.steps
+                + NeedleTouchOff.CHECK_DOTS);
         TouchOffResult res = new TouchOffResult();
         res.run = r;
         return submitResult(r, res, () -> {
@@ -3691,8 +3764,9 @@ public final class DispenseService {
             }
             List<SpotDot> seen = s.imageSpots(specs, req.primeAtWaste, primeExtra, NeedleTouchOff.cutMm(dotMm),
                     req.pitchMm / 2);
-            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen, req.jumpRatio, steadyMm,
-                    c.profile.touchOffSkipDots);
+            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen.subList(0, req.steps), req.jumpRatio,
+                    steadyMm, c.profile.touchOffSkipDots);
+            NeedleTouchOff.checkLanding(res.analysis, seen, c.profile.touchOffSkipDots); // BR-89
             res.analysis.referenceFrom = referenceFrom;
             res.previousOffsetMm = c.needleZOffsetMm;
             java.util.Map<String, Object> det = new java.util.LinkedHashMap<>();
@@ -3703,9 +3777,10 @@ public final class DispenseService {
             det.put("blankPlaneMaxResidualMm", plane == null ? null : plane.maxAbsResidualMm);
             det.put("dotZ", specs.stream().map(x -> x.dispenseZ).collect(java.util.stream.Collectors.toList()));
             String details = new com.google.gson.Gson().toJson(det);
+            String moved = res.analysis.landingProblem;
             if (res.analysis.found()) {
                 res.newOffsetMm = c.needleZOffsetMm + res.analysis.contactGapMm;
-                if (apply) {
+                if (apply && moved == null) {
                     // under the needle the touch-off started with: a needle change meanwhile refuses it (§22.3)
                     NeedleFrameResult fr = setNeedleZOffset(res.newOffsetMm, "dot-ladder-touch-off", details,
                             c.needleChangedAtMs);
@@ -3713,11 +3788,13 @@ public final class DispenseService {
                     res.applied = true;
                 }
                 else {
-                    db.insertTouchOff("dot-ladder-touch-off (not applied)", res.newOffsetMm, c.needleZOffsetMm,
-                            details, null);
+                    // BR-89: a tip that may have moved invalidates both the measured Z and the landing: kept, not set
+                    db.insertTouchOff("dot-ladder-touch-off (not applied" + (apply ? ": " + moved : "") + ")",
+                            res.newOffsetMm, c.needleZOffsetMm, details, null);
                 }
             }
-            r.message = res.analysis.reason;
+            r.message = moved == null ? res.analysis.reason : res.analysis.reason + "; " + (res.analysis.found()
+                    ? "not applied: " : "") + moved;
             s.ok();
         });
     }
@@ -4026,6 +4103,7 @@ public final class DispenseService {
         Exception failed = null;
         try {
             homeTracker.homeStarted();
+            controllerReset.homeStarted(); // BR-97: its G28 may move the frame, even if it ends unhomed
             m.home();
         }
         catch (Exception e) {
@@ -4993,6 +5071,196 @@ public final class DispenseService {
     }
 
     /**
+     * BR-94: N1 or the needle presses the bed's height switch {@code presses} times ({@link HeightSwitch}) in the raw Z
+     * window from {@code zStart} to {@code zFloor} (each null: 1.0 above and 0.5 past the tool's accepted trip of this
+     * home). An accepted measure is the tool's trip at once, no Use step; the needle presses only with
+     * {@code tipClean}. The Future never throws for task failures: a refused, stopped or failed task is a refused
+     * result with its reason.
+     */
+    public Future<HeightSwitch.Result> measureHeightSwitch(String tool, int presses, Double zStart, Double zFloor,
+            boolean tipClean) throws Exception {
+        if (!"n1".equals(tool) && !"needle".equals(tool)) {
+            throw new IllegalArgumentException("'tool' must be n1 or needle");
+        }
+        if (presses < 1 || presses > 20) {
+            throw new IllegalArgumentException("'presses' must be 1..20");
+        }
+        requireAvailable();
+        RunResult r = newRun("height-switch", null, "height switch", 0, 0);
+        HeightSwitch.Result res = new HeightSwitch.Result();
+        res.tool = tool;
+        res.presses = presses;
+        Task t = new Task(r, "measure");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> heightSwitchBody(zStart, zFloor, tipClean, res, t)), () -> {
+            if (r.status != RunResult.Status.OK) {
+                res.accepted = false;
+                res.refused = true;
+                res.why = r.message;
+            }
+        });
+    }
+
+    private void heightSwitchBody(Double zStart, Double zFloor, boolean tipClean, HeightSwitch.Result res, Task t)
+            throws Exception {
+        boolean needle = "needle".equals(res.tool);
+        DispenseConfig c = cfg;
+        DispenseConfig.NamedLocation place = c.location(HeightSwitch.PLACE);
+        if (place == null) {
+            throw refused("the height switch's place is not set: PUT /api/locations/" + HeightSwitch.PLACE
+                    + " {x, y}, the switch's top centre");
+        }
+        String unchecked = needle ? needleXyProblem(c) : null;
+        if (unchecked != null) {
+            // an unchecked landing may aim it up to 15 mm off: down to zFloor beside the plunger (#60 review); first,
+            // as checking the landing lays paste
+            throw refused("the needle is aimed at the switch by where it lands: " + unchecked.replaceAll("\\.$", "")
+                    + ", then clean the tip");
+        }
+        if (needle && !tipClean) {
+            throw refused("the needle presses the height switch only with a clean tip: paste must never touch it");
+        }
+        String unknown = positionUnknownWhy();
+        if (unknown != null) {
+            throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
+        }
+        if (!configuration.getMachine().isHomed()) {
+            throw refused("MACHINE: the machine is not homed: Home first");
+        }
+        Long home = homeTracker.getLastHomeAtMs();
+        res.homeAtMs = home;
+        DispenseConfig.HeightSwitchTrip last = needle ? HeightSwitch.needleTrip(c) : c.heightSwitch.n1;
+        if ((zStart == null || zFloor == null) && (last == null || home == null || !home.equals(last.homeAtMs))) {
+            throw refused("zStart and zFloor (raw Z) are needed: " + (needle ? "the needle" : "N1")
+                    + " has no accepted trip on the height switch " + (needle && last == null
+                            && c.heightSwitch.needle != null ? "since it was put on" : "in this home"));
+        }
+        Nozzle probeNozzle = getProbeNozzle();
+        if (!needle && probeNozzle == null) {
+            throw refused("nozzle '" + PROBE_NOZZLE + "' is not in the machine");
+        }
+        Session s = t.start(c);
+        ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
+        OpenPnpRawMapper mapper = needle ? s.mapper : OpenPnpRawMapper.forProbeNozzle(m, probeNozzle, c.bAxisName);
+        // the needle is aimed as programs aim it: its tip lands at N2 + the landing and the trim
+        double[] aim = needle ? landingAndTrim(c) : new double[] {0, 0};
+        double x = place.x - aim[0], y = place.y - aim[1];
+        HeightSwitch.Plan p = new HeightSwitch.Plan();
+        p.tool = res.tool;
+        RawPoint xy = mapper.toRaw(x, y, c.travelSafeZMm);
+        p.rawX = xy.x;
+        p.rawY = xy.y;
+        double[] here = s.mapper.currentNozzleLocation();
+        p.travelZ = s.mapper.toRaw(here[0], here[1], c.travelSafeZMm).z;
+        p.down = HeightSwitch.down(mapper, x, y, c.travelSafeZMm);
+        p.zStart = zStart != null ? zStart : last.tripRawZ - p.down * 1.0;
+        p.zFloor = zFloor != null ? zFloor : last.tripRawZ + p.down * 0.5;
+        p.coarseMm = needle ? 0.10 : 0.25;
+        p.presses = res.presses;
+        p.zLimits = mapper.zSoftLimitsRaw();
+        p.safeZone = mapper.zSafeZoneRaw();
+        // refused here, a measure that returns has sent its lines and ended at travel height over the switch
+        String bad = HeightSwitch.windowProblem(p);
+        if (bad != null) {
+            throw refused(bad);
+        }
+        HeightSwitch.Io io = new HeightSwitch.Io() {
+            @Override
+            public void send(String line) throws Exception {
+                s.exec.sendGated(DispenseExecutor.Scope.PROBE, line, c.commandTimeoutMs, s.r);
+            }
+
+            @Override
+            public List<String> query(String line) throws Exception {
+                return s.exec.queryGated(DispenseExecutor.Scope.PROBE, line, c.commandTimeoutMs, s.r);
+            }
+        };
+        // everything OpenPnP queued must be done before the raw lines start
+        m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+        try {
+            HeightSwitch.measure(io, p, res);
+        }
+        catch (Exception e) {
+            boolean stop = t.aborted();
+            s.recover();
+            if (stop && !(e instanceof DispenseExecutor.AbortedException)) {
+                DispenseExecutor.AbortedException a = new DispenseExecutor.AbortedException(abortReason(s.exec,
+                        "stopped during the height-switch measure"));
+                a.addSuppressed(e);
+                throw a;
+            }
+            throw e;
+        }
+        double[] end = {p.rawX, p.rawY, p.travelZ};
+        mapper.resync(end, end, mapper.currentB());
+        res.atMs = System.currentTimeMillis();
+        db.event(s.r.runId, res.accepted ? "INFO" : "WARN", "HEIGHT_SWITCH", new Gson().toJson(res));
+        if (res.refused) {
+            throw refused(res.why);
+        }
+        if (res.accepted) {
+            recordHeightSwitch(needle, res, c.needleChangedAtMs);
+        }
+        s.ok();
+    }
+
+    /**
+     * BR-94: reads the height switch now, its pull-up set first ({@code M42 P53 T2}, {@code M43 P5}); nothing moves.
+     * The last level is kept in memory for the status. The Future never throws for task failures: see {@code why}.
+     */
+    public Future<HeightSwitch.Read> readHeightSwitch() throws Exception {
+        requireAvailable();
+        RunResult r = newRun("height-switch-read", null, "height switch", 0, 0);
+        HeightSwitch.Read res = new HeightSwitch.Read();
+        Task t = new Task(r, "read");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> {
+            DispenseConfig c = cfg;
+            Session s = t.start(c);
+            s.exec.sendGated(DispenseExecutor.Scope.PROBE, ControllerCommands.HEIGHT_SWITCH_PULL_UP, c.commandTimeoutMs,
+                    s.r);
+            res.level = HeightSwitch.level(s.exec.queryGated(DispenseExecutor.Scope.PROBE,
+                    ControllerCommands.HEIGHT_SWITCH_READ, c.commandTimeoutMs, s.r));
+            res.atMs = System.currentTimeMillis();
+            lastHeightSwitchRead = res;
+            s.ok();
+        }), () -> {
+            if (r.status != RunResult.Status.OK) {
+                res.why = r.message;
+            }
+        });
+    }
+
+    /** BR-94: the last read of the height switch ({@link #readHeightSwitch}), or null. */
+    public HeightSwitch.Read getLastHeightSwitchRead() {
+        return lastHeightSwitchRead;
+    }
+
+    /** BR-94: an accepted measure is the tool's trip from now on (the clean-tip word is the only human step). */
+    private synchronized void recordHeightSwitch(boolean needle, HeightSwitch.Result res, Long token)
+            throws IOException {
+        if (needle) {
+            requireToken(token); // a needle change during the measure: not this needle's trip (#60 re-review)
+        }
+        DispenseConfig.HeightSwitchTrip trip = new DispenseConfig.HeightSwitchTrip();
+        trip.tripRawZ = res.tripRawZ;
+        trip.rangeMm = res.rangeMm;
+        trip.sdMm = res.sdMm;
+        trip.presses = res.trips.size();
+        // not before the needle's token (ahead of the clock after a clock set back), or needleTrip would void it
+        trip.atMs = needle && token != null ? Math.max(res.atMs, token) : res.atMs;
+        trip.homeAtMs = res.homeAtMs;
+        DispenseConfig c = cfg.copy();
+        if (needle) {
+            c.heightSwitch.needle = trip;
+        }
+        else {
+            c.heightSwitch.n1 = trip;
+        }
+        updateConfig(c);
+    }
+
+    /**
      * Check Z (§5.8): the Z check alone, behind the I4 "Z not checked" refusal of prime, the test dot,
      * the touch-off, the dot ladder and shots. It never homes.
      */
@@ -5190,7 +5458,7 @@ public final class DispenseService {
     private void doseBlocks(DoseBlocksRequest req, DoseBlocksResult res, Task t) throws Exception {
         RunResult r = t.r;
         hook("dose-blocks");
-        DispenseConfig c = cfg;
+        DispenseConfig c = stepConfig(cfg, req);
         if (stopEpoch.get() != req.stopEpoch) {
             throw refused(STOPPED_SINCE_QUEUED);
         }
@@ -5207,6 +5475,11 @@ public final class DispenseService {
             }
         }
         Session s = t.start(c);
+        if (req.measuresStartAngle && s.readBCount(false) == null) {
+            // BR-77: asked before the home, the Z check and the camera tour
+            throw refused("I11: the controller did not report the B step count (M114 Count): the start angle cannot be "
+                    + "measured. Nothing was sent.");
+        }
         HomeTracker.Plan hp = homePlan();
         t.detail.put("home", homeDetail(hp));
         t.detail.put("blocks", req.blocks.size());
@@ -5296,6 +5569,7 @@ public final class DispenseService {
         if (req.landingCheck) {
             scope.landingWaiver = Interlocks.Scope.LANDING_CHECK;
         }
+        scope.startAngleWaiver = req.measuresStartAngle;
         t.stage = "z check";
         res.zCheck = zCheckIfNeeded(s, null, scope, t::aborted);
         for (DoseBlocksRequest.Block b : req.blocks) {
@@ -5483,6 +5757,26 @@ public final class DispenseService {
                 bZeroed.get(), false, 0L, null, tipXy(c));
     }
 
+    /**
+     * The configuration a dose-blocks step runs on, its builder and its stream validator alike: the live one, or BR-77 a
+     * copy with the request's start angle and, for a measure, the tip's smallest dose lowered to the request's (never
+     * saved).
+     */
+    static DispenseConfig stepConfig(DispenseConfig live, DoseBlocksRequest req) {
+        if (req.startAngleDeg == null && !req.measuresStartAngle) {
+            return live;
+        }
+        DispenseConfig c = live.copy();
+        if (req.startAngleDeg != null) {
+            c.profile.startAngleDeg = req.startAngleDeg;
+        }
+        for (int k = 0; req.measuresStartAngle && k < req.blocks.size(); k++) {
+            // R1 is about a dose's reliability: a phase map is no production dose
+            c.tip.minDotSteps = Math.min(c.tip.minDotSteps, req.blocks.get(k).netSteps);
+        }
+        return c;
+    }
+
     /** The Interlocks of a block program: I4 by the scope, I9 for its purge spots, I11 for a partial turn, I6-feed. */
     private Interlocks.Inputs blockInputs(DispenseConfig c, Interlocks.Scope scope, double est, int purge,
             boolean partial, List<GcodeProgram.BlockInfo> blocks) {
@@ -5665,13 +5959,16 @@ public final class DispenseService {
         }
     }
 
-    /** The landing check's purge dots (§22.3): at the request's spots in its band, on the first block's surface. */
+    /**
+     * The landing check's purge dots (§22.3), BR-77 the measure's throwaways: at the request's spots, on the first block's
+     * surface, each raised by its own height (never below the gap).
+     */
     private static List<GcodeStreamBuilder.DotSpec> bandPurge(DispenseConfig c, DoseBlocksRequest req) {
         List<GcodeStreamBuilder.DotSpec> l = new ArrayList<>();
         SurfacePlane plane = planeOf(c, req.blocks.get(0).surfaceName);
         for (int i = 0; plane != null && i < req.purgeXy.size(); i++) {
             double[] xy = req.purgeXy.get(i);
-            double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm();
+            double z = plane.z(xy[0], xy[1]) + c.needleZOffsetMm + c.gapMm() + (xy.length > 2 ? Math.max(0, xy[2]) : 0);
             l.add(new GcodeStreamBuilder.DotSpec(xy[0], xy[1], z, z + c.liftMm(), c.profile.netDeg(c),
                     GcodeStreamBuilder.PURGE_INDEX, "purge#band" + i));
         }

@@ -332,8 +332,25 @@
   function currentStep(s) {
     if (IL.recoveryActive()) return 'recovery';
     if (R.section && STEPS.includes(R.section)) return R.section;
-    return autoStep(s);
+    const a = autoStep(s);
+    return flowView(s, a) || a;
   }
+  /**
+   * The Run pages of the agreed flow (runflow.js) at bare #run: Start while nothing needs today's pages (no board run
+   * running, stopped or part done, no registration of today's to show; Start's own chain keeps it until its run
+   * starts), Live while a board runs, Needs you while a board is stopped or part done, Done after a board run. On
+   * today's pages (R.steps: a #run/<step> was opened) bare #run stays today's: Plan and Register move on there.
+   */
+  function flowView(s, a) {
+    if (!IL.runFlow || R.steps) return null;
+    if (a === 'run') return 'live';
+    if (IL.runFlow.chaining()) return 'start';
+    if (a === 'result') return 'done';
+    if (a === 'probe') return !R.regResultRunId && !(regRun(s) && regRun(s).running) ? 'start' : null;
+    if (a === 'board' || a === 'checks') return stopDecision(s) || partialDecision(s) ? 'needs' : 'start';
+    return null;
+  }
+  const FLOW_VIEWS = ['start', 'live', 'needs', 'done'];
   function goStep(step) {
     R.section = step;
     IL.go({ ws: 'run', section: step }, { replace: true });
@@ -479,7 +496,7 @@
     n.again.addEventListener('click', () => IL.runFix('plan-again', n.again));
     n.actions = el('div', { class: 'page-head__actions' }, n.change, n.again);
     n.headRef = el('div', { 'data-refusals': '', id: 'run-head-refusals' });
-    const head = el('div', { class: 'page-head' }, el('div', { class: 'page-head__text' }, n.eyebrow, n.title, n.meta, n.lock), n.actions);
+    const head = n.head = el('div', { class: 'page-head' }, el('div', { class: 'page-head__text' }, n.eyebrow, n.title, n.meta, n.lock), n.actions);
 
     n.chip = el('span', { class: 'plan-chip', id: 'plan-chip' });
     n.recipe = el('span', { id: 'run-recipe', class: 'run-recipe' });
@@ -547,6 +564,10 @@
     const n = R.n;
     if (!n.hero) return;
     const step = currentStep(s);
+    const view = FLOW_VIEWS.includes(step) ? step : null;
+    for (const x of [n.head, n.headRef]) IL.show(x, !view);
+    IL.show(n.hero, view !== 'start');   // Live, Needs you and Done show this board picture in their own frame
+    if (IL.runFlow) IL.runFlow.render(s, view);
     let p = plan();
     let mode = mainMode(s, step);
     // another board chosen in the Board step: the main column shows it before planning (its drawing at the form's seat,
@@ -1169,7 +1190,7 @@
     R.boardsLoading = true;
     R.boardsErr = null;
     IL.render();
-    try { R.boards = await IL.api('GET', '/api/boards'); } catch (e) { R.boardsErr = IL.errorText(e); }
+    try { R.boards = await IL.api('GET', '/api/boards'); } catch (e) { R.boardsErr = IL.readErrorText(e); }
     R.boardsLoading = false;
     syncSelect(true);
     IL.render();
@@ -1325,6 +1346,13 @@
     const p0 = plan();
     return rem && rem.atMs ? rem.atMs : p0 && p0.source && c && p0.source.file === c.file ? p0.createdAtMs - S.skewMs : null;
   }
+  /** A file board's seat, kept in this browser (its position fields fill from it next time). */
+  function rememberSeat(body) {
+    if (body.source !== 'file') return;
+    const rem = remembered(body.file);
+    const same = rem && Number(rem.x) === body.x && Number(rem.y) === body.y && Number(rem.z) === body.z && Number(rem.rotation || 0) === body.rotation;
+    lsSet('il.boardloc.' + body.file, JSON.stringify({ x: body.x, y: body.y, z: body.z, rotation: body.rotation, atMs: same && rem.atMs ? rem.atMs : Date.now() }));
+  }
   function invalid(id, msg) {
     const i = $(id), e = $(id + '-err');
     if (i) i.classList.add('input--invalid');
@@ -1346,11 +1374,7 @@
     }
     const p = await IL.act(btn, async () => {
       const q = await postPlan(body);
-      if (c.kind === 'file') {
-        const rem = remembered(c.file);
-        const same = rem && Number(rem.x) === body.x && Number(rem.y) === body.y && Number(rem.z) === body.z && Number(rem.rotation || 0) === body.rotation;
-        lsSet('il.boardloc.' + c.file, JSON.stringify({ x: body.x, y: body.y, z: body.z, rotation: body.rotation, atMs: same && rem.atMs ? rem.atMs : Date.now() }));
-      }
+      rememberSeat(body);
       return q;
     }, { ok: (q) => 'Planned ' + q.summary.dots + ' dots on ' + q.summary.pads + ' pads' });
     if (!p) return;
@@ -1372,7 +1396,7 @@
       if (!i) continue;
       if (i.readOnly !== !!job) i.readOnly = !!job;
     }
-    const hint = R.boardsErr ? 'Could not list the boards: ' + R.boardsErr
+    const hint = R.boardsErr ? IL.listReadError(R.boardsErr, !!b && ((b.files || []).length + (b.job || []).length) > 0)
       : job ? 'Position from the OpenPnP job. Register board checks the fiducials again with the top camera.'
         : c ? 'Enter roughly where the board origin (its 0,0 corner) sits. After planning, Register board finds the fiducials with the top camera and probes this seat.' : 'Choose the board to dispense.';
     IL.setText($('board-hint'), hint);
@@ -1498,13 +1522,13 @@
     IL.loadPlan(r.nextPlanId);
   }
   /** Register board: POST /api/plan/{id}/register (probe 'auto': the engine's new-seat flag forces the probe). */
-  async function postRegister(probe) {
+  async function postRegister(probe, stay) {
     const p = plan();
     if (!p) throw new Error('Plan a board first.');
     const r = await IL.api('POST', '/api/plan/' + encodeURIComponent(p.planId) + '/register', { probe: probe || 'auto' });
     setRegResult(null);
     R.byHand = false;
-    if (IL.active() === 'run' && currentStep(S.status) !== 'probe') goStep('probe');
+    if (!stay && IL.active() === 'run' && currentStep(S.status) !== 'probe') goStep('probe');
     return r;
   }
   const regOk = (r) => (r && r.probeOnly ? 'Probe only started' : 'Register board started') + (r && r.home && r.home.needed ? ': homes first (≈ ' + IL.fmtSecs(r.home.estimateS) + '), then ' : ': ')
@@ -2430,7 +2454,7 @@
     if (it.ledger && (checking || cc)) detail.unshift(it.ledger.line + ' ');
     if (refLine) detail.unshift(refLine);
     const posWrong = !checking && IL.cleanPositionWrong(cc);
-    const btn = fixBtn({ fix: 'clean-check', label: posWrong ? 'Check again' : cc && !cc.ok ? 'Wiped: check again' : 'Check pads', icon: 'i-refresh', title: 'The top camera looks at every pad (≈ ' + IL.fmtClock(tourSeconds(plan().pads.length)) + '), the pressure stays off. Press twice.' }, null, 'btn-clean-check');
+    const btn = fixBtn({ fix: 'clean-check', label: posWrong ? 'Check again' : cc && !cc.ok ? 'Wiped: check again' : 'Check pads', icon: 'i-refresh', title: 'The top camera looks at every pad' + (plan() ? ' (≈ ' + IL.fmtClock(tourSeconds(plan().pads.length)) + ')' : '') + ', the pressure stays off. Press twice.' }, null, 'btn-clean-check');
     const cam = el('button', { type: 'button', class: 'btn btn--icon', title: 'Top camera snapshot (nothing moves)', 'aria-label': 'Top camera snapshot', onclick: () => IL.openView('camera', { keep: true }) }, IL.icon('i-camera'));
     const pos = posWrong ? fixBtn({ href: '#run/board', label: 'Check the board position', icon: 'i-swap' }, 'rt-pos') : null;
     return el('div', { class: 'ri ri--' + (it.state === 'live' ? 'live' : it.state === 'block' ? 'block' : 'need'), id: 'clean-result', 'data-key': it.key, 'data-refusals': '' },
@@ -2450,6 +2474,18 @@
   function tourLine(run) {
     const tp = tourProgress(run, run.elapsedS || 0, plan().pads.length);
     return tp.text + ' · ' + IL.fmtClock(tp.left) + ' left.';
+  }
+  /** What need cards show (Run › Checks and Run › Start): their key changes when any of it does, a fix-it's label too. */
+  function needKey(needs, s = S.status) {
+    const run = s && s.run;
+    return JSON.stringify([needs.map((x) => [x.key, x.state, x.title, x.detail, x.fixes || []]), S.cleanCheck ? S.cleanCheck.checkedAtMs : '',
+      !!(run && run.running && run.label === 'clean-pad check'), R.showAllDirty, R.ccRefused ? R.ccRefused.runId : '']);
+  }
+  /** The clean-pad check's progress line inside need cards: it changes every poll, under the cards' key. */
+  function cleanTour(host, s) {
+    const run = s && s.run;
+    const tour = run && run.running && run.label === 'clean-pad check' && plan() ? host.querySelector('.clean-tour') : null;
+    if (tour) IL.setText(tour, tourLine(run));
   }
   function needCard(it, first, s) {
     // too few clean pads on a ledger board (BR-76): its own fix-its (Board wiped, Test board), not the camera's
@@ -2499,15 +2535,11 @@
     // their fixed order; ready tiles; items known after planning
     const needs0 = r.needs.filter((x) => x.state !== 'wait');
     const needs = r.next && needs0.includes(r.next) ? [r.next].concat(needs0.filter((x) => x !== r.next)) : needs0;
-    const run = s.run;
     const ccKey = S.cleanCheck ? S.cleanCheck.checkedAtMs : '';
-    const checking = !!(run && run.running && run.label === 'clean-pad check');
     const ccRef = R.ccRefused ? R.ccRefused.runId : '';
-    const nk = JSON.stringify(needs.map((x) => [x.key, x.state, x.detail, (x.fixes || []).map((f) => f.label)])) + ccKey + checking + R.showAllDirty + ccRef;
-    IL.keyed($('chk-needs'), nk, () => (needs.length ? [IL.sectionK('Needs you', needs.length),
+    IL.keyed($('chk-needs'), needKey(needs, s), () => (needs.length ? [IL.sectionK('Needs you', needs.length),
       el('div', { class: 'stack', style: 'margin-top:10px;gap:10px' }, needs.map((x, i) => needCard(x, i === 0, s)))] : null));
-    const tour = checking && plan() ? $('chk-needs').querySelector('.clean-tour') : null;
-    if (tour) IL.setText(tour, tourLine(run));
+    cleanTour($('chk-needs'), s);
     const ready = r.items.filter((x) => x.ready);
     const rk = JSON.stringify(ready.map((x) => [x.key, x.state, x.value, x.tip])) + ccKey + ccRef;
     IL.keyed($('chk-ready'), rk, () => (ready.length ? [IL.sectionK('Ready', ready.length),
@@ -2705,19 +2737,23 @@
         el('button', { type: 'button', class: 'btn btn--lg', onclick: () => h.close('cancel') }, 'Cancel'),
         el('button', { type: 'button', class: 'btn btn--primary btn--lg', onclick: () => {
           h.close('yes');
-          IL.setNewSeat(Date.now());
-          R.seatSame = null;
-          R.resultRunId = null;
-          R.refused = null;
-          R.decidedAt = Date.now();
-          ssSet('il.run.decidedAt', R.decidedAt);
-          R.doneSet = new Set();
-          // a new board starts here (the server: every tab sees it): the board count goes up at its first dot
-          IL.api('POST', '/api/board/next', {}).then(() => IL.planRefresh({ quiet: true }))
-            .catch((e) => IL.toast('Next board not noted: ' + IL.errorText(e), 'need'));
+          nextBoard();
           goStep('board');
         } }, 'Yes: new seat')],
       initialFocus: null });
+  }
+  /** The board on the seat is done: a new seat, nothing decided or shown about the board before it. */
+  function nextBoard() {
+    IL.setNewSeat(Date.now());
+    R.seatSame = null;
+    R.resultRunId = null;
+    R.refused = null;
+    R.decidedAt = Date.now();
+    ssSet('il.run.decidedAt', R.decidedAt);
+    R.doneSet = new Set();
+    // a new board starts here (the server: every tab sees it): the board count goes up at its first dot
+    IL.api('POST', '/api/board/next', {}).then(() => IL.planRefresh({ quiet: true }))
+      .catch((e) => IL.toast('Next board not noted: ' + IL.errorText(e), 'need'));
   }
   function renderResult(s) {
     const p = plan();
@@ -2831,6 +2867,9 @@
     if (wipe) wipe.input.addEventListener('change', () => updateDialog(S.status));
     const pon = el('button', { type: 'button', class: 'btn', id: 'run-confirm-pressure', title: 'Pressure on to read the gauge (press twice unless the needle is over the waste)' }, IL.icon('i-gauge'), 'Pressure on to adjust');
     pon.addEventListener('click', (ev) => IL.runFix('pressure-on', pon, null, ev));
+    // BR-03's pump only (I12): the gauge is read with the valve closed, nothing moves; before it, Pressure on
+    const pump = IL.fixButton({ fix: 'pressure-pump', label: 'Pump on to adjust', icon: 'i-gauge', title: 'Switches the pump on with the valve closed, so the gauge shows the feed pressure. Nothing moves; nothing comes out.' });
+    pump.id = 'run-confirm-pump';
     const held = el('div', { class: 'regulator__held', id: 'run-confirm-held', hidden: true });
     const sensed = el('div', { class: 'grid2', id: 'run-sensed' });
     const testLine = el('div', { class: 'testline', id: 'run-test-line', hidden: !mode.test, role: 'note' }, IL.glyph('need', 'sm'), el('span', { text: mode.test || '' }));
@@ -2843,7 +2882,7 @@
       el('div', { class: 'regulator' }, IL.icon('i-gauge'),
         el('div', {}, el('div', { class: 'regulator__big', id: 'run-confirm-psi', text: 'Set the regulator to ' + psi + ' psi (profile ' + (prof.name || '') + ')' }),
           el('div', { class: 'regulator__d', text: 'There is no pressure sensor: read the gauge. 16 psi starved the screw, 20 psi drooled.' })),
-        el('div', { class: 'regulator__row' }, gauge.lab, pon), held),
+        el('div', { class: 'regulator__row' }, gauge.lab, pump, pon), held),
       testLine, blockBox,
       IL.sectionK('The machine checked'), sensed,
       IL.sectionK('You confirm (nothing senses these)'),
@@ -2858,7 +2897,7 @@
     const h = IL.dialog.open({ id: 'dlg-run', eyebrow: 'Run board · ' + p.boardName + ' · plan ' + shortId(p), title: mode.title, keys: true,
       body, foot: [sum, cancel, go], initialFocus: first, onClose: () => { if (R.dlg === h) R.dlg = null; } });
     h.mode = mode;
-    h.n = { gauge, paste, hands, tip: tipT, wipe, pon, held, sensed, sum, go, refusals, blockBox, homeBox };
+    h.n = { gauge, paste, hands, tip: tipT, wipe, pon, pump, held, sensed, sum, go, refusals, blockBox, homeBox };
     h.runId = s.run ? s.run.runId : null;   // the last task this tab knew of when the confirm opened
     R.dlg = h;
     cancel.addEventListener('click', () => h.close('cancel'));
@@ -2874,12 +2913,7 @@
     if (m.padIds) body.padIds = m.padIds;
     if (h.n.wipe && h.n.wipe.input.checked) body.wiped = true;   // the server forgets the board's paste before the run
     h.starting = true;   // this run's own start closes the confirm without a note
-    const res = await IL.act(h.n.go, async () => {
-      const r = await IL.api('POST', '/api/run', body);
-      // what this run is (the Last board tile, Records and the Result step say "test", "the pads left")
-      if (r && r.planId) { R.kinds[r.planId] = m.kind; ssSet('il.run.kinds', R.kinds); }
-      return r;
-    }, {
+    const res = await IL.act(h.n.go, () => postRun(body, m.kind), {
       refusalIn: h.n.refusals, what: 'Run',
       ok: (r) => 'Run started: ' + IL.plural((r && r.dots) || m.n, 'dot') + (m.kind === 'test' ? ' (test)' : m.kind === 'rest' ? ' (the pads left)' : ''),
     });
@@ -2891,6 +2925,16 @@
     h.close('run');
     R.test = false;
     R.maxDots = '';
+    runStarted();
+  }
+  /** POST /api/run; what the run is (the Last board tile, Records and the Result step say "test", "the pads left"). */
+  async function postRun(body, kind) {
+    const r = await IL.api('POST', '/api/run', body);
+    if (r && r.planId) { R.kinds[r.planId] = kind; ssSet('il.run.kinds', R.kinds); }
+    return r;
+  }
+  /** After a run started: a result or refusal shown before is over, the decisions before it are made. */
+  function runStarted() {
     R.resultRunId = null;
     R.refused = null;
     R.decidedAt = Date.now();
@@ -2934,6 +2978,8 @@
       el('span', { class: 'spacer' }), fixBtn({ fix: 'pressure-off', label: 'Pressure off', primary: true }, 'btn--sm')] : null));
     IL.show(n.held, !!holding);
     IL.gate(n.pon, holding ? 'Pressure is on' : IL.lockReason(s, { connected: true, homed: true, engine: true }));
+    IL.show(n.pump, IL.hasPumpOnly(s));
+    IL.show(n.pon, !IL.hasPumpOnly(s));
     // what the machine checked
     const it = (k) => r.items.find((x) => x.key === k);
     const row = (s.dispense && s.dispense.purgeRow) || {};
@@ -3031,6 +3077,7 @@
       IL.views.recovery.render(parts, s, true);
       return;
     }
+    if (FLOW_VIEWS.includes(step)) { IL.runFlow.panel(parts, s, true, step); return; }
     renderSteps(parts.top, s, step);
     if (step === 'board') {
       if (!R.boards && !R.boardsLoading) loadBoards();
@@ -3054,6 +3101,7 @@
   }
   function renderPanelStep(parts, s, step) {
     if (step === 'recovery') { IL.views.recovery.render(parts, s, false); return; }
+    if (FLOW_VIEWS.includes(step)) { IL.runFlow.panel(parts, s, false, step); return; }
     renderSteps(parts.top, s, step);
     if (step === 'board') renderBoardStep(s, parts);
     else if (step === 'probe') renderProbe(s);
@@ -3092,13 +3140,16 @@
   // STOP makes an open run confirm moot: close it (Recovery takes over)
   IL.on('stop', () => { if (R.dlg) R.dlg.close('stop'); });
   IL.on('online', () => { if (R.dlg) IL.safe(() => updateDialog(S.status), 'run confirm'); });
+  // a list read that failed (OpenPnP away, the page loaded during its restart): read again once it answers
+  IL.on('online', (on) => { if (on && R.boardsErr) loadBoards(); });
   IL.on('taskend', (run) => {
     // Register board ended: the new plan (the same physical board), and its result card on the Register step
     if (run && run.label === 'board registration' && IL.planMatches(run.planId)) {
       R.regLoaded[run.runId] = true;
       if (run.detail) R.regDetail = { runId: run.runId, detail: run.detail };
       adoptRegPlan(run);
-      setRegResult(run.runId);
+      // Start's own registration (runflow.js) goes on to its run: no result card for today's Register step
+      if (!(IL.runFlow && IL.runFlow.chaining())) setRegResult(run.runId);
       R.byHand = false;
       if (IL.active() === 'run' && R.section && R.section !== 'probe') goStep('probe');
       IL.render();
@@ -3117,6 +3168,35 @@
     IL.render();
   });
 
+  // ================================================================================== Run › Start (runflow.js)
+  // the Run menu item opens Start again, also from today's pages (the same #run does not route again)
+  const tabRun = $('tab-btn-run');
+  if (tabRun) tabRun.addEventListener('click', () => { R.steps = false; if (IL.active() === 'run') IL.render(); });
+  // and its key, Alt+1 (core's handler goes to #run, which does not route again from #run)
+  document.addEventListener('keydown', (e) => { if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'Digit1') R.steps = false; }, true);
+  // what Start does through run.js, so both keep one board choice, one plan and one run bookkeeping
+  R.flow = {
+    selectBoard, loadBoards, needCard, needKey, cleanTour, padsDone, padsLeft, remembered, resultRun, boardNumber, openConfirm, nextBoard,
+    registerWhy, probeOnlyPlan,
+    stopped: (s) => stopDecision(s) || partialDecision(s),
+    estimate: (s) => estimate(s),
+    /** Back to Start after Done (the result was seen). */
+    leaveResult() { R.resultRunId = null; IL.render(); },
+    async plan(body) {
+      const p = await postPlan(body);
+      rememberSeat(body);
+      R.formDirty = false;
+      setRegResult(null);
+      return p;
+    },
+    register: (probe) => postRegister(probe, true),
+    async run(body, kind) {
+      const r = await postRun(body, kind);
+      runStarted();
+      return r;
+    },
+  };
+
   // ================================================================================== the workspace
   IL.workspace('run', {
     ownsRecovery: true,
@@ -3125,6 +3205,7 @@
       R.root = root;
       if (!R.form.sel) R.form.sel = lsGet('il.run.sel') || null;
       buildMain(root);
+      if (IL.runFlow) IL.runFlow.mount(root);
       if (S.plan) formFromPlan(S.plan);
       // board position fields remembered for a file board chosen before
       const c = selectedBoard();
@@ -3135,6 +3216,9 @@
     },
     show(route) {
       R.section = route && STEPS.includes(route.section) ? route.section : null;
+      // into Run from elsewhere: Start, unless today's pages were asked for (a step, or #run/steps: their own step now)
+      R.steps = !!R.section || !!(route && route.section === 'steps');
+      loadBoards();   // a design saved since (Designs, another tab) is in the list: Make a board chooses it
       if (R.bv) setTimeout(() => R.bv.relayout(), 0);
     },
     hide() {
@@ -3144,6 +3228,7 @@
     route(route) {
       const sec = route && STEPS.includes(route.section) ? route.section : null;
       if (sec !== R.section) { R.section = sec; }
+      if (sec || (route && route.section === 'steps')) R.steps = true;
     },
     render(s) { renderMain(s); },
     panel(parts, s, first) {

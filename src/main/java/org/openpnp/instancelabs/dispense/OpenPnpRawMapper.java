@@ -222,6 +222,15 @@ public class OpenPnpRawMapper implements RawMapper {
         return new double[] {lo ? mm(axZ.getSafeZoneLow()) : Double.NaN, hi ? mm(axZ.getSafeZoneHigh()) : Double.NaN};
     }
 
+    /** The raw Z axis' soft limits {low, high} (NaN where a side is not enabled), or null if none. */
+    public double[] zSoftLimitsRaw() {
+        boolean lo = axZ.isSoftLimitLowEnabled(), hi = axZ.isSoftLimitHighEnabled();
+        if (!lo && !hi) {
+            return null;
+        }
+        return new double[] {lo ? mm(axZ.getSoftLimitLow()) : Double.NaN, hi ? mm(axZ.getSoftLimitHigh()) : Double.NaN};
+    }
+
     private static double mm(Length l) {
         return l.convertToUnits(LengthUnit.Millimeters).getValue();
     }
