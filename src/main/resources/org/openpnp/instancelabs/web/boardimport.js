@@ -785,7 +785,7 @@
       !pp && crows.length ? el('div', { class: 'bi-todo' },
         el('h3', { text: crows.length === 1 ? 'Characterize this pad type before its parts get paste' : 'Characterize these pad types before their parts get paste' }),
         el('ul', {}, crows)) : null,
-      el('p', { class: 'bi-saved__next', text: M.saveCloses ? 'Its Set up says what the design still needs.'
+      el('p', { class: 'bi-saved__next', text: M.saveCloses ? 'Set up shows what this design still needs.'
         : how === 'attach' ? 'Use this design, then plan it: the drawing shows under its dots.'
         : 'Use this design: put the top camera on ' + (M.saved.fiducial || 'the first fiducial') + ' and press "Camera is on ' + (M.saved.fiducial || 'FID1')
           + '" (or type the origin), then Plan. Register board then finds the fiducials.' })].filter(Boolean));

@@ -563,7 +563,7 @@ server:  same gates, same pipeline; sha256 must match; files staged; ONE EdtRunn
          allocate (digest must equal `decisions`) → packages, parts → board → read back → move files → addBoard
          → packages.xml, parts.xml, boards.xml → index.json; any failure undoes all of it
          ◀── 201 {file, slug, packages, parts, art, boards}
-browser: "Use this board" → Board step selects it → position (Camera is on FID1) → Plan → Register board (AR)
+browser: "Use this design" → Board step selects it → position (Camera is on FID1) → Plan → Register board (AR)
 ```
 
 There is no server-side preview session, no import id, no expiry and no DELETE: the save re-parses the bytes (1–3 s

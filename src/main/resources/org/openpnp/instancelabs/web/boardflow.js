@@ -117,8 +117,8 @@
     const row = body.querySelector('.board-sel-row');
     if (!row) return;
     const upload = el('button', { type: 'button', class: 'btn bf-upload', id: 'btn-board-upload',
-      title: 'Read a KiCad board file (.kicad_pcb) and save it as a design here. Nothing moves.' },
-    IL.icon('i-plus'), el('span', { text: 'Upload a design…' }));   // the dialog's own title (Designs' button says it too)
+      title: 'Read a KiCad board file (.kicad_pcb) and save it as a design. Nothing moves.' },
+    IL.icon('i-plus'), el('span', { text: 'Upload a design…' }));   // the dialog's own title
     upload.addEventListener('click', () => IL.boardImport.open({ onSaved: onImported }));
     const thumbs = el('div', { class: 'board-thumbs', id: 'board-thumbs', role: 'group', 'aria-label': 'Boards with a drawing: press one to choose it', hidden: true });
     const imported = el('div', { class: 'reason bf-imported', id: 'board-imported', hidden: true });
