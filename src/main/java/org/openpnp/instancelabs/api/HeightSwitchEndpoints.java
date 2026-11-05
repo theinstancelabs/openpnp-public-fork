@@ -73,7 +73,9 @@ final class HeightSwitchEndpoints {
         HeightSwitch.Read last = svc.getLastHeightSwitchRead();
         return Views.map("place", c.location(HeightSwitch.PLACE), "n1", n1, "needle", needle, "kSwitch",
                 who == null ? Double.valueOf(n1.tripRawZ + needle.tripRawZ) : null, "kSwitchWhy",
-                who == null ? null : who + " has no accepted trip on the height switch in this home", "lastRead",
+                who == null ? null : who + " has no accepted trip on the height switch " + ("the needle".equals(who)
+                        && needle == null && c.heightSwitch.needle != null ? "since it was put on" : "in this home"),
+                "lastRead",
                 last == null ? null : lastRead(last));
     }
 

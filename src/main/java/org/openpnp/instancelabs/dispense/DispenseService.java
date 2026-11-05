@@ -1525,6 +1525,9 @@ public final class DispenseService {
         for (DispenseConfig.ParkedTip p : before.parkedTips.values()) {
             token = Math.max(token, measuredStamp(p.needleAnchor, p.needleZOffsetSetAtMs, p.needleLanding) + 1);
         }
+        if (before.heightSwitch.needle != null) { // BR-94: the old needle's switch trip, also after a clock set back
+            token = Math.max(token, before.heightSwitch.needle.atMs + 1);
+        }
         DispenseConfig c = before.copy();
         c.needleChangedAtMs = token;
         writeConfig(c); // a fact: never refused, so never held back by a check of other settings
@@ -5055,13 +5058,15 @@ public final class DispenseService {
             throw refused("the height switch's place is not set: PUT /api/locations/" + HeightSwitch.PLACE
                     + " {x, y}, the switch's top centre");
         }
-        if (needle && !tipClean) {
-            throw refused("the needle presses the height switch only with a clean tip: paste must never touch it");
-        }
         String unchecked = needle ? needleXyProblem(c) : null;
         if (unchecked != null) {
-            // an unchecked landing may aim it up to 15 mm off: down to zFloor beside the plunger (#60 review)
-            throw refused("the needle is aimed at the switch by where it lands, and " + unchecked);
+            // an unchecked landing may aim it up to 15 mm off: down to zFloor beside the plunger (#60 review); first,
+            // as checking the landing lays paste
+            throw refused("the needle is aimed at the switch by where it lands: " + unchecked.replaceAll("\\.$", "")
+                    + ", then clean the tip");
+        }
+        if (needle && !tipClean) {
+            throw refused("the needle presses the height switch only with a clean tip: paste must never touch it");
         }
         String unknown = positionUnknownWhy();
         if (unknown != null) {
@@ -5075,7 +5080,8 @@ public final class DispenseService {
         DispenseConfig.HeightSwitchTrip last = needle ? HeightSwitch.needleTrip(c) : c.heightSwitch.n1;
         if ((zStart == null || zFloor == null) && (last == null || home == null || !home.equals(last.homeAtMs))) {
             throw refused("zStart and zFloor (raw Z) are needed: " + (needle ? "the needle" : "N1")
-                    + " has no accepted trip on the height switch in this home");
+                    + " has no accepted trip on the height switch " + (needle && last == null
+                            && c.heightSwitch.needle != null ? "since it was put on" : "in this home"));
         }
         Nozzle probeNozzle = getProbeNozzle();
         if (!needle && probeNozzle == null) {
@@ -5141,7 +5147,7 @@ public final class DispenseService {
             throw refused(res.why);
         }
         if (res.accepted) {
-            recordHeightSwitch(needle, res);
+            recordHeightSwitch(needle, res, c.needleChangedAtMs);
         }
         s.ok();
     }
@@ -5179,13 +5185,18 @@ public final class DispenseService {
     }
 
     /** BR-94: an accepted measure is the tool's trip from now on (the clean-tip word is the only human step). */
-    private synchronized void recordHeightSwitch(boolean needle, HeightSwitch.Result res) throws IOException {
+    private synchronized void recordHeightSwitch(boolean needle, HeightSwitch.Result res, Long token)
+            throws IOException {
+        if (needle) {
+            requireToken(token); // a needle change during the measure: not this needle's trip (#60 re-review)
+        }
         DispenseConfig.HeightSwitchTrip trip = new DispenseConfig.HeightSwitchTrip();
         trip.tripRawZ = res.tripRawZ;
         trip.rangeMm = res.rangeMm;
         trip.sdMm = res.sdMm;
         trip.presses = res.trips.size();
-        trip.atMs = res.atMs;
+        // not before the needle's token (ahead of the clock after a clock set back), or needleTrip would void it
+        trip.atMs = needle && token != null ? Math.max(res.atMs, token) : res.atMs;
         trip.homeAtMs = res.homeAtMs;
         DispenseConfig c = cfg.copy();
         if (needle) {
