@@ -48,7 +48,8 @@ unavailable (engine without its nozzle), machine-500 (GET /api/status and /api/m
 home endpoint), old-status (a build before BR-44: no machine.homing, server.startedAtMs, dispense.state or
 dispense.startError, and an enable on a kept-alive link that died fails on the dead port), old-stop (a build before
 BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the lock just before the planned stop),
-planned-lines-failed (the planned stop's M107 P3 gets no ok: linesFailed).
+planned-lines-failed (the planned stop's M107 P3 gets no ok: linesFailed), planned-slow (the first planned stop
+of an enabled machine switches it off but answers 409 refused: its task outlived the API's 20 s wait).
 BR-75's planned stop: 409 locked while someone holds the lock, 409 refused (nothing sent) while anything works or for
 the first fake-machine.json "planned_refusals" N calls; else the STOP without the screw's motor-off, the link closed
 (keep-alive or not). A STOP of a machine already off sends nothing (it still vents the pressure and ends a run).
@@ -462,6 +463,10 @@ class FakeOpenPnP:
             self.enabled = self.homed = self.connected = False
             lines = ["M410", "M107 P3", "M107 P2", "M107 P1", "M107 P0"] if was else []
             failed = lines[1:2] if "planned-lines-failed" in self.fail else []  # the valve off line got no ok
+            if was and "planned-slow" in self.fail:
+                self.fail.discard("planned-slow")  # once: the lines went out, the answer did not wait for their acks
+                return 409, {"error": "refused", "reason": "the planned stop has not ended after 20 s: the machine may "
+                                                           "still be switching off. The real STOP is POST /api/stop"}
             return 200, {"stopped": True, "machineEnabled": False, "planned": True,
                          "linesSent": [x for x in lines if x not in failed], "linesFailed": failed,
                          "actions": ["OpenPnP Stop; the screw's motor stays on"] if was

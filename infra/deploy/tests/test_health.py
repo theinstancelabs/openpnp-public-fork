@@ -98,6 +98,64 @@ class Health(HealthLab, unittest.TestCase):
         self.assertEqual(rep["kind"], "machine", rep)
         self.assertIn("M107 P3", rep["failure"])
 
+    def test_unanswered_lines_at_the_enable_steps_stop_are_the_machines(self):
+        self.start(jar_fail=["planned-lines-failed"])
+        self.fake.enable()
+        rep = self.check()
+        self.assertEqual((rep["kind"], rep["failure"][:8]), ("machine", "enable: "), rep)
+        self.assertIn("M107 P3", rep["failure"])
+
+    def test_already_stopped_after_a_refused_stop_that_ran_is_the_machines(self):
+        """#41 answers 409 when its task outlives the API's wait: its lines went out, their acks unknown. The retry
+        finds the machine off and answers 200 'already stopped', sending nothing: the outputs are not known off."""
+        self.start(jar_fail=["planned-slow"])
+        rep = self.check("--stop-timeout", "1")
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("machine", "stop"), rep)
+        self.assertIn("has not ended after 20 s", rep["failure"])
+        self.assertNotIn(("POST", "/api/stop"), self.posts())
+
+    def test_already_stopped_after_a_refused_stop_that_ran_at_the_enable_step_is_the_machines(self):
+        self.start(jar_fail=["planned-slow"])
+        self.fake.enable()
+        rep = self.check("--stop-timeout", "1")
+        self.assertFalse(rep["ok"])
+        self.assertEqual((rep["kind"], rep["failure"][:8]), ("machine", "enable: "), rep)
+        self.assertIn("has not ended after 20 s", rep["failure"])
+
+    def planned_stop_times_out(self):
+        """POST /api/stop/planned gets no answer in time (the lock guard's resync can hold a request ~90 s)."""
+        post = il_deploy.Api.post
+
+        def timed_out(api, path, body=None, timeout=10):
+            if path == "/api/stop/planned":
+                raise il_deploy.ApiTimeout(f"POST {path}: no answer within {timeout:g} s")
+            return post(api, path, body, timeout)
+        return mock.patch.object(il_deploy.Api, "post", timed_out)
+
+    def test_a_planned_stop_that_timed_out_is_the_machines(self):
+        """It may have run with its valve and pump off acks unknown: nothing restarts and homes unattended."""
+        self.start()
+        with self.planned_stop_times_out():
+            rep = self.check()
+        self.assertEqual((rep["kind"], rep["steps"][-1]["step"]), ("machine", "stop"), rep)
+        self.assertIn("no answer within 60 s", rep["failure"])
+        self.assertEqual(rep["failure"].count("POST /api/stop/planned"), 1, rep["failure"])
+
+    def test_a_planned_stop_that_timed_out_at_the_enable_step_is_the_machines(self):
+        self.start()
+        self.fake.enable()
+        with self.planned_stop_times_out():
+            rep = self.check()
+        self.assertEqual((rep["kind"], rep["failure"][:8]), ("machine", "enable: "), rep)
+
+    def test_a_locked_answer_at_the_enable_step_is_proof_enough(self):
+        self.start(jar_fail=["lock-at-planned-stop"])
+        self.fake.enable()
+        with mock.patch.object(il_deploy.Deployer, "_lock_taken", return_value=None):
+            rep = self.check()
+        self.assertEqual((rep["kind"], rep["failure"][:8]), ("claim-lost", "enable: "), rep)
+
     def test_a_locked_answer_is_proof_enough(self):
         """409 locked is someone else's session even if the status read after it fails."""
         self.start(jar_fail=["lock-at-planned-stop"])

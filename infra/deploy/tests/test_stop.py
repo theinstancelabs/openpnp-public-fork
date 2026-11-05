@@ -427,7 +427,8 @@ class PlannedStop(unittest.TestCase):
 
     def test_a_stopped_machine_that_still_works_is_not_stopped(self):
         for over in ({"pressure": {"on": True, "state": "on"}}, {"dispense": {"busy": True}},
-                     {"lock": {"holder": {"kind": "user", "who": "user", "label": "User"}}}):
+                     {"lock": {"holder": {"kind": "user", "who": "user", "label": "User"}}},
+                     {"run": {"running": True, "kind": "program"}}, {"machine": {"busy": True, "enabled": False}}):
             with self.subTest(over):
                 api = PlannedApi(lambda n: self.ENGINE_REFUSED, st=lambda n: self.off(**over))
                 self.assertIsNone(self.deployer(api).planned_stop(off_is_done=True)[0])

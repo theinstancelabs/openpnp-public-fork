@@ -1285,28 +1285,32 @@ def api_stop_and_wait(api, timeout, poll=0.2, clock=None):
 
 PLANNED_STOP = "/api/stop/planned"  # BR-75
 PLANNED_STOP_RETRY_S = 5  # a refusal lasts while something works: asked again this often, not every poll
-NO_PLANNED_STOP = f"no {PLANNED_STOP} to use (a build before BR-75, or the API refuses connections)"
+NO_PLANNED_STOP = f"no {PLANNED_STOP} to use (a build before BR-75, or no connection to the API)"
 PLANNED_LOCKED = "no planned stop, someone has the machine lock: "  # 409 locked: their session, whatever else reads
 LINES_UNANSWERED = f"POST {PLANNED_STOP}: no ok from the controller for "  # the valve or pump may be on
+PLANNED_MAY_HAVE_RUN = "the planned stop may have run, its outputs not known to be off: "  # no answer, or a lost one
 
 
 def api_planned_stop(api, timeout, poll=0.2, clock=None, off_is_done=False):
     """BR-75, the deployer's own stop: POST /api/stop/planned is OpenPnP's STOP without the screw's motor-off line
     (M18 B), so the screw keeps its timing. (ok, detail) as api_stop_and_wait; a 200 whose lines went unanswered
-    (detail LINES_UNANSWERED: the valve or pump may still be on) and a request that timed out (it may have run) are
-    failures. A refusal is answered by waiting, never by a real STOP: 409 locked returns ok None at once (detail
-    PLANNED_LOCKED); 409 refused (something works) is asked again every PLANNED_STOP_RETRY_S, and ok None when timeout
-    s have passed, nothing sent. off_is_done (before the switch only, where the idle check found the machine off): a
-    refusal while /api/status shows the machine stopped and nobody holding the lock is nothing to stop (ok True); #41
-    refuses without its engine or a machine before it looks. NO_PLANNED_STOP when the build has none (404 "no such
-    endpoint") or the API refuses connections: the caller's own stop decides, as before BR-75."""
+    (detail LINES_UNANSWERED: the valve or pump may still be on) is a failure, and so (detail PLANNED_MAY_HAVE_RUN)
+    are a request that timed out and, after the switch, a 200 that sent nothing after a refusal of this call: #41's
+    409 for a task that outlived its wait (its lines out, their acks lost), then "already stopped". A refusal is
+    answered by waiting, never by a real STOP: 409 locked returns ok None at once (detail PLANNED_LOCKED); 409 refused
+    (something works) is asked again every PLANNED_STOP_RETRY_S, and ok None when timeout s have passed, nothing sent.
+    off_is_done (before the switch only, where the idle check found the machine off): a refusal while /api/status
+    shows the machine stopped, idle and nobody holding the lock is nothing to stop (ok True); #41 refuses without its
+    engine or a machine before it looks. NO_PLANNED_STOP when the build has none (404 "no such endpoint") or the API
+    gives no connection: the caller's own stop decides, as before BR-75."""
     clock = clock or Clock()
     end = clock.monotonic() + timeout
+    refused = None  # this call's first refusal
     while True:
         try:
             code, body = api.post(PLANNED_STOP, timeout=60)  # the API gives its task 20 s to start and end
         except ApiTimeout as e:
-            return False, f"POST {PLANNED_STOP}: {e}"
+            return False, PLANNED_MAY_HAVE_RUN + str(e)
         except ApiDown:
             return None, NO_PLANNED_STOP
         error, reason = body.get("error"), str(body.get("reason") or "")
@@ -1315,12 +1319,13 @@ def api_planned_stop(api, timeout, poll=0.2, clock=None, off_is_done=False):
         if code == 409 and error in LOCK_REFUSALS:
             return None, PLANNED_LOCKED + reason
         if code == 409 and error == "refused":
+            refused = refused or reason
             if off_is_done:
                 try:
                     st_code, st = api.get("/api/status", timeout=5)
                 except ApiDown:
                     st_code, st = None, {}
-                if st_code == 200 and not stop_left(st) and not api_lock_reasons(st):
+                if st_code == 200 and not (stop_left(st) or api_busy_reasons(st) or api_lock_reasons(st)):
                     return True, f"{STOP_DONE} (already: the planned stop answered {reason})"
             if clock.monotonic() >= end:
                 return None, f"no planned stop for {timeout:g} s: {reason}"
@@ -1331,13 +1336,15 @@ def api_planned_stop(api, timeout, poll=0.2, clock=None, off_is_done=False):
         failed = body.get("linesFailed") or []
         if failed:
             return False, LINES_UNANSWERED + ", ".join(map(str, failed))
+        if refused and not off_is_done and not body.get("linesSent"):
+            return False, f"{PLANNED_MAY_HAVE_RUN}refused ({refused}), then the machine was already stopped"
         return wait_stopped(api, timeout, poll, clock, PLANNED_STOP)
 
 
 def planned_stop_kind(ok, detail):
-    """A failed planned stop in the health check: a refusal (ok None) or unanswered lines are the machine's (a person
-    checks; nothing restarts unattended), anything else the build's."""
-    return "machine" if ok is None or detail.startswith(LINES_UNANSWERED) else "build"
+    """A failed planned stop in the health check: a refusal (ok None), unanswered lines or a stop that may have run
+    are the machine's (a person checks; nothing restarts unattended), anything else the build's."""
+    return "machine" if ok is None or detail.startswith((LINES_UNANSWERED, PLANNED_MAY_HAVE_RUN)) else "build"
 
 
 def wait_stopped(api, timeout, poll, clock, sent):
