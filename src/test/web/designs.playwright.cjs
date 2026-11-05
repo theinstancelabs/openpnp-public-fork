@@ -14,6 +14,7 @@
  * the check's `use` groups and the page follows the new check; (5) Set up the rest uses the doses found and opens the
  * pad calibration of the groups to calibrate (its own Start: nothing pressed); a doses row is done only when no dose is
  * missing (a group that waits for the tip's dots or a by-hand dose says so; stubbed: a fresh SIM tip is measured); a
+ * design that is not ready with nothing listed to wait on (only an `outside` group, stubbed) says the card's words; a
  * refusal stays with its design; a file dropped on the open dialog keeps Designs' Save, even over another page; the menu
  * line follows a design saved in Run's Board step in this tab; (6) a ready design: Make a board opens Run › Start with it chosen;
  * a failed read of the list keeps the cards Start and Designs have and says so in one wording everywhere (no "look at the
@@ -106,7 +107,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
   // states the SIM does not hold on demand: a check whose groups wait for the tip's dots or a by-hand dose (one board
   // file), an apply refused once
   const ST = { checkFile: null, refuseApply: false, attachOffer: null, attachDnp: true, attachUrl: null, importHeld: null, holdPreview: null, holdAttach: null, okTipFile: null,
-    task: null };
+    task: null, outsideFile: null };
   // the status's boardImport held ((2), (5d): "an upload is being read" off and savedAtMs as before the save, so only the
   // save's own 'boards' event may make Designs read its list; (2c): only `reading` off, savedAtMs passes); (3c): a task
   // running (ST.task: its label)
@@ -148,6 +149,11 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
         const fix = (body.groups || []).filter((g) => ['no-pad-size', 'no-type', 'below-gate', 'bridge'].includes(g.reason));
         if (fix[0]) fix[0].suggestion = { kind: 'measure-tip', id: 'stub-measure', group: fix[0].group };
         if (fix[1]) fix[1].suggestion = null;
+      }
+      // (5b2): not ok, and the only group is an `outside` one (nothing the page lists as waiting)
+      if (ST.outsideFile && new URL(route.request().url()).searchParams.get('boardFile') === ST.outsideFile) {
+        Object.assign(body, { ok: false, groups: [{ group: 'stub-outside', reason: 'outside', outsideKind: 'interlock', blocking: true, fixable: false, refs: ['U1'],
+          packageIds: ['QFN-stub'], pads: 4, short: 'stub outside reason', reasonText: 'Stub: an interlock.' }] });
       }
       // (6b): every pad has a dose, and one tip group the engine does not block on (ok stays true: ProfileCheck's unflagged
       // tip group of kind pitch)
@@ -437,6 +443,17 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     check('(5b) groups that wait for the tip\'s dots or a by-hand dose: Missing doses is not done, and says why', /tip’s dots are measured/.test(doses5 || '') && /by hand/.test(doses5 || '')
       && !(await shown(page, '#btn-design-use')) && await shown(page, '#btn-design-next') && !(await shown(page, '#btn-design-rest')), doses5);
     ST.checkFile = null;
+
+    // ---- (5b2) not ready with nothing listed to wait on (only an `outside` group, stubbed on the Nano): the panel says the
+    // card's words, never "This design waits on ."
+    ST.outsideFile = nano.file;
+    await page.evaluate(() => IL.go('#designs'));
+    await page.evaluate((h) => IL.go(h), routeOf(nano));
+    const lead5 = await page.waitForFunction(() => { const t = (document.querySelector('#panel .panel__lead') || {}).textContent || ''; return /stub outside reason/.test(t) && t; },
+      null, { timeout: 10000 }).then((h) => h.jsonValue(), () => page.evaluate(() => (document.querySelector('#panel .panel__lead') || {}).textContent || null));
+    check('(5b2) not ready with nothing listed to wait on (only an outside group): the panel says the card\'s words, never "This design waits on ."',
+      lead5 === 'Not ready: stub outside reason.', lead5);
+    ST.outsideFile = null;
 
     // ---- (5c) a file dropped on the open dialog (not on its drop box) keeps the options it was opened with: Designs'
     // Save opens the design's Set up, even with another page under it (whose drop would otherwise be Run's upload) -----
