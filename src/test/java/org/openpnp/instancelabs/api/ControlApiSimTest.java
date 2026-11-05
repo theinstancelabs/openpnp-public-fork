@@ -14,6 +14,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.FlatVacuum;
 import org.openpnp.instancelabs.dispense.SimMachine;
@@ -270,6 +271,31 @@ public class ControlApiSimTest {
         ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":130,\"y\":100}", UI));
         ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
         refused(409, "travel height", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dx\":-10}", UI));
+    }
+
+    /**
+     * BR-94 review MINOR 6: over the height switch the needle is checked where its tip lands (N2 + the landing + trim,
+     * as the measure and I12 aim), not at N2. With an 11 mm landing, N2 11 mm from the place puts the tip on it: a jog
+     * down is refused; N2 on the place puts the tip 11 mm away: it may go down to its floor.
+     */
+    @Test
+    public void overTheHeightSwitchTheNeedleIsCheckedWhereItsTipLands() throws Exception {
+        needleFrameAndBlank();
+        ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        DispenseConfig c = svc.getConfig();
+        DispenseConfig.NeedleLanding l = new DispenseConfig.NeedleLanding();
+        l.dxMm = 11;
+        double[] ho = svc.headOffsetNow();
+        l.headOffsetXMm = ho[0];
+        l.headOffsetYMm = ho[1];
+        l.setAtMs = System.currentTimeMillis();
+        c.needleLanding = l;
+        svc.updateConfig(c);
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":89,\"y\":100}", UI));
+        refused(409, "over the height switch (100.0, 100.0)", call("POST", "/api/jog",
+                "{\"tool\":\"needle\",\"dz\":-1}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"place\":\"height-switch\"}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI));
     }
 
     /** #19 review of BR-49, MINOR 7: a real unhomed state (STOP, then Start), not a faked flag. */

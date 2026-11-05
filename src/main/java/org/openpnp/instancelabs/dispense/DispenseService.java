@@ -1393,8 +1393,13 @@ public final class DispenseService {
             return null;
         }
         org.openpnp.model.Location at = n.getLocation().convertToUnits(LengthUnit.Millimeters);
+        return needleXY(at.getX(), at.getY());
+    }
+
+    /** Where the needle's paste lands with N2 at (x, y): N2 plus the mounted tip's landing + trim, as programs aim. */
+    public double[] needleXY(double x, double y) {
         double[] l = landingAndTrim(cfg);
-        return new double[] {at.getX() + l[0], at.getY() + l[1]};
+        return new double[] {x + l[0], y + l[1]};
     }
 
     /**

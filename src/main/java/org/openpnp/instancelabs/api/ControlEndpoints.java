@@ -41,8 +41,9 @@ import com.google.gson.JsonObject;
  * transforms say and holds each to its floor at its own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed
  * surface under it (it may touch: the by-hand probe), the needle with a current frame not below the surface under it
  * (contact = surface + offset) nor its I4 floor, without one not below its safe zone; over the height switch (BR-94:
- * the circle around its place) neither below its safe zone, whatever its floor. Move-to travels at safe Z and ends at
- * the tool's safe Z (both nozzles at travel height). A STOP ends either at once; a move that saw one answers 409.</p>
+ * the circle around its place; the needle where its tip lands) neither below its safe zone, whatever its floor.
+ * Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel height). A STOP ends either at once;
+ * a move that saw one answers 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
@@ -265,10 +266,13 @@ final class ControlEndpoints {
                 continue; // going up (or not moving): always allowed, also out of a spot below a floor that rose
             }
             double low = safeLow(n);
-            if (Double.isFinite(low) && at.getZ() < low - 1e-6 && overHeightSwitch(at.getX(), at.getY())) {
+            // the needle where its tip lands (N2 + its landing and trim), as the measure and I12 aim
+            double[] tip = isNeedle(n) ? ctx.svcOrNull().needleXY(at.getX(), at.getY())
+                    : new double[] {at.getX(), at.getY()};
+            if (Double.isFinite(low) && at.getZ() < low - 1e-6 && overHeightSwitch(tip[0], tip[1])) {
                 throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over the height "
                         + "switch (%.1f, %.1f), below its safe zone %.2f: only its measure presses it (POST "
-                        + "/api/height-switch/measure)%s", name(n), at.getZ(), at.getX(), at.getY(), low,
+                        + "/api/height-switch/measure)%s", name(n), at.getZ(), tip[0], tip[1], low,
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
             boolean needle = isNeedle(n);
