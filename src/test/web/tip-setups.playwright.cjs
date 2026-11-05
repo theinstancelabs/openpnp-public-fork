@@ -514,7 +514,9 @@ const ticks = (page) => page.evaluate(() => { IL.attest.set('regulator', IL.S.st
     check('(6) the primary is "Calibrate the … pad types of … for the 25G straight…"', c6.measured && /^Calibrate the .*pad types of .* for the 25G straight…$/.test(c6.next || '') && c6.primary, c6);
     await shoot(page, 'measure-result', null, true);
     await page.evaluate(() => IL.go('#setup/tip'));
-    await page.waitForFunction(() => /measured /.test(document.getElementById('tip-kv').textContent), null, { timeout: 15000 }).catch(() => null);
+    // Setup shows at once what it drew in (5) ("Dotsnot measured yet", which /measured / matched) and draws again at the next
+    // frame: wait for the check's own words
+    await page.waitForFunction(() => /Dotsmeasured\b/.test(document.getElementById('tip-kv').textContent), null, { timeout: 15000 }).catch(() => null);
     const kv6 = await page.textContent('#tip-kv');
     check('(6) #tip-kv says measured', /Dotsmeasured\b/.test(kv6), kv6);
 
