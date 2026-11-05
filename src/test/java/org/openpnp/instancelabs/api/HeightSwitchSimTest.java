@@ -977,6 +977,34 @@ public class HeightSwitchSimTest {
     }
 
     /**
+     * #110 review NIT 2: a needle change also stops N1's press (the engine's abort, at its next line): 409
+     * needle-changed as for the needle, and no trip. (One after N1's last line stops nothing: its trip does not depend
+     * on the needle.)
+     */
+    @Test
+    public void aNeedleChangeStopsN1sPressWithNeedleChanged() throws Exception {
+        svc.setLocation(HeightSwitch.PLACE, 150, 200, 0);
+        String lift = "G1 Z31.500 F600";
+        CountDownLatch held = new CountDownLatch(1);
+        try {
+            long before = count(lift);
+            sim.server.holdOkUntil.put(lift, held);
+            Future<HeightSwitch.Result> f = svc.measureHeightSwitch("n1", 5, N1_TRIP + 1, N1_TRIP - 0.5);
+            waitFor(() -> count(lift) == before + 1); // up to travel Z first, its ok held
+            svc.recordNeedleChange("the needle came off", "test");
+            sim.server.holdOkUntil.remove(lift);
+            held.countDown();
+            HeightSwitch.Result r = f.get(120, TimeUnit.SECONDS);
+            assertTrue(r.refused, String.valueOf(r.why));
+            assertEquals("needle-changed", r.code, r.why);
+            assertNull(svc.getConfig().heightSwitch.n1, "no trip");
+        }
+        finally {
+            held.countDown();
+        }
+    }
+
+    /**
      * #60 re-review MINOR 2: a clock set back after the trip (emulated by a trip stamped an hour ahead): the change's
      * token still comes later than the trip, so the old trip is void; a new trip then counts at once.
      */
