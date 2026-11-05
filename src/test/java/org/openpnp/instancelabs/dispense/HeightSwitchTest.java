@@ -209,6 +209,29 @@ public class HeightSwitchTest {
         assertEquals(0, needle.past(52.96), 1e-9, "never past the needle's floor: " + needle.lines);
     }
 
+    /**
+     * Review MINOR 5: a coarse press the fine pass does not see again (a bounce, noise) ends the fine pass one fine step
+     * past the coarse trip, not 0.30 past it.
+     */
+    @Test
+    public void aPressTheFinePassDoesNotSeeAgainEndsOneFineStepPastTheCoarseTrip() throws Exception {
+        FakeSwitch sw = new FakeSwitch(51.95, 1) {
+            boolean seen;
+
+            @Override
+            boolean pressed() {
+                boolean now = super.pressed() && !seen;
+                seen |= now;
+                return now;
+            }
+        };
+        HeightSwitch.Result r = HeightSwitch.measure(sw, plan("needle", 1, 51.0, 52.9, 5));
+        assertTrue(r.why != null && r.why.contains("the fine descent") && r.why.contains("52.000"), r.why);
+        assertTrue(r.trips.isEmpty());
+        assertEquals(HeightSwitch.FINE_MM, sw.past(52.0), 1e-9, "one fine step past the coarse trip: " + sw.lines);
+        assertEquals(31.5, sw.z, 1e-9, "back up");
+    }
+
     @Test
     public void fewerThanFivePressesOrASpreadOver50umIsNotAccepted() throws Exception {
         HeightSwitch.Result three = HeightSwitch.measure(new FakeSwitch(12.0, -1), plan("n1", -1, 13.0, 11.0, 3));

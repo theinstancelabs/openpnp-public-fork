@@ -15,8 +15,8 @@ import java.util.regex.Pattern;
  *
  * <p>One press: a coarse descent from the start (N1 0.25 mm, the needle 0.10) to the first step that reads pressed,
  * 0.40 mm back (still pressed there: the switch sticks or the tool is caught, refused), then a fine descent of 0.025 mm
- * from 0.30 above that step: the trip is the first fine step that reads pressed, so the tool goes at most one coarse
- * step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. Every step is
+ * from 0.30 above that step to one fine step past it: the trip is the first fine step that reads pressed, so the tool
+ * goes at most one coarse and one fine step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. Every step is
  * a move, M400 and 50 ms before its read. Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's other side) as
  * it rises ({@link Plan#down}). Travel Z at the end, also after a refusal; an exception from the link (a STOP's abort,
  * a lost link) ends it as it is.</p>
@@ -180,7 +180,8 @@ public final class HeightSwitch {
                         + "sticks or the tool is caught", BACK_MM, zc);
                 return;
             }
-            double end = p.down < 0 ? Math.max(zc - FINE_FROM_MM, p.zFloor) : Math.min(zc + FINE_FROM_MM, p.zFloor);
+            // one fine step past the coarse trip: a press that does not repeat (a bounce, noise) goes no deeper
+            double end = p.down < 0 ? Math.max(zc - FINE_MM, p.zFloor) : Math.min(zc + FINE_MM, p.zFloor);
             Double t = descend(io, p, zc - p.down * FINE_FROM_MM, end, FINE_MM, r.idleLevel);
             if (t == null) {
                 r.why = String.format(Locale.ROOT, "the fine descent from Z %.3f found no trip (the coarse one did at Z "
