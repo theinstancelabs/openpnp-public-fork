@@ -298,7 +298,7 @@ class Pa5Switch(unittest.TestCase):
         self.assertFalse(pa5(b)["pressed"])
 
     def test_a_kill_at_rest_drops_z_onto_the_switch(self):
-        """Stock: when the coast ends; il-safety (its kill freezes at once): at the kill."""
+        """Stock: when its steppers go off, 0.85 s after the kill; il-safety (its kill freezes at once): at the kill."""
         for personality, at_kill in (("stock", []), ("il-safety", [OVER_06])):
             with self.subTest(personality):
                 b = switch(homed(personality=personality))
@@ -309,6 +309,47 @@ class Pa5Switch(unittest.TestCase):
                 self.assertEqual(errors(b), at_kill)
                 b.run(1.0)
                 self.assertEqual(errors(b), [OVER_06])
+
+    def test_a_kill_holds_z_through_its_coast(self):
+        """minkill() turns the steppers off 0.25 s after its 0.6 s coast: until then Z is held. A move that ends in
+        the coast went 0.4 mm into the switch, not 0.8; a read in the coast (a fault) sees Z where it is."""
+        b = switch(homed())
+        to(b, 100, 50, 12.3)
+        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+        b.send("G1 Z11.6 F600")
+        b.send("G1 Z13 F600")
+        b.run(0.005)
+        b.write("M112\n")
+        b.run(2.0)
+        self.assertEqual(errors(b), [])
+        b = switch(homed())
+        to(b, 100, 50, 11.8)
+        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+        b.send("G1 Z20 F60")
+        b.run(0.15)
+        b.write("M112\n")
+        b.run(0.01)
+        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "home_offset", "x": 0.1}, b.t)["ok"])
+        b.run(1.0)
+        self.assertEqual(errors(b), [])
+
+    def test_a_kills_drop_is_seen_when_it_happens_whoever_looks(self):
+        """The steppers go off at the kill + 0.85 s (stock) whether or not anything reads the state meanwhile."""
+        def run(poll):
+            b = switch(homed())
+            to(b, 100, 50, 11.8)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"])
+            b.write("M112\n")
+            b.run(0.001)
+            t_kill = b.t
+            b.run(5.0)
+            if poll:
+                pa5(b)
+            b.run(5.0)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": 1.0}, b.t)["ok"])
+            return [(round(e["t"] - t_kill, 2), e["error"]) for e in b.sim.state(b.t)["sim_errors"]]
+        self.assertEqual(run(poll=False), [(0.85, OVER_06)])
+        self.assertEqual(run(poll=True), [(0.85, OVER_06)])
 
     def test_another_tools_window_clears_the_release_point(self):
         """N1 released and lifted in its window to Z 53 (its release point follows), then the head moves into the

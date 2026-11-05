@@ -26,6 +26,7 @@ HOMING_BUMP_DIVISOR = [2, 2, 4]
 Z_AFTER_HOMING = 31.5
 XY_PROBE_FEEDRATE = 133.0
 KILL_DELAY_S = 0.6              # minkill(): messages get out, the stepper ISR still runs, then cli()
+STEPPERS_OFF_DELAY_S = 0.25     # minkill(): after cli(), DELAY_US(250000), then disable_all_steppers() (M112)
 DEFAULT_STEPPER_TIMEOUT_MS = 3600 * 1000  # DEFAULT_STEPPER_TIMEOUT_SEC (Configuration_adv.h)
 DISABLE_IDLE = AXES             # DISABLE_IDLE_X/Y/Z/I/J: an idle timeout releases every axis
 MILLIS_HALF = 2 ** 31           # ELAPSED()/PENDING() compare millis_t as int32_t (core/millis_t.h:32-33)
@@ -177,6 +178,7 @@ class Firmware:
         self.keepalive_interval = 2.0
         self.next_busy = now + self.keepalive_interval
         self.halted, self.halt_reason, self.halt_time = False, None, None
+        self.steppers_off_at = None  # a stock kill's disable_all_steppers(), after its coast
         self.homing_phase, self.in_g28 = None, False
         # il/safety
         self.wd_timeout, self.wd_last, self.wd_tripped = 0, now, False
@@ -203,13 +205,24 @@ class Firmware:
 
     # ------------------------------------------------------------------ driver interface
     def next_wake(self):
-        return math.inf if self.halted else self._wake
+        if not self.halted:
+            return self._wake
+        # a halted board still ends a kill's coast and then lets its steppers go, each at its own time
+        coast = self.stepper.freeze_at if self.stepper.freeze_at is not None and not self.stepper.frozen else math.inf
+        return min(coast, math.inf if self.steppers_off_at is None else self.steppers_off_at)
 
     def advance(self, t):
         """Run everything due up to simulator time t."""
         while not self.halted and self._wake <= t:
             self.now = max(self.now, self._wake)
             self._resume()
+        while self.halted and self.next_wake() <= t:
+            self.now = max(self.now, self.next_wake())
+            self.stepper.update(self.now)
+            if self.steppers_off_at is not None and self.steppers_off_at <= self.now:
+                self.steppers_off_at = None
+                for a in AXES:
+                    self.release(a)
         self.now = max(self.now, t)
 
     def feed(self, data, t):
@@ -551,11 +564,13 @@ class Firmware:
         if self.p.outputs_off_on_kill:
             self._outputs_off("kill")
             self.stepper.freeze(self.now)
+            if steppers_off:
+                for a in AXES:
+                    self.release(a)
         else:
             self.stepper.freeze(self.now + KILL_DELAY_S)
-        if steppers_off:
-            for a in AXES:
-                self.release(a)
+            if steppers_off:  # the drivers hold until then (advance lets them go)
+                self.steppers_off_at = self.now + KILL_DELAY_S + STEPPERS_OFF_DELAY_S
         self._dead(reason)
         raise Halted(reason)
 
@@ -563,9 +578,7 @@ class Firmware:
         """stepper.disable_axis(): the driver lets go. A released Z moves by the machine's z_drop."""
         if axis == "Z" and self.enabled["Z"]:
             self.machine.release_z()
-            if not (self.stepper.freeze_at is not None and self.stepper.freeze_at > self.now):
-                self.pa5(self.now)  # a drop under or off the switch, where the head is (a quick stop's move may run)
-            # else a kill's coast: the steppers go off when it ends, and Stepper.update reads the switch there
+            self.pa5(self.now)  # a drop under or off the switch, where the head is (a quick stop's move may run)
         self.enabled[axis] = False
 
     # ------------------------------------------------------------------ positions
