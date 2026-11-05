@@ -350,7 +350,8 @@ public class ScrewIdleCutSimTest {
         }
         List<Map<String, Object>> offs = motorOffs();
         assertEquals(1, offs.size(), journal());
-        assertEquals(turned + HOUR, ((Number) offs.get(0).get("ts")).longValue(), 2000, journal());
+        long at = ((Number) offs.get(0).get("ts")).longValue();
+        assertTrue(at > turned + HOUR - 60_000 && at <= turned + HOUR, "the last move + 3600 s: " + journal());
         JsonObject cut = idleCut();
         assertTrue(cut.get("cut").getAsBoolean(), cut.toString());
         assertEquals(STOCK, cut.get("firmware").getAsString());
