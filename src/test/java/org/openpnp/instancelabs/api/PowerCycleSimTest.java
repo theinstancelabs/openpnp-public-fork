@@ -1403,6 +1403,35 @@ public class PowerCycleSimTest {
         }
     }
 
+    /**
+     * BR-97 review: a levelling call walks from the controller's Z, read first (M400, M114), not from OpenPnP's belief.
+     * Without sync-initial-location, and with the engine's read at the connect unanswered (a possible reset: any M114
+     * reply would set OpenPnP's driver coordinates), OpenPnP still believes the Z before the reset (31.5) while Marlin
+     * reads 0: G1 Z31 would pass as a 0.5 mm step and move 31 mm.
+     */
+    @Test
+    public void aLevellingCallReadsTheControllersZFirst() throws Exception {
+        DispenseConfig c = svc.getConfig();
+        c.commandTimeoutMs = 1500;
+        svc.updateConfig(c);
+        sim.driver.setSyncInitialLocation(false);
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.server.mute.add("M114");
+        try {
+            sim.machine.setEnabled(true);
+        }
+        finally {
+            sim.server.mute.remove("M114");
+        }
+        assertFalse(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean(), "a possible reset");
+        assertEquals(31.5, believedZ(), 1e-6, "OpenPnP's belief from before the reset");
+        assertEquals(0.0, sim.server.position('Z'), 1e-9);
+        lockForProcess();
+        refusedLevel("{\"lines\":[\"G1 Z31 F300\"],\"what\":\"w\"}", "1 mm");
+        assertEquals(0.0, sim.server.position('Z'), 1e-9);
+    }
+
     /** BR-97: a levelling call after one that left its moves unwaited reads the controller's Z first. */
     @Test
     public void aLevellingCallAfterAnUnwaitedMoveStartsFromTheControllersZ() throws Exception {

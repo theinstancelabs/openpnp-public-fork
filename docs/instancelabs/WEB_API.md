@@ -552,8 +552,8 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   `interrupted: true` (its `ok` may be the STOP's flush, not the move's end: never take it as done). Every line
   is checked first (`PassthroughLines`): the bench tools' commands; X/Y/Z inside the soft limits; X/Y only once
   homed; while not homed (BR-97: levelling the see-saw before a reset's Home) `G1` with Z as the only axis and `F` ≤
-  300 (not `G0`: it keeps `F` only while the firmware's `G0_FEEDRATE` is off), each line at most 1 mm from the Z before it (the first from OpenPnP's Z, re-read with M400 and M114 first
-  when a passthrough move was not), every target at most 5 mm from where the call began and 32 mm from where the
+  300 (not `G0`: it keeps `F` only while the firmware's `G0_FEEDRATE` is off), each line at most 1 mm from the Z before it (the first from the controller's Z, read first with M400 and
+  M114, never OpenPnP's belief), every target at most 5 mm from where the call began and 32 mm from where the
   position became unknown: Marlin's boot Z 0 after a reset the engine detected (on record, so also after an OpenPnP
   restart), else the Z of the first levelling call since a possible reset (a connect whose position was not read), the
   start of a home through the API or the engine (its G28 may move the frame even if the home ends unhomed) or a home;

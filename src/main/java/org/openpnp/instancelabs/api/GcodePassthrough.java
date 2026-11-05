@@ -195,16 +195,14 @@ final class GcodePassthrough {
     }
 
     /**
-     * BR-97: the batch's Z moves while not homed, walked from the controller's Z (OpenPnP's, re-read first when a
-     * passthrough move was not) by {@link PassthroughLines#level}, within 32 mm of where the position became unknown
+     * BR-97: the batch's Z moves while not homed, walked from the controller's Z (read first: M400, M114) by
+     * {@link PassthroughLines#level}, within 32 mm of where the position became unknown
      * (the engine's {@code ControllerReset#levelReference}): a refused one sends nothing, else the call is journaled
      * (events {@code Z_LEVEL}: the holder, the lines, the reason).
      */
     private void checkLevelling(Machine m, GcodeDriver d, DispenseService svc, List<String> raw,
             List<PassthroughLines.Line> lines, MachineLock.Holder holder, String what) throws ApiException {
-        if (positionStale()) {
-            resyncNow(m, d);
-        }
+        resyncNow(m, d); // never OpenPnP's belief: a connect whose read got no answer leaves it as it was (review)
         double z = zNow(m, d);
         double first = z;
         double ref = svc.getControllerReset().levelReference(z);
