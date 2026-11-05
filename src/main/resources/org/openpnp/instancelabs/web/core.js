@@ -1432,7 +1432,7 @@
         detail: 'Plan forgotten (OpenPnP restarted): plan again', fixes: [{ fix: 'plan-again', label: 'Plan again', primary: true }] });
     } else if (!plan) {
       add({ key: 'plan', code: 'PLAN', title: 'Plan', state: 'need', value: 'no plan', short: 'plan a board',
-        detail: 'No plan yet: choose a board and plan it.', fixes: [{ href: '#run/board', label: 'Choose a board' }] });
+        detail: 'No plan yet: choose a design and plan it.', fixes: [{ href: '#run/board', label: 'Choose a design' }] });
     } else if (c.planPending) {
       add({ key: 'plan', code: 'PLAN', title: 'Plan', state: 'checking', value: 'checking…', short: 'checking', detail: 'Re-reading the plan…' });
     } else {
@@ -1618,7 +1618,7 @@
     // every dot of the plan is on its board already (the server's paste): the next action is the next board, not a run
     const doneDots = plan && plan.dots && plan.dots.length && IL.pastedDots(plan) >= plan.dots.length ? plan.dots.length : 0;
     if (blocked.length) verdict = { state: 'block', text: 'Blocked · ' + blocked[0].short, value: ['Blocked', ' · ' + blocked[0].short, 2], title: blocked.map((x) => x.title + ': ' + x.detail).join('\n') };
-    else if (!plan && !c.planForgotten) verdict = { state: 'need', text: 'No plan yet', title: 'Choose a board and plan it (Run).' };
+    else if (!plan && !c.planForgotten) verdict = { state: 'need', text: 'No plan yet', title: 'Choose a design and plan it (Run).' };
     else if (doneDots) verdict = { state: 'ok', done: true, text: 'Board done · Next board', value: ['Board done', ' · Next board', 2],
       title: 'All ' + doneDots + ' dots are on board ' + (plan.pasted && plan.pasted.board) + ': unload it and press Next board (Run), or wipe it before running it again.' };
     else if (notReady.length) verdict = { state: 'need', text: count + ' of 9 · ' + next.short, value: [count + ' of 9', ' · ' + next.short, 2], title: notReady.map((x) => x.title + ': ' + x.detail).join('\n') };
