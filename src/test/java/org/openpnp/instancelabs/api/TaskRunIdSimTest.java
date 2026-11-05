@@ -2,8 +2,10 @@ package org.openpnp.instancelabs.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
@@ -12,13 +14,14 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.LandingResult;
+import org.openpnp.instancelabs.dispense.RunResult;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 /**
- * BR-101 on the SIM machine: a task's 202 names the run it started ({@code runId}, as status.run shows it), and a task
- * refused before its run started leaves its label to no other run.
+ * BR-101, mostly on the SIM machine: a task's 202 names the run it started ({@code runId}, as status.run shows it),
+ * and a task refused before its run started leaves its label to no other run.
  */
 public class TaskRunIdSimTest {
     TipSim t;
@@ -103,5 +106,23 @@ public class TaskRunIdSimTest {
         JsonObject run = run();
         assertEquals("z-check", TipSim.str(run, "kind"), run.toString());
         assertEquals("z-check", TipSim.str(run, "label"), run.toString());
+    }
+
+    /**
+     * The tracker alone: a request refused while another's run is queued (the engine runs one task at a time) neither
+     * takes nor clears that run's label.
+     */
+    @Test
+    public void aRequestRefusedMeanwhileNeitherTakesNorClearsAQueuedRunsLabel() throws Exception {
+        RunTracker tracker = new RunTracker();
+        RunTracker.Started<Object> queued = tracker.start("dot ladder", () -> new CompletableFuture<>());
+        assertThrows(IllegalStateException.class, () -> tracker.start("needle touch-off", () -> {
+            throw new IllegalStateException("a dispense task is already running");
+        }));
+        RunResult run = new RunResult(); // the queued run, under the id its task was started with
+        run.runId = queued.runId;
+        run.kind = "dot-ladder";
+        tracker.onPhase(run, "dispensing calibration dots");
+        assertEquals("dot ladder", tracker.snapshot().get("label"));
     }
 }

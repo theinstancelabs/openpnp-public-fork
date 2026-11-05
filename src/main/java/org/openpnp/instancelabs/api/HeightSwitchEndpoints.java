@@ -41,9 +41,9 @@ final class HeightSwitchEndpoints {
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
         ctx.requirePositionKnown(svc);
-        ctx.tracker.expect("height switch");
-        HeightSwitch.Result res = svc.measureHeightSwitch(tool, presses, zStart, zFloor, tipClean).get(
-                ApiContext.MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+        HeightSwitch.Result res = ctx.tracker.start("height switch",
+                () -> svc.measureHeightSwitch(tool, presses, zStart, zFloor, tipClean)).future.get(
+                        ApiContext.MAX_WAIT_MS, TimeUnit.MILLISECONDS);
         if (res.refused) {
             throw ApiException.refused(res.why).with("result", res);
         }
@@ -56,8 +56,8 @@ final class HeightSwitchEndpoints {
         ctx.requireEngineIdle(svc);
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
-        ctx.tracker.expect("height switch read");
-        HeightSwitch.Read res = svc.readHeightSwitch().get(ApiContext.MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+        HeightSwitch.Read res = ctx.tracker.start("height switch read", svc::readHeightSwitch).future.get(
+                ApiContext.MAX_WAIT_MS, TimeUnit.MILLISECONDS);
         if (res.level == null) {
             throw ApiException.refused(res.why);
         }

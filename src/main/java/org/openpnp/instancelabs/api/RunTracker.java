@@ -7,8 +7,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
 
 import org.openpnp.instancelabs.dispense.DispenseListener;
+import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.RunResult;
 
 /**
@@ -46,12 +51,36 @@ final class RunTracker implements DispenseListener {
     static final Set<String> PRESSURE_PHASES = new HashSet<>(
             Arrays.asList("dispensing", "shots", "dispensing calibration dots"));
 
-    private volatile Progress current;
-    private volatile String pendingLabel;
+    /** An engine task started as a run: the run's id (status.run.runId while it runs) and the task's future. */
+    static final class Started<T> {
+        final String runId;
+        final Future<T> future;
 
-    /** Label (e.g. "prime", "test dot") for the next run the engine starts. */
-    void expect(String label) {
-        pendingLabel = label;
+        Started(String runId, Future<T> future) {
+            this.runId = runId;
+            this.future = future;
+        }
+    }
+
+    private volatile Progress current;
+    /** The label of each run {@link #start} started, until the run's first callback. */
+    private final Map<String, String> labels = new ConcurrentHashMap<>();
+
+    /**
+     * Starts {@code task} (one DispenseService task method) as a run labelled {@code label} (e.g. "prime", "test dot").
+     * BR-101: the run takes an id made here, so the label is that run's alone (a task refused before its run started
+     * takes its label with it; a request meanwhile neither takes nor clears it) and the answer can name the run.
+     */
+    <T> Started<T> start(String label, Callable<Future<T>> task) throws Exception {
+        String runId = UUID.randomUUID().toString();
+        labels.put(runId, label);
+        try {
+            return new Started<>(runId, DispenseService.startAs(runId, task));
+        }
+        catch (Exception e) {
+            labels.remove(runId);
+            throw e;
+        }
     }
 
     private synchronized Progress forRun(RunResult run) {
@@ -60,8 +89,8 @@ final class RunTracker implements DispenseListener {
             p = new Progress();
             p.runId = run.runId;
             p.kind = run.kind;
-            p.label = pendingLabel == null ? run.kind : pendingLabel;
-            pendingLabel = null;
+            String label = labels.remove(run.runId);
+            p.label = label == null ? run.kind : label;
             p.boardName = run.boardName;
             p.planId = run.planId;
             p.startedAtMs = run.startedAtMs > 0 ? run.startedAtMs : System.currentTimeMillis();

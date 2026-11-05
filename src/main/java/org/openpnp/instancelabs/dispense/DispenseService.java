@@ -6656,9 +6656,28 @@ public final class DispenseService {
         }
     }
 
+    /** BR-101: the id {@link #startAs} hands to the run its task call makes on this thread, else null (a new id). */
+    private static final ThreadLocal<String> RUN_ID = new ThreadLocal<>();
+
+    /**
+     * BR-101: calls {@code task} (one task method) so that the run it makes takes {@code runId}: the caller labels the
+     * run and names it in its answer before the run can start.
+     */
+    public static <T> T startAs(String runId, Callable<T> task) throws Exception {
+        RUN_ID.set(runId);
+        try {
+            return task.call();
+        }
+        finally {
+            RUN_ID.remove();
+        }
+    }
+
     private RunResult newRun(String kind, String planId, String board, long calibrationId, int dots) {
         RunResult r = new RunResult();
-        r.runId = java.util.UUID.randomUUID().toString();
+        String id = RUN_ID.get();
+        RUN_ID.remove(); // one run per task call
+        r.runId = id != null ? id : java.util.UUID.randomUUID().toString();
         r.kind = kind;
         r.planId = planId;
         r.boardName = board;
