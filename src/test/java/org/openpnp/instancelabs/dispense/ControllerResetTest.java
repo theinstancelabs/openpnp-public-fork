@@ -790,6 +790,11 @@ public class ControllerResetTest {
         assertEquals(Boolean.TRUE, idleCut(r).get("cut"), "the marker outside FIRMWARE_NAME");
         r.firmwareAtConnect(m115(HOLD_B_M115.replace("il-holdB", "il-holdB2")), null);
         assertEquals(Boolean.TRUE, idleCut(r).get("cut"), "another marker");
+        // review MINOR 2: a build named on from the marker (hyphen, dot) or ending in it is another build
+        for (String other : new String[] {"il-holdB-rollback", "il-holdB.2", "xil-holdB"}) {
+            r.firmwareAtConnect(m115(HOLD_B_M115.replace("il-holdB", other)), null);
+            assertEquals(Boolean.TRUE, idleCut(r).get("cut"), other);
+        }
         r.firmwareAtConnect(m115(HOLD_B_M115), null);
         assertEquals(Boolean.FALSE, idleCut(r).get("cut"));
     }

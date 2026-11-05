@@ -22,6 +22,9 @@ import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.LengthUnit;
+import org.openpnp.model.Location;
+import org.openpnp.model.Motion;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -39,6 +42,9 @@ public class ScrewIdleCutSimTest {
     /** The board's firmware before the flash (Opulo's v4.0.0 release). */
     static final String STOCK = "Marlin bugfix-2.1.x (Sep 19 2024 13:39:21)";
     static final long HOUR = 3600_000L;
+    /** What follows FIRMWARE_NAME on the real M115 line (firmware/holdB/firmware.bin): the name ends at the next key. */
+    static final String M115_REST = " SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0"
+            + " MACHINE_TYPE:LumenPnP EXTRUDER_COUNT:0 AXIS_COUNT:5";
 
     SimMachine sim;
     DispenseService svc;
@@ -88,16 +94,21 @@ public class ScrewIdleCutSimTest {
         return o;
     }
 
+    /** The controller's M115 names this FIRMWARE_NAME (null: none), on a line that goes on as the real one does. */
+    void firmware(String name) {
+        sim.server.firmwareName = name == null ? null : name + M115_REST;
+    }
+
     /** The controller answers M115 with this FIRMWARE_NAME (null: none); OpenPnP connects and homes. */
     void connect(String firmwareName) throws Exception {
-        sim.server.firmwareName = firmwareName;
+        firmware(firmwareName);
         sim.enableAndHome();
     }
 
     /** OpenPnP Stop and Start, the controller powered all along, which now answers M115 with this FIRMWARE_NAME. */
     void reconnect(String firmwareName) throws Exception {
         sim.machine.setEnabled(false);
-        sim.server.firmwareName = firmwareName;
+        firmware(firmwareName);
         sim.machine.setEnabled(true);
     }
 
@@ -273,7 +284,7 @@ public class ScrewIdleCutSimTest {
     public void aConnectMadeBeforeTheEngineStartedDecidesAtItsStart() throws Exception {
         connect(HOLD_B);
         sim.machine.setEnabled(false);
-        sim.server.firmwareName = STOCK;
+        firmware(STOCK);
         // OpenPnP starts again, and Start is pressed before the engine's listeners exist
         TipSim.hook(p -> {
             if ("listeners".equals(p)) {
@@ -292,6 +303,54 @@ public class ScrewIdleCutSimTest {
             TipSim.hook(null);
         }
         assertTrue(sim.machine.isEnabled());
+        JsonObject cut = idleCut();
+        assertTrue(cut.get("cut").getAsBoolean(), cut.toString());
+        assertEquals(STOCK, cut.get("firmware").getAsString());
+    }
+
+    /**
+     * Review MINOR 1: the board went back to stock firmware while OpenPnP was down (a rollback flash), OpenPnP
+     * connected before the engine started and jogged before the engine read M115. That jog is judged with the
+     * firmware unread (the idle cut), never with the last connect's holdB: the switch-off an hour after the last move
+     * stays on record.
+     */
+    @Test
+    public void aMoveBeforeTheEngineReadsTheFirmwareKeepsTheIdleSwitchOff() throws Exception {
+        connect(HOLD_B);
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, String.join("\n",
+                ControllerCommands.STOP_SEQUENCE));
+        long turned = turnScrewAndSetTheAngle();
+        ok("POST", "/api/stop/planned", null);
+        PlannedStopSimTest.engineClock(() -> turned + 2 * HOUR);
+        sim.machine.setEnabled(false);
+        firmware(STOCK);
+        // OpenPnP starts again: Start before the engine's listeners exist, a jog before its catch-up reads M115
+        TipSim.hook(p -> {
+            try {
+                if ("listeners".equals(p)) {
+                    sim.machine.setEnabled(true);
+                }
+                else if ("catch-up".equals(p)) {
+                    sim.machine.execute(() -> {
+                        sim.n1.moveTo(sim.n1.getLocation().add(new Location(LengthUnit.Millimeters, 1, 0, 0, 0)),
+                                Motion.MotionOption.JogMotion);
+                        return null;
+                    });
+                }
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        try {
+            svc = DispenseService.start(Configuration.get());
+        }
+        finally {
+            TipSim.hook(null);
+        }
+        List<Map<String, Object>> offs = motorOffs();
+        assertEquals(1, offs.size(), journal());
+        assertEquals(turned + HOUR, ((Number) offs.get(0).get("ts")).longValue(), 2000, journal());
         JsonObject cut = idleCut();
         assertTrue(cut.get("cut").getAsBoolean(), cut.toString());
         assertEquals(STOCK, cut.get("firmware").getAsString());

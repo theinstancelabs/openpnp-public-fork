@@ -465,6 +465,11 @@ public final class DispenseService {
                     journalSentDisable(m, "a STOP"); // the lines before the failure, its M18 among them maybe, went out
                 }
             };
+            if (machine.isEnabled()) {
+                // BR-92 (review MINOR 1): OpenPnP connected before this engine, and its moves may come before the
+                // catch-up reads M115: until then the idle cut counts, never the last connect's firmware
+                controllerReset.firmwareAtConnect(null, "not read yet: OpenPnP connected before the engine started");
+            }
             machine.addListener(machineListener);
             hook("catch-up");
             catchUpConnect(machine);

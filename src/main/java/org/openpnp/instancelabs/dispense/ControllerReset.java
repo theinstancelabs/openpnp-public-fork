@@ -134,7 +134,8 @@ public final class ControllerReset {
     private static final Pattern WORD = Pattern.compile("(?:^|\\s)([A-Z]):(-?\\d+(?:\\.\\d+)?)");
     /** Marlin's M115 FIRMWARE_NAME: its value runs to the next "KEY:" word. */
     private static final Pattern FIRMWARE_NAME = Pattern.compile("FIRMWARE_NAME:(.*?)(?=\\s+[A-Z_]+:|$)");
-    private static final Pattern HOLD_B = Pattern.compile("\\b" + Pattern.quote(HOLD_B_MARKER) + "\\b");
+    /** A whole word: a build named on from it ({@code il-holdB-rollback}, {@code il-holdB.2}) is another build. */
+    private static final Pattern HOLD_B = Pattern.compile("\\b" + Pattern.quote(HOLD_B_MARKER) + "(?![\\w.-])");
 
     /** One journaled change: its code (EVENT_*), when, and the reason in plain words. */
     public static final class Event {
