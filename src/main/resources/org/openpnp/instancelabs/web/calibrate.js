@@ -807,13 +807,14 @@
     // the places the engine takes shots on (shotsRun): the sinks, the blank (a reference) and a coupon; its zones refuse the
     // others ("takes no paste"); a cup first, else the waste; never the blank or a coupon by default (30 whole turns)
     const coupons = ((S.config || {}).padCalibration || {}).couponPlaces || ['coupon1', 'coupon2'];
-    const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace) || d.wasteLocationName || 'waste',
+    pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace) || d.wasteLocationName || 'waste',
       (nm) => IL.isSinkPlace(nm, d) || nm === (d.blankLocationName || 'blank') || coupons.includes(nm), true);
-    IL.show($('shots-noplace'), !names.length);
     const place = $('shots-place').value;
+    IL.show($('shots-noplace'), !place);
     const p = shotsPlan();
     showErrs(p.errs);
-    const blockers = renderPrereqs($('shots-pre'), prereqs(s, { machine: true, engine: true, place: true, pressure: true }, place));
+    // nothing chosen: no place row (prereqs would fall back to the blank), the banner and Run's reason say why
+    const blockers = renderPrereqs($('shots-pre'), prereqs(s, { machine: true, engine: true, place: !!place, pressure: true }, place));
     IL.gate($('btn-shots-run'), runReason(s, blockers, Object.values(p.errs).find(Boolean) || (!place ? 'Add a cup place in Setup › Places first.' : null)), $('shots-reason'));
     renderLive($('shots-live'), s, 'scale shots');
     prefill('ss-psi', isNum(prof.pressurePsi) ? IL.fmtPsi(prof.pressurePsi) : null);
