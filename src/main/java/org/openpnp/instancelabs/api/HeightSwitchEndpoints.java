@@ -99,6 +99,10 @@ final class HeightSwitchEndpoints {
         String who = !HeightSwitch.counts(c, n1, home) ? "N1" : !HeightSwitch.counts(c, needle, home) ? "the needle"
                 : null;
         String why = svc.positionUnknownWhy();
+        DispenseConfig.NamedLocation place = c.location(HeightSwitch.PLACE);
+        if (why == null && (place == null || place.setAtMs == null)) {
+            why = HeightSwitch.PLACE_NOT_SET; // no trip counts without it (#110 review NIT 1)
+        }
         if (why == null && who != null) {
             why = who + " has no accepted trip on the height switch " + ("the needle".equals(who) && needle == null
                     && c.heightSwitch.needle != null ? "since it was put on" : "in this home since its place was set");

@@ -871,8 +871,15 @@ public class HeightSwitchSimTest {
      */
     @Test
     public void aPlaceWithoutItsSetTimeIsNotSet() throws Exception {
+        // #110 review NIT 1: no place, or none set, is what the status names (the press refuses it first), not N1
+        JsonObject none = heightSwitchStatus();
+        assertEquals(HeightSwitch.PLACE_NOT_SET, none.get("kSwitchWhy").getAsString(), none.toString());
+        assertEquals(HeightSwitch.PLACE_NOT_SET, none.get("needleWindowWhy").getAsString(), none.toString());
         ok("PUT", "/api/config", "{\"locations\":{\"height-switch\":{\"x\":150,\"y\":200,\"z\":0}}}");
         assertEquals(null, svc.getConfig().location(HeightSwitch.PLACE).setAtMs);
+        JsonObject unset = heightSwitchStatus();
+        assertEquals(HeightSwitch.PLACE_NOT_SET, unset.get("kSwitchWhy").getAsString(), unset.toString());
+        assertEquals(HeightSwitch.PLACE_NOT_SET, unset.get("needleWindowWhy").getAsString(), unset.toString());
         sim.server.mark();
         call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
         assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "nothing sent");

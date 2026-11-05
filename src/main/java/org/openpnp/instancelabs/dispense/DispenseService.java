@@ -5159,8 +5159,7 @@ public final class DispenseService {
         DispenseConfig.NamedLocation place = c.location(HeightSwitch.PLACE);
         if (place == null || place.setAtMs == null) {
             // re-review MINOR 1: a trip counts after the place's set time only (PUT /api/config may leave none)
-            throw refused("the height switch's place is not set: PUT /api/locations/" + HeightSwitch.PLACE
-                    + " {x, y}, the switch's top centre");
+            throw refused(HeightSwitch.PLACE_NOT_SET);
         }
         List<String> invalid = c.validate();
         if (!invalid.isEmpty()) {

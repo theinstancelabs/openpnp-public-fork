@@ -36,6 +36,9 @@ import java.util.regex.Pattern;
 public final class HeightSwitch {
     /** The named location of the switch's top centre ({@code PUT /api/locations/height-switch {x, y}}). */
     public static final String PLACE = "height-switch";
+    /** No place, or one without its set time (no trip counts there): the measure and the window say so first. */
+    public static final String PLACE_NOT_SET = "the height switch's place is not set: PUT /api/locations/" + PLACE
+            + " {x, y}, the switch's top centre";
     /** PA5 for M42 (the MARLIN_F407VE variant's Arduino pin) and for M43 (its entry in the firmware's pin table). */
     public static final int M42_PIN = 53;
     public static final int M43_PIN = 5;
@@ -197,6 +200,11 @@ public final class HeightSwitch {
     public static Window needleWindow(DispenseConfig c, DispenseConfig.NeedleEnd end, Long home, int down) {
         Window w = new Window();
         DispenseConfig.HeightSwitchTrip n1 = c.heightSwitch.n1, own = needleTrip(c);
+        DispenseConfig.NamedLocation place = c.location(PLACE);
+        if (place == null || place.setAtMs == null) {
+            w.why = PLACE_NOT_SET; // as the press refuses it first, not "press N1 first" (#110 review NIT 1)
+            return w;
+        }
         if (c.heightSwitchMaxPastTripMm == null) {
             w.why = NO_MAX_PAST_TRIP;
             return w;
