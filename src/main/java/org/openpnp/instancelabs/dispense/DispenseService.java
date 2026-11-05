@@ -702,14 +702,23 @@ public final class DispenseService {
         }
     }
 
-    /** BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. */
+    /**
+     * BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. A
+     * home's start that cannot be written throws: that home must not start (BR-97, {@link ControllerReset#homeStarted}).
+     */
     private void journalReset(ControllerReset.Event e) {
         try {
             String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
-                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code) ? "INFO" : "WARN";
+                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code)
+                    || ControllerReset.EVENT_HOME_STARTED.equals(e.code) ? "INFO" : "WARN";
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
         catch (SQLException ex) {
+            if (ControllerReset.EVENT_HOME_STARTED.equals(e.code)) {
+                Logger.error(ex, "dispense: a home's start could not be journaled: the home is refused");
+                throw new IllegalStateException("its start could not be journaled (" + ex.getMessage() + "), so its "
+                        + "G28 was not sent", ex);
+            }
             Logger.error(ex, "dispense: the controller reset journal could not be written ({}): after a restart the "
                     + "engine will not know about it", e.code);
         }
@@ -717,8 +726,8 @@ public final class DispenseService {
 
     /**
      * BR-02: what earlier engines journaled about controller resets and the screw's motor (the newest of each kind),
-     * so a restart keeps the screw count's epoch, an unknown position and the controller's idle clock. Unreadable, it
-     * counts as an unread connect: unknown until a home.
+     * so a restart keeps the screw count's epoch, an unknown position, the controller's idle clock and BR-97's
+     * levelling reference. Unreadable, it counts as an unread connect: unknown until a home.
      */
     private List<ControllerReset.Event> resetHistory(boolean dbExisted) {
         List<ControllerReset.Event> h = new ArrayList<>();
@@ -739,7 +748,8 @@ public final class DispenseService {
             for (Map<String, Object> row : db.newestEvents(ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
                     ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH, ControllerReset.EVENT_MOTOR_OFF,
                     ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_WATCHDOG_TRIP,
-                    ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED)) {
+                    ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED,
+                    ControllerReset.EVENT_HOME_STARTED)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }
@@ -4093,6 +4103,7 @@ public final class DispenseService {
         Exception failed = null;
         try {
             homeTracker.homeStarted();
+            controllerReset.homeStarted(); // BR-97: its G28 may move the frame, even if it ends unhomed
             m.home();
         }
         catch (Exception e) {

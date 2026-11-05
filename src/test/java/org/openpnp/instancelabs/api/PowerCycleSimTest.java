@@ -210,9 +210,9 @@ public class PowerCycleSimTest {
         assertTrue(lastBody.contains("nothing is under either tool"), lastBody);
         // #11 final review MAJOR: G28 drives X, then Y, at the tools' height first (no Z clearance on this firmware)
         assertTrue(lastBody.contains("homing corner") && lastBody.contains("at the height the tools are at now")
-                && lastBody.contains("level N1 and the needle by hand"), lastBody);
+                && lastBody.contains("by hand, or by Z-only moves"), lastBody);
         // the process engineer, 11-04: the see-saw levelled (both tips up) before Home
-        assertTrue(lastBody.contains("before Home: the see-saw levelled, both tips up"), lastBody);
+        assertTrue(lastBody.contains("the see-saw is levelled, both tips up"), lastBody);
         assertFalse(lastBody.contains("nothing moves before it"), lastBody);
         assertEquals(new ArrayList<String>(), motionAndOutputs(), "a refused home sends nothing");
 
@@ -357,6 +357,57 @@ public class PowerCycleSimTest {
         call("POST", "/api/screw/start-angle", "{}");
         assertEquals(409, lastStatus, "a confirm cannot keep the angle set before the loss: " + lastBody);
         assertTrue(lastBody.contains("measure"), lastBody);
+    }
+
+    /**
+     * BR-97 re-review 4 (MINOR): the web home's other path, the engine up but unavailable (no N2), journals its start
+     * too: a start that cannot be written sends no G28, and the reference stays the boot Z.
+     */
+    @Test
+    public void aWebHomeWithoutTheEngineWhoseStartCannotBeJournaledDoesNotStart() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        try (java.sql.Connection c = java.sql.DriverManager.getConnection(svc.getDb().getUrl());
+                java.sql.Statement st = c.createStatement()) {
+            st.execute("CREATE TRIGGER home_started_fails BEFORE INSERT ON events WHEN NEW.code = 'HOME_STARTED' "
+                    + "BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+        }
+        java.lang.reflect.Field f = DispenseService.class.getDeclaredField("nozzle");
+        f.setAccessible(true);
+        Object n2 = f.get(svc);
+        f.set(svc, null); // the engine up but unavailable: the home goes the API's own way
+        assertFalse(svc.isAvailable());
+        sim.server.mark();
+        try {
+            call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        }
+        finally {
+            f.set(svc, n2);
+        }
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("homing failed") && lastBody.contains("database is locked"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "no G28: nothing sent");
+        assertFalse(sim.machine.isHomed());
+        walk(3, -32);
+        refusedLevel(level("w", -33), "32 mm");
+    }
+
+    /**
+     * BR-97 x BR-93: a link lost in the middle of a levelling walk moves no frame by itself, so the reference stays (here
+     * the boot Z) and the reconnect decides (a reset it detects sets the boot Z). Taken afresh at the reconnect, it would
+     * allow another 32 mm past the see-saw's travel.
+     */
+    @Test
+    public void aLinkLostMidWalkKeepsTheLevellingReference() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, -20);
+        sim.server.dropLink();
+        awaitLinkLost();
+        reconnect(); // the board is back on USB, not reset: Stop, then Start
+        walk(-20, -32);
+        refusedLevel(level("w", -33), "32 mm");
     }
 
     /** BR-93: the lost link is on record: after an OpenPnP restart the position is still unknown until that home. */
@@ -1283,5 +1334,720 @@ public class PowerCycleSimTest {
         old.shutdown(); // the rest of its stop: its listeners
         svc = DispenseService.start(Configuration.get());
         assertEquals("running", DispenseService.startState());
+    }
+
+    /**
+     * BR-96 (the PM 16:1x): after a reset an agent attests the home itself (the side camera: tips up and level; the top
+     * camera: G28's path clear). The home's journal row says who and with what evidence, and so does the status; who
+     * is the lock holder unless the call names someone.
+     */
+    @Test
+    public void anAgentsAttestedHomeJournalsWhoAndTheEvidence() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"reset home\"}").get("token")
+                .getAsString();
+        String big = new String(new char[4100]).replace('\0', 'x');
+        call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"evidence\":\"" + big + "\"}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("evidence"), lastBody);
+        assertFalse(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean(), "nothing homed");
+
+        String evidence = "{\"run\":\"r-17\",\"pictures\":[\"side-1\",\"top-2\"]}";
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"evidence\":" + evidence + "}");
+        List<java.util.Map<String, Object>> known = events(ControllerReset.EVENT_KNOWN);
+        String row = String.valueOf(known.get(known.size() - 1).get("message"));
+        assertTrue(row.contains("attested by Process (evidence: " + evidence + ")"), row);
+        JsonObject last = ok("GET", "/api/machine", null).getAsJsonObject("lastAttestation");
+        assertEquals("Process", last.get("by").getAsString(), last.toString());
+        assertEquals(evidence, last.get("evidence").getAsString());
+        assertFalse(last.get("atMs").isJsonNull(), last.toString());
+
+        // another name, said by the call: the lock's holder is named too (review)
+        powerCycle();
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"attestedBy\":\"Process (side "
+                + "camera)\",\"evidence\":\"run r-18\"}");
+        known = events(ControllerReset.EVENT_KNOWN);
+        row = String.valueOf(known.get(known.size() - 1).get("message"));
+        assertTrue(row.contains("attested by Process (side camera) (lock: Process) (evidence: \"run r-18\")"), row);
+
+        // review: one line of text: a newline would split the journal row (a lock's label lands there too)
+        powerCycle();
+        call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true,\"attestedBy\":\"Process\\n"
+                + "homed: the position is known again\"}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("attestedBy") && lastBody.contains("control characters"), lastBody);
+        assertFalse(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean(), "nothing homed");
+        ok("POST", "/api/lock/release", "{}");
+        lockToken = null;
+        call("POST", "/api/lock/acquire", "{\"who\":\"process\",\"label\":\"Pro\\tcess\",\"what\":\"w\"}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("label") && lastBody.contains("control characters"), lastBody);
+    }
+
+    /** The response to a refused passthrough line: 400 refused-line, its rule, nothing sent. */
+    void refusedLevel(String body, String rule) throws Exception {
+        sim.server.mark();
+        call("POST", "/api/gcode", body);
+        assertEquals(400, lastStatus, body + ": " + lastBody);
+        assertTrue(lastBody.contains("refused-line") && lastBody.contains(rule), body + ": " + lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), body + " sends nothing");
+    }
+
+    /** The batch of these Z targets, F300, then M400, for the reason {@code what}. */
+    static String level(String what, double... z) {
+        StringBuilder sb = new StringBuilder("{\"lines\":[");
+        for (double v : z) {
+            sb.append("\"G1 Z").append(v).append(" F300\",");
+        }
+        return sb.append("\"M400\"],\"what\":\"").append(what).append("\"}").toString();
+    }
+
+    /** OpenPnP's believed Z (the controller axis Z, raw). */
+    double believedZ() throws Exception {
+        for (com.google.gson.JsonElement a : ok("GET", "/api/machine", null).getAsJsonArray("axes")) {
+            JsonObject ax = a.getAsJsonObject();
+            if (ax.has("letter") && "Z".equals(ax.get("letter").getAsString())) {
+                return ax.get("driverCoordinate").getAsDouble();
+            }
+        }
+        throw new AssertionError("no Z axis");
+    }
+
+    /**
+     * BR-97 (the PM 16:4x): after a power cycle the see-saw is levelled before the home by Z alone, by the lock holder
+     * through the passthrough: each line at most 1 mm from the Z before it, 5 mm per call, 32 mm from the Z where the
+     * levelling began, F at most 300, with a reason; each call journaled. A home clears that reference.
+     */
+    @Test
+    public void theSeeSawIsLevelledByZAloneBeforeTheHomeAfterAReset() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+        sim.server.mark();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z1 F300\",\"M400\"],\"what\":\"see-saw levelling, needle tip y 494 "
+                + "to 486\"}");
+        assertEquals(java.util.Arrays.asList("G1 Z1 F300"), motionAndOutputs());
+        assertEquals(1.0, believedZ(), 1e-6);
+        List<java.util.Map<String, Object>> ev = events("Z_LEVEL");
+        assertEquals(1, ev.size(), ev.toString());
+        String row = String.valueOf(ev.get(0).get("message"));
+        assertTrue(row.contains("by Process (") && row.contains("G1 Z1 F300; M400")
+                && row.contains("see-saw levelling, needle tip y 494 to 486"), row);
+
+        refusedLevel("{\"lines\":[\"G1 X1 Z1.5 F300\"],\"what\":\"w\"}", "home");
+        refusedLevel(level("w", 2.5), "1 mm");
+        refusedLevel(level("w", 2, 3, 4, 5, 6, 7), "5 mm");
+        refusedLevel("{\"lines\":[\"G1 Z1.5 F600\"],\"what\":\"w\"}", "300");
+        refusedLevel("{\"lines\":[\"G1 Z1.5\"],\"what\":\"w\"}", "300");
+        refusedLevel("{\"lines\":[\"G91\",\"G1 Z0.5 F300\"],\"what\":\"w\"}", "absolute");
+        refusedLevel("{\"lines\":[\"G92 Z0\"],\"what\":\"w\"}", "G92");
+        refusedLevel("{\"lines\":[\"G28 Z\"],\"what\":\"w\"}", "/api/machine/home");
+        // review: an M410 may stop a move short, and the next line would then travel up to 2 mm
+        refusedLevel("{\"lines\":[\"G1 Z1.5 F300\",\"M410\",\"G1 Z2.5 F300\"],\"what\":\"w\"}", "M410");
+        for (String body : new String[] {"{\"lines\":[\"G1 Z1.5 F300\"]}",
+                "{\"lines\":[\"G1 Z1.5 F300\"],\"what\":\" \"}",
+                "{\"lines\":[\"G1 Z1.5 F300\"],\"what\":\"w\\nZ_LEVEL forged\"}"}) {
+            sim.server.mark();
+            call("POST", "/api/gcode", body);
+            assertEquals(400, lastStatus, lastBody);
+            assertTrue(lastBody.contains("what"), lastBody);
+            assertEquals(new ArrayList<String>(), motionAndOutputs(), "nothing sent");
+        }
+        assertEquals(1, events("Z_LEVEL").size(), "refused calls are not journaled");
+
+        // to 31 in calls of 5 mm, then past 32 from Z 0, where it began: refused
+        for (int c = 0; c < 6; c++) {
+            double z = 1 + 5 * c;
+            ok("POST", "/api/gcode", level("toward the far end", z + 1, z + 2, z + 3, z + 4, z + 5));
+        }
+        assertEquals(31.0, believedZ(), 1e-6);
+        refusedLevel(level("w", 32, 33), "32 mm");
+        assertEquals(7, events("Z_LEVEL").size());
+        // a Stop and Start (the controller powered) keeps where it began (the BR-96/97 review's surviving mutant)
+        reconnect();
+        refusedLevel(level("w", 32, 33), "32 mm");
+
+        // the home clears the reference: unhomed again at Z 30 (a Stop and Start, powered), 33 is 3 mm from it
+        ok("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z30 F600\",\"M400\"]}");
+        reconnect();
+        assertFalse(sim.machine.isHomed());
+        assertEquals(30.0, believedZ(), 1e-6);
+        ok("POST", "/api/gcode", level("w", 31, 32, 33));
+        assertEquals(33.0, believedZ(), 1e-6);
+    }
+
+    /** Levels from Z {@code from} to {@code to} by lines of 1 mm (the last one shorter), 5 a call: each answered 200. */
+    void walk(double from, double to) throws Exception {
+        double z = from;
+        while (Math.abs(to - z) > 1e-9) {
+            double[] call = new double[(int) Math.min(5, Math.ceil(Math.abs(to - z) - 1e-9))];
+            for (int i = 0; i < call.length; i++) {
+                z += Math.max(-1, Math.min(1, to - z));
+                call[i] = z;
+            }
+            ok("POST", "/api/gcode", level("walk", call));
+        }
+    }
+
+    /** The lock for Process (BR-72), as the levelling's agent. */
+    void lockForProcess() throws Exception {
+        lockToken = null;
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+    }
+
+    /**
+     * OpenPnP quits and starts again whole (a deploy), the controller powered all along: the engine and the web API
+     * start afresh (nothing the API kept in memory survives), and Start connects.
+     */
+    void restartOpenPnpAndTheApi() throws Exception {
+        sim.machine.setEnabled(false);
+        api.stop();
+        svc = DispenseService.start(Configuration.get());
+        ApiSettings s = new ApiSettings();
+        s.port = 0;
+        api = ApiServer.start(Configuration.get(), s);
+        sim.machine.setEnabled(true);
+    }
+
+    /**
+     * BR-97 review (MAJOR, the review's probe): the 32 mm count from the Z where the position became unknown: after a
+     * reset Marlin's boot Z 0, whatever an earlier levelling took (here Z 20, unhomed by a Stop and Start).
+     */
+    @Test
+    public void aResetCountsTheLevellingFromTheBootZ() throws Exception {
+        lockForProcess();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z20 F600\",\"M400\"]}");
+        reconnect();
+        ok("POST", "/api/gcode", level("w", 21));
+        powerCycle();
+        assertEquals(0.0, sim.server.position('Z'), 1e-9, "Marlin boots at Z 0 where the see-saw stands");
+        walk(0, 30);
+        refusedLevel(level("w", 31, 32, 33, 34, 35), "32 mm");
+        assertEquals(30.0, sim.server.position('Z'), 1e-9);
+    }
+
+    /** BR-97 review (MAJOR): an OpenPnP restart in the middle of a walk keeps the reset's boot Z (it is on record). */
+    @Test
+    public void anOpenPnpRestartMidWalkKeepsTheBootZ() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 30);
+        restartOpenPnpAndTheApi();
+        lockForProcess();
+        walk(30, 32);
+        refusedLevel(level("w", 33), "32 mm");
+    }
+
+    /**
+     * BR-97 review (MAJOR): a home whose G28 ran but that ended unhomed (here its visual homing failed) moved Marlin's
+     * frame: the levelling after it counts from where that home left Z, not from the reset's boot Z.
+     */
+    @Test
+    public void aHomeThatEndsUnhomedTakesTheLevellingReferenceAfresh() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 1);
+        attestedHomeThatEndsUnhomed();
+        walk(31.5, -0.5);
+        refusedLevel(level("w", -1), "32 mm");
+    }
+
+    /**
+     * BR-97 re-review (MAJOR, the review's probe): that home, then an OpenPnP restart (a deploy, BR-93's restart): the
+     * home's start is on record, so the restart does not bring back the reset's boot Z 0 (31.5 below level in the frame
+     * G28 set: the probe walked to Z -32).
+     */
+    @Test
+    public void aHomeThatEndsUnhomedStillCountsAfterAnOpenPnpRestart() throws Exception {
+        powerCycle();
+        lockForProcess();
+        attestedHomeThatEndsUnhomed();
+        restartOpenPnpAndTheApi();
+        lockForProcess();
+        walk(31.5, -0.5);
+        refusedLevel(level("w", -1), "32 mm");
+    }
+
+    /** An attested home whose G28 runs (Z 31.5) but that ends unhomed: its visual homing fails. */
+    void attestedHomeThatEndsUnhomed() throws Exception {
+        org.openpnp.spi.base.AbstractHead head = (org.openpnp.spi.base.AbstractHead) sim.machine.getDefaultHead();
+        head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod.ResetToFiducialLocation);
+        try {
+            call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        }
+        finally {
+            head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod.None);
+        }
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("homing failed"), lastBody);
+        assertFalse(sim.machine.isHomed());
+        assertEquals(31.5, sim.server.position('Z'), 1e-9, "its G28 ran");
+    }
+
+    /**
+     * BR-97 review: a batch's lines are checked against OpenPnP's homed state of the moment; a home that lands before
+     * they go out (here between the checks and the submit) would put unhomed levelling lines in the homed frame,
+     * unchecked: the batch stops before its first line.
+     */
+    @Test
+    public void aHomeBetweenTheChecksAndTheSendStopsTheBatch() throws Exception {
+        powerCycle();
+        lockForProcess();
+        GcodePassthrough.submitHook = () -> {
+            try {
+                sim.machine.execute(() -> {
+                    sim.machine.home();
+                    return null;
+                });
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", level("w", 1));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertTrue(sim.machine.isHomed(), "the home ran first");
+        assertFalse(sim.server.sinceMark().contains("G1 Z1 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("homed"), lastBody);
+    }
+
+    /**
+     * BR-97 review 3 (MAJOR, the review's probe): a home there whose G28 runs but that ends unhomed leaves OpenPnP's
+     * homed state as it was, yet Z is 31.5 in the frame G28 set: the lines walked from the old Z stop before the first
+     * (sent, "G1 Z1" would be a 30.5 mm move).
+     */
+    @Test
+    public void aHomeThatEndsUnhomedBetweenTheChecksAndTheSendStopsTheBatch() throws Exception {
+        powerCycle();
+        lockForProcess();
+        org.openpnp.spi.base.AbstractHead head = (org.openpnp.spi.base.AbstractHead) sim.machine.getDefaultHead();
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            try {
+                sim.machine.execute(() -> {
+                    svc.getControllerReset().homeStarted();
+                    head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod
+                            .ResetToFiducialLocation);
+                    try {
+                        sim.machine.home();
+                    }
+                    catch (Exception e) {
+                        // the visual homing fails: the home ends unhomed after its G28
+                    }
+                    finally {
+                        head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod.None);
+                    }
+                    return null;
+                });
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", level("w", 1));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.machine.isHomed(), "the home ended unhomed");
+        assertTrue(String.valueOf(sim.server.sinceMark()).contains("G28"), "its G28 ran: " + sim.server.sinceMark());
+        assertFalse(sim.server.sinceMark().contains("G1 Z1 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(31.5, sim.server.position('Z'), 1e-9);
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z moved after the lines were checked"), lastBody);
+    }
+
+    /**
+     * BR-97 review 3: a power cycle there (OpenPnP Stop, the controller boots at Z 0, Start) leaves the machine on and
+     * unhomed as before: the lines walked from Z 3 stop before the first (sent, "G1 Z4" would be a 4 mm move).
+     */
+    @Test
+    public void aResetBetweenTheChecksAndTheSendStopsTheBatch() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            try {
+                powerCycle();
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", level("w", 4));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z4 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(0, sim.server.position('Z'), 1e-9, "the boot Z");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z moved after the lines were checked"), lastBody);
+    }
+
+    /**
+     * BR-97 review 4: the same with a connect whose position read got no answer: OpenPnP still believes Z 3 while the
+     * controller boots at Z 0; the controller's own M114, not OpenPnP's belief, decides.
+     */
+    @Test
+    public void anUnreadResetBetweenTheChecksAndTheSendStopsTheBatch() throws Exception {
+        DispenseConfig c = svc.getConfig();
+        c.commandTimeoutMs = 1500;
+        svc.updateConfig(c);
+        sim.driver.setSyncInitialLocation(false);
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            try {
+                sim.machine.setEnabled(false);
+                sim.server.powerCycle();
+                sim.server.mute.add("M114");
+                try {
+                    sim.machine.setEnabled(true);
+                }
+                finally {
+                    sim.server.mute.remove("M114");
+                }
+                assertEquals(3, believedZ(), 1e-9, "OpenPnP's belief is the old Z");
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", level("w", 4));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z4 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z moved after the lines were checked"), lastBody);
+    }
+
+    /** BR-97 review 4: the Z re-read comes before the first line sent, also when the batch starts with a comment. */
+    @Test
+    public void aBatchThatStartsWithACommentGetsTheZReReadToo() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            try {
+                powerCycle();
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", "{\"lines\":[\"; lead\",\"G1 Z4 F300\",\"M400\"],\"what\":\"w\"}");
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z4 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z moved after the lines were checked"), lastBody);
+    }
+
+    /** BR-97 review 4 (MAJOR): a web STOP while the Z re-read waits for its answer sends no line after it. */
+    @Test
+    public void aStopDuringTheZReReadSendsNoLine() throws Exception {
+        powerCycle();
+        lockForProcess();
+        CountDownLatch hold = new CountDownLatch(1);
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            sim.server.mark();
+            sim.server.holdOkUntil.put("M114", hold);
+            new Thread(() -> {
+                try {
+                    long t0 = System.currentTimeMillis();
+                    while (!String.valueOf(sim.server.sinceMark()).contains("M114")
+                            && System.currentTimeMillis() - t0 < 10000) {
+                        Thread.sleep(5);
+                    }
+                    context().passthrough.abort("a test STOP");
+                }
+                catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+                finally {
+                    hold.countDown();
+                }
+            }).start();
+        };
+        try {
+            call("POST", "/api/gcode", level("w", 1));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+            sim.server.holdOkUntil.remove("M114");
+        }
+        assertTrue(String.valueOf(sim.server.sinceMark()).contains("M114"), "the re-read ran: " + sim.server.sinceMark());
+        assertFalse(sim.server.sinceMark().contains("G1 Z1 F300"), "no line after the STOP: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+    }
+
+    /**
+     * BR-97 review 4 (MAJOR, older than the re-read): OpenPnP's own Stop (its disable sequence, M410 first, from another
+     * thread) ends a levelling batch before its next line: a line after the M410 would start from a Z the quick stop cut
+     * short.
+     */
+    @Test
+    public void openPnpsOwnStopEndsALevellingBatchBeforeItsNextLine() throws Exception {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, "M410\nM107 P3\nM107 P2\nM107 P1\nM107");
+        powerCycle();
+        lockForProcess();
+        CountDownLatch hold = new CountDownLatch(1);
+        sim.server.holdOkUntil.put("G1 Z1 F300", hold);
+        sim.server.delayBeforeOkMs.put("M410", 200L);
+        sim.server.mark();
+        Thread[] stop = new Thread[1];
+        Thread stopper = new Thread(() -> {
+            try {
+                long t0 = System.currentTimeMillis();
+                while (!sim.server.sinceMark().contains("G1 Z1 F300") && System.currentTimeMillis() - t0 < 10000) {
+                    Thread.sleep(5);
+                }
+                stop[0] = new Thread(() -> {
+                    try {
+                        sim.machine.setEnabled(false);
+                    }
+                    catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                });
+                stop[0].start();
+                // the line's ok only once OpenPnP's Stop has announced itself (before its M410), however slow
+                ApiContext c = context();
+                while (!c.switchOff.inProgress() && System.currentTimeMillis() - t0 < 10000) {
+                    Thread.sleep(5);
+                }
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+            finally {
+                hold.countDown();
+            }
+        });
+        stopper.start();
+        try {
+            call("POST", "/api/gcode", level("w", 1, 2));
+        }
+        finally {
+            sim.server.holdOkUntil.remove("G1 Z1 F300");
+            sim.server.delayBeforeOkMs.remove("M410");
+        }
+        stopper.join();
+        stop[0].join(10000);
+        assertTrue(sim.server.sinceMark().contains("G1 Z1 F300"), "the first line went: " + sim.server.sinceMark());
+        assertTrue(sim.server.sinceMark().contains("M410"), "OpenPnP's Stop ran: " + sim.server.sinceMark());
+        assertFalse(sim.server.sinceMark().contains("G1 Z2 F300"), "no line after it: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+    }
+
+    /** BR-97 review 4: the re-read's M400 and M114 answers are not the first line's replies. */
+    @Test
+    public void theZReReadIsNoReplyOfTheFirstLine() throws Exception {
+        powerCycle();
+        lockForProcess();
+        JsonObject o = ok("POST", "/api/gcode", level("w", 1, 2));
+        JsonObject first = o.getAsJsonArray("results").get(0).getAsJsonObject();
+        assertEquals("G1 Z1 F300", first.get("line").getAsString(), o.toString());
+        assertEquals(0, first.getAsJsonArray("replies").size(), o.toString());
+    }
+
+    /** BR-97 review 4: a Z re-read that gets no answer sends nothing and says so (409), not a line's timeout. */
+    @Test
+    public void aZReReadThatFailsSendsNothingAndSaysSo() throws Exception {
+        powerCycle();
+        lockForProcess();
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            sim.server.mark();
+            sim.server.mute.add("M400");
+        };
+        try {
+            call("POST", "/api/gcode", "{\"lines\":[\"G1 Z1 F300\",\"M400\"],\"what\":\"w\",\"timeoutMs\":1000}");
+        }
+        finally {
+            sim.server.mute.remove("M400");
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z1 F300"), "nothing sent: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z could not be re-read before the first line"), lastBody);
+    }
+
+    /** The web API's context (its passthrough), for a STOP from a test thread. */
+    ApiContext context() throws Exception {
+        java.lang.reflect.Field f = ApiServer.class.getDeclaredField("context");
+        f.setAccessible(true);
+        return (ApiContext) f.get(api);
+    }
+
+    /**
+     * BR-97 review: without the engine nothing journals a levelling call (Z_LEVEL) or keeps the reset on record: the
+     * call is refused (409) and nothing is sent.
+     */
+    @Test
+    public void levellingIsRefusedWithoutTheEngine() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+        DispenseService old = svc;
+        TipSim.hook(p -> {
+            if ("shutdown".equals(p)) {
+                throw new IllegalStateException("the old engine did not stop");
+            }
+        });
+        try {
+            assertThrows(IllegalStateException.class, () -> DispenseService.start(Configuration.get()));
+        }
+        finally {
+            TipSim.hook(null);
+        }
+        old.shutdown();
+        assertEquals(null, DispenseService.get(), "no engine");
+        sim.server.mark();
+        call("POST", "/api/gcode", level("w", 1));
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("dispense engine"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "nothing sent");
+        svc = DispenseService.start(Configuration.get());
+    }
+
+    /**
+     * BR-97 re-review (MINOR): every levelling call is journaled before it is sent: a journal write that fails (here a
+     * trigger aborts the Z_LEVEL insert, as a full disk would) answers 409 and sends nothing.
+     */
+    @Test
+    public void aLevellingCallWhoseJournalWriteFailsSendsNothing() throws Exception {
+        powerCycle();
+        lockForProcess();
+        try (java.sql.Connection c = java.sql.DriverManager.getConnection(svc.getDb().getUrl());
+                java.sql.Statement st = c.createStatement()) {
+            st.execute("CREATE TRIGGER z_level_fails BEFORE INSERT ON events WHEN NEW.code = 'Z_LEVEL' BEGIN SELECT "
+                    + "RAISE(ABORT, 'disk full'); END");
+        }
+        sim.server.mark();
+        call("POST", "/api/gcode", level("w", 1));
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("journal") && lastBody.contains("disk full"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "nothing sent");
+        assertEquals(0.0, sim.server.position('Z'), 1e-9);
+    }
+
+    /**
+     * BR-97 re-review 3 (MINOR, safety; the review's probe): a home whose start cannot be journaled does not start. Its
+     * G28 would move the Z frame with nothing on record, so an OpenPnP restart would bring back the reset's boot Z 0
+     * (the probe then walked to Z -1 in G28's frame). No G28 goes out, and the levelling reference stays the boot Z.
+     */
+    @Test
+    public void aHomeWhoseStartCannotBeJournaledDoesNotStart() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        try (java.sql.Connection c = java.sql.DriverManager.getConnection(svc.getDb().getUrl());
+                java.sql.Statement st = c.createStatement()) {
+            st.execute("CREATE TRIGGER home_started_fails BEFORE INSERT ON events WHEN NEW.code = 'HOME_STARTED' "
+                    + "BEGIN SELECT RAISE(ABORT, 'database is locked'); END");
+        }
+        sim.server.mark();
+        call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("homing failed") && lastBody.contains("database is locked"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "no G28: nothing sent");
+        assertFalse(sim.machine.isHomed());
+        // the reference is still the boot Z 0, not the Z 3 the failed home left: 32 mm below 0 is the end
+        walk(3, -32);
+        refusedLevel(level("w", -33), "32 mm");
+    }
+
+    /** BR-97: a levelling move counts for BR-02's idle clock: it keeps the screw's motor on, as any move does. */
+    @Test
+    public void aLevellingMoveKeepsTheScrewMotorOn() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+        long idle = Math.round(svc.getConfig().screwIdleOffS * 1000);
+        long t0 = System.currentTimeMillis() + 1000;
+        long[] now = {t0};
+        PlannedStopSimTest.engineClock(() -> now[0]);
+        try {
+            ok("POST", "/api/gcode", "{\"lines\":[\"G1 B30 F600\",\"M400\"]}"); // the screw turns: its motor is on
+            now[0] = t0 + idle - 1000;
+            ok("POST", "/api/gcode", level("w", 1));
+            now[0] = t0 + idle + 1000;
+            assertEquals(null, svc.getControllerReset().lastScrewMotorOff(), "the levelling move restarted the clock");
+            now[0] = t0 + 2 * idle;
+            assertEquals(t0 + 2 * idle - 1000, svc.getControllerReset().lastScrewMotorOff().atMs, "off an idle "
+                    + "timeout after the levelling move");
+        }
+        finally {
+            PlannedStopSimTest.engineClock(null);
+        }
+    }
+
+    /**
+     * BR-97 review: a levelling call walks from the controller's Z, read first (M400, M114), not from OpenPnP's belief.
+     * Without sync-initial-location, and with the engine's read at the connect unanswered (a possible reset: any M114
+     * reply would set OpenPnP's driver coordinates), OpenPnP still believes the Z before the reset (31.5) while Marlin
+     * reads 0: G1 Z31 would pass as a 0.5 mm step and move 31 mm.
+     */
+    @Test
+    public void aLevellingCallReadsTheControllersZFirst() throws Exception {
+        DispenseConfig c = svc.getConfig();
+        c.commandTimeoutMs = 1500;
+        svc.updateConfig(c);
+        sim.driver.setSyncInitialLocation(false);
+        sim.machine.setEnabled(false);
+        sim.server.powerCycle();
+        sim.server.mute.add("M114");
+        try {
+            sim.machine.setEnabled(true);
+        }
+        finally {
+            sim.server.mute.remove("M114");
+        }
+        assertFalse(ok("GET", "/api/machine", null).get("positionKnown").getAsBoolean(), "a possible reset");
+        assertEquals(31.5, believedZ(), 1e-6, "OpenPnP's belief from before the reset");
+        assertEquals(0.0, sim.server.position('Z'), 1e-9);
+        lockForProcess();
+        refusedLevel("{\"lines\":[\"G1 Z31 F300\"],\"what\":\"w\"}", "1 mm");
+        assertEquals(0.0, sim.server.position('Z'), 1e-9);
+    }
+
+    /** BR-97: a levelling call after one that left its moves unwaited reads the controller's Z first. */
+    @Test
+    public void aLevellingCallAfterAnUnwaitedMoveStartsFromTheControllersZ() throws Exception {
+        powerCycle();
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z1 F300\"],\"what\":\"w\"}");
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z2 F300\"],\"what\":\"w\"}");
+        refusedLevel("{\"lines\":[\"G1 Z0.5 F300\"],\"what\":\"w\"}", "1 mm");
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z1.5 F300\",\"M400\"],\"what\":\"w\"}");
+        assertEquals(1.5, believedZ(), 1e-6);
     }
 }
