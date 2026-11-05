@@ -3159,10 +3159,12 @@
     run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status)),
     ok: (r) => (r && (r.note || r.lastEvent)) || 'Pressure switching on',
   });
-  // BR-03: the pump only, the valve stays closed (read the gauge), anywhere; offered only by a backend with I12
+  // BR-03: the pump only, the valve stays closed (read the gauge), anywhere; only a backend with I12 has it (its own gate:
+  // a backend without it would open the valve wherever the needle is)
   IL.fix('pressure-pump', {
-    gate: (s) => (s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
-      : IL.lockReason(s, { connected: true, engine: true })),
+    gate: (s) => (!IL.hasPumpOnly(s) ? 'This OpenPnP has no pump-only start (I12)'
+      : s.pressure && s.pressure.state && s.pressure.state !== 'off' ? 'Pressure is already on'
+        : IL.lockReason(s, { connected: true, engine: true })),
     run: () => IL.api('POST', '/api/pressure/start', IL.pressureStartBody(S.status, true)),
     ok: (r) => (r && (r.note || r.lastEvent)) || 'Pump on, valve closed: read the gauge',
   });

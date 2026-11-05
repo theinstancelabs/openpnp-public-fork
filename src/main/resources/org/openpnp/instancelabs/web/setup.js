@@ -454,7 +454,8 @@
       case 'regulator':
         q = 'Read the regulator gauge: ' + IL.fmtPsi(prof.pressurePsi) + ' psi';
         code = 'I6 · no sensor';
-        dd = 'Switch the pressure on with the needle over the waste, read the gauge, then tick it. Kept in this browser for 8 h.';
+        dd = (IL.hasPumpOnly(s) ? 'Switch the pump on (the valve stays closed, nothing moves), read the gauge'
+          : 'Switch the pressure on with the needle over the waste, read the gauge') + ', then tick it. Kept in this browser for 8 h.';
         acts = x.fixes.map((f) => IL.fixButton(f));
         break;
       case 'needle':
