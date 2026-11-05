@@ -54,8 +54,9 @@
     const d = (status && status.dispense) || {};
     return Object.keys(d.locations || {}).filter((n) => n !== 'waste-test-dot').sort();
   };
-  /** Fills a place <select>, keeps the chosen value; preferred when nothing is chosen yet; only(name): the places offered. */
-  pcr.fillPlaces = function (sel, status, preferred, only) {
+  /** Fills a place <select>, keeps the chosen value; preferred when nothing is chosen yet; only(name): the places offered;
+   *  bare: with neither offered, nothing is chosen (the caller's gate asks for a place) instead of the first. */
+  pcr.fillPlaces = function (sel, status, preferred, only, bare) {
     const names = pcr.places(status).filter(only || Boolean);
     const key = names.join('|');
     if (sel.dataset.key !== key) {
@@ -65,6 +66,7 @@
         : [el('option', { value: '', text: 'No places yet' })]));
       if (keep && names.includes(keep)) sel.value = keep;
       else if (preferred && names.includes(preferred)) sel.value = preferred;
+      else if (bare && names.length) sel.selectedIndex = -1;
     }
     return names;
   };

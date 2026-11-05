@@ -805,10 +805,10 @@
   function renderShots(s) {
     const d = s.dispense || {}, prof = d.profile || {};
     // the places the engine takes shots on (shotsRun): the sinks, the blank (a reference) and a coupon; its zones refuse the
-    // others ("takes no paste"); a cup first
+    // others ("takes no paste"); a cup first, else the waste; never the blank or a coupon by default (30 whole turns)
     const coupons = ((S.config || {}).padCalibration || {}).couponPlaces || ['coupon1', 'coupon2'];
     const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace) || d.wasteLocationName || 'waste',
-      (nm) => IL.isSinkPlace(nm, d) || nm === (d.blankLocationName || 'blank') || coupons.includes(nm));
+      (nm) => IL.isSinkPlace(nm, d) || nm === (d.blankLocationName || 'blank') || coupons.includes(nm), true);
     IL.show($('shots-noplace'), !names.length);
     const place = $('shots-place').value;
     const p = shotsPlan();
