@@ -381,7 +381,7 @@
   async function planAgain() {
     const src = (plan() && plan().source) || lsJson('il.run.source', null);
     const body = planBodyFrom(src);
-    if (!body) { IL.go('#run/board'); throw new Error('No board to plan again: choose a board first.'); }
+    if (!body) { IL.go('#run/board'); throw new Error('No board to plan again: choose a design first.'); }
     const p = await postPlan(body);
     goAuto();   // the step that matters now: Probe when this seat needs its surface, else Checks
     return p;
@@ -427,7 +427,7 @@
     gate: (s) => IL.lockReason(s, { pressureOff: false, engine: true }),
     run: async () => {
       const body = planBodyFrom((plan() && plan().source) || lsJson('il.run.source', null));
-      if (!body) throw new Error('No board to plan: choose a board first.');
+      if (!body) throw new Error('No board to plan: choose a design first.');
       const p = await postPlan(Object.assign(body, { registration: 'none' }));
       setRegResult(null);
       goAuto();
@@ -671,7 +671,7 @@
     if (!p) {
       if (S.planForgotten) { kind = 'need'; glyph = 'need'; text = 'Plan forgotten (OpenPnP restarted): plan again'; title = 'OpenPnP keeps plans in memory only: plan the board again (nothing moves).'; }
       else if (R.pending) { kind = 'off'; glyph = 'off'; text = 'Not planned yet'; title = 'Enter where the board sits, then Plan (nothing moves).'; }
-      else { kind = 'off'; glyph = 'off'; text = 'No plan yet'; title = 'Choose a board and plan it.'; }
+      else { kind = 'off'; glyph = 'off'; text = 'No plan yet'; title = 'Choose a design and plan it.'; }
     } else if (mode === 'live') {
       kind = 'live'; glyph = 'live';
       if (/I10|clean/i.test(run.phase || '')) text = 'Checking pads with the camera · pressure off';
@@ -819,7 +819,7 @@
           el('div', { class: 'btn-row', 'data-refusals': '' }, fixBtn({ fix: 'plan-again', label: 'Plan again', primary: true })));
       }
       return el('div', {}, IL.icon('i-run'), el('b', { text: sel ? 'Plan to see the dots' : 'Choose a design on the right' }),
-        el('span', { text: sel ? 'Enter where the board sits, then Plan. The board is drawn to scale with every planned dot.' : 'Pick a design (or a job board) in the Board step, enter where the board sits, then Plan.' }));
+        el('span', { text: sel ? 'Enter where the board sits, then Plan. The board is drawn to scale with every planned dot.' : 'Or a job board. Then enter where the board sits and press Plan.' }));
     });
     if (!p) { IL.show(n.stageBar, drawn); IL.show(n.timeline, false); return; }
     IL.show(n.stageBar, true);
@@ -1288,9 +1288,9 @@
   }
   function buildBoard(p) {
     const body = el('div', { class: 'stack', 'data-enter-submits': 'btn-plan' });
-    const sel = el('select', { class: 'input', id: 'board-select', title: 'A board of the job open in OpenPnP (position and fiducial check from the job), or a board file placed by hand' });
+    const sel = el('select', { class: 'input', id: 'board-select', title: 'A design (a board file placed by hand), or a board of the job open in OpenPnP (position and fiducial check from the job)' });
     sel.addEventListener('change', onBoardSelect);
-    const refresh = el('button', { type: 'button', class: 'btn btn--icon', id: 'btn-board-refresh', title: 'Reload the board list from OpenPnP', 'aria-label': 'Refresh the board list' }, IL.icon('i-refresh'));
+    const refresh = el('button', { type: 'button', class: 'btn btn--icon', id: 'btn-board-refresh', title: 'Read the designs again from OpenPnP', 'aria-label': 'Read the designs again' }, IL.icon('i-refresh'));
     refresh.addEventListener('click', () => loadBoards());
     const file = el('input', { class: 'input', id: 'board-file', type: 'text', placeholder: '/home/…/my.board.xml', autocomplete: 'off', spellcheck: 'false' });
     file.addEventListener('input', () => { R.form.file = file.value.trim(); R.formDirty = true; IL.render(); });
@@ -1388,7 +1388,7 @@
     prefillZ(s);
     fillForm();
     const b = R.boards;
-    IL.setText($('board-count'), R.boardsLoading ? 'loading…' : b ? ((b.job || []).length ? (b.job || []).length + ' job · ' : '') + IL.plural((b.files || []).length, 'design') : '');
+    IL.setText($('board-count'), R.boardsLoading ? 'reading…' : b ? ((b.job || []).length ? (b.job || []).length + ' job · ' : '') + IL.plural((b.files || []).length, 'design') : '');
     IL.show($('board-file-row'), R.form.sel === 'other');
     const job = c && c.kind === 'job';
     for (const id of ['board-x', 'board-y', 'board-z', 'board-rot']) {
@@ -1398,7 +1398,8 @@
     }
     const hint = R.boardsErr ? IL.listReadError(R.boardsErr, !!b && ((b.files || []).length + (b.job || []).length) > 0)
       : job ? 'Position from the OpenPnP job. Register board checks the fiducials again with the top camera.'
-        : c ? 'Enter roughly where the board origin (its 0,0 corner) sits. After planning, Register board finds the fiducials with the top camera and probes this seat.' : 'Choose the design to paste.';
+        : c ? 'Enter roughly where the board origin (its 0,0 corner) sits. After planning, Register board finds the fiducials with the top camera and probes this seat.'
+          : R.form.sel === 'other' ? 'Type the board file\'s path.' : 'Choose the design to paste.';
     IL.setText($('board-hint'), hint);
     IL.setClass($('board-hint'), 'reason' + (R.boardsErr ? ' reason--block' : ''));
     // dirty fields: differ from the remembered (or planned) values
@@ -1436,7 +1437,7 @@
     IL.setText(why, !job && capLock ? capLock : '');
     IL.show(why, !job && !!capLock);
     // Plan: locked while a task runs
-    const lock = IL.lockReason(s, { pressureOff: false }) || (!c ? 'Choose a design first' : null);
+    const lock = IL.lockReason(s, { pressureOff: false }) || (!c ? (R.form.sel === 'other' ? 'Type the board file first' : 'Choose a design first') : null);
     IL.gate($('btn-plan'), lock, $('plan-why'));
     IL.setText($('plan-next-hint'), S.newSeatAtMs && !job ? 'then: register the board' : '');
     // under the Board top Z: where a prefill came from, and the window and needle-frame check of the plan shown
@@ -2639,7 +2640,7 @@
       const est = p ? estimate(s) : null;
       return [el('div', { class: 'notebox' }, el('b', { text: 'No board is running.' }),
         el('div', { class: 'muted', text: p ? 'Start it from the Checks step: ' + IL.plural(p.dots.length, 'dot') + (est ? ', ≈ ' + IL.fmtClock(est.total) + ' for the board.' : '.') : 'Plan a board first.' })),
-      el('div', { class: 'btn-row' }, el('button', { type: 'button', class: 'btn', onclick: () => goStep(p ? 'checks' : 'board') }, p ? 'Open Checks' : 'Choose a board'))];
+      el('div', { class: 'btn-row' }, el('button', { type: 'button', class: 'btn', onclick: () => goStep(p ? 'checks' : 'board') }, p ? 'Open Checks' : 'Choose a design'))];
     });
     if (!live) { IL.show($('run-after'), false); return; }
     const t = phaseTimes(s, run, Date.now());
