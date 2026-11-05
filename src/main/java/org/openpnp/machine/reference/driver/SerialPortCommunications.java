@@ -109,6 +109,13 @@ public class SerialPortCommunications extends ReferenceDriverCommunications {
 
     private volatile SerialPortMatch lastMatch;
 
+    /**
+     * Instance Labs (BR-93): set as the JVM shuts down, by a hook jSerialComm runs before it closes every port: a read
+     * that then fails on a link kept open across a STOP is OpenPnP's exit, not a lost link.
+     */
+    static volatile boolean jvmShuttingDown;
+    private static final java.util.concurrent.atomic.AtomicBoolean shutdownFlagHooked =
+            new java.util.concurrent.atomic.AtomicBoolean();
     /** Instance Labs (BR-47): the device the last connect opened, links resolved; null before one. */
     private volatile String openedRealPath;
 
@@ -117,6 +124,9 @@ public class SerialPortCommunications extends ReferenceDriverCommunications {
     @Override
     public synchronized void connect() throws Exception {
         disconnect();
+        if (shutdownFlagHooked.compareAndSet(false, true)) {
+            SerialPort.addShutdownHook(new Thread(() -> jvmShuttingDown = true, "serial-exit-flag")); // BR-93
+        }
         SerialPortMatch match = resolvePort();
         serialPort = SerialPort.getCommPort(match.getPortDescriptor());
         serialPort.flushIOBuffers();
