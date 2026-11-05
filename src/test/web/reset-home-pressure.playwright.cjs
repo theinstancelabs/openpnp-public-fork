@@ -323,9 +323,13 @@ const visibleFixes = (page, root) => page.evaluate((r) => Array.from(document.qu
     check('(5) a lost link: the Machine cell says "Controller lost" with the engine\'s why and next step, and offers no Home', /Controller lost/.test(l5.v)
       && /cell--block/.test(l5.cls) && said(l5.title) && !l5.home && !l5.start, l5);
     check('(5) Machine › Control: the jog pad waits, in the same words (not "home first")', l5.padLocked && said(l5.why) && !/home first/i.test(l5.why), l5);
+    // what only writes data (a place's Save, a surface, plan again: {engine: true}) stays free: those routes never touch it
+    const free5 = await page.evaluate(() => ({ data: IL.lockReason(IL.S.status, { engine: true }), move: IL.lockReason(IL.S.status, { connected: true }) }));
+    check('(5) saves that only write data stay free; what moves the machine waits', !said(String(free5.data || '')) && said(String(free5.move || '')), free5);
     // Stop (or a failed write) leaves OpenPnP stopped: the cell still says the link was lost, and offers Start (the next step)
     stub.linkLost = { enabled: false };
-    await sleep(1500);
+    await page.waitForFunction(() => IL.S.status.machine.enabled === false, null, { timeout: 8000 }).catch(() => null);
+    await sleep(600);
     const l5b = await lostNow();
     check('(5) stopped too: the cell still says the link was lost, and offers Start', /Controller lost/.test(l5b.v) && said(l5b.title) && l5b.start && !l5b.home, l5b);
     await page.screenshot({ path: path.join(OUT, 'rhp-link-lost.png') });
