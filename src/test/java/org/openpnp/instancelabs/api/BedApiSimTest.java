@@ -2,6 +2,7 @@ package org.openpnp.instancelabs.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -17,6 +18,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -367,6 +370,49 @@ public class BedApiSimTest {
         call("POST", "/api/bed/objects/blank-front/removed", "{}", token);
         assertEquals(200, status, body);
         assertEquals("process", rows(BedModelStore.EVENT).get(0).get("who").getAsString());
+    }
+
+    /**
+     * Two writes at once, each built from the model it read: the second to write is refused (read it again) and the
+     * first's change is kept; before, the later one stamped its version over the other's change (#66 review MAJOR 2).
+     */
+    @Test
+    public void aWriteFromAModelThatChangedMeanwhileIsRefused() throws Exception {
+        start(true);
+        CountDownLatch read = new CountDownLatch(1), go = new CountDownLatch(1);
+        BedEndpoints.writeHook = () -> {
+            read.countDown();
+            try {
+                go.await(30, TimeUnit.SECONDS);
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        };
+        CompletableFuture<String> reel;
+        try {
+            reel = CompletableFuture.supplyAsync(() -> {
+                try {
+                    call("POST", "/api/bed/objects", "{\"name\":\"A reel\",\"outline\":{\"box\":[300,400,340,440]}}", UI);
+                    return status + " " + body;
+                }
+                catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+            assertTrue(read.await(30, TimeUnit.SECONDS), "the first write read version 1 and passed its checks");
+            BedEndpoints.writeHook = null;
+            ok("POST", "/api/bed/objects", "{\"name\":\"A tray\",\"outline\":{\"box\":[350,400,390,440]}}");
+        }
+        finally {
+            BedEndpoints.writeHook = null;
+            go.countDown();
+        }
+        String first = reel.get(60, TimeUnit.SECONDS);
+        assertTrue(first.startsWith("409 ") && first.contains("changed meanwhile"), first);
+        assertNotNull(object("a-tray"), "the write that went first is kept");
+        assertNull(object("a-reel"), "the refused one wrote nothing");
+        assertEquals(2, version());
     }
 
     String postAcquire() throws Exception {

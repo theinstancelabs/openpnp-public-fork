@@ -90,17 +90,22 @@ public final class BedModelStore {
     }
 
     /**
-     * Writes the next model: version = the stored one + 1 (after an invalid file, its own version + 1 if it has one;
-     * after none, 1), {@code changedAtMs} and {@code changedBy} stamped, validated as the loader does (an invalid model
-     * throws IllegalArgumentException and nothing is written), rewritten atomically, journaled with {@code before} and
+     * Writes the next model, made from {@code from} (the valid model its caller read; null: none): after another write
+     * since, it throws IllegalStateException and nothing is written, so two writes at once never lose one (#66 review
+     * MAJOR 2). Version = the stored one + 1 (after an invalid file, its own version + 1 if it has one; after none, 1),
+     * {@code changedAtMs} and {@code changedBy} stamped, validated as the loader does (an invalid model throws
+     * IllegalArgumentException and nothing is written), rewritten atomically, journaled with {@code before} and
      * {@code after} (the part that changed).
      */
-    public synchronized BedModel write(JsonObject next, String who, String what, JsonElement before, JsonElement after)
-            throws IOException {
+    public synchronized BedModel write(BedModel from, JsonObject next, String who, String what, JsonElement before,
+            JsonElement after) throws IOException {
         State s = state;
-        int from = s.model != null ? s.model.version : s.exists ? versionOfFile() : 0;
+        if (s.model != from) {
+            throw new IllegalStateException("the bed model changed meanwhile: read it again (GET /api/bed)");
+        }
+        int was = s.model != null ? s.model.version : s.exists ? versionOfFile() : 0;
         JsonObject j = new JsonParser().parse(next.toString()).getAsJsonObject();
-        j.addProperty("version", from + 1);
+        j.addProperty("version", was + 1);
         j.addProperty("changedAtMs", System.currentTimeMillis());
         j.addProperty("changedBy", who);
         BedModel m = BedModel.parse(j);
@@ -114,7 +119,7 @@ public final class BedModelStore {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("who", who);
         row.put("what", what);
-        row.put("version", new int[] {from, m.version});
+        row.put("version", new int[] {was, m.version});
         row.put("before", before);
         row.put("after", after);
         journal("INFO", row);

@@ -638,7 +638,8 @@ a jog: its floor), and only over a measured `touchable` top whose outline holds 
   calibration, a G-code batch or its moves not ended by an `M400`). Each is validated as the loader does (400
   `bad-request` with the problem; nothing written), then `version` + 1, `changedAtMs`/`changedBy` stamped, the file
   rewritten atomically, a `BED_MODEL` row `{who, what, version: [before, after], before, after}`, and the answer is
-  `GET /api/bed`'s.
+  `GET /api/bed`'s. Two writes at once: the one whose model another write changed after it was read answers 409
+  `refused` `the bed model changed meanwhile: read it again` and writes nothing.
   - `PUT /api/bed {whole model}`: the first model (no file, or one that fails validation); with a valid model the
     same rules as the parts below.
   - `POST /api/bed/objects {name, outline, id?, kind? = movable, role?, marginMm? = 1.0, touchable? = false,

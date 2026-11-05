@@ -41,6 +41,8 @@ final class BedEndpoints {
     static final String MEASUREMENT_NEEDED = "measurement-needed";
     /** Process's X/Y margin (design §8, desk answer 4) for an object a person adds. */
     static final double ADDED_MARGIN_MM = 1.0;
+    /** Tests only (#66 review MAJOR 2): runs between a write's checks and its write. */
+    static volatile Runnable writeHook;
 
     private final ApiContext ctx;
 
@@ -237,8 +239,9 @@ final class BedEndpoints {
 
     /**
      * Validates {@code next} (400 with the problem), holds it to the rules against {@code before} (409
-     * {@value #MEASUREMENT_NEEDED} listing what frees space without its record; none for the first model), writes it.
-     * {@code cleared}: the removed object {@code /cleared} took out (its records were checked there).
+     * {@value #MEASUREMENT_NEEDED} listing what frees space without its record; none for the first model), writes it
+     * unless another write came since {@code before} was read (409 refused: read it again). {@code cleared}: the
+     * removed object {@code /cleared} took out (its records were checked there).
      */
     private Object save(ApiServer.Request r, BedModelStore st, BedModel before, JsonObject next, String what,
             JsonElement b, JsonElement a, String cleared) throws Exception {
@@ -261,7 +264,16 @@ final class BedEndpoints {
             b = before == null ? JsonNull.INSTANCE : before.json();
             a = next;
         }
-        st.write(next, who, what, b, a);
+        Runnable hook = writeHook;
+        if (hook != null) {
+            hook.run();
+        }
+        try {
+            st.write(before, next, who, what, b, a);
+        }
+        catch (IllegalStateException e) {
+            throw ApiException.refused(e.getMessage());
+        }
         return ctx.bed.view();
     }
 
