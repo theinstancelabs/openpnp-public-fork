@@ -276,10 +276,11 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       await page.waitForFunction(() => document.getElementById('dlg-board-import').dataset.state === 'saved', null, { timeout: 15000 }).catch(() => null);
       const words = await page.evaluate(() => { const u = document.getElementById('btn-board-import-use'), x = document.querySelector('#board-import-saved .bi-saved__next');
         return { use: u ? u.textContent.trim() : null, next: x ? x.textContent : null }; });
-      if (open) await page.click('#btn-board-import-use');
+      if (open) await page.click('#btn-board-import-use', { timeout: 5000 }).catch(() => null);   // a failed attach: this check fails, the rest run
       else await page.keyboard.press('Escape');
       await page.waitForSelector('#dlg-board-import', { state: 'detached', timeout: 10000 }).catch(() => null);
-      const at = open ? await page.waitForFunction((h) => location.hash === h && !document.getElementById('design-setup').hidden, routeOf(nano), { timeout: 15000 })
+      const at = open ? await page.waitForFunction((h) => location.hash === h && !document.getElementById('design-setup').hidden && !document.getElementById('dlg-board-import'),
+        routeOf(nano), { timeout: 15000 })
         .then(() => true, () => false) : null;
       return { on, attach: ST.attachUrl, words, at };
     };
