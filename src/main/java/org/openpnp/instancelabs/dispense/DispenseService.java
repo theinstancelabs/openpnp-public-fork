@@ -4026,6 +4026,7 @@ public final class DispenseService {
         Exception failed = null;
         try {
             homeTracker.homeStarted();
+            controllerReset.homeStarted(); // BR-97: its G28 may move the frame, even if it ends unhomed
             m.home();
         }
         catch (Exception e) {

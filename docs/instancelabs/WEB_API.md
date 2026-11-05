@@ -554,7 +554,10 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   homed; while not homed (BR-97: levelling the see-saw before a reset's Home) `G1` with Z as the only axis and `F` ≤
   300 (not `G0`: it keeps `F` only while the firmware's `G0_FEEDRATE` is off), each line at most 1 mm from the Z before it (the first from OpenPnP's Z, re-read with M400 and M114 first
   when a passthrough move was not), every target at most 5 mm from where the call began and 32 mm from where the
-  levelling began (its first call since the last home; a home clears it); such a call needs `what` (400 without it)
+  position became unknown: Marlin's boot Z 0 after a reset the engine detected (on record, so also after an OpenPnP
+  restart), else the Z of the first levelling call since a possible reset (a connect whose position was not read), the
+  start of a home through the API or the engine (its G28 may move the frame even if the home ends unhomed) or a home;
+  a Stop and Start keeps it (OpenPnP's own Home button is not seen starting: one that ends unhomed keeps it too); such a call needs `what` (400 without it)
   and the dispense engine (409 without it: nothing would journal it), and is an `events` row `Z_LEVEL` (the holder,
   the lines, `what`); on that line any other axis is refused; pump P2 /
   valve P3 only full on; `M906 B` ≤ 670; `G4` ≤ 60 s; the bed's height switch on PA5 only (the HACK header's pin 3):

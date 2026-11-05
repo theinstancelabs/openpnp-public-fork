@@ -1259,6 +1259,94 @@ public class PowerCycleSimTest {
         assertEquals(33.0, believedZ(), 1e-6);
     }
 
+    /** Levels from Z {@code from} to {@code to} by lines of 1 mm (the last one shorter), 5 a call: each answered 200. */
+    void walk(double from, double to) throws Exception {
+        double z = from;
+        while (Math.abs(to - z) > 1e-9) {
+            double[] call = new double[(int) Math.min(5, Math.ceil(Math.abs(to - z) - 1e-9))];
+            for (int i = 0; i < call.length; i++) {
+                z += Math.max(-1, Math.min(1, to - z));
+                call[i] = z;
+            }
+            ok("POST", "/api/gcode", level("walk", call));
+        }
+    }
+
+    /** The lock for Process (BR-72), as the levelling's agent. */
+    void lockForProcess() throws Exception {
+        lockToken = null;
+        lockToken = ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"see-saw levelling\"}")
+                .get("token").getAsString();
+    }
+
+    /**
+     * OpenPnP quits and starts again whole (a deploy), the controller powered all along: the engine and the web API
+     * start afresh (nothing the API kept in memory survives), and Start connects.
+     */
+    void restartOpenPnpAndTheApi() throws Exception {
+        sim.machine.setEnabled(false);
+        api.stop();
+        svc = DispenseService.start(Configuration.get());
+        ApiSettings s = new ApiSettings();
+        s.port = 0;
+        api = ApiServer.start(Configuration.get(), s);
+        sim.machine.setEnabled(true);
+    }
+
+    /**
+     * BR-97 review (MAJOR, the review's probe): the 32 mm count from the Z where the position became unknown: after a
+     * reset Marlin's boot Z 0, whatever an earlier levelling took (here Z 20, unhomed by a Stop and Start).
+     */
+    @Test
+    public void aResetCountsTheLevellingFromTheBootZ() throws Exception {
+        lockForProcess();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 Z20 F600\",\"M400\"]}");
+        reconnect();
+        ok("POST", "/api/gcode", level("w", 21));
+        powerCycle();
+        assertEquals(0.0, sim.server.position('Z'), 1e-9, "Marlin boots at Z 0 where the see-saw stands");
+        walk(0, 30);
+        refusedLevel(level("w", 31, 32, 33, 34, 35), "32 mm");
+        assertEquals(30.0, sim.server.position('Z'), 1e-9);
+    }
+
+    /** BR-97 review (MAJOR): an OpenPnP restart in the middle of a walk keeps the reset's boot Z (it is on record). */
+    @Test
+    public void anOpenPnpRestartMidWalkKeepsTheBootZ() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 30);
+        restartOpenPnpAndTheApi();
+        lockForProcess();
+        walk(30, 32);
+        refusedLevel(level("w", 33), "32 mm");
+    }
+
+    /**
+     * BR-97 review (MAJOR): a home whose G28 ran but that ended unhomed (here its visual homing failed) moved Marlin's
+     * frame: the levelling after it counts from where that home left Z, not from the reset's boot Z.
+     */
+    @Test
+    public void aHomeThatEndsUnhomedTakesTheLevellingReferenceAfresh() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 1);
+        org.openpnp.spi.base.AbstractHead head = (org.openpnp.spi.base.AbstractHead) sim.machine.getDefaultHead();
+        head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod.ResetToFiducialLocation);
+        try {
+            call("POST", "/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}");
+        }
+        finally {
+            head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod.None);
+        }
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("homing failed"), lastBody);
+        assertFalse(sim.machine.isHomed());
+        assertEquals(31.5, sim.server.position('Z'), 1e-9, "its G28 ran");
+        walk(31.5, -0.5);
+        refusedLevel(level("w", -1), "32 mm");
+    }
+
     /**
      * BR-97 review: without the engine nothing journals a levelling call (Z_LEVEL) or keeps the reset on record: the
      * call is refused (409) and nothing is sent.

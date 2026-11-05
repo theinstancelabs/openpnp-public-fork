@@ -436,6 +436,9 @@ final class MachineEndpoints {
                 if (safe) {
                     return svc.homeSafely(attested);
                 }
+                if (reset != null) {
+                    reset.homeStarted(); // BR-97, as homeSafely does
+                }
                 m.home();
                 return null;
             }

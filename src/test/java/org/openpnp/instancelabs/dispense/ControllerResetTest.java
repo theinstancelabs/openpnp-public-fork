@@ -704,6 +704,35 @@ public class ControllerResetTest {
     }
 
     /**
+     * BR-97 review (MAJOR): the see-saw's levelling is bounded around the Z where the position became unknown: Marlin's
+     * boot Z 0 after a detected reset (on record, so also after a restart), else the first levelling call's Z. A reset,
+     * a possible one (an unread connect), a home's start and a home take it afresh; a Stop and Start keeps it.
+     */
+    @Test
+    public void theLevellingReferenceIsWhereThePositionBecameUnknown() {
+        ControllerReset r = run(false, false);
+        assertEquals(20.0, r.levelReference(20), 1e-9, "no reset: the first call's Z");
+        assertEquals(20.0, r.levelReference(25), 1e-9, "kept");
+        now = 1000;
+        r.connected(reply(BOOT), 'B', null);
+        assertEquals(0.0, r.levelReference(30), 1e-9, "a detected reset: Marlin's boot Z 0, not the call's Z");
+        now = 1500;
+        r.connected(reply("X:0.0000 Y:0.0000 Z:30.0000 A:720.0000 B:720.0000 Count X:0 Y:0 Z:0"), 'B', null);
+        assertEquals(0.0, r.levelReference(30), 1e-9, "a Stop and Start, the controller powered: kept");
+        ControllerReset restarted = run(false, false);
+        assertEquals(0.0, restarted.levelReference(30), 1e-9, "an OpenPnP restart: the reset is on record");
+        restarted.homeStarted();
+        assertEquals(31.5, restarted.levelReference(31.5), 1e-9, "a home's G28 moved the frame, homed or not");
+        now = 2000;
+        restarted.connected(null, 'B', "no answer");
+        assertEquals(12.0, restarted.levelReference(12), 1e-9, "a possible reset: taken afresh");
+        now = 3000;
+        restarted.homed();
+        assertEquals(7.0, restarted.levelReference(7), 1e-9, "a home: taken afresh");
+        assertEquals(9.0, run(false, false).levelReference(9), 1e-9, "homed since the reset: no boot Z after a restart");
+    }
+
+    /**
      * The home after a detected reset moves the Z frame (K by twice the shift): it says so once, also when the reset was
      * homed only after an engine restart; an ordinary home does not. A connect whose position was not read may have been
      * a reset (I11 counts it so): its home moves the frame too (#11 review 11-04, the conservative side).

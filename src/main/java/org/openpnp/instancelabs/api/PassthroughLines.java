@@ -36,8 +36,8 @@ final class PassthroughLines {
     static final double MAX_SCREW_MA = 670;
     /**
      * BR-97 (Process's numbers, the PM 16:4x): while not homed the see-saw is levelled by Z alone, at most 1 mm per
-     * line, 5 mm per call (the caller looks between calls) and 32 mm from where the levelling began (the see-saw's
-     * 0-63: levelling from either end needs up to 31.5), at F 300 or slower.
+     * line, 5 mm per call (the caller looks between calls) and 32 mm from where the position became unknown (the
+     * see-saw's 0-63: levelling from either end needs up to 31.5), at F 300 or slower.
      */
     static final double LEVEL_STEP_MM = 1;
     static final double LEVEL_CALL_MM = 5;
@@ -155,7 +155,7 @@ final class PassthroughLines {
 
     /**
      * BR-97: why a levelling move from Z {@code from} to {@code to} may not go out, or null. {@code first}: the Z where
-     * this call began; {@code ref}: where the levelling began after the last home.
+     * this call began; {@code ref}: where the position became unknown (the engine's ControllerReset.levelReference).
      */
     static String level(double from, double to, double first, double ref) {
         if (Math.abs(to - from) > LEVEL_STEP_MM + LEVEL_TOL_MM) {
@@ -167,8 +167,9 @@ final class PassthroughLines {
                     + "send the next call", plain(to), plain(LEVEL_CALL_MM), plain(first));
         }
         if (Math.abs(to - ref) > LEVEL_RANGE_MM + LEVEL_TOL_MM) {
-            return String.format(Locale.ROOT, "Z %s is more than %s mm from Z %s, where the levelling began after the "
-                    + "last home (the see-saw's whole travel is 63 mm)", plain(to), plain(LEVEL_RANGE_MM), plain(ref));
+            return String.format(Locale.ROOT, "Z %s is more than %s mm from Z %s, where the position became unknown "
+                    + "(after a reset the controller's boot Z 0, else where the levelling began; the see-saw's whole "
+                    + "travel is 63 mm)", plain(to), plain(LEVEL_RANGE_MM), plain(ref));
         }
         return null;
     }

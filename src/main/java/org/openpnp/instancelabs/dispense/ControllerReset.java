@@ -64,6 +64,9 @@ import java.util.regex.Pattern;
  * <p>After a switch-off or a reset a start angle can only be set once the screw has turned since (the dot pair that
  * measures it turns it; {@link #whyNoAngle}): the angle shown before it, one click away, would otherwise clear I11.</p>
  *
+ * <p>BR-97: the see-saw's levelling before a home stays within 32 mm of where the position became unknown
+ * ({@link #levelReference}): Marlin's boot Z 0 after a detected reset, also after a restart (it is on record).</p>
+ *
  * <p>Times are epoch ms from an injectable clock. Thread safe.</p>
  */
 public final class ControllerReset {
@@ -159,6 +162,11 @@ public final class ControllerReset {
     private String attestedEvidence;
     /** The last home that ended an unknown position on someone's word: {by, evidence, atMs}; null: none here. */
     private Map<String, Object> lastAttestation;
+    /**
+     * BR-97: the levelling's reference ({@link #levelReference}): 0 after a detected reset (also read back after a
+     * restart); null: the next levelling call's Z. A Stop and Start keeps it.
+     */
+    private Double levelRefZ;
     /** The changes made and not written yet (under this lock), in their order. */
     private final List<Event> toWrite = new ArrayList<>();
     /** One journal writer at a time, outside this lock (a stream's move never waits for an insert). */
@@ -212,6 +220,7 @@ public final class ControllerReset {
                 tripEndedAt = later(tripEndedAt, e.atMs); // it boots without the trip
                 detectedAtMs = e.atMs; // what it reported is not journaled: reported stays null
                 unknown(e.message, e.atMs);
+                levelRefZ = 0.0; // BR-97: the boot Z, unless a newer event clears it (a possible reset, a home)
                 stopIdleClock(e.atMs); // the controller boots with its motors off
             }
             else if (EVENT_MOTOR_OFF.equals(e.code)) {
@@ -235,6 +244,7 @@ public final class ControllerReset {
             else if (EVENT_KNOWN.equals(e.code)) {
                 positionKnown = true;
                 unknownWhy = null;
+                levelRefZ = null;
             }
         }
         watchdogTripAt(tripAt, tripEndedAt);
@@ -350,6 +360,7 @@ public final class ControllerReset {
             }
             unknown(String.format(Locale.ROOT, "the controller was reset (a power cycle: at connect it reported "
                     + "X 0, Y 0, Z 0 and %s), so the head may be anywhere", rot), now);
+            levelRefZ = 0.0; // BR-97: Marlin boots at Z 0 where the see-saw stands
             stopIdleClock(now); // it boots with its motors off: the count's epoch covers the screw
             watchdogTripAtMs = null; // and without a host watchdog trip
             resetUnhomed = true; // its home will move the Z frame
@@ -626,6 +637,7 @@ public final class ControllerReset {
             }
             positionKnown = true;
             unknownWhy = null;
+            levelRefZ = null;
         }
         writeOut();
         return moved;
@@ -638,6 +650,26 @@ public final class ControllerReset {
     public synchronized void attest(String who, String evidenceJson) {
         attestedBy = who;
         attestedEvidence = evidenceJson;
+    }
+
+    /**
+     * BR-97: the Z (the controller's frame) the see-saw's levelling before a home stays within 32 mm of: where the
+     * position became unknown. Marlin's boot Z 0 after a detected reset; else {@code zNow}, taken at the first levelling
+     * call since a possible reset, a home's start or a home.
+     */
+    public synchronized double levelReference(double zNow) {
+        if (levelRefZ == null) {
+            levelRefZ = zNow;
+        }
+        return levelRefZ;
+    }
+
+    /**
+     * BR-97: a home starts (its G28 next): its G28 may move the controller's frame even if the home ends unhomed, so the
+     * next levelling takes its reference afresh.
+     */
+    public synchronized void homeStarted() {
+        levelRefZ = null;
     }
 
     /** When the last home after a detected reset moved the Z frame (also before a restart), or null. */
@@ -728,6 +760,7 @@ public final class ControllerReset {
         positionKnown = false;
         unknownWhy = why;
         countEpochMs = later(countEpochMs, atMs);
+        levelRefZ = null; // BR-97: maybe a new frame (a detected reset then sets its boot Z)
     }
 
     /** A change to journal: written after the lock is released, after the changes made before it. */

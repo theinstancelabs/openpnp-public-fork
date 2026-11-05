@@ -67,7 +67,7 @@ final class LockEndpoints {
         @Override
         public void machineHomed(Machine m, boolean isHomed) {
             if (isHomed) {
-                ctx.passthrough.machineHomed();
+                ctx.passthrough.machineStopped();
             }
         }
     };

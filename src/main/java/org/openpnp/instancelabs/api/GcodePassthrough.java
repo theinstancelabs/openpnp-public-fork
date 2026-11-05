@@ -65,8 +65,6 @@ final class GcodePassthrough {
     private boolean motionPending;
     /** OpenPnP's coordinates may differ from the controller's (a passthrough move or G92 not re-read yet). */
     private boolean positionStale;
-    /** BR-97: the Z where the see-saw's levelling began (its first call since the last home), or null. */
-    private Double levelRefZ;
     private final Object logLock = new Object();
 
     /** One running batch. */
@@ -110,12 +108,6 @@ final class GcodePassthrough {
     synchronized void machineStopped() {
         motionPending = false;
         positionStale = false;
-    }
-
-    /** OpenPnP homed: as a stop, and the levelling after the next reset begins afresh. */
-    synchronized void machineHomed() {
-        machineStopped();
-        levelRefZ = null;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -204,8 +196,9 @@ final class GcodePassthrough {
 
     /**
      * BR-97: the batch's Z moves while not homed, walked from the controller's Z (OpenPnP's, re-read first when a
-     * passthrough move was not) by {@link PassthroughLines#level}: a refused one sends nothing, else the call is
-     * journaled (events {@code Z_LEVEL}: the holder, the lines, the reason).
+     * passthrough move was not) by {@link PassthroughLines#level}, within 32 mm of where the position became unknown
+     * (the engine's {@code ControllerReset#levelReference}): a refused one sends nothing, else the call is journaled
+     * (events {@code Z_LEVEL}: the holder, the lines, the reason).
      */
     private void checkLevelling(Machine m, GcodeDriver d, DispenseService svc, List<String> raw,
             List<PassthroughLines.Line> lines, MachineLock.Holder holder, String what) throws ApiException {
@@ -214,13 +207,7 @@ final class GcodePassthrough {
         }
         double z = zNow(m, d);
         double first = z;
-        double ref;
-        synchronized (this) {
-            if (levelRefZ == null) {
-                levelRefZ = z;
-            }
-            ref = levelRefZ;
-        }
+        double ref = svc.getControllerReset().levelReference(z);
         StringBuilder sent = new StringBuilder();
         for (int i = 0; i < lines.size(); i++) {
             PassthroughLines.Line l = lines.get(i);
