@@ -29,8 +29,9 @@
   /** GET /api/boards, then each board file's check (10-20 ms each). */
   function load() {
     if (D.loading) return D.loading;
+    if (D.err) { D.err = null; IL.render(); }   // "Reading…" while it reads again (Retry shows it worked on)
     D.loading = (async () => {
-      try { D.boards = await IL.api('GET', '/api/boards'); D.err = null; } catch (e) { D.err = e.message || String(e); return; }
+      try { D.boards = await IL.api('GET', '/api/boards'); D.err = null; } catch (e) { D.err = IL.readErrorText(e); return; }
       await Promise.all(files().map((f) => readCheck(f.file)));
     })().finally(() => { D.loading = null; IL.render(); });
     return D.loading;
@@ -75,6 +76,7 @@
 
   IL.on('padtypes', () => { if (D.boards) reload(); });
   IL.on('boards', () => { if (D.boards) D.fresh = reload(); });   // a save or attach in this tab (Run's Board step too)
+  IL.on('online', (on) => { if (on && D.err) reload(); });   // a read that failed while OpenPnP was away
 
   // ================================================================================== Designs (d0)
   /** A board's picture from its drawing (once per drawing and size); its frame while it loads. */
@@ -98,15 +100,18 @@
     const list = files();
     const key = [!!D.boards, D.err, list.map((f) => [f.name, f.file, stateOf(f).text, !!D.thumbs.get((f.art && f.art.id) + '|300')])];
     IL.keyed(n.list, JSON.stringify(key), () => {
-      if (D.err) return el('p', { class: 'notebox notebox--block', text: 'The designs could not be read: ' + D.err });
+      if (D.err && !list.length) return el('p', { class: 'notebox notebox--block' }, el('span', { text: IL.listReadError(D.err) }), ' ', IL.retryButton(reload, 'designs'));
       if (!D.boards) return el('p', { class: 'muted', text: 'Reading the designs…' });
       if (!list.length) return el('p', { class: 'notebox', text: 'No designs yet: upload one.' });
-      return list.map((f) => {
+      // a read again that fails keeps the cards it has, under a note (the next visit reads them again)
+      const note = D.err ? [el('p', { class: 'reason reason--need designs-note' }, el('span', { text: IL.listReadError(D.err, true) }), ' ',
+        IL.retryButton(reload, 'designs-note'))] : [];
+      return note.concat(list.map((f) => {
         const st = stateOf(f);
         return el('a', { class: 'design', href: routeOf(f), 'data-name': f.name, 'data-file': f.file, 'data-state': st.state, 'data-art': f.art && f.art.id ? f.art.id : null },
           pic(f, 300, 120), el('span', { class: 'design__t', text: title(f) }),
           el('span', { class: 'design__s' }, IL.glyph(GLYPH[st.state], 'xs'), el('span', { class: 'design__st', text: st.text })));
-      });
+      }));
     });
     IL.setText(n.count, D.boards ? IL.plural(list.length, 'design') : '');
   }
@@ -189,13 +194,17 @@
     const f = byKey(D.sel);
     IL.setText(n.name, f ? title(f) : '');
     const im = f && f.imported;
-    IL.keyed(n.meta, JSON.stringify([!!D.boards, D.err, f && f.file, im && im.atMs]), () => (!f ? el('span', { text: D.err ? 'The designs could not be read: ' + D.err
-      : D.boards ? 'No such design: pick one in Designs.' : 'Reading the design…' })
+    IL.keyed(n.meta, JSON.stringify([!!D.boards, D.err, f && f.file, im && im.atMs]), () => (!f ? (D.err ? [el('span', { text: IL.listReadError(D.err) }), ' ', IL.retryButton(reload, 'setup')]
+      : el('span', { text: D.boards ? 'No such design: pick one in Designs.' : 'Reading the design…' }))
       : [el('span', { text: im && im.atMs ? 'Uploaded ' + IL.fmtDateTime(IL.toClient(im.atMs)) + (im.sourceName ? ' from ' + im.sourceName : '') : 'Board file ' + String(f.file).split('/').pop() }),
         el('span', { text: 'top side' })]));
     const st = f ? stateOf(f) : { state: 'reading', text: '' };
     const rows = f ? stepsOf(f, st) : [];
     IL.keyed(n.steps, JSON.stringify([f && f.file, rows]), () => rows.map((r) => rowEl(f, r)));
+    // as Pad types' Needs: Use the doses found waits for a task, held pressure or an upload being read; a calibration also
+    // for one waiting on its readings
+    IL.gate(document.getElementById('btn-design-use'), PP().idle(IL.S.status));
+    IL.gate(document.getElementById('btn-design-doses'), PP().calIdle(IL.S.status));
     const todo = rows.filter((r) => r.state === 'need' || r.state === 'block').length;
     IL.setText(n.todo, st.state === 'ready' ? 'Ready' : todo ? todo + ' to do' : '');
     n.todo.classList.toggle('design-todo--ok', st.state === 'ready');
@@ -297,8 +306,9 @@
       n.pMake.addEventListener('click', () => { const f = byKey(D.sel); if (f) make(f); });
       n.pNext = el('button', { type: 'button', class: 'btn btn--primary btn--lg btn--block', id: 'btn-design-next' });
       n.pNext.addEventListener('click', () => { if (n.pNextGo) n.pNextGo(); });
+      n.pWhy = el('div', { class: 'reason', id: 'design-rest-why', hidden: true });
       n.pCap = el('div', { class: 'design-cap' });
-      p.foot.append(n.pRefusals, n.pRest, n.pMake, n.pNext, n.pCap);
+      p.foot.append(n.pRefusals, n.pRest, n.pWhy, n.pMake, n.pNext, n.pCap);
     }
     const f = D.sel ? byKey(D.sel) : null;
     const st = f ? stateOf(f) : null;
@@ -307,7 +317,7 @@
     const ready = !!st && st.state === 'ready';
     const tipRefs = [...new Set(g.tip.flatMap((x) => x.refs || []))];
     IL.setText(n.pTitle, !D.sel ? 'Designs' : ready ? 'Ready' : 'Set up the rest');
-    IL.setText(n.pLead, !D.sel ? 'Pick a design to see what it still needs.' : !st || !st.g ? st ? st.text : D.err ? 'The designs could not be read.' : 'Reading the design…'
+    IL.setText(n.pLead, !D.sel ? 'Pick a design to see what it still needs.' : !st || !st.g ? st ? st.text : D.err ? 'Could not read the designs.' : 'Reading the design…'
       : ready ? 'Every pad on the top has a dose. The steps not built yet are done by hand or later.'
         : 'This design waits on ' + [g.fix.length ? IL.plural(g.fix.length, 'pad group') : null, tipRefs.length ? 'another tip for ' + IL.boardImport.refList(tipRefs, 3) : null].filter(Boolean).join(' and ') + '.');
     const left = !st || !st.g || ready ? [] : [
@@ -325,6 +335,9 @@
     IL.show(n.pMore, !D.sel);
     const canRest = !!st && !ready && (use.length > 0 || cal.length > 0);
     IL.show(n.pRest, canRest);
+    // the visible reason for this and the steps' buttons (they show only when this does), as Needs' #needs-why; while a
+    // pushed panel (the pad calibration's) covers this one, the steps' buttons keep the reason as their title
+    IL.gate(n.pRest, canRest ? (cal.length ? PP().calIdle : PP().idle)(s) : null, n.pWhy);
     IL.show(n.pMake, ready);
     // nothing to run here: the step that comes next, on its own page
     const next = !st || ready || canRest ? null : measure.length ? ['Measure the tip’s dots', () => IL.go('#tip/checks')]

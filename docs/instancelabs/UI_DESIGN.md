@@ -309,11 +309,11 @@ panel only; the board stays in view. This replaces the ~5 tab switches per board
   surface probed for it or the needle frame (`#board-z-note` says from where); Register board measures it. The plan's
   frame check shows under it. The re-seat answer is the engine's new-seat flag (`POST /api/board/new-seat`), shared by
   every browser: `New seat: after planning, Register board checks the fiducials and probes this seat.`
-- **As built (board import, `boardflow.js`):** `Upload KiCad board…` (`#btn-board-upload`) opens the upload dialog
+- **As built (board import, `boardflow.js`):** `Upload a design…` (`#btn-board-upload`) opens the upload dialog
   (§11); `#board-thumbs`, one row of board pictures (a click chooses that board); `#board-imported` says where the
   drawing comes from; **`Camera is on FID1`** (`#btn-board-use-fid`, next to `Use camera X/Y`) sets the origin from
   the top camera centred on the board's first fiducial: origin = camera − R(rotation)·(FID1's board X/Y). After a save,
-  `Use this board` chooses it here.
+  `Use this design` chooses it here (opened from Designs, the button after an attach is `Open its Set up`).
 
 #### 8.1.3 Register step (`data-view=probe`; was "Probe")
 
@@ -1008,7 +1008,7 @@ tick or a `new seat` answer in one tab counts in the others at once).
 | Refusals | inline line under the action `Refused: <why> — <fix button>` · card banner (4 px left border) · Activity log | the I-code prefix of a 409 message (`I10: …`) becomes a link to its fix |
 | Toast `#toast` | at most 3 lines, top-left of the main column (over the page title, never over the live tiles or the board decision), ≤ 4 s | never over the panel or STOP; always repeated in Activity; never the only record of a safety event |
 | Sticky message area `#msg-area` | top of the main column | holds offline / vent_failed / STOP NOT CONFIRMED bands; replaces the old top-of-page `#banner` |
-| Upload dialog `#dlg-board-import` (as built, `boardimport.js`) | drop zone and file picker · reading (Cancel) · preview: the board drawn, what was found, warnings in four groups (Blocks dispensing, Registration, Check in the preview, Notes), packages and their pad types, the name and slug · saved: pad types to add, `Use this board`, `Upload another` | choose · reading · preview · saving (Esc and Cancel do nothing) · saved · refused (reason + `Choose another file`); `exists` asks a two-press replace; attach offered when a listed board file matches |
+| Upload dialog `#dlg-board-import` (as built, `boardimport.js`) | drop zone and file picker · reading (Cancel) · preview: the board drawn, what was found, warnings in four groups (Blocks dispensing, Registration, Check in the preview, Notes), packages and their pad types, the name and slug · saved: pad types to add, `Use this design` (opened from Designs: `Open its Set up`), `Upload another` | choose · reading · preview · saving (Esc and Cancel do nothing) · saved · refused (reason + `Choose another file`); `exists` asks a two-press replace; attach offered when a listed board file matches |
 | Pad inspector (panel view `pad`, `padinspect.js`) | the part drawn to scale (its paste openings, its dots at their real size in path order), the pad type and the rule that chose it in a sentence, the stencil-equivalent amount, flags and why a pad is blocked, `Edit pad type Chip 0603` (or `New pad type for <package>`), prev / next pad | opens on a pad or part click; Esc back |
 | Path preview row `#run-preview` (`pathpreview.js`) | `#pv-play` · scrub `#pv-scrub` · speed `#pv-speed` · readout `#pv-readout` (`Dot 37 of 160 · R12.1 · ½ turn · Z 2.91 mm · 0:41 of 1:36`) · `#pv-reset` | collapsed until it starts; hidden while a task runs or after a STOP; times from the plan's estimate, else illustrative (50 mm/s, 0.6 s per dot) |
 | Board thumbnails `#board-thumbs` | one row of board pictures from `art.thumb` (blob: images) | a click chooses the board |

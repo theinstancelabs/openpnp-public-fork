@@ -137,8 +137,8 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
   `lost_steps` or `home_offset` that lands while a homing move runs toward a switch is checked again at once: the
   move ends where the switch now triggers (at once if the head is already past it), and so does its wait.
 - A power cycle resets the belief and the counts; the head stays where it is (a released Z drops, below).
-- Releasing an energised Z (`M18`/`M84` with Z or no axis, the idle timeout, `M112` 0.85 s after the kill, a power
-  cycle) moves the head by the `z_drop` fault's distance (default 0). It stays there: the next block with Z steps
+- Releasing an energised Z (`M18`/`M84` with Z or no axis, the idle timeout, `M112` 0.85 s after the kill, `M997`, a
+  power cycle) moves the head by the `z_drop` fault's distance (default 0). It stays there: the next block with Z steps
   re-energises Z (at once when planned: `Z_LATE_ENABLE` is off, planner.cpp), as does `M17`. A move with no Z steps
   leaves Z released.
 - The control state's `head` gives X/Y/Z `physical`, `logical` (the step counts now, in G92 coordinates; M114 prints
@@ -261,7 +261,7 @@ energised.
 | M106 P2/P3 | S as given | any S>0 is 255 |
 | Z steps/mm, B max accel, B current | 40, 10000, 200 mA | 160, 20000, 540 mA |
 | kill | fans unchanged, motion runs 0.6 s more | all four outputs off, planner stopped first |
-| M997 | unknown | reboot to DFU: the port goes away until a power cycle |
+| M997 | unknown | quick-stop, all four outputs off, every stepper let go, `echo:M997: entering STM32 DFU bootloader (0483:df11)`; then it answers nothing more and, 0.1 s later (the firmware's wait for USB to send what was due, that echo with it; counted from when lumen-sim sees the halt, so a late wake still sends it), enters DFU: the port goes away until a power cycle |
 
 ## The simulator line (`--sim-cap`, BR-47)
 

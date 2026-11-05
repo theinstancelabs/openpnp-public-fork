@@ -63,10 +63,10 @@ def temp_dir(test):
     return tmp
 
 
-def in_process_runner(test, clock=None, **kw):
+def in_process_runner(test, clock=None, personality="stock", **kw):
     """A Runner on a pty of its own in a temp directory, shut down after the test whatever happens."""
     tmp = temp_dir(test)
-    r = Runner(Simulator(), os.path.join(tmp, "ttyLUMEN"), clock=clock or time.monotonic, **kw)
+    r = Runner(Simulator(personality), os.path.join(tmp, "ttyLUMEN"), clock=clock or time.monotonic, **kw)
     test.addCleanup(r.shutdown)
     return r
 
@@ -748,6 +748,7 @@ class RunnerFaults(unittest.TestCase):
             self.addCleanup(r.shutdown)
             r.link.open()
             r.sim.receive(b"M997\n", 0.0)
+            self.clock[0] = 0.2  # past flashFirmware()'s 0.1 s for USB CDC: in DFU
             r._service()
             self.assertFalse(os.path.lexists(r.link.link))
             self.assertTrue(r._handle_control({"cmd": "fault", "fault": "disconnect", "down_s": 0.5})["ok"])
@@ -758,6 +759,60 @@ class RunnerFaults(unittest.TestCase):
             self.assertTrue(r.transport_state()["link_down"])
             self.assertTrue(r._handle_control({"cmd": "power_cycle"})["ok"])
             self.assertEqual(os.path.realpath(r.link.link), r.link.pts)
+
+    def m997_over_the_pty(self, lines):
+        """An il-safety board whose host wrote `lines` (M997 last), serviced at 0.05 s: the runner, and what the host
+        reads."""
+        r = self.runner(personality="il-safety")
+        r.link.open()
+        host = open_raw(r.link.link)
+        self.addCleanup(os.close, host)
+        os.write(host, lines)
+        self.clock[0] = 0.05
+        r._service()
+        return r, read_some(host, 0.3)
+
+    def test_m997_s_echo_reaches_the_host_before_the_port_goes(self):
+        """flashFirmware() gives USB CDC ~0.1 s to send the echo before the reset into DFU (dfu_bootloader.cpp), and a
+        host reads it on the board (firmware/verify_fw.py, D1). A pty master closed at once takes the bytes the host
+        has not read with it."""
+        with within(self, 5):
+            r, got = self.m997_over_the_pty(b"M997\n")
+            self.assertEqual(got, b"echo:M997: entering STM32 DFU bootloader (0483:df11)\n")
+            self.assertTrue(os.path.lexists(r.link.link))
+            self.clock[0] = 0.2
+            r._service()
+            self.assertFalse(os.path.lexists(r.link.link))
+
+    def test_a_reply_due_before_m997_reaches_the_host_too(self):
+        with within(self, 5):
+            _, got = self.m997_over_the_pty(b"M105\nM997\n")
+            self.assertEqual(got, b"ok T:0\necho:M997: entering STM32 DFU bootloader (0483:df11)\n")
+
+    def test_a_late_wake_still_sends_the_m997_echo_before_the_port_goes(self):
+        """A loaded host can wake the runner late: the drain counts from when the runner sees the halt, not from the
+        halt, else the port goes before the echo is written (here M997 runs at 0.05 behind a G4, the runner wakes at
+        0.3, past 0.05 + flashFirmware()'s 0.1 s). Also with an injection due at 0.15, so run_until's injection loop
+        sees the halt (the drain counts from the runner's 0.3, not the injection's 0.15; the halt drops the injection)."""
+        for inject in (None, {"cmd": "fault", "fault": "inject", "text": "x", "after_s": 0.15}):
+            with self.subTest(inject=inject), within(self, 5):
+                r = self.runner(personality="il-safety")
+                r.link.open()
+                host = open_raw(r.link.link)
+                self.addCleanup(os.close, host)
+                if inject:
+                    self.assertTrue(r._handle_control(inject)["ok"])
+                os.write(host, b"G4 P50\nM997\n")
+                r._service()  # read at 0.0: the dwell ends at 0.05, M997 behind it
+                self.clock[0] = 0.3
+                r._service()
+                self.assertEqual(read_some(host, 0.3), b"ok\necho:M997: entering STM32 DFU bootloader (0483:df11)\n")
+                self.clock[0] = 0.35
+                r._service()
+                self.assertTrue(os.path.lexists(r.link.link))  # 0.1 s from 0.3
+                self.clock[0] = 0.45
+                r._service()
+                self.assertFalse(os.path.lexists(r.link.link))
 
     def test_the_io_log_takes_any_byte_a_model_error_quotes(self):
         """A line the model cannot run is noted in the I/O log with its bytes, whatever they are; the board answers."""
@@ -1155,6 +1210,31 @@ class TimeScale(unittest.TestCase):
                 os.close(fd)
         finally:
             sim.stop()
+
+
+class StoppingTheProcess(unittest.TestCase):
+    def test_stop_kills_a_process_that_ignores_sigterm(self):
+        """A lumen-sim spinning past its stop request and SIGTERM is killed, never left behind (stop() waits 5 s
+        twice)."""
+        sim = SimProcess.__new__(SimProcess)
+        sim.dir = tempfile.mkdtemp(prefix="lumen-sim-test-")
+        sim.sock = os.path.join(sim.dir, "ctl.sock")  # nothing listens: the stop request fails
+        sim.proc = subprocess.Popen(
+            [sys.executable, "-c", "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                                   "print(flush=True)\ntime.sleep(60)"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        sim.proc.stdout.readline()  # SIGTERM is ignored from here on
+        try:
+            with within(self, 20):
+                sim.stop()
+            rc = sim.proc.poll()  # before the kill below, which is only there to never leave it behind
+        finally:
+            if sim.proc.poll() is None:
+                sim.proc.kill()
+                sim.proc.wait()
+            sim.proc.stdout.close()
+        self.assertEqual(rc, -signal.SIGKILL)
+        self.assertFalse(os.path.exists(sim.dir))
 
 
 if __name__ == "__main__":

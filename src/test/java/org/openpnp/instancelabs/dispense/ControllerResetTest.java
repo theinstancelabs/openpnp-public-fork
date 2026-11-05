@@ -679,6 +679,131 @@ public class ControllerResetTest {
         assertTrue(ms < 1000, "the moves waited " + ms + " ms for the journal");
     }
 
+    // ------------------------------------------------------------------------------------------
+    // BR-92: whether the firmware cuts the screw's motor when idle (M115 at every connect)
+    // ------------------------------------------------------------------------------------------
+
+    /** Marlin's M115 line of the holdB build (firmware/holdB/README.md) and of the board's firmware before it. */
+    static final String HOLD_B_M115 = "FIRMWARE_NAME:Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24) "
+            + "SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 MACHINE_TYPE:Opulo LumenPnP "
+            + "EXTRUDER_COUNT:0 AXIS_COUNT:5";
+    static final String STOCK_M115 = HOLD_B_M115.replace("bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24)",
+            "bugfix-2.1.x (Sep 19 2024 13:39:21)");
+
+    static List<String> m115(String firmwareLine) {
+        return Arrays.asList(firmwareLine, "Cap:HOST_WATCHDOG:1", "ok");
+    }
+
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> idleCut(ControllerReset r) {
+        return (Map<String, Object>) r.view().get("screwIdleCut");
+    }
+
+    /**
+     * The holdB build keeps the screw's motor on when idle: no idle switch-off. A connect that reads other firmware
+     * brings the timeout back, dated from the last move as before.
+     */
+    @Test
+    public void theHoldBBuildHasNoIdleSwitchOffUntilAConnectReadsOtherFirmware() {
+        ControllerReset r = withIdle();
+        Map<String, Object> none = idleCut(r);
+        assertEquals(Boolean.TRUE, none.get("cut"), "before any connect: the safe side");
+        assertNull(none.get("firmware"));
+        assertNull(none.get("readAtMs"));
+
+        now = 1000;
+        r.firmwareAtConnect(m115(HOLD_B_M115), null);
+        Map<String, Object> c = idleCut(r);
+        assertEquals(Boolean.FALSE, c.get("cut"));
+        assertEquals("Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24)", c.get("firmware"));
+        assertEquals(1000L, c.get("readAtMs"));
+        assertEquals(Arrays.asList(ControllerReset.EVENT_IDLE_HOLD), codes());
+        assertTrue(journal.get(0).message.contains("Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24)"),
+                journal.get(0).message);
+        r.screwMoved();
+        r.journalScrewMotion();
+        assertFalse(journal.get(1).message.contains("switches it off"), "no timeout to name: "
+                + journal.get(1).message);
+        now = 1000 + 5 * HOUR;
+        assertNull(r.countEpochMs(), "no idle switch-off");
+        assertNull(r.lastScrewMotorOff());
+
+        now = 1000 + 6 * HOUR;
+        r.firmwareAtConnect(m115(STOCK_M115), null);
+        assertEquals(Boolean.TRUE, idleCut(r).get("cut"));
+        assertEquals("Marlin bugfix-2.1.x (Sep 19 2024 13:39:21)", idleCut(r).get("firmware"));
+        assertEquals(Long.valueOf(1000 + HOUR), r.countEpochMs(), "the last move + the timeout");
+        assertEquals(Arrays.asList(ControllerReset.EVENT_IDLE_HOLD, ControllerReset.EVENT_SCREW_MOTION,
+                ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_MOTOR_OFF), codes());
+    }
+
+    /**
+     * The last connect's decision outlives an engine restart (a deploy): the status polls before the next connect
+     * count no idle switch-off on the holdB build. An M115 not read keeps the cut, the safe side.
+     */
+    @Test
+    public void theLastConnectsDecisionOutlivesAnEngineRestart() {
+        ControllerReset first = withIdle();
+        now = 1000;
+        first.firmwareAtConnect(m115(HOLD_B_M115), null);
+        first.screwMoved();
+        first.journalScrewMotion();
+        now = 1000 + 3 * HOUR;
+        ControllerReset second = withIdle();
+        Map<String, Object> c = idleCut(second);
+        assertEquals(Boolean.FALSE, c.get("cut"), "the last connect's, until the next reads M115");
+        assertEquals("Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:37:24)", c.get("firmware"));
+        assertEquals(1000L, c.get("readAtMs"));
+        assertNull(second.countEpochMs(), "no idle switch-off before the connect");
+
+        second.firmwareAtConnect(null, "timeout waiting for response");
+        assertEquals(Long.valueOf(1000 + HOUR), second.countEpochMs(), "an M115 not read keeps the cut");
+        assertEquals(Arrays.asList(ControllerReset.EVENT_IDLE_HOLD, ControllerReset.EVENT_SCREW_MOTION,
+                ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_MOTOR_OFF), codes());
+        assertTrue(journal.get(2).message.contains("timeout waiting for response"), journal.get(2).message);
+        ControllerReset third = withIdle();
+        assertEquals(Boolean.TRUE, idleCut(third).get("cut"));
+        assertNull(idleCut(third).get("firmware"));
+        assertEquals(1000L + 3 * HOUR, idleCut(third).get("readAtMs"));
+    }
+
+    /** A switch-off the last connect's firmware made goes on record before a connect reads the holdB build. */
+    @Test
+    public void aSwitchOffUnderTheLastConnectsFirmwareStaysOnRecord() {
+        ControllerReset r = withIdle();
+        now = 1000;
+        r.firmwareAtConnect(m115(STOCK_M115), null);
+        r.screwMoved();
+        now = 1000 + 2 * HOUR; // nothing read the state meanwhile
+        r.firmwareAtConnect(m115(HOLD_B_M115), null);
+        assertEquals(Arrays.asList(ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_MOTOR_OFF,
+                ControllerReset.EVENT_IDLE_HOLD), codes());
+        assertEquals(1000 + HOUR, r.lastScrewMotorOff().atMs, "the timeout of the firmware read before");
+    }
+
+    /**
+     * Only the marker in FIRMWARE_NAME, as a whole word, holds the screw; an M115 without FIRMWARE_NAME keeps the cut.
+     */
+    @Test
+    public void onlyTheMarkerInFirmwareNameHoldsTheScrew() {
+        ControllerReset r = withIdle();
+        r.firmwareAtConnect(Arrays.asList("Cap:HOST_WATCHDOG:1", "ok"), null);
+        assertEquals(Boolean.TRUE, idleCut(r).get("cut"));
+        assertNull(idleCut(r).get("firmware"));
+        assertTrue(journal.get(0).message.contains("no FIRMWARE_NAME"), journal.get(0).message);
+        r.firmwareAtConnect(m115(STOCK_M115.replace("MACHINE_TYPE:Opulo LumenPnP", "MACHINE_TYPE:il-holdB")), null);
+        assertEquals(Boolean.TRUE, idleCut(r).get("cut"), "the marker outside FIRMWARE_NAME");
+        r.firmwareAtConnect(m115(HOLD_B_M115.replace("il-holdB", "il-holdB2")), null);
+        assertEquals(Boolean.TRUE, idleCut(r).get("cut"), "another marker");
+        // review MINOR 2: a build named on from the marker (hyphen, dot) or ending in it is another build
+        for (String other : new String[] {"il-holdB-rollback", "il-holdB.2", "xil-holdB"}) {
+            r.firmwareAtConnect(m115(HOLD_B_M115.replace("il-holdB", other)), null);
+            assertEquals(Boolean.TRUE, idleCut(r).get("cut"), other);
+        }
+        r.firmwareAtConnect(m115(HOLD_B_M115), null);
+        assertEquals(Boolean.FALSE, idleCut(r).get("cut"));
+    }
+
     /**
      * The confirm before the home after a reset (the process engineer, 11-04): the see-saw levelled, both tips up.
      * BR-96: it says what must be true, for whoever checks (an agent's cameras, or a person), not who checks.

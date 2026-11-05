@@ -21,7 +21,8 @@ import java.util.regex.Pattern;
  * switch sticks or the tool is caught, refused), then a fine descent of 0.025 mm from 0.30 above that step to one fine
  * step past it: the trip is the first fine step that reads pressed, so the tool goes at most one coarse and one fine
  * step past the plunger's trip, and never past the floor. The next press starts 1 mm above the last trip. No move goes
- * above travel Z (the back move, the fine start and the lift stop there): past it the see-saw lowers the other tool.
+ * above travel Z (the back move, the fine start and the lift stop there): past it the see-saw lowers the other tool;
+ * still pressed at travel Z is refused as that (it sticks, or it trips less than 0.40 mm below travel Z).
  * Every step is a move, M400 and 50 ms before its read. Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's
  * other side) as it rises ({@link Plan#down}). Travel Z at the end, also after a refusal and after a failure (a reply
  * with no level twice, a line that timed out: the tool goes up, Z only, before the failure is thrown); a STOP's abort
@@ -237,8 +238,14 @@ public final class HeightSwitch {
             io.send("G4 P200");
             if (read(io) != r.idleLevel) {
                 r.refused = true;
-                r.why = String.format(Locale.ROOT, "still pressed %.2f mm above the coarse trip (Z %.3f): the switch "
-                        + "sticks or the tool is caught", Math.abs(zc - back), zc);
+                // the back move stops at travel Z (no move goes above it), maybe short of 0.40
+                r.why = back == p.travelZ
+                        ? String.format(Locale.ROOT, "the switch still reads pressed at travel Z (Z %.3f, the coarse "
+                                + "trip at Z %.3f): it sticks, or it trips less than %.2f mm below travel Z (the tool "
+                                + "barely clears it at travel height): check the switch's height or travelSafeZMm",
+                                back, zc, BACK_MM)
+                        : String.format(Locale.ROOT, "still pressed %.2f mm above the coarse trip (Z %.3f): the switch "
+                                + "sticks or the tool is caught", Math.abs(zc - back), zc);
                 return;
             }
             // one fine step past the coarse trip: a press that does not repeat (a bounce, noise) goes no deeper

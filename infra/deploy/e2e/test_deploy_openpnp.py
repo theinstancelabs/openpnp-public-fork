@@ -32,9 +32,10 @@ jar, which connects over its real serial stack (jSerialComm) to lumen-sim's pty.
      hand is taken to have left (person.json dated back past the quiet period).
      test_2: lumen-sim power-cycled and a third build: the deploy must not home the reset controller (exit 5, the
      previous build back unchecked, the hold set), then `resume`.
-     test_3 (BR-44): the controller power-cycled again while OpenPnP runs with its link kept open; a health check by
-     hand: Start finds the link dead and connects again (a new connect line for the serial step), and the reset
-     controller is not homed.
+     test_3 (BR-44, BR-93): a health check by hand on the build test_2 left running, never enabled: Start connects
+     (a new connect line for the serial step), the reset controller is not homed, and the STOP leaves the link open.
+     lumen-sim is power-cycled again: #53 shows the dead link as machine.linkLost, so the check by hand is refused
+     (not idle) and sends nothing.
 
 Checked: rc of each step, the current/previous links, deployed.json, bad.json, the server.version each health check
 saw, STATE.md's "Deployed on the machine" line and Holder, the deploy.jsonl records, and lumen-sim's I/O log. The
@@ -791,11 +792,12 @@ class DeployRealOpenPnP(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.root, "hold.json")))
         type(self).power_cycled_ok = True
 
-    def test_3_a_link_kept_alive_through_a_power_cycle_reconnects_and_is_never_homed(self):
-        """BR-44: OpenPnP runs with its controller link kept open (connection-keep-alive) and the controller is switched
-        off and on. A health check by hand: Start finds the link dead and connects again (GcodeDriver.setEnabled), so
-        the serial step reads the new connect line, not the kept-open fallback, and the controller's boot position stops
-        the check before any home. Before BR-44 that enable failed on the dead port."""
+    def test_3_a_reset_controller_is_never_homed_and_a_lost_link_is_left_alone(self):
+        """BR-44: the build test_2 left running was never enabled. A health check by hand: Start connects, so the serial
+        step reads the new connect line, not the kept-open fallback, and the controller's boot position stops the check
+        before any home; its STOP leaves the link open (connection-keep-alive). Then the controller is power-cycled:
+        BR-93 (#53) shows the dead link as machine.linkLost, and the check by hand leaves it alone: not idle, no Start
+        (the reconnect is then the operator's Stop and Start, Backend's PowerCycleSimTest)."""
         if not getattr(type(self), "power_cycled_ok", False):
             self.skipTest("needs test_2's power cycle")
         start = self.sim.io_count()
@@ -813,17 +815,15 @@ class DeployRealOpenPnP(unittest.TestCase):
             connects = f.read().count("Serial port: connecting to ")
 
         self.assertTrue(self.sim.ctl({"cmd": "power_cycle"})["ok"])  # the link OpenPnP keeps open dies
-        self.main("health", "--no-claim", expect=1)
-        rep = json.loads(self.last_stdout)
-        self.assertEqual([s["step"] for s in rep["steps"]], ["status", "origins", "enable", "serial", "axes"], rep)
-        self.assertNotIn("kept open", step(rep, "serial")["detail"], "Start connected again")
-        self.assertIn("Serial port: connecting to %s by " % self.sim.link, step(rep, "serial")["detail"])
-        self.assertIn("controller was reset", rep["failure"])
-        self.assertTrue(rep["stopped"]["ok"], rep)
+        self.assertIn("linkLost", self.wait_api()["machine"], "a build without BR-93's machine.linkLost")
+        end = time.monotonic() + 30  # OpenPnP's reader finds the closed pty a moment later
+        while self.wait_api()["machine"]["linkLost"] is None:
+            self.assertLess(time.monotonic(), end, "the dead link never showed as machine.linkLost")
+            time.sleep(0.2)
+        out = self.main("health", "--no-claim", expect=3)
+        self.assertIn("the controller link is lost (machine.linkLost)", out)
         with open(log, errors="replace") as f:
-            text = f.read()
-        self.assertIn("the kept-alive link to the controller is dead: connecting again", text)
-        self.assertEqual(text.count("Serial port: connecting to "), connects + 1)
+            self.assertEqual(f.read().count("Serial port: connecting to "), connects, "no Start")
 
         lines = [line for _, line in sent(self.sim.io(start))]
         self.assertEqual([x for x in lines if x.split(" ")[0] in ("G0", "G1", "G28")], [], "something moved")

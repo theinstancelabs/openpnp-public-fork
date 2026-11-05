@@ -6,7 +6,7 @@
  * design", "Design name", "Save the design"), the parts that get no paste under "No paste" (the Nano's bottom side
  * is not read yet: BR-25), and Save the design opens its Set up while Designs lists it, after one read of the list,
  * and leaves an operator who went elsewhere meanwhile where they are; the drawing given to a board file keeps the
- * preview's "paste the DNP parts"; (3) Set up of a design that
+ * preview's "paste the DNP parts", and its saved step's button and line name Set up (Open its Set up); (3) Set up of a design that
  * waits (padcal under a new name): the checklist B1-B6 (the top read; the bottom's parts from the upload's record,
  * GET /api/boards' `imported.skipped` (BR-88 (a)); paste per pad with the groups that wait; one row per part that needs another
  * tip, with Change the tip; missing doses; the copper check, the fine-pitch rehearsal, feeders and the holder not
@@ -15,7 +15,10 @@
  * pad calibration of the groups to calibrate (its own Start: nothing pressed); a doses row is done only when no dose is
  * missing (a group that waits for the tip's dots or a by-hand dose says so; stubbed: a fresh SIM tip is measured); a
  * refusal stays with its design; a file dropped on the open dialog keeps Designs' Save, even over another page; the menu
- * line follows a design saved in Run's Board step in this tab; (6) a ready design: Make a board opens Run › Start with it chosen; (7) nothing moves (only
+ * line follows a design saved in Run's Board step in this tab; (6) a ready design: Make a board opens Run › Start with it chosen;
+ * a failed read of the list keeps the cards Start and Designs have and says so in one wording everywhere (no "look at the
+ * machine" after a read), with Retry on Start, Designs and Set up (a Retry pressed from the keyboard keeps the focus);
+ * nothing reads the list again by itself but OpenPnP answering again (online); (7) nothing moves (only
  * uploads, the apply and the test's own set-up writes are sent), no JavaScript errors, no native dialogs. Designs are
  * routed by their board file's path: names repeat, and every board saved from one KiCad file shows the same upload.
  * Self-contained: it marks chip-0603 characterized (SIM only, as the sim acceptance and pad-profile do), uploads its own
@@ -102,15 +105,18 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
   });
   // states the SIM does not hold on demand: a check whose groups wait for the tip's dots or a by-hand dose (one board
   // file), an apply refused once
-  const ST = { checkFile: null, refuseApply: false, attachOffer: null, attachDnp: true, attachUrl: null, importHeld: null, holdPreview: null, holdAttach: null, okTipFile: null };
+  const ST = { checkFile: null, refuseApply: false, attachOffer: null, attachDnp: true, attachUrl: null, importHeld: null, holdPreview: null, holdAttach: null, okTipFile: null,
+    task: null };
   // the status's boardImport held ((2), (5d): "an upload is being read" off and savedAtMs as before the save, so only the
-  // save's own 'boards' event may make Designs read its list; (2c): only `reading` off, savedAtMs passes)
+  // save's own 'boards' event may make Designs read its list; (2c): only `reading` off, savedAtMs passes); (3c): a task
+  // running (ST.task: its label)
   await page.route((u) => u.pathname === '/api/status', async (route) => {
-    if (!ST.importHeld) return route.continue();
+    if (!ST.importHeld && !ST.task) return route.continue();
     try {
       const res = await route.fetch();
       const body = await res.json();
-      if (body.boardImport) Object.assign(body.boardImport, ST.importHeld);
+      if (ST.importHeld && body.boardImport) Object.assign(body.boardImport, ST.importHeld);
+      if (ST.task) body.run = Object.assign({}, body.run, { running: true, label: ST.task });
       await route.fulfill({ response: res, json: body });
     } catch (e) { /* unrouted while it was being answered */ }
   });
@@ -258,8 +264,9 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
 
     // ---- (2e) the drawing given to a board file keeps the preview's "paste the DNP parts" (Backend's #40 review: the
     // attach re-reads the file, and without the same flag it no longer matches the preview: 409), off and on
-    ST.attachOffer = { file: '/stub/designs-attach.board.xml', name: 'designs-attach', maxOffsetMm: 0, offsets: [] };
-    const attachOnce = async (dnp) => {
+    // the Nano saved in (2) as the board file the drawing goes to: its Set up is where Open its Set up must land
+    ST.attachOffer = { file: nano ? nano.file : '/stub/designs-attach.board.xml', name: 'designs-attach', maxOffsetMm: 0, offsets: [] };
+    const attachOnce = async (dnp, open) => {
       ST.attachDnp = dnp;
       ST.attachUrl = null;
       await page.evaluate(() => IL.go('#designs'));
@@ -270,12 +277,22 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       const on = await page.evaluate(() => { const c = document.getElementById('board-import-paste-dnp'); return !!c && c.checked; });
       await page.click('#btn-board-import-attach');
       await page.waitForFunction(() => document.getElementById('dlg-board-import').dataset.state === 'saved', null, { timeout: 15000 }).catch(() => null);
-      await page.keyboard.press('Escape');
+      const words = await page.evaluate(() => { const u = document.getElementById('btn-board-import-use'), x = document.querySelector('#board-import-saved .bi-saved__next');
+        return { use: u ? u.textContent.trim() : null, next: x ? x.textContent : null }; });
+      if (open) await page.click('#btn-board-import-use', { timeout: 5000 }).catch(() => null);   // a failed attach: this check fails, the rest run
+      else await page.keyboard.press('Escape');
       await page.waitForSelector('#dlg-board-import', { state: 'detached', timeout: 10000 }).catch(() => null);
-      return { on, attach: ST.attachUrl };
+      const at = open ? await page.waitForFunction((h) => location.hash === h && !document.getElementById('design-setup').hidden && !document.getElementById('dlg-board-import'),
+        routeOf(nano), { timeout: 15000 })
+        .then(() => true, () => false) : null;
+      return { on, attach: ST.attachUrl, words, at };
     };
-    const dnpOff = await attachOnce(false);
+    const dnpOff = await attachOnce(false, !!nano);
     check('(2e) Use the drawing for a board file, DNP parts not pasted: the attach sends no pasteDnp', !dnpOff.on && dnpOff.attach !== null && !/pasteDnp/.test(dnpOff.attach), dnpOff);
+    // its button opens the design's Set up (Designs' onSaved), so it and its line say so, not Run's "then plan it"
+    check('(2e) after an attach in Designs the button and its line name Set up, and the button opens the design\'s Set up: "Open its Set up"',
+      dnpOff.words.use === 'Open its Set up' && /Set up/.test(dnpOff.words.next || '') && !/plan it|Use this/.test(dnpOff.words.next || '') && dnpOff.at === true,
+      { words: dnpOff.words, at: dnpOff.at, hash: await page.evaluate(() => location.hash) });
     const dnpOn = await attachOnce(true);
     check('(2e) Use the drawing for a board file, DNP parts pasted: the attach sends pasteDnp=1, as the save does', dnpOn.on && /(^|[?&])pasteDnp=1(&|$)/.test(dnpOn.attach || ''), dnpOn);
 
@@ -364,6 +381,23 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     await page.evaluate((h) => IL.go(h), routeOf(pc));
     await page.waitForFunction(() => !!document.getElementById('btn-design-use'), null, { timeout: 10000 }).catch(() => null);
 
+    // ---- (3c) while a task runs, the doses found, Calibrate… and Set up the rest wait and say why, as Pad types' Needs
+    // does (#48's review MINOR); they are free again when it ends ----------------------------------------------------
+    const ACTS = ['btn-design-use', 'btn-design-doses', 'btn-design-rest'];
+    const acts = (dis) => page.waitForFunction(([ids, d]) => ids.every((id) => (document.getElementById(id) || {}).disabled === d), [ACTS, dis], { timeout: 10000 })
+      .catch(() => null).then(() => page.evaluate((ids) => {
+        const w = document.getElementById('design-rest-why');
+        return { btns: ids.map((id) => { const b = document.getElementById(id); return b ? [id, b.disabled, b.title] : [id, 'missing']; }),
+          why: w && !w.hidden ? w.textContent : null };
+      }, ACTS));
+    ST.task = 'needle touch-off';   // the engine's label (core.js TASK_WORD)
+    const busy = await acts(true);
+    check('(3c) while a task runs: Use the doses found, Calibrate… and Set up the rest are locked, and the panel says why',
+      busy.btns.every(([, dis, t]) => dis === true && t === 'Locked while the needle touch-off runs') && busy.why === 'Locked while the needle touch-off runs', busy);
+    ST.task = null;
+    const free = await acts(false);
+    check('(3c) once the task ends they are free again, the reason gone', free.btns.every(([, dis, t]) => dis === false && !t) && free.why === null, free);
+
     // ---- (4) Use the doses found ---------------------------------------------------------------------------------
     await page.click('#btn-design-use');
     const used = await page.waitForFunction((n) => new RegExp('^' + n + ' pad groups? waits?').test((document.querySelector('#design-steps li[data-k="paste"] .rstep__d') || {}).textContent || ''),
@@ -445,7 +479,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     check('(5c2) a file dropped on the Designs page: Save the design opens its Set up (not Run)', dropped2, await page.evaluate(() => location.hash));
 
     // ---- (5d) the menu line follows a design saved in Run's Board step in this tab ('boards'; another tab's: (2c)): the
-    // dialog with Run's options, saved, then closed without Use this board
+    // dialog with Run's options, saved, then closed without Use this design
     await holdImport();
     await page.evaluate(() => IL.go('#machine'));
     const elseName = 'designs-else-' + TS;
@@ -525,6 +559,9 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       chosen: ((document.querySelector('#rs-designs .design[aria-pressed="true"]') || {}).dataset || {}).board || null, start: (document.getElementById('rs-start-why') || {}).textContent || null })));
     ST.okTipFile = null;
 
+    // one wording for a failed read of the list (#48's re-checks): kept cards, or none
+    const KEPT = 'These are the designs from before. Could not read them again: ', NONE = 'Could not read the designs: ';
+    const noAdvice = (t) => !!t && !/outcome unknown|look at the machine/i.test(t);   // a read changes nothing on the machine
     // ---- (6c) Run reads the list again on every entry: a read that fails then keeps the cards Start has (no error box
     // instead of them; the re-check of (6b)'s fix)
     await page.evaluate(() => IL.go('#machine'));
@@ -535,10 +572,10 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
     const c6 = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
       cards: document.querySelectorAll('#rs-designs .design[data-board]').length, box: !!document.querySelector('#rs-designs .notebox--block'),
-      note: ((document.querySelector('#rs-designs .rf-note') || {}).textContent || ''), first: !!document.querySelector('#rs-designs > .rf-note:first-child') })))));
+      note: ((n) => (n ? (n.querySelector(':scope > span') || n).textContent : ''))(document.querySelector('#rs-designs .rf-note')), first: !!document.querySelector('#rs-designs > .rf-note:first-child') })))));
     check('(6c) a failed read of the list on entering Run: Start keeps its design cards, no error box instead', !!c6.err && c6.cards > 0 && !c6.box, c6);
     check('(6c) and says above them that the list could not be read again, then the reason (the re-checks\' MINORs)', c6.first
-      && /^Could not read the designs again, so these are the ones from before\. /.test(c6.note) && c6.note.endsWith(c6.err || '\u0000'), c6);
+      && c6.note === KEPT + c6.err, c6);
     await page.unroute('**/api/boards', fail6);
     // the next good read takes the note away (a note shown always, or never cleared, fails here)
     await page.evaluate(() => IL.go('#machine'));
@@ -547,6 +584,138 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     const c6d = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
       cards: document.querySelectorAll('#rs-designs .design[data-board]').length, note: !!document.querySelector('#rs-designs .rf-note') })))));
     check('(6c) the next good read: the cards without the note', !c6d.err && c6d.cards > 0 && !c6d.note, c6d);
+
+    // ---- (6d) a read with no answer at all (status 0) keeps every list it had and says so in the same words: Start, Run's
+    // Board step and Designs (whose error box once replaced its cards)
+    const lost = (route) => (route.request().method() === 'GET' ? route.abort('failed') : route.fallback());
+    await page.evaluate(() => IL.go('#machine'));
+    await page.route('**/api/boards', lost);
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+    const d6 = await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r({ err: IL.run.boardsErr,
+      cards: document.querySelectorAll('#rs-designs .design[data-board]').length, note: ((n) => (n ? (n.querySelector(':scope > span') || n).textContent : ''))(document.querySelector('#rs-designs .rf-note')),
+      retry: !!document.querySelector('#rs-designs .rf-note button.list-retry') })))));
+    check('(6d) no answer: Start keeps its cards under "' + KEPT + '<reason>" with Retry, and no "look at the machine"', d6.cards > 0 && d6.note === KEPT + d6.err
+      && noAdvice(d6.note) && d6.retry, d6);
+    await page.evaluate(() => IL.go('#run/board'));
+    const hint6 = await page.waitForFunction(() => { const h = document.getElementById('board-hint'); return h && !h.closest('[hidden]') && IL.run.boardsErr ? h.textContent : null; },
+      null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+    check('(6d) and Run\'s Board step says the same', hint6 === KEPT + d6.err, { hint6, err: d6.err });
+    await page.evaluate(() => IL.go('#designs'));
+    const des6 = await page.waitForFunction(() => { const n = document.querySelector('#designs-list .designs-note, #designs-list .notebox--block');
+      return n ? { note: (n.querySelector(':scope > span') || n).textContent, retry: !!n.querySelector('button.list-retry'), box: n.classList.contains('notebox--block'),
+        first: n === document.getElementById('designs-list').firstElementChild,
+        cards: document.querySelectorAll('#designs-list a.design').length } : null; }, null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
+    check('(6d) and Designs keeps its cards under the same words with Retry, first (no error box instead of them)', !!des6 && !des6.box && des6.first
+      && des6.cards > 0 && des6.note === KEPT + d6.err && des6.retry, des6);
+    await page.unroute('**/api/boards', lost);
+    await page.evaluate(() => IL.go('#machine'));
+    await page.evaluate(() => IL.go('#designs'));
+    const des6b = await page.waitForFunction(() => !document.querySelector('#designs-list .designs-note, #designs-list .notebox--block')
+      && document.querySelectorAll('#designs-list a.design').length > 0, null, { timeout: 15000 }).then(() => true, () => false);
+    check('(6d) the next good read on Designs: its cards without the note', des6b, null);
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !!IL.run.boards && !IL.run.boardsLoading && !IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+    // a bare HTTP error (no reason in its body) is named: "HTTP 502 Bad Gateway." (HTTP/2 brings "502 " alone)
+    const bare = (route) => (route.request().method() === 'GET' ? route.fulfill({ status: 502, body: '' }) : route.fallback());
+    await page.evaluate(() => IL.go('#machine'));
+    await page.route('**/api/boards', bare);
+    await page.evaluate(() => IL.go('#run'));
+    const err502 = await page.waitForFunction(() => !IL.run.boardsLoading && IL.run.boardsErr, null, { timeout: 15000 }).then((h) => h.jsonValue(), () => null);
+    check('(6d) a bare HTTP 502 is named "HTTP 502 …."', /^HTTP 502\b.*\.$/.test(err502 || '') && noAdvice(err502), err502);
+    await page.unroute('**/api/boards', bare);
+    await page.evaluate(() => IL.go('#machine'));
+    await page.evaluate(() => IL.go('#run'));
+    await page.waitForFunction(() => !!IL.run.boards && !IL.run.boardsLoading && !IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+
+    // ---- (6e) a tab whose reads of the list get no answer: Start, Set up and Designs say "Could not read the designs:
+    // <reason>" with Retry; nothing reads the list again by itself meanwhile (Start once read it on every render); Retry
+    // reads it; OpenPnP answering again (online) reads a list whose last read failed
+    const tab = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    tab.on('pageerror', (e) => jsErrors.push('tab 2: ' + String(e)));
+    tab.on('dialog', (d) => { dialogs.push(d.type() + ': ' + d.message()); d.dismiss().catch(() => {}); });
+    tab.on('request', (r) => { if (r.method() !== 'GET' && new URL(r.url()).pathname.startsWith('/api/')) writes.push(r.method() + ' ' + new URL(r.url()).pathname); });
+    let failing = true, delay6 = 0, reads6 = 0, done6 = 0, unsettled6 = 0;
+    await tab.route('**/api/boards', async (route) => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      reads6++;
+      try {
+        if (!failing) return await route.fallback();
+        if (delay6) await new Promise((r) => setTimeout(r, delay6));   // a slow "no answer": the page shows "Reading…" meanwhile
+        return await route.abort('failed');
+      } finally { done6++; }
+    });
+    // settled: every read of the list ended and none for 800 ms, so the page shows its outcome; at most ~12 s (a page that
+    // reads on every render never settles: counted, and a check fails at the end, no hang)
+    const settle = async () => { for (let i = 0; i < 15; i++) { const n = reads6; await tab.waitForTimeout(800); if (n === reads6 && done6 === reads6) return; } unsettled6++; };
+    const shown6 = (sel) => tab.evaluate((q) => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => { const b = document.querySelector(q);
+      r(b && !b.closest('[hidden]') ? { text: (b.querySelector(':scope > span') || b).textContent, retry: !!b.querySelector('button.list-retry') } : null); }))), sel);
+    await tab.goto(BASE + '#run');
+    // the first status answer (online) comes before the count: its own read and the menu's are not "by itself"
+    await tab.waitForFunction(() => !!(window.IL && IL.S && IL.S.online === true && IL.run && IL.run.boardsErr), null, { timeout: 20000 }).catch(() => null);
+    await settle();
+    const reason6 = await tab.evaluate(() => IL.run.boardsErr);
+    const e6 = await shown6('#rs-designs .notebox--block');
+    check('(6e) a first read with no answer: Start says "' + NONE + '<reason>", no "look at the machine", with Retry', !!reason6 && !!e6
+      && e6.text === NONE + reason6 && noAdvice(e6.text) && e6.retry, { e6, reason6 });
+    let before6 = reads6;
+    await tab.waitForTimeout(2000);
+    check('(6e) and nothing reads the list again by itself (Start once read it on every render)', reads6 === before6, { before: before6, after: reads6 });
+    // Retry from the keyboard, the read slow enough that the box shows "Reading…" meanwhile (the pressed button is gone)
+    delay6 = 300;
+    await tab.evaluate(() => { const b = document.querySelector('#rs-designs .notebox--block button.list-retry'); if (b) b.dataset.pressed = '1'; });
+    before6 = reads6;
+    if (e6 && e6.retry) { await tab.focus('#rs-designs .notebox--block button.list-retry'); await tab.keyboard.press('Enter'); }
+    await settle();
+    const e6b = await shown6('#rs-designs .notebox--block');
+    check('(6e) Start\'s Retry reads the list again (no answer again: the same words)', reads6 > before6 && !!e6b && e6b.text === NONE + reason6, { reads: reads6 - before6, e6b });
+    const focus6 = await tab.evaluate(() => { const a = document.activeElement;
+      return a && a !== document.body ? { retry: a.matches('#rs-designs .notebox--block button.list-retry'), same: a.dataset.pressed === '1' } : null; });
+    check('(6e) and a Retry pressed from the keyboard leaves the focus on the Retry shown after the read (a new one)', !!focus6 && focus6.retry && !focus6.same, focus6);
+    // but never takes the focus back from where the operator moved it during a slow read
+    delay6 = 1500;
+    if (e6b && e6b.retry) { await tab.focus('#rs-designs .notebox--block button.list-retry'); await tab.keyboard.press('Enter'); }
+    await tab.waitForTimeout(300);
+    await tab.focus('#tab-btn-designs');
+    await settle();
+    const moved6 = await tab.evaluate(() => (document.activeElement || {}).id || null);
+    check('(6e) a slow read: the focus stays where the operator moved it meanwhile (the menu), not back on Retry', moved6 === 'tab-btn-designs', moved6);
+    delay6 = 0;
+    await tab.evaluate((k) => IL.go('#designs/setup/' + k), late ? encodeURIComponent(late.file) : 'none');
+    await settle();
+    const set6 = await shown6('#design-meta');
+    check('(6e) Set up of a design with no list read says the same, with Retry', !!set6 && set6.text === NONE + reason6 && set6.retry, set6);
+    before6 = reads6;
+    if (set6 && set6.retry) await tab.click('#design-meta button.list-retry');
+    await settle();
+    check('(6e) Set up\'s Retry reads the list again', reads6 > before6, { reads: reads6 - before6 });
+    await tab.evaluate(() => IL.go('#designs'));
+    await settle();
+    const e6d = await shown6('#designs-list .notebox--block');
+    check('(6e) Designs says the same, with Retry', !!e6d && e6d.text === NONE + reason6 && e6d.retry, e6d);
+    failing = false;
+    if (e6d && e6d.retry) await tab.click('#designs-list .notebox--block button.list-retry');
+    const ok6d = await tab.waitForFunction(() => !document.querySelector('#designs-list .notebox--block') && document.querySelectorAll('#designs-list a.design').length > 0,
+      null, { timeout: 15000 }).then(() => true, () => false);
+    check('(6e) Designs\' Retry reads the list: its cards', !!e6d && e6d.retry && ok6d, null);
+    await tab.evaluate(() => IL.go('#run'));
+    await tab.waitForFunction(() => !!IL.run.boards && !IL.run.boardsLoading && !IL.run.boardsErr, null, { timeout: 15000 }).catch(() => null);
+    failing = true;
+    await tab.evaluate(() => IL.go('#designs'));   // its visit reads again: no answer, its note over the cards
+    await settle();
+    await tab.evaluate(() => IL.go('#run'));       // and Start's
+    await settle();
+    const n6 = await shown6('#rs-designs .rf-note');
+    failing = false;
+    before6 = reads6;
+    await tab.evaluate(() => IL.emit('online', true));
+    await settle();
+    const n6b = await shown6('#rs-designs .rf-note');
+    const cards6 = await tab.evaluate(() => document.querySelectorAll('#rs-designs .design[data-board]').length);
+    check('(6e) OpenPnP answering again (online) reads both lists again (Start\'s and Designs\'): Start\'s note goes, its cards stay', !!n6
+      && reads6 - before6 >= 2 && !n6b && cards6 > 0, { note: n6, after: n6b, reads: reads6 - before6, cards6 });
+    check('(6e) every step settled: no read of the list in flight or repeating by itself', unsettled6 === 0, { unsettled6, reads6, done6 });
+    await tab.close();
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------
     const allowed = ['POST /api/boards/import', 'POST /api/boards/import/save', 'POST /api/boards/import/attach', 'POST /api/pad-profile/apply', 'POST /api/package-mappings',

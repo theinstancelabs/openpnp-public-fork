@@ -112,9 +112,12 @@ browser keeps them. A value left in
 
 ### Network and data
 - `IL.api(method, path, body?, {timeoutMs?})` → parsed JSON; throws `IL.ApiError {status, data, code, message}`.
-  `status 0` = no answer (`code` `timeout` / `network`): show `Outcome unknown: look at the machine.`, never re-send.
-  Default timeout 10 s (status 2.5 s, STOP 2 s are internal).
-- `IL.errorText(e)` one line incl. interlock violations.
+  `status 0` = no answer (`code` `timeout` / `network`): after an action show `Outcome unknown: look at the machine.`,
+  never re-send. Default timeout 10 s (status 2.5 s, STOP 2 s are internal).
+- `IL.errorText(e)` one line incl. interlock violations (for actions). `IL.readErrorText(e)` for a read (GET): no
+  "Outcome unknown" (a read changes nothing), a bare HTTP status named. A failed read of the designs list says
+  `IL.listReadError(reason, kept)` everywhere (Start, Run's Board step, Designs and Set up), with `IL.retryButton(read,
+  key)` (Retry); after a failed read only Retry, the next visit or OpenPnP answering again (`online`) reads it again.
 - `IL.pollNow()` poll at once (after an action). `IL.render()` schedule one render (coalesced per frame).
 - `IL.setPlan(plan)` (after `POST /api/plan`; remembers `il.planId`), `IL.clearPlan()`, `IL.loadPlan(id)`,
   `IL.planRefresh({quiet})`, `IL.planRefreshSoon()` (300 ms debounce; marks `planPending`). Core re-reads the plan by
@@ -573,7 +576,7 @@ Never `/dev/ttyACM*`, `/dev/serial/*`, `/dev/video*` or a real-mode OpenPnP.
   extra blocker `I4-z` (`Z check`, fix: Needle Z frame), never the surface item (Register board would not clear them). Recovery's home step is done without a home unless N1 is low. The run confirm
   shows `#run-confirm-home`; the Run step's phases add Home and Z check rows from `run.detail`.
 - **Board step:** `Board top Z (approximate, ±1 mm)`, prefilled when empty (`#board-z-note` says from where), the
-  plan's frame check under it; copy names Register board. Another board chosen there (picked, or "Use this board"
+  plan's frame check under it; copy names Register board. Another board chosen there (picked, or "Use this design"
   after an upload): the main column shows that board before planning (`R.pending` keeps the plan, which the other
   steps still show) until Plan.
 - **Setup › Probe the blank** (`probe-blank` view): automatic (`ol.phases#blank-phases`, `table#blank-targets`,

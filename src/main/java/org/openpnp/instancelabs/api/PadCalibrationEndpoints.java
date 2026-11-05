@@ -99,7 +99,42 @@ final class PadCalibrationEndpoints {
         }
         q.measure = Json.str(b, "measure", null);
         q.wide = Json.bool(b, "wide", false);
+        if (Json.has(b, "expectedLanding")) {
+            JsonElement e = b.get("expectedLanding");
+            if (!e.isJsonObject()) {
+                throw ApiException.badRequest("'expectedLanding' is {dxMm, dyMm, evidence}");
+            }
+            JsonObject o = e.getAsJsonObject();
+            q.expectedLanding = expectedLanding(q, Json.reqNum(o, "dxMm"), Json.reqNum(o, "dyMm"),
+                    Json.str(o, "evidence", null));
+        }
         return q;
+    }
+
+    /**
+     * BR-103: a landing check's expected landing (mm from N2's head offset) and where it comes from. Only for the
+     * landing check, never with 'wide', within the ±9 mm a wide search covers, its evidence named.
+     */
+    static PadCalibrationJob.ExpectedLanding expectedLanding(PadCalibrationJob.Request q, double dx, double dy,
+            String evidence) throws ApiException {
+        if (!PadCalibrationJob.MEASURE_LANDING.equals(q.measure)) {
+            throw ApiException.badRequest("'expectedLanding' is for the landing check (measure: landing)");
+        }
+        if (q.wide) {
+            throw ApiException.badRequest("'expectedLanding' searches ±2 mm around it and 'wide' ±9 mm: one or the other");
+        }
+        double max = org.openpnp.instancelabs.padprofile.LandingFit.SEARCH_WIDE_MM;
+        if (!Double.isFinite(dx) || !Double.isFinite(dy) || Math.abs(dx) > max || Math.abs(dy) > max) {
+            throw ApiException.badRequest("'expectedLanding' dxMm and dyMm are within ±" + Texts.num(max, 0) + " mm");
+        }
+        if (evidence == null || evidence.isBlank() || evidence.length() > 200) {
+            throw ApiException.badRequest("'expectedLanding.evidence' says where it comes from (1-200 characters)");
+        }
+        PadCalibrationJob.ExpectedLanding x = new PadCalibrationJob.ExpectedLanding();
+        x.dxMm = dx;
+        x.dyMm = dy;
+        x.evidence = evidence;
+        return x;
     }
 
     /** The preview's query: the same fields, lists comma-separated, suggestionIds as group:id pairs. */
@@ -148,6 +183,20 @@ final class PadCalibrationEndpoints {
         }
         q.measure = r.query("measure", null);
         q.wide = "true".equals(r.query("wide", "false"));
+        String expected = r.query("expectedLanding", null); // "dx,dy", with &evidence=
+        if (expected != null) {
+            String[] xy = expected.split(",");
+            try {
+                if (xy.length != 2) {
+                    throw new NumberFormatException(expected);
+                }
+                q.expectedLanding = expectedLanding(q, Double.parseDouble(xy[0].trim()), Double.parseDouble(xy[1].trim()),
+                        r.query("evidence", null));
+            }
+            catch (NumberFormatException ex) {
+                throw ApiException.badRequest("'expectedLanding' is dx,dy (mm)");
+            }
+        }
         return q;
     }
 
