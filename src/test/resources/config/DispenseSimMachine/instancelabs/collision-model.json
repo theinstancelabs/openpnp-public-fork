@@ -1,0 +1,70 @@
+{
+  "_comment": [
+    "BR-98 fixture (collision-model-design.md section 2) for the unit tests, the in-process SIM and lumen-sim: one file for both SIMs.",
+    "Every number marked (guess) in its 'note' is unmeasured; the rest is from STATE.md 'Machine' or Process's desk answers (design section 8).",
+    "Plane (guess): bed at N1 raw ~-3.0, below N1's reach (the waste found no seal down to raw 0.5): N1 at raw 0 hangs ~3.1 mm above the bare bed.",
+    "With it the blanks' N1 contact ~5.3 gives their top ~8.3 and the needle's contact ~59.5 (K 64.875 - 5.35), the tile's ~10.7 a top ~13.6.",
+    "The homing corner: N1's tip at raw 0 at head (0, 0) is (-24.178, -63.91), outside the bed outline and 3.1 mm above the plane there.",
+    "tipEnd of the needle is the SIM's N2 head offset (25.291, -75.926); the real 25G's end is camera + (18.93, -71.0)."
+  ],
+  "schema": 1,
+  "version": 1,
+  "changedAtMs": 0,
+  "changedBy": "fixture",
+  "frame": {"xy": "machine", "z": "above-bed"},
+  "zMarginMm": 2.0,
+  "contactDepthMm": 0.25,
+  "bed": {
+    "note": "outline (guess): stops short of N1's tip at the homing corner",
+    "outline": {"box": [-20, -60, 450, 490]},
+    "plane": {"how": "n1-touch-on:blank-front (guess)", "points": [[60, 120, -3.0], [300, 120, -2.96], [300, 300, -2.89], [60, 300, -2.93]],
+              "homeAtMs": 0, "by": "fixture", "atMs": 0, "errMm": 0.05, "evidence": "event:1"},
+    "reach": {"headX": [0, 408], "headY": [0, 487], "cameraXEnd": 413}
+  },
+  "objects": [
+    {"id": "holder-left", "name": "the nozzle-tip holder (left)", "kind": "fixed", "role": "fixture", "note": "place and top (guess)",
+     "outline": {"box": [10, 95, 30, 115]}, "topZ": 14.0, "marginMm": 1.0, "noPaste": false, "surface": null, "touchable": false,
+     "measured": {"xy": {"how": "camera-edges", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
+                  "top": {"how": "n1-touch", "by": "fixture", "atMs": 0, "errMm": 0.05, "rawZ": 10.99, "homeAtMs": 0, "evidence": "event:1"}},
+     "state": "measured", "invalidatedBy": ["moved", "touched"]},
+    {"id": "height-switch", "name": "the needle switch", "kind": "fixed", "role": "switch", "note": "place and top (guess); r 5 as BR-94's zone",
+     "outline": {"circle": [65, 25, 5]}, "topZ": 12.0, "marginMm": 1.0, "noPaste": true, "surface": null, "touchable": true,
+     "measured": {"xy": {"how": "camera-edges", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
+                  "top": {"how": "n1-press", "by": "fixture", "atMs": 0, "errMm": 0.05, "evidence": "event:1"}},
+     "state": "measured", "invalidatedBy": ["moved", "touched"]},
+    {"id": "blank-front", "name": "the front blank", "kind": "movable", "role": "blank", "note": "place (guess); top from N1's contact ~5.3",
+     "outline": {"box": [60, 120, 160, 200]}, "topZ": 8.3, "marginMm": 1.0, "noPaste": false, "surface": "blank-front", "touchable": true,
+     "measured": {"xy": {"how": "camera-edges", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
+                  "top": {"how": "n1-touch", "by": "fixture", "atMs": 0, "errMm": 0.025, "rawZ": 5.3, "homeAtMs": 0, "evidence": "event:1"}},
+     "state": "measured", "invalidatedBy": ["moved", "touched"]},
+    {"id": "nano-tile", "name": "the Nano tile", "kind": "movable", "role": "board", "note": "Process's BR-81 polygon; top from N1's contact ~10.7",
+     "outline": {"polygon": [[462.2, 276.8], [305.3, 278.7], [304.1, 129.7], [461.0, 127.8]]}, "topZ": 13.6, "marginMm": 1.0,
+     "noPaste": false, "surface": "board", "touchable": true,
+     "measured": {"xy": {"how": "camera-fiducials", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
+                  "top": {"how": "n1-touch", "by": "fixture", "atMs": 0, "errMm": 0.025, "rawZ": 10.7, "homeAtMs": 0, "evidence": "event:1"}},
+     "state": "measured", "invalidatedBy": ["moved", "touched"]},
+    {"id": "blank-black", "name": "the black blank", "kind": "movable", "role": "blank", "note": "put down, not measured (place a guess)",
+     "outline": {"box": [200, 220, 260, 300]}, "topZ": null, "marginMm": 1.0, "noPaste": false, "surface": null, "touchable": false,
+     "measured": {"xy": null, "top": null}, "state": "added", "invalidatedBy": ["moved", "touched"]}
+  ],
+  "tools": [
+    {"id": "n1", "moves": "n1", "tipEnd": {"dx": -24.178, "dy": -63.91, "setup": "N1", "atMs": 0},
+     "note": "layer sizes (guess)",
+     "layers": [
+       {"name": "tip", "at": "tip-end", "outline": {"circle": [0, 0, 0.6]}, "aboveTipMm": 0},
+       {"name": "holder", "at": "head", "outline": {"circle": [-24.178, -63.91, 4]}, "aboveTipMm": 8}]},
+    {"id": "needle", "moves": "needle", "tipEnd": {"dx": 25.291, "dy": -75.926, "setup": "SIM N2", "atMs": 0},
+     "note": "layer sizes and heights (guess)",
+     "layers": [
+       {"name": "tip", "at": "tip-end", "outline": {"circle": [0, 0, 0.6]}, "aboveTipMm": 0},
+       {"name": "hub", "at": "head", "outline": {"circle": [25.291, -75.926, 6]}, "aboveTipMm": 12},
+       {"name": "dispenser", "at": "head", "outline": {"box": [12, -100, 45, -50]}, "aboveTipMm": 25}]},
+    {"id": "camera", "moves": "fixed", "note": "size and height (guess)",
+     "layers": [{"name": "camera and light", "at": "head", "outline": {"circle": [0, 0, 20]}, "bottomZ": 40}]}
+  ],
+  "seesaw": {"endStopsRaw": [0, 63], "restRaw": null,
+             "n1": {"kneeRaw": 31.5, "mmPerRaw": 1.0}, "needle": {"kneeRaw": 31.5, "mmPerRaw": 1.0},
+             "K": {"raw": 64.875, "homeAtMs": 0, "surface": "blank-front"},
+             "homeRepeatMm": 0.1,
+             "measured": {"how": "n1-touch", "by": "fixture", "atMs": 0, "errMm": 0.05, "homeAtMs": 0, "evidence": "event:1"}}
+}
