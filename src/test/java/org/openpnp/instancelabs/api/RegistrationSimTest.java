@@ -111,6 +111,8 @@ public class RegistrationSimTest {
         sc.vacuum.tauS = 0;
         sc.vacuum.sealTauS = 0;
         sc.vacuum.releaseTauS = 0;
+        // N1's first touch (BR-100) at the plane's Z, where the surfaces typed by hand put it: no half seal above it
+        sc.vacuum.partialBandMm = 0;
         sc.validate();
         return sc;
     }
