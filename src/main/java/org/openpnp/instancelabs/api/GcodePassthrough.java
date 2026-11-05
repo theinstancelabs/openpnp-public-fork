@@ -270,13 +270,22 @@ final class GcodePassthrough {
     /**
      * BR-97 review 3: a home whose G28 ran but that ended unhomed, or a power cycle, between the checks and the first
      * line leaves OpenPnP's homed state as it was; the controller's Z (M400, M114) must still be the one the lines were
-     * walked from. On the machine thread.
+     * walked from. On the machine thread; a failed read is a reason too (nothing was sent).
      */
-    private static String levelStartMoved(Machine m, GcodeDriver d, double from, long timeoutMs) throws Exception {
-        d.sendCommand("M400", timeoutMs);
-        double z = d.getReportedLocation(timeoutMs).getCoordinate(zAxis(m, d), LengthUnit.Millimeters);
+    private static String levelStartMoved(Machine m, GcodeDriver d, double from, long timeoutMs) {
+        double z;
+        try {
+            d.sendCommand("M400", timeoutMs);
+            z = d.getReportedLocation(timeoutMs).getCoordinate(zAxis(m, d), LengthUnit.Millimeters);
+            d.receiveResponses(); // its answers are not the first line's replies
+        }
+        catch (Exception e) {
+            return "Z could not be re-read before the first line (" + MachineEndpoints.rootMessage(e) + "): nothing "
+                    + "was sent";
+        }
         return Math.abs(z - from) <= 0.01 ? null : String.format(Locale.ROOT, "Z moved after the lines were checked "
-                + "(raw Z %.2f then, %.2f now: a home or a power cycle ran meanwhile): send them again", from, z);
+                + "(raw Z %.2f then, %.2f now: a home or a power cycle ran meanwhile): walk again from the Z now", from,
+                z);
     }
 
     /** How a batch ended: {@link #status} "ok", "lock-lost", "stopped", "controller-error" or "controller-timeout". */
@@ -333,6 +342,9 @@ final class GcodePassthrough {
                 if (stop == null && !zChecked) {
                     zChecked = true;
                     stop = levelStartMoved(m, d, b.levelFromZ, timeoutMs);
+                    if (stop == null) {
+                        stop = stopReason(m, b); // a STOP or a take during the re-read's round trips
+                    }
                 }
                 if (stop != null) {
                     return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i,
@@ -442,12 +454,16 @@ final class GcodePassthrough {
     }
 
     /** Why the batch must send nothing more ("lock-lost: ..." for a revoked holder), or null. */
-    private static String stopReason(Machine m, Batch b) {
+    private String stopReason(Machine m, Batch b) {
         if (b.holder != null && b.holder.revoked) {
             return "lock-lost: the lock was taken or ran out";
         }
         if (b.stoppedBy != null) {
             return b.stoppedBy;
+        }
+        if (ctx.switchOff.inProgress()) {
+            // OpenPnP's own Stop, from its announce: its M410 may cut a move short, so no line goes after it
+            return "OpenPnP is switching the machine off";
         }
         if (!m.isEnabled()) {
             return "the machine was switched off";

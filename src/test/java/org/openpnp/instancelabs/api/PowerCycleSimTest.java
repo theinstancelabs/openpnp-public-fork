@@ -1698,6 +1698,205 @@ public class PowerCycleSimTest {
     }
 
     /**
+     * BR-97 review 4: the same with a connect whose position read got no answer: OpenPnP still believes Z 3 while the
+     * controller boots at Z 0; the controller's own M114, not OpenPnP's belief, decides.
+     */
+    @Test
+    public void anUnreadResetBetweenTheChecksAndTheSendStopsTheBatch() throws Exception {
+        DispenseConfig c = svc.getConfig();
+        c.commandTimeoutMs = 1500;
+        svc.updateConfig(c);
+        sim.driver.setSyncInitialLocation(false);
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            try {
+                sim.machine.setEnabled(false);
+                sim.server.powerCycle();
+                sim.server.mute.add("M114");
+                try {
+                    sim.machine.setEnabled(true);
+                }
+                finally {
+                    sim.server.mute.remove("M114");
+                }
+                assertEquals(3, believedZ(), 1e-9, "OpenPnP's belief is the old Z");
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", level("w", 4));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z4 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z moved after the lines were checked"), lastBody);
+    }
+
+    /** BR-97 review 4: the Z re-read comes before the first line sent, also when the batch starts with a comment. */
+    @Test
+    public void aBatchThatStartsWithACommentGetsTheZReReadToo() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            try {
+                powerCycle();
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", "{\"lines\":[\"; lead\",\"G1 Z4 F300\",\"M400\"],\"what\":\"w\"}");
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z4 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+    }
+
+    /** BR-97 review 4 (MAJOR): a web STOP while the Z re-read waits for its answer sends no line after it. */
+    @Test
+    public void aStopDuringTheZReReadSendsNoLine() throws Exception {
+        powerCycle();
+        lockForProcess();
+        CountDownLatch hold = new CountDownLatch(1);
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            sim.server.mark();
+            sim.server.holdOkUntil.put("M114", hold);
+            new Thread(() -> {
+                try {
+                    long t0 = System.currentTimeMillis();
+                    while (!String.valueOf(sim.server.sinceMark()).contains("M114")
+                            && System.currentTimeMillis() - t0 < 10000) {
+                        Thread.sleep(5);
+                    }
+                    context().passthrough.abort("a test STOP");
+                }
+                catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+                finally {
+                    hold.countDown();
+                }
+            }).start();
+        };
+        try {
+            call("POST", "/api/gcode", level("w", 1));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+            sim.server.holdOkUntil.remove("M114");
+        }
+        assertTrue(String.valueOf(sim.server.sinceMark()).contains("M114"), "the re-read ran: " + sim.server.sinceMark());
+        assertFalse(sim.server.sinceMark().contains("G1 Z1 F300"), "no line after the STOP: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+    }
+
+    /**
+     * BR-97 review 4 (MAJOR, older than the re-read): OpenPnP's own Stop (its disable sequence, M410 first, from another
+     * thread) ends a levelling batch before its next line: a line after the M410 would start from a Z the quick stop cut
+     * short.
+     */
+    @Test
+    public void openPnpsOwnStopEndsALevellingBatchBeforeItsNextLine() throws Exception {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, "M410\nM107 P3\nM107 P2\nM107 P1\nM107");
+        powerCycle();
+        lockForProcess();
+        CountDownLatch hold = new CountDownLatch(1);
+        sim.server.holdOkUntil.put("G1 Z1 F300", hold);
+        sim.server.delayBeforeOkMs.put("M410", 200L);
+        sim.server.mark();
+        Thread stopper = new Thread(() -> {
+            try {
+                long t0 = System.currentTimeMillis();
+                while (!sim.server.sinceMark().contains("G1 Z1 F300") && System.currentTimeMillis() - t0 < 10000) {
+                    Thread.sleep(5);
+                }
+                new Thread(() -> {
+                    try {
+                        sim.machine.setEnabled(false);
+                    }
+                    catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                }).start();
+                Thread.sleep(300);
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            finally {
+                hold.countDown();
+            }
+        });
+        stopper.start();
+        try {
+            call("POST", "/api/gcode", level("w", 1, 2));
+        }
+        finally {
+            sim.server.holdOkUntil.remove("G1 Z1 F300");
+            sim.server.delayBeforeOkMs.remove("M410");
+        }
+        stopper.join();
+        assertTrue(sim.server.sinceMark().contains("M410"), "OpenPnP's Stop ran: " + sim.server.sinceMark());
+        assertFalse(sim.server.sinceMark().contains("G1 Z2 F300"), "no line after it: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+    }
+
+    /** BR-97 review 4: the re-read's M400 and M114 answers are not the first line's replies. */
+    @Test
+    public void theZReReadIsNoReplyOfTheFirstLine() throws Exception {
+        powerCycle();
+        lockForProcess();
+        JsonObject o = ok("POST", "/api/gcode", level("w", 1, 2));
+        JsonObject first = o.getAsJsonArray("results").get(0).getAsJsonObject();
+        assertEquals("G1 Z1 F300", first.get("line").getAsString(), o.toString());
+        assertEquals(0, first.getAsJsonArray("replies").size(), o.toString());
+    }
+
+    /** BR-97 review 4: a Z re-read that gets no answer sends nothing and says so (409), not a line's timeout. */
+    @Test
+    public void aZReReadThatFailsSendsNothingAndSaysSo() throws Exception {
+        powerCycle();
+        lockForProcess();
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            sim.server.mark();
+            sim.server.mute.add("M400");
+        };
+        try {
+            call("POST", "/api/gcode", "{\"lines\":[\"G1 Z1 F300\",\"M400\"],\"what\":\"w\",\"timeoutMs\":1000}");
+        }
+        finally {
+            sim.server.mute.remove("M400");
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z1 F300"), "nothing sent: " + sim.server.sinceMark());
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z could not be re-read before the first line"), lastBody);
+    }
+
+    /** The web API's context (its passthrough), for a STOP from a test thread. */
+    ApiContext context() throws Exception {
+        java.lang.reflect.Field f = ApiServer.class.getDeclaredField("context");
+        f.setAccessible(true);
+        return (ApiContext) f.get(api);
+    }
+
+    /**
      * BR-97 review: without the engine nothing journals a levelling call (Z_LEVEL) or keeps the reset on record: the
      * call is refused (409) and nothing is sent.
      */
