@@ -24,15 +24,14 @@ import java.util.regex.Pattern;
  * snap switch stays released (pressed there: erratic, refused); then a fine descent of 0.025 mm to one fine step past
  * that step: the trip is the first fine step that reads pressed, so the tool goes at most one coarse and one fine step
  * past the plunger's trip, and never past the floor. Lifts of 0.25 mm again until it reads released: the press's
- * release (the same refusal); the differential is the mean of |release − trip|, an upper bound, at most 0.25 mm over
- * (the first 0.25 mm lift that reads released, or travel Z). The next press starts 1 mm above the trip (it stays
- * released between the trip and the release). No move goes above travel Z (the lifts and the fine start stop there):
- * past it the see-saw lowers the other tool; still pressed at travel Z is refused as that (it sticks, or it releases
- * only above travel Z). Every step is a move, M400 and a dwell before its read (a descent's 50 ms, a lift's 100, the
- * fine start's 200, as the bench tool's). Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's other side) as
- * it rises ({@link Plan#down}). Travel Z at the end, also after a refusal and after a failure (a reply with no level
- * twice, a line that timed out: the tool goes up, Z only, before the failure is thrown); a STOP's abort ends it where
- * it is.</p>
+ * release (the same refusal); the differential is the mean of |release − trip|, an upper bound, at most 0.275 mm over
+ * (a 0.25 mm lift plus the 0.025 mm fine step). The next press starts 1 mm above the trip (it stays released between
+ * the trip and the release). No move goes above travel Z (the lifts and the fine start stop there): past it the see-saw
+ * lowers the other tool; still pressed at travel Z is refused as that (it sticks, or it releases only above travel Z).
+ * Every step is a move, M400 and a dwell before its read (a descent's 50 ms, a lift's 100, the fine start's 200, as the
+ * bench tool's). Raw Z: N1 goes down as raw Z falls, the needle (the see-saw's other side) as it rises
+ * ({@link Plan#down}). Travel Z at the end, also after a refusal and after a failure (a reply with no level twice, a
+ * line that timed out: the tool goes up, Z only, before the failure is thrown); a STOP's abort ends it where it is.</p>
  */
 public final class HeightSwitch {
     /** The named location of the switch's top centre ({@code PUT /api/locations/height-switch {x, y}}). */
@@ -145,8 +144,8 @@ public final class HeightSwitch {
         /** Each press's trip and where it read released on the lifts after it (raw Z, one of each per press). */
         public List<Double> trips = new ArrayList<>(), releases = new ArrayList<>();
         /**
-         * {@code differentialMm}: the mean of |release − trip|, an upper bound, at most 0.25 mm over (the first
-         * 0.25 mm lift that reads released, or travel Z), null with no press.
+         * {@code differentialMm}: the mean of |release − trip|, an upper bound, at most 0.275 mm over (a 0.25 mm lift
+         * plus the 0.025 mm fine step), null with no press.
          */
         public Double tripRawZ, sdMm, rangeMm, differentialMm;
         public Integer idleLevel;

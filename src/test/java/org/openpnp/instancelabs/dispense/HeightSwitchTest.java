@@ -148,11 +148,11 @@ public class HeightSwitchTest {
     /**
      * The machine's switch (Process 22:3x) is a hinge lever pressed near its free end: it lets go well above its trip
      * (N1 pressed at raw 25.50 still read pressed at 25.90). After each trip the tool lifts in 0.25 mm steps until it
-     * reads released: 5 presses accepted for both tools, each trip within one fine step, each release recorded, and
-     * the differential is their mean distance at 0.25 mm resolution (0.45 reads 0.50, 0.9 reads 1.00, 1.6 reads 1.75).
-     * Release review MINOR: right after each press's release the next press starts 1 mm above its trip, also when the
-     * release lies above that (1.6). NIT: a trip off the coarse grid (0.07 past a step) records the press's release,
-     * not the coarse trip's.
+     * reads released: 5 presses accepted for both tools, each trip within one fine step, each release recorded, and the
+     * differential is their mean distance, an upper bound, at most 0.275 mm over (a 0.25 mm lift plus the 0.025 mm fine
+     * step): 0.45 reads 0.50, 0.9 reads 1.00, 1.6 reads 1.75. Release review MINOR: right after each press's release
+     * the next press starts 1 mm above its trip, also when the release lies above that (1.6). NIT: a trip off the
+     * coarse grid (0.07 past a step) records the press's release, not the coarse trip's.
      */
     @Test
     public void aLeverThatLetsGoWellAboveItsTripIsMeasuredWithItsReleases() {
