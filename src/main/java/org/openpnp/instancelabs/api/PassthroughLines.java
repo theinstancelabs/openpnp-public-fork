@@ -31,8 +31,8 @@ final class PassthroughLines {
      * variant's Arduino pin), M43 the same pin P5 (its entry in the firmware's pin table). The same counts give BR-48's
      * PC0 as M42 P44 and M43 P29, which Process checked on the machine 11-02.
      */
-    static final double SWITCH_PIN_M42 = 53;
-    static final double SWITCH_PIN_M43 = 5;
+    static final double SWITCH_PIN_M42 = org.openpnp.instancelabs.dispense.HeightSwitch.M42_PIN;
+    static final double SWITCH_PIN_M43 = org.openpnp.instancelabs.dispense.HeightSwitch.M43_PIN;
     static final double MAX_SCREW_MA = 670;
     private static final Pattern WORD = Pattern.compile("([A-Z])\\s*([-+]?(?:\\d+\\.?\\d*|\\.\\d+))?\\s*");
 

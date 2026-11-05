@@ -2,6 +2,7 @@
 import unittest
 
 from lumen_sim.bench import Bench
+from tests.hang import within
 
 
 def il():
@@ -67,19 +68,20 @@ class Watchdog(unittest.TestCase):
 
 class Kill(unittest.TestCase):
     def test_m112_turns_every_output_off_and_stops_motion_at_once(self):
-        b = il()
-        for line in ("M106", "M106 P1 S180", "M106 P2 S255", "M106 P3 S255"):
-            b.send(line)
-        b.send("G1 X100 F600")
-        b.run(5.0)
-        x = b.sim.state(b.t)["head"]["physical"]["X"]
-        b.write("M112\n")
-        b.run(3.0)
-        st = b.sim.state(b.t)
-        self.assertTrue(st["halted"])
-        self.assertEqual(st["fans"], [0, 0, 0, 0])
-        self.assertEqual([h["source"] for h in st["fan_history"][-4:]], ["kill"] * 4)
-        self.assertAlmostEqual(st["head"]["physical"]["X"], x, places=6)
+        with within(self, 5):
+            b = il()
+            for line in ("M106", "M106 P1 S180", "M106 P2 S255", "M106 P3 S255"):
+                b.send(line)
+            b.send("G1 X100 F600")
+            b.run(5.0)
+            x = b.sim.state(b.t)["head"]["physical"]["X"]
+            b.write("M112\n")
+            b.run(3.0)
+            st = b.sim.state(b.t)
+            self.assertTrue(st["halted"])
+            self.assertEqual(st["fans"], [0, 0, 0, 0])
+            self.assertEqual([h["source"] for h in st["fan_history"][-4:]], ["kill"] * 4)
+            self.assertAlmostEqual(st["head"]["physical"]["X"], x, places=6)
 
 
 class Settings(unittest.TestCase):
@@ -97,12 +99,13 @@ class Settings(unittest.TestCase):
         self.assertIn("echo:  M906 X800 Y1000 Z800 A200 B540", lines)
 
     def test_m997_drops_the_port_until_a_power_cycle(self):
-        b = il()
-        b.write("M997\n")
-        b.run(0.1)
-        self.assertEqual(b.sim.state(b.t)["halt_reason"], "DFU")
-        self.assertEqual(b.sim.take_transport_actions(), [{"action": "disconnect", "down_s": None}])
-        self.assertEqual(Bench().send("M997").lines, ['echo:Unknown command: "M997"', "ok"])
+        with within(self, 5):
+            b = il()
+            b.write("M997\n")
+            b.run(0.1)
+            self.assertEqual(b.sim.state(b.t)["halt_reason"], "DFU")
+            self.assertEqual(b.sim.take_transport_actions(), [{"action": "disconnect", "down_s": None}])
+            self.assertEqual(Bench().send("M997").lines, ['echo:Unknown command: "M997"', "ok"])
 
     def test_boot_report_with_160_steps_on_z(self):
         b = il()

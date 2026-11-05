@@ -1622,6 +1622,33 @@ async function runFirstDots(page, n) {
         const c = await waitStatus(page, (x) => x.dispense.homeBeforeRun === v, 10000).then(() => true, () => false);
         check('Settings: "Before Register board, Probe and Run" saves ' + v, c);
       }
+      // 11b. The advanced JSON editor: keys the engine stamps are read-only there and never sent, the tip's dose anchor (BR-85)
+      // and the switch's measures (BR-94) too (#60's review: editing them got the server's 400 instead), and the paste's
+      // load time inside `paste`, which the server merges one level deep (#64's review)
+      {
+        await page.evaluate(() => { const d = document.getElementById('set-advanced'); if (d && !d.open) d.open = true; });
+        const orig = await page.waitForFunction(() => { const t = document.getElementById('set-json'); return t && t.value.trim().startsWith('{') ? t.value : null; },
+          null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        let sj = null, restored = false;
+        if (orig) {
+          await page.evaluate(() => { const t = document.getElementById('set-json'); const cfg = JSON.parse(t.value);
+            cfg.doseAnchor = { test: 1 }; cfg.heightSwitch = { test: 1 }; cfg.paste = Object.assign({}, cfg.paste, { loadedAtMs: 12345 });
+            t.value = JSON.stringify(cfg, null, 2); t.dispatchEvent(new Event('input', { bubbles: true })); });
+          sj = await page.waitForFunction(() => { const lis = [...document.querySelectorAll('#set-json-diff li')];
+            const row = (k) => lis.find((li) => (li.querySelector('code') || {}).textContent === k);
+            const a = row('doseAnchor'), b = row('heightSwitch'), pl = row('paste.loadedAtMs'), h = document.querySelector('#set-json-diff .su-diff__h');
+            return a && b ? { anchorRo: a.classList.contains('su-diff--ro'), switchRo: b.classList.contains('su-diff--ro'),
+              pasteRo: !!pl && pl.classList.contains('su-diff--ro'), head: h ? h.textContent : '' } : null; },
+          null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+          // Reload: only stamped keys were changed, so nothing is kept and the editor is clean again for later steps
+          restored = await page.click('#btn-settings-json-reload', { timeout: 5000 }).then(() => page.waitForFunction(() =>
+            !document.getElementById('set-json').classList.contains('input--dirty'), null, { timeout: 10000 })).then(() => true, () => false);
+          await page.evaluate(() => { document.getElementById('set-advanced').open = false; });
+        }
+        check('Settings › advanced JSON: the dose anchor, the switch\'s measures and the paste\'s load time are read-only and not sent (the engine stamps them)',
+          !!sj && sj.anchorRo && sj.switchRo && sj.pasteRo && /^0 changed keys will be sent/.test(sj.head), sj || { orig: !!orig });
+        check('Settings › advanced JSON: Reload leaves the editor clean again (only stamped keys were changed: nothing kept)', restored, { restored });
+      }
 
       // 12. A fiducial not found (FID2 hidden in the scene): the REG fixes, then a plan without fiducial correction
       const hidden = Object.assign({}, scene, { board: Object.assign({}, scene.board, { hideFiducials: ['FID2'] }) });

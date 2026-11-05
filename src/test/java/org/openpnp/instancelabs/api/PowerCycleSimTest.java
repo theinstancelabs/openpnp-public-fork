@@ -272,7 +272,8 @@ public class PowerCycleSimTest {
         // refused with the reason and the way back, before anything is tried
         String[][] tries = {{"/api/gcode", "{\"lines\":[\"M114\"]}"}, {"/api/jog", "{\"tool\":\"n1\",\"dx\":1}"},
                 {"/api/move-to", "{\"tool\":\"n1\",\"x\":100,\"y\":100}"},
-                {"/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}"}};
+                {"/api/machine/home", "{\"wait\":true,\"clearBelowAttested\":true}"},
+                {"/api/height-switch/measure", "{\"tool\":\"n1\"}"}, {"/api/height-switch/read", "{}"}};
         for (String[] t : tries) {
             call("POST", t[0], t[1]);
             assertEquals(409, lastStatus, t[0] + " " + lastBody);

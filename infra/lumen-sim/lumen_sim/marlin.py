@@ -10,6 +10,7 @@ import re
 import struct
 from collections import deque
 
+from .machine import PA5_LINE
 from .motion import MINIMAL_STEP_RATE, Block, Stepper, Trapezoid
 
 AXES = "XYZAB"
@@ -25,6 +26,7 @@ HOMING_BUMP_DIVISOR = [2, 2, 4]
 Z_AFTER_HOMING = 31.5
 XY_PROBE_FEEDRATE = 133.0
 KILL_DELAY_S = 0.6              # minkill(): messages get out, the stepper ISR still runs, then cli()
+STEPPERS_OFF_DELAY_S = 0.25     # minkill(): after cli(), DELAY_US(250000), then disable_all_steppers() (M112)
 DEFAULT_STEPPER_TIMEOUT_MS = 3600 * 1000  # DEFAULT_STEPPER_TIMEOUT_SEC (Configuration_adv.h)
 DISABLE_IDLE = AXES             # DISABLE_IDLE_X/Y/Z/I/J: an idle timeout releases every axis
 MILLIS_HALF = 2 ** 31           # ELAPSED()/PENDING() compare millis_t as int32_t (core/millis_t.h:32-33)
@@ -152,6 +154,8 @@ class Firmware:
         self.ws = [0.0] * 5                         # position_shift (G92)
         self.position = [lround(f32(self.cur[i] * self.steps[i])) for i in range(5)]  # planner.position
         self.stepper = Stepper(self.position, machine.physical, self.steps, machine.switches)
+        self.stepper.on_move = self.pa5  # each move's end: a press, an overtravel
+        self.pa5_pull = 0  # PA5's input mode (M42 P53 T): what it reads with nothing wired
         self.homed = [False, False, False]
         self.enabled = {a: False for a in AXES}
         # M18/M84 S: stepper_inactive_time (0 = never), previous_move_ms, already_shutdown_steppers
@@ -174,6 +178,7 @@ class Firmware:
         self.keepalive_interval = 2.0
         self.next_busy = now + self.keepalive_interval
         self.halted, self.halt_reason, self.halt_time = False, None, None
+        self.steppers_off_at = None  # an M112 kill's disable_all_steppers(), at the end of minkill()
         self.homing_phase, self.in_g28 = None, False
         # il/safety
         self.wd_timeout, self.wd_last, self.wd_tripped = 0, now, False
@@ -200,13 +205,26 @@ class Firmware:
 
     # ------------------------------------------------------------------ driver interface
     def next_wake(self):
-        return math.inf if self.halted else self._wake
+        if not self.halted:
+            return self._wake
+        # a halted board still runs a kill's coast (each move's end, then its freeze) and then lets its steppers go,
+        # each at its own time (next_event is inf once frozen)
+        coast = self.stepper.freeze_at if self.stepper.freeze_at is not None and not self.stepper.frozen else math.inf
+        off = math.inf if self.steppers_off_at is None else self.steppers_off_at
+        return min(coast, self.stepper.next_event(self.now), off)
 
     def advance(self, t):
         """Run everything due up to simulator time t."""
         while not self.halted and self._wake <= t:
             self.now = max(self.now, self._wake)
             self._resume()
+        while self.halted and self.next_wake() <= t:
+            self.now = max(self.now, self.next_wake())
+            self.stepper.update(self.now)
+            if self.steppers_off_at is not None and self.steppers_off_at <= self.now:
+                self.steppers_off_at = None
+                for a in AXES:
+                    self.release(a)
         self.now = max(self.now, t)
 
     def feed(self, data, t):
@@ -547,12 +565,11 @@ class Firmware:
             self._emit("Error:Printer halted. kill() called!")
         if self.p.outputs_off_on_kill:
             self._outputs_off("kill")
-            self.stepper.freeze(self.now)
+            self.stepper.freeze(self.now)  # planner.quick_stop() first: the motion ends now, the drivers stay on
         else:
             self.stepper.freeze(self.now + KILL_DELAY_S)
-        if steppers_off:
-            for a in AXES:
-                self.release(a)
+        if steppers_off:  # both: minkill() holds the drivers until then (advance lets them go)
+            self.steppers_off_at = self.now + KILL_DELAY_S + STEPPERS_OFF_DELAY_S
         self._dead(reason)
         raise Halted(reason)
 
@@ -560,6 +577,7 @@ class Firmware:
         """stepper.disable_axis(): the driver lets go. A released Z moves by the machine's z_drop."""
         if axis == "Z" and self.enabled["Z"]:
             self.machine.release_z()
+            self.pa5(self.now)  # a drop under or off the switch, where the head is (a quick stop's move may run)
         self.enabled[axis] = False
 
     # ------------------------------------------------------------------ positions
@@ -670,7 +688,7 @@ class Firmware:
 
     @property
     def M(self):
-        return {17: self.m17, 18: self.m18, 84: self.m18, 42: _noop, 43: _noop, 92: self.m92, 105: self.m105,
+        return {17: self.m17, 18: self.m18, 84: self.m18, 42: self.m42, 43: self.m43, 92: self.m92, 105: self.m105,
                 106: self.m106, 107: self.m107, 108: _noop, 110: _noop, 111: _noop, 112: self.m112,
                 113: self.m113, 114: self.m114, 115: self.m115, 119: self.m119, 122: _noop, 150: self.m150,
                 201: self.m201, 203: self.m203, 204: self.m204, 205: self.m205, 206: _noop, 211: self.m211,
@@ -823,6 +841,31 @@ class Firmware:
         yield from self._synchronize()
         for a in axes or AXES:
             self.release(a)
+
+    def m42(self, cmd):
+        """M42 P53 T<mode>: PA5's input mode, which sets what it reads with nothing wired (T2 pull-up 1; T3 pull-down
+        and T0 floating 0, as read 11-02). Other M42 forms only ack."""
+        if cmd.val("P") == 53 and cmd.val("T") in (0, 2, 3):
+            self.pa5_pull = 1 if cmd.val("T") == 2 else 0
+
+    def m43(self, cmd):
+        """M43 P5: the PA5 pin's line as the board prints it, read where the head is now (M43 waits for no move)."""
+        # shortcut: PA5 alone (the switch, 11-04); M43 without P or another pin prints nothing: add a pin's line here
+        # when a route reads it
+        if cmd.val("P") == 5:
+            self._emit(PA5_LINE % self.pa5(self.now))
+
+    def pa5(self, at=None):
+        """The PA5 switch with the head where it is at time `at` (default: where the last move ended): the pin's
+        level (0 with nothing wired, as the board read 11-02); an overtravel goes to the model's errors."""
+        sw = self.machine.pa5
+        if sw is None:
+            return self.pa5_pull
+        x, y, z = (self.machine.physical if at is None else self.stepper.realtime_physical(at))[:3]
+        level, overtravel = sw.observe(x, y, z)
+        if overtravel:
+            self._model_error(None, overtravel)
+        return level
 
     def m92(self, cmd):
         for i, a in enumerate(AXES):

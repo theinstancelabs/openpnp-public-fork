@@ -25,12 +25,16 @@
   const PLACE_RE = /^[A-Za-z0-9_-]{1,40}$/;
   /** Settings only their own actions may change: never sent by the JSON editor (WEB_API.md, PUT /api/config). Since the
    *  tip setups (PROFILE_CALIBRATION_DESIGN.md §22.1) the mounted tip, what the other tips keep, where the needle lands
-   *  and its trim are set by Setup › Dispenser & tip, Check where it lands and the trim panel. */
+   *  and its trim are set by Setup › Dispenser & tip, Check where it lands and the trim panel; the tip's dose anchor and the
+   *  switch's measures by their own steps. WebEditorSettingsListsTest keeps these lists covering the server's. */
   const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleZOffsetHomeAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces',
-    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs']);
+    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs', 'doseAnchor',
+    'heightSwitch']);
   const STAMPED_NESTED = new Set(['profile.startAngleDeg', 'profile.startAngleSetAtMs', 'profile.startAngleChangedAtMs',
-    'profile.startAngleFeature', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
-  const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe']);
+    'profile.startAngleFeature', 'purgeRow.resetAtMs', 'purgeRow.usedSpots', 'calibrationArea.usedMm', 'calibrationArea.resetAtMs',
+    'paste.loadedAtMs']);
+  const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe', 'paste', 'calibrationArea', 'padCalibration',
+    'outputZones']);
   /** Maps PUT /api/config replaces whole: the editor diffs them per entry and Save sends the server's map as it is then
    *  with only the edited entries changed (a place saved meanwhile on the Places card is kept). */
   const BY_ENTRY = new Set(['locations']);
@@ -2146,14 +2150,15 @@
     c.jErr = el('div', { class: 'field__err', id: 'su-json-err', role: 'status' });
     c.jStale = el('div', { class: 'notebox notebox--need su-json-stale', hidden: true });
     c.jDiff = el('div', { id: 'set-json-diff', class: 'su-diff' });
-    c.jReload = btn('Reload and keep my edits', { class: 'btn' }, 'i-refresh');
+    c.jReload = btn('Reload and keep my edits', { id: 'btn-settings-json-reload', class: 'btn' }, 'i-refresh');
     c.jSave = btn('Save changed keys', { id: 'btn-settings-json', class: 'btn' });
     c.jReason = el('span', { class: 'reason su-foot-reason' });
     c.adv = el('details', { class: 'disclose su-adv', id: 'set-advanced' }, el('summary', { text: 'All settings (advanced JSON)' }),
       el('div', { class: 'su-col', 'data-refusals': '' },
-        el('p', { class: 'su-note', text: 'Every engine setting. Save sends only the keys you changed (one level deep for profile, purgeRow and cleanPadCheck). Keys stamped by the engine are read-only here: '
-          + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, the start angle (profile.startAngleDeg, startAngleSetAtMs, startAngleChangedAtMs and startAngleFeature: set or measured in Profiles); the tip (tip, parkedTips) is set in Setup › Dispenser & tip, '
-          + 'where the needle lands (needleLanding, needleXyTrim) by Check where it lands and the trim panel. The profile is the mounted tip’s recipe. '
+        el('p', { class: 'su-note', text: 'Every engine setting. Save sends only the keys you changed (one level deep for the grouped settings: profile, purgeRow, cleanPadCheck, paste, calibrationArea and the like). Keys stamped by the engine are read-only here: '
+          + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, calibrationArea.usedMm and resetAtMs, paste.loadedAtMs, the start angle (profile.startAngleDeg, startAngleSetAtMs, startAngleChangedAtMs and startAngleFeature: set or measured in Profiles); the tip (tip, parkedTips) is set in Setup › Dispenser & tip, '
+          + 'where the needle lands (needleLanding, needleXyTrim) by Check where it lands and the trim panel; the tip’s dose anchor (doseAnchor) and '
+          + 'the switch’s measures (heightSwitch) are set by their own steps. The profile is the mounted tip’s recipe. '
           + 'Places (locations) are sent one by one: a place saved elsewhere meanwhile is kept.' }),
         F.json.el, c.jErr, c.jStale, c.jDiff,
         el('div', { class: 'btn-row' }, c.jSave, c.jReload, c.jReason)));

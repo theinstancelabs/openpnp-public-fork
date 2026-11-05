@@ -217,6 +217,8 @@ public final class DispenseService {
     private volatile BooleanSupplier pressureHoldActive = () -> false;
     /** Set by {@link #abort}: stops a camera-only clean-pad check (it has no executor). */
     private volatile boolean cameraTourAbort;
+    /** BR-94: the height switch's last read; in memory only. */
+    private volatile HeightSwitch.Read lastHeightSwitchRead;
     /**
      * Counts every {@link #abort}: a task queued before a STOP refuses at its start, so a step a job
      * queued in the gap between two steps never pressurises (profile calibration design §7.8).
@@ -1503,8 +1505,13 @@ public final class DispenseService {
             return null;
         }
         org.openpnp.model.Location at = n.getLocation().convertToUnits(LengthUnit.Millimeters);
+        return needleXY(at.getX(), at.getY());
+    }
+
+    /** Where the needle's paste lands with N2 at (x, y): N2 plus the mounted tip's landing + trim, as programs aim. */
+    public double[] needleXY(double x, double y) {
         double[] l = landingAndTrim(cfg);
-        return new double[] {at.getX() + l[0], at.getY() + l[1]};
+        return new double[] {x + l[0], y + l[1]};
     }
 
     /**
@@ -1567,6 +1574,9 @@ public final class DispenseService {
         token = Math.max(token, measuredStamp(before.needleAnchor, before.needleZOffsetSetAtMs, before.needleLanding) + 1);
         for (DispenseConfig.ParkedTip p : before.parkedTips.values()) {
             token = Math.max(token, measuredStamp(p.needleAnchor, p.needleZOffsetSetAtMs, p.needleLanding) + 1);
+        }
+        if (before.heightSwitch.needle != null) { // BR-94: the old needle's switch trip, also after a clock set back
+            token = Math.max(token, before.heightSwitch.needle.atMs + 1);
         }
         DispenseConfig c = before.copy();
         c.needleChangedAtMs = token;
@@ -3724,7 +3734,8 @@ public final class DispenseService {
         requireAvailable();
         String blankName = req.locationName == null ? cfg.blankLocationName : req.locationName;
         DispenseConfig.NamedLocation blank = requireLocation(blankName);
-        RunResult r = newRun("touch-off", null, "blank", getCurrentCalibration().id, req.steps);
+        RunResult r = newRun("touch-off", null, "blank", getCurrentCalibration().id, req.steps
+                + NeedleTouchOff.CHECK_DOTS);
         TouchOffResult res = new TouchOffResult();
         res.run = r;
         return submitResult(r, res, () -> {
@@ -3764,8 +3775,9 @@ public final class DispenseService {
             }
             List<SpotDot> seen = s.imageSpots(specs, req.primeAtWaste, primeExtra, NeedleTouchOff.cutMm(dotMm),
                     req.pitchMm / 2);
-            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen, req.jumpRatio, steadyMm,
-                    c.profile.touchOffSkipDots);
+            res.analysis = NeedleTouchOff.analyze(NeedleTouchOff.gaps(req), seen.subList(0, req.steps), req.jumpRatio,
+                    steadyMm, c.profile.touchOffSkipDots);
+            NeedleTouchOff.checkLanding(res.analysis, seen, c.profile.touchOffSkipDots); // BR-89
             res.analysis.referenceFrom = referenceFrom;
             res.previousOffsetMm = c.needleZOffsetMm;
             java.util.Map<String, Object> det = new java.util.LinkedHashMap<>();
@@ -3776,9 +3788,10 @@ public final class DispenseService {
             det.put("blankPlaneMaxResidualMm", plane == null ? null : plane.maxAbsResidualMm);
             det.put("dotZ", specs.stream().map(x -> x.dispenseZ).collect(java.util.stream.Collectors.toList()));
             String details = new com.google.gson.Gson().toJson(det);
+            String moved = res.analysis.landingProblem;
             if (res.analysis.found()) {
                 res.newOffsetMm = c.needleZOffsetMm + res.analysis.contactGapMm;
-                if (apply) {
+                if (apply && moved == null) {
                     // under the needle the touch-off started with: a needle change meanwhile refuses it (§22.3)
                     NeedleFrameResult fr = setNeedleZOffset(res.newOffsetMm, "dot-ladder-touch-off", details,
                             c.needleChangedAtMs);
@@ -3786,11 +3799,13 @@ public final class DispenseService {
                     res.applied = true;
                 }
                 else {
-                    db.insertTouchOff("dot-ladder-touch-off (not applied)", res.newOffsetMm, c.needleZOffsetMm,
-                            details, null);
+                    // BR-89: a tip that may have moved invalidates both the measured Z and the landing: kept, not set
+                    db.insertTouchOff("dot-ladder-touch-off (not applied" + (apply ? ": " + moved : "") + ")",
+                            res.newOffsetMm, c.needleZOffsetMm, details, null);
                 }
             }
-            r.message = res.analysis.reason;
+            r.message = moved == null ? res.analysis.reason : res.analysis.reason + "; " + (res.analysis.found()
+                    ? "not applied: " : "") + moved;
             s.ok();
         });
     }
@@ -5063,6 +5078,196 @@ public final class DispenseService {
         t.stepsDone = t.stepsPlanned;
         t.send();
         s.ok();
+    }
+
+    /**
+     * BR-94: N1 or the needle presses the bed's height switch {@code presses} times ({@link HeightSwitch}) in the raw Z
+     * window from {@code zStart} to {@code zFloor} (each null: 1.0 above and 0.5 past the tool's accepted trip of this
+     * home). An accepted measure is the tool's trip at once, no Use step; the needle presses only with
+     * {@code tipClean}. The Future never throws for task failures: a refused, stopped or failed task is a refused
+     * result with its reason.
+     */
+    public Future<HeightSwitch.Result> measureHeightSwitch(String tool, int presses, Double zStart, Double zFloor,
+            boolean tipClean) throws Exception {
+        if (!"n1".equals(tool) && !"needle".equals(tool)) {
+            throw new IllegalArgumentException("'tool' must be n1 or needle");
+        }
+        if (presses < 1 || presses > 20) {
+            throw new IllegalArgumentException("'presses' must be 1..20");
+        }
+        requireAvailable();
+        RunResult r = newRun("height-switch", null, "height switch", 0, 0);
+        HeightSwitch.Result res = new HeightSwitch.Result();
+        res.tool = tool;
+        res.presses = presses;
+        Task t = new Task(r, "measure");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> heightSwitchBody(zStart, zFloor, tipClean, res, t)), () -> {
+            if (r.status != RunResult.Status.OK) {
+                res.accepted = false;
+                res.refused = true;
+                res.why = r.message;
+            }
+        });
+    }
+
+    private void heightSwitchBody(Double zStart, Double zFloor, boolean tipClean, HeightSwitch.Result res, Task t)
+            throws Exception {
+        boolean needle = "needle".equals(res.tool);
+        DispenseConfig c = cfg;
+        DispenseConfig.NamedLocation place = c.location(HeightSwitch.PLACE);
+        if (place == null) {
+            throw refused("the height switch's place is not set: PUT /api/locations/" + HeightSwitch.PLACE
+                    + " {x, y}, the switch's top centre");
+        }
+        String unchecked = needle ? needleXyProblem(c) : null;
+        if (unchecked != null) {
+            // an unchecked landing may aim it up to 15 mm off: down to zFloor beside the plunger (#60 review); first,
+            // as checking the landing lays paste
+            throw refused("the needle is aimed at the switch by where it lands: " + unchecked.replaceAll("\\.$", "")
+                    + ", then clean the tip");
+        }
+        if (needle && !tipClean) {
+            throw refused("the needle presses the height switch only with a clean tip: paste must never touch it");
+        }
+        String unknown = positionUnknownWhy();
+        if (unknown != null) {
+            throw refused("MACHINE: " + unknown + ": " + Interlocks.POSITION_UNKNOWN_REMEDY);
+        }
+        if (!configuration.getMachine().isHomed()) {
+            throw refused("MACHINE: the machine is not homed: Home first");
+        }
+        Long home = homeTracker.getLastHomeAtMs();
+        res.homeAtMs = home;
+        DispenseConfig.HeightSwitchTrip last = needle ? HeightSwitch.needleTrip(c) : c.heightSwitch.n1;
+        if ((zStart == null || zFloor == null) && (last == null || home == null || !home.equals(last.homeAtMs))) {
+            throw refused("zStart and zFloor (raw Z) are needed: " + (needle ? "the needle" : "N1")
+                    + " has no accepted trip on the height switch " + (needle && last == null
+                            && c.heightSwitch.needle != null ? "since it was put on" : "in this home"));
+        }
+        Nozzle probeNozzle = getProbeNozzle();
+        if (!needle && probeNozzle == null) {
+            throw refused("nozzle '" + PROBE_NOZZLE + "' is not in the machine");
+        }
+        Session s = t.start(c);
+        ReferenceMachine m = (ReferenceMachine) configuration.getMachine();
+        OpenPnpRawMapper mapper = needle ? s.mapper : OpenPnpRawMapper.forProbeNozzle(m, probeNozzle, c.bAxisName);
+        // the needle is aimed as programs aim it: its tip lands at N2 + the landing and the trim
+        double[] aim = needle ? landingAndTrim(c) : new double[] {0, 0};
+        double x = place.x - aim[0], y = place.y - aim[1];
+        HeightSwitch.Plan p = new HeightSwitch.Plan();
+        p.tool = res.tool;
+        RawPoint xy = mapper.toRaw(x, y, c.travelSafeZMm);
+        p.rawX = xy.x;
+        p.rawY = xy.y;
+        double[] here = s.mapper.currentNozzleLocation();
+        p.travelZ = s.mapper.toRaw(here[0], here[1], c.travelSafeZMm).z;
+        p.down = HeightSwitch.down(mapper, x, y, c.travelSafeZMm);
+        p.zStart = zStart != null ? zStart : last.tripRawZ - p.down * 1.0;
+        p.zFloor = zFloor != null ? zFloor : last.tripRawZ + p.down * 0.5;
+        p.coarseMm = needle ? 0.10 : 0.25;
+        p.presses = res.presses;
+        p.zLimits = mapper.zSoftLimitsRaw();
+        p.safeZone = mapper.zSafeZoneRaw();
+        // refused here, a measure that returns has sent its lines and ended at travel height over the switch
+        String bad = HeightSwitch.windowProblem(p);
+        if (bad != null) {
+            throw refused(bad);
+        }
+        HeightSwitch.Io io = new HeightSwitch.Io() {
+            @Override
+            public void send(String line) throws Exception {
+                s.exec.sendGated(DispenseExecutor.Scope.PROBE, line, c.commandTimeoutMs, s.r);
+            }
+
+            @Override
+            public List<String> query(String line) throws Exception {
+                return s.exec.queryGated(DispenseExecutor.Scope.PROBE, line, c.commandTimeoutMs, s.r);
+            }
+        };
+        // everything OpenPnP queued must be done before the raw lines start
+        m.getMotionPlanner().waitForCompletion(null, CompletionType.WaitForStillstand);
+        try {
+            HeightSwitch.measure(io, p, res);
+        }
+        catch (Exception e) {
+            boolean stop = t.aborted();
+            s.recover();
+            if (stop && !(e instanceof DispenseExecutor.AbortedException)) {
+                DispenseExecutor.AbortedException a = new DispenseExecutor.AbortedException(abortReason(s.exec,
+                        "stopped during the height-switch measure"));
+                a.addSuppressed(e);
+                throw a;
+            }
+            throw e;
+        }
+        double[] end = {p.rawX, p.rawY, p.travelZ};
+        mapper.resync(end, end, mapper.currentB());
+        res.atMs = System.currentTimeMillis();
+        db.event(s.r.runId, res.accepted ? "INFO" : "WARN", "HEIGHT_SWITCH", new Gson().toJson(res));
+        if (res.refused) {
+            throw refused(res.why);
+        }
+        if (res.accepted) {
+            recordHeightSwitch(needle, res, c.needleChangedAtMs);
+        }
+        s.ok();
+    }
+
+    /**
+     * BR-94: reads the height switch now, its pull-up set first ({@code M42 P53 T2}, {@code M43 P5}); nothing moves.
+     * The last level is kept in memory for the status. The Future never throws for task failures: see {@code why}.
+     */
+    public Future<HeightSwitch.Read> readHeightSwitch() throws Exception {
+        requireAvailable();
+        RunResult r = newRun("height-switch-read", null, "height switch", 0, 0);
+        HeightSwitch.Read res = new HeightSwitch.Read();
+        Task t = new Task(r, "read");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> {
+            DispenseConfig c = cfg;
+            Session s = t.start(c);
+            s.exec.sendGated(DispenseExecutor.Scope.PROBE, ControllerCommands.HEIGHT_SWITCH_PULL_UP, c.commandTimeoutMs,
+                    s.r);
+            res.level = HeightSwitch.level(s.exec.queryGated(DispenseExecutor.Scope.PROBE,
+                    ControllerCommands.HEIGHT_SWITCH_READ, c.commandTimeoutMs, s.r));
+            res.atMs = System.currentTimeMillis();
+            lastHeightSwitchRead = res;
+            s.ok();
+        }), () -> {
+            if (r.status != RunResult.Status.OK) {
+                res.why = r.message;
+            }
+        });
+    }
+
+    /** BR-94: the last read of the height switch ({@link #readHeightSwitch}), or null. */
+    public HeightSwitch.Read getLastHeightSwitchRead() {
+        return lastHeightSwitchRead;
+    }
+
+    /** BR-94: an accepted measure is the tool's trip from now on (the clean-tip word is the only human step). */
+    private synchronized void recordHeightSwitch(boolean needle, HeightSwitch.Result res, Long token)
+            throws IOException {
+        if (needle) {
+            requireToken(token); // a needle change during the measure: not this needle's trip (#60 re-review)
+        }
+        DispenseConfig.HeightSwitchTrip trip = new DispenseConfig.HeightSwitchTrip();
+        trip.tripRawZ = res.tripRawZ;
+        trip.rangeMm = res.rangeMm;
+        trip.sdMm = res.sdMm;
+        trip.presses = res.trips.size();
+        // not before the needle's token (ahead of the clock after a clock set back), or needleTrip would void it
+        trip.atMs = needle && token != null ? Math.max(res.atMs, token) : res.atMs;
+        trip.homeAtMs = res.homeAtMs;
+        DispenseConfig c = cfg.copy();
+        if (needle) {
+            c.heightSwitch.needle = trip;
+        }
+        else {
+            c.heightSwitch.n1 = trip;
+        }
+        updateConfig(c);
     }
 
     /**

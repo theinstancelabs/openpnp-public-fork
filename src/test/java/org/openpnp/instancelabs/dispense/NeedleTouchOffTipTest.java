@@ -72,8 +72,8 @@ public class NeedleTouchOffTipTest {
             svc.getDb().insertDoseRecord(own);
             long at = svc.mountedTip().measured.get(1600).atMs;
             // the start blob on dots 1 and 2, then 0.77 mm dots (droplets for the 22G model's 1.345 mm, steady dots for
-            // the tip's 1.20 mm), squashed at 0.05
-            svc.setDotImager(spots(1.90, 1.60, 0.76, 0.78, 0.77, 0.76, 1.15));
+            // the tip's 1.20 mm), squashed at 0.05; BR-89's 2 check dots at the reference gap, steady again
+            svc.setDotImager(spots(1.90, 1.60, 0.76, 0.78, 0.77, 0.76, 1.15, 0.77, 0.76));
             NeedleTouchOff.Request req = new NeedleTouchOff.Request();
             req.startGapMm = 0.35;
             req.stepMm = 0.05;
@@ -86,6 +86,9 @@ public class NeedleTouchOffTipTest {
             assertEquals(0.77, t.analysis.referenceDiameterMm, 1e-12, "dots 3 and 4");
             assertEquals(0.075, t.analysis.contactGapMm, 1e-12);
             assertEquals("the tip's dots at 1600 steps (" + ZCheck.dayClock(at) + ")", t.analysis.referenceFrom);
+            assertEquals(9, t.analysis.dotsLaid, "7 and the 2 check dots");
+            assertEquals(0.25, t.analysis.checkGapMm, 1e-12, "the first counted dot's gap");
+            assertEquals(0, t.analysis.landingShiftMm, 1e-12);
 
             // the skip is the 25G recipe's: the 22G's is none, and the 25G's comes back with it
             f.mount(Tip.SEED_KEY);
