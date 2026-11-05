@@ -1,12 +1,19 @@
-"""Firmware builds the simulator can be: the board as flashed today (stock) and il/safety d973aef69 (il-safety).
+"""Firmware builds the simulator can be: the board as flashed today (stock), il/safety d973aef69 (il-safety) and
+il/holdB 75fb46ebc (il-holdB).
 
 Numbers come from the stock source wt/marlin-stock-7776c73 (Configuration.h / Configuration_adv.h) and the
-il/safety diff, as listed in RESEARCH.md section 5.
+il/safety diff, as listed in RESEARCH.md section 5. il/holdB is stock with DISABLE_IDLE_J off and a version marker.
 """
+import copy
 
 FIRMWARE_LINE = ("FIRMWARE_NAME:Marlin bugfix-2.1.x (Sep 19 2024 13:39:21) "
                  "SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 "
                  "MACHINE_TYPE:LumenPnP EXTRUDER_COUNT:0 AXIS_COUNT:5")
+# il/holdB's line as Backend's linux_native build printed it (firmware/holdB/native-test); the engine reads only the
+# il-holdB marker in FIRMWARE_NAME (BR-92)
+HOLDB_FIRMWARE_LINE = ("FIRMWARE_NAME:Marlin bugfix-2.1.x-il-holdB (Nov  4 2026 22:38:38) "
+                       "SOURCE_CODE_URL:github.com/MarlinFirmware/Marlin PROTOCOL_VERSION:1.0 "
+                       "MACHINE_TYPE:SimRap 1.4 EXTRUDER_COUNT:0 AXIS_COUNT:5")
 
 # M115 capability lines in firmware order (serial.log lines 3-38); EMERGENCY_PARSER is filled per build
 CAPS = [
@@ -27,8 +34,10 @@ SIM_CAP_LINE = "Cap:SIMULATOR:lumen-sim"
 
 class Personality:
     def __init__(self, name, steps, max_accel, b_current, emergency_parser, host_watchdog, onoff_right_outputs,
-                 homing_abort, outputs_off_on_kill):
+                 homing_abort, outputs_off_on_kill, firmware_line=FIRMWARE_LINE, disable_idle="XYZAB"):
         self.name = name
+        self.firmware_line = firmware_line
+        self.disable_idle = disable_idle        # DISABLE_IDLE_X/Y/Z/I/J: the axes the idle timeout releases
         self.steps = steps                      # DEFAULT_AXIS_STEPS_PER_UNIT
         self.max_feed = [1500.0, 1500.0, 500.0, 50000.0, 50000.0]  # DEFAULT_MAX_FEEDRATE (units/s)
         self.max_accel = max_accel              # DEFAULT_MAX_ACCELERATION (units/s^2)
@@ -42,7 +51,7 @@ class Personality:
 
     def m115(self, sim_cap=False):
         """M115's lines before the ok; sim_cap adds SIM_CAP_LINE last of the Cap lines."""
-        lines = [FIRMWARE_LINE]
+        lines = [self.firmware_line]
         for cap, value in CAPS:
             if value is None:
                 value = 1 if self.emergency_parser else 0
@@ -64,11 +73,16 @@ IL_SAFETY = Personality("il-safety", steps=[320.0, 320.0, 160.0, 4.44, 4.44],
                         emergency_parser=True, host_watchdog=True, onoff_right_outputs=True,
                         homing_abort=True, outputs_off_on_kill=True)
 
-PERSONALITIES = {"stock": STOCK, "il-safety": IL_SAFETY}
+# stock plus the marker, with DISABLE_IDLE_J off (B keeps its angle through the idle timeout): copied, so a fix to
+# stock's numbers reaches it
+IL_HOLDB = copy.deepcopy(STOCK)
+IL_HOLDB.name, IL_HOLDB.firmware_line, IL_HOLDB.disable_idle = "il-holdB", HOLDB_FIRMWARE_LINE, "XYZA"
+
+PERSONALITIES = {"stock": STOCK, "il-safety": IL_SAFETY, "il-holdB": IL_HOLDB}
 
 
 def get(name):
     try:
         return PERSONALITIES[name]
     except KeyError:
-        raise ValueError("unknown personality %r (stock, il-safety)" % name) from None
+        raise ValueError("unknown personality %r (%s)" % (name, ", ".join(PERSONALITIES))) from None

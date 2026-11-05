@@ -39,13 +39,15 @@ import com.google.gson.JsonObject;
  * <p>Rules (#19 review of BR-49: N1 and the needle share one Z axis, a see-saw): nothing moves unhomed, off, busy
  * (a task, a G-code batch, a pressure hold, a pad calibration) or switching off; one motion request at a time, checked
  * again on OpenPnP's machine thread; one press at most {@value #MAX_XY_MM} mm in X/Y and {@value #MAX_Z_MM} mm in Z;
- * X/Y only with both nozzles at travel height (their safe zones); a Z press puts BOTH nozzles where OpenPnP's
+ * X/Y only with both nozzles at travel height (their safe zones; none on Z: no X/Y); no Z press without the engine and
+ * both its nozzles, never one nozzle as both (it holds the floors); a Z press puts BOTH nozzles where OpenPnP's
  * transforms say and holds each to its floor at its own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed
- * surface under it (it may touch: the by-hand probe), the needle with a current frame not below the surface where its
- * tip lands (N2 + its landing and trim; contact = surface + offset) nor the one under N2, nor its I4 floor, without one
- * not below its safe zone; over the height switch (BR-94: the circle around its place; the needle where its tip lands)
- * neither below its safe zone, whatever its floor. Move-to travels at safe Z and ends at the tool's safe Z (both
- * nozzles at travel height). A STOP ends either at once; a move that saw one answers 409.</p>
+ * surface under it (it may touch: the by-hand probe), the needle with a current frame and its landing checked not below
+ * the surface where its tip lands (N2 + its landing and trim; contact = surface + offset) nor the one under N2, nor its
+ * I4 floor, without them not below its safe zone (none on Z: not lower at all); over the height switch (BR-94: the
+ * circle around its place; the needle where its tip lands) neither below its safe zone, whatever its floor (none on Z:
+ * no press down there at all). Move-to travels at safe Z and ends at the tool's safe Z (both nozzles at travel height).
+ * A STOP ends either at once; a move that saw one answers 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
@@ -360,13 +362,21 @@ final class ControlEndpoints {
         }
     }
 
-    /** X/Y moves only with both nozzles at travel height: nothing is dragged across the bed (#19 review of BR-49). */
+    /**
+     * X/Y moves only with both nozzles at travel height: nothing is dragged across the bed (#19 review of BR-49); with
+     * no lower safe zone on Z there is no travel height, so no X/Y (BR-94 follow-up review, MAJOR 1).
+     */
     private void requireTravelHeight() throws ApiException {
-        for (HeadMountable n : nozzles()) {
+        DispenseService svc = ctx.svcOrNull();
+        for (HeadMountable n : nozzles(svc)) {
             double z = mm(n.getLocation()).getZ(), low = safeLow(n);
-            if (Double.isFinite(low) && z < low - 1e-6) {
+            if (!Double.isFinite(low)) {
+                throw ApiException.refused("Z has no lower safe zone in OpenPnP (the Z axis's Safe Zone): X and Y move "
+                        + "only at travel height");
+            }
+            if (z < low - 1e-6) {
                 throw ApiException.refused(String.format(Locale.ROOT, "%s is below its safe zone (Z %.2f, the zone "
-                        + "starts at %.2f): raise it first; X and Y move only at travel height", name(n), z, low));
+                        + "starts at %.2f): raise it first; X and Y move only at travel height", name(svc, n), z, low));
             }
         }
     }
@@ -374,10 +384,32 @@ final class ControlEndpoints {
     /**
      * Both nozzles where they would be if {@code hm} went to {@code to} (N1 and the needle share one Z axis: a see-saw,
      * lowering one raises the other), each against its own floor at its own X/Y (#19 review of BR-49, BLOCKER 1).
+     * The engine is read once and passed down: one that went mid-check (a configuration load restarts it) took the
+     * needle for N1, with no floor and no switch check.
      */
     private void requireFloors(Machine m, HeadMountable hm, Location to) throws Exception {
+        DispenseService svc = ctx.svcOrNull();
+        if (svc == null) {
+            throw ApiException.refused("the dispense engine is not running: no Z press without the floors it holds (a "
+                    + "configuration load restarts it: try again in a moment; if it failed to start, see the OpenPnP "
+                    + "log)");
+        }
+        // both read once: a press moves both, and one the engine has not found (renamed in OpenPnP) has no floor; one
+        // nozzle as both (renamed since the engine found them) is checked twice and the other never
+        HeadMountable n1 = svc.getProbeNozzle(), n2 = svc.getDispenserNozzle();
+        String both = "no Z press without the floors of both (N1 and the needle share one Z: a press moves both)";
+        if (n1 != null && n1 == n2) { // not the settings: a new 'nozzle' could take the vacuum nozzle (renamed too)
+            throw ApiException.refused("the needle the engine found is now named " + DispenseService.PROBE_NOZZLE
+                    + " in OpenPnP: " + both + ": name them back in OpenPnP");
+        }
+        if (n1 == null || n2 == null) {
+            String which = n1 == null ? "N1 (no nozzle named '" + DispenseService.PROBE_NOZZLE + "' in OpenPnP)"
+                    : "the needle (" + svc.getUnavailableReason() + ")";
+            throw ApiException.refused("the dispense engine has not found " + which + ": " + both + ": name it back in "
+                    + "OpenPnP" + (n1 == null ? "" : ", or set 'nozzle' in the settings"));
+        }
         AxesLocation target = new AxesLocation(m).put(((AbstractHeadMountable) hm).toRaw(hm.toHeadLocation(to)));
-        for (HeadMountable n : nozzles()) {
+        for (HeadMountable n : new HeadMountable[] {n1, n2}) {
             Location at = mm(n.toHeadMountableLocation(((AbstractHeadMountable) n).toTransformed(target)));
             if (at.getZ() >= mm(n.getLocation()).getZ() - 1e-9) {
                 continue; // going up (or not moving): always allowed, also out of a spot below a floor that rose
@@ -385,73 +417,81 @@ final class ControlEndpoints {
             double low = safeLow(n);
             // the needle where its tip lands (N2 + its landing and trim), as the measure and I12 aim: over the switch
             // and for its floor (over a surface's edge N2 and the tip lie over different surfaces)
-            DispenseService svc = ctx.svcOrNull();
-            boolean needle = svc != null && n == svc.getDispenserNozzle();
+            boolean needle = n == n2;
             double[] tip = needle ? svc.needleXY(at.getX(), at.getY()) : new double[] {at.getX(), at.getY()};
-            if (Double.isFinite(low) && at.getZ() < low - 1e-6 && overHeightSwitch(tip[0], tip[1])) {
+            // without a lower safe zone on Z every press down over the switch is refused (fail closed)
+            if ((!Double.isFinite(low) || at.getZ() < low - 1e-6) && overHeightSwitch(svc, tip[0], tip[1])) {
                 throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over the height "
-                        + "switch (%.1f, %.1f), below its safe zone %.2f: only its measure presses it (POST "
-                        + "/api/height-switch/measure)%s", name(n), at.getZ(), tip[0], tip[1], low,
+                        + "switch (%.1f, %.1f), %s: only its measure presses it (POST /api/height-switch/measure)%s",
+                        name(svc, n), at.getZ(), tip[0], tip[1], Double.isFinite(low) ? String.format(Locale.ROOT,
+                                "below its safe zone %.2f", low) : "with no lower safe zone on Z",
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
-            double floor = needle ? needleFloor(n, tip[0], tip[1]) : n1Floor(tip[0], tip[1]);
+            double floor = needle ? needleFloor(svc, n, tip[0], tip[1]) : n1Floor(svc, tip[0], tip[1]);
             double[] where = tip;
             if (needle) { // N2 and its tip can lie over different surfaces: the higher floor holds (NaN: no floor there)
-                double underN2 = needleFloor(n, at.getX(), at.getY());
+                double underN2 = needleFloor(svc, n, at.getX(), at.getY());
                 if (Double.isNaN(floor) || underN2 > floor) {
                     floor = underN2;
                     where = new double[] {at.getX(), at.getY()};
                 }
             }
             if (Double.isFinite(floor) && at.getZ() < floor - 1e-9) {
+                String why = needle ? needleFloorWhy(svc)
+                        : plain(N1_BELOW_SURFACE_MM) + " mm below the probed surface under it";
                 throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over (%.1f, %.1f), "
-                        + "below its floor %.2f (%s)%s", name(n), at.getZ(), where[0], where[1], floor,
-                        needle ? needleFloorWhy() : plain(N1_BELOW_SURFACE_MM) + " mm below the probed surface under it",
+                        + "below its floor %.2f (%s)%s", name(svc, n), at.getZ(), where[0], where[1], floor, why,
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
         }
     }
 
     /** BR-94: (x, y) lies in the height switch's circle (its place, once set). */
-    private boolean overHeightSwitch(double x, double y) {
-        DispenseService svc = ctx.svcOrNull();
-        DispenseConfig c = svc == null ? null : svc.getConfig();
-        DispenseConfig.NamedLocation p = c == null ? null : c.location(HeightSwitch.PLACE);
+    private static boolean overHeightSwitch(DispenseService svc, double x, double y) {
+        DispenseConfig c = svc.getConfig();
+        DispenseConfig.NamedLocation p = c.location(HeightSwitch.PLACE);
         return p != null && Math.hypot(x - p.x, y - p.y) <= c.outputZones.heightSwitchRadiusMm;
     }
 
     /** N1 at most 0.5 mm below a probed surface under it (it may touch: the by-hand probe); NaN: none known there. */
-    private double n1Floor(double x, double y) {
-        double s = surfaceUnder(x, y);
+    private static double n1Floor(DispenseService svc, double x, double y) {
+        double s = surfaceUnder(svc, x, y);
         return Double.isFinite(s) ? s - N1_BELOW_SURFACE_MM : Double.NaN;
     }
 
     /**
      * The needle with its tip landing at (x, y): with its frame current (anchored and touched off since the last needle
-     * change), not below the surface there (needle contact = surface + offset) nor its I4 floor; without, not below its
-     * safe zone (also with the engine gone).
+     * change) and where its tip lands checked, not below the surface there (needle contact = surface + offset) nor its
+     * I4 floor; without, not below its safe zone, anywhere (over the switch too: the old tip's landing, or 0, 0 after
+     * N2's head offset changed, puts (x, y) up to 15 mm off for a bent tip).
      */
-    private double needleFloor(HeadMountable needle, double x, double y) {
-        DispenseService svc = ctx.svcOrNull();
-        if (svc == null) {
-            return safeLow(needle);
+    private static double needleFloor(DispenseService svc, HeadMountable needle, double x, double y)
+            throws ApiException {
+        if (!needleFrameCurrent(svc) || !svc.isNeedleXyChecked()) {
+            double low = safeLow(needle);
+            if (Double.isNaN(low)) { // no lower safe zone on Z: no floor at all
+                throw ApiException.refused("the needle has no floor, so no press lowers it (raising N1 lowers it too: "
+                        + "they share one Z): Z has no lower safe zone in OpenPnP (the Z axis's Safe Zone), and its "
+                        + "floor is " + needleFloorWhy(svc));
+            }
+            return low;
         }
         DispenseConfig c = svc.getConfig();
-        if (!needleFrameCurrent(svc)) {
-            return safeLow(needle);
-        }
         double floor = c.needleFloorZMm();
-        double s = surfaceUnder(x, y);
+        double s = surfaceUnder(svc, x, y);
         if (Double.isFinite(s)) {
             floor = Double.isFinite(floor) ? Math.max(floor, s + c.needleZOffsetMm) : s + c.needleZOffsetMm;
         }
         return floor;
     }
 
-    private String needleFloorWhy() {
-        DispenseService svc = ctx.svcOrNull();
-        return svc != null && needleFrameCurrent(svc) ? "the surface under its tip or under N2, or its I4 floor"
-                : "its safe zone: its Z frame is not set for this needle, or this home's Z check failed";
+    private static String needleFloorWhy(DispenseService svc) {
+        if (!needleFrameCurrent(svc)) {
+            return "its safe zone: its Z frame is not set for this needle, or this home's Z check failed";
+        }
+        String xy = svc.needleXyProblem(); // the engine's sentence: here inside brackets, so without its period
+        return xy == null ? "the surface under its tip or under N2, or its I4 floor"
+                : "its safe zone: " + xy.replaceFirst("\\.$", "");
     }
 
     /**
@@ -469,10 +509,9 @@ final class ControlEndpoints {
     }
 
     /** The highest probed surface under (x, y) (N1-contact Z), NaN where none is known. */
-    private double surfaceUnder(double x, double y) {
-        DispenseService svc = ctx.svcOrNull();
-        DispenseConfig c = svc == null ? null : svc.getConfig();
-        if (c == null || c.surfaces == null) {
+    private static double surfaceUnder(DispenseService svc, double x, double y) {
+        DispenseConfig c = svc.getConfig();
+        if (c.surfaces == null) {
             return Double.NaN;
         }
         double top = Double.NaN;
@@ -491,17 +530,17 @@ final class ControlEndpoints {
         return top;
     }
 
-    /** N1 and the needle (the engine's), else every nozzle of the head (the engine starting or failed). */
-    private List<HeadMountable> nozzles() throws ApiException {
+    /**
+     * N1 and the needle (the engine's), else every nozzle of the head (the engine starting or failed, or one of the
+     * two not found, or one nozzle as both: renamed in OpenPnP).
+     */
+    private List<HeadMountable> nozzles(DispenseService svc) throws ApiException {
         List<HeadMountable> l = new ArrayList<>();
-        DispenseService svc = ctx.svcOrNull();
-        if (svc != null) {
-            if (svc.getProbeNozzle() != null) {
-                l.add(svc.getProbeNozzle());
-            }
-            if (svc.getDispenserNozzle() != null) {
-                l.add(svc.getDispenserNozzle());
-            }
+        HeadMountable n1 = svc == null ? null : svc.getProbeNozzle();
+        HeadMountable n2 = svc == null ? null : svc.getDispenserNozzle();
+        if (n1 != null && n2 != null && n1 != n2) {
+            l.add(n1);
+            l.add(n2);
         }
         if (l.isEmpty()) {
             try {
@@ -517,13 +556,8 @@ final class ControlEndpoints {
         return l;
     }
 
-    private boolean isNeedle(HeadMountable n) {
-        DispenseService svc = ctx.svcOrNull();
-        return svc != null && n == svc.getDispenserNozzle();
-    }
-
-    private String name(HeadMountable n) {
-        return isNeedle(n) ? "the needle" : "N1";
+    private static String name(DispenseService svc, HeadMountable n) {
+        return svc != null && n == svc.getDispenserNozzle() ? "the needle" : n.getName();
     }
 
     /** The bottom of the tool's safe Z zone (OpenPnP's safe Z), NaN if none. */
@@ -548,7 +582,6 @@ final class ControlEndpoints {
 
     /** camera = the head's down-looking camera; n1 = the probe nozzle; needle = the dispenser nozzle (N2). */
     private HeadMountable tool(String tool) throws ApiException {
-        DispenseService svc = ctx.svcOrNull();
         HeadMountable hm = null;
         if ("camera".equals(tool)) {
             try {
@@ -560,10 +593,10 @@ final class ControlEndpoints {
             }
         }
         else if ("n1".equals(tool)) {
-            hm = svc == null ? null : svc.getProbeNozzle();
+            hm = ctx.svc().getProbeNozzle(); // the engine finds N1 and the needle (503 while it is not running)
         }
         else if ("needle".equals(tool)) {
-            hm = svc == null ? null : svc.getDispenserNozzle();
+            hm = ctx.availableSvc().getDispenserNozzle();
         }
         else {
             throw ApiException.badRequest("'tool' is camera, n1 or needle");

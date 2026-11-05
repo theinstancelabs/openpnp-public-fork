@@ -470,6 +470,11 @@ public final class DispenseService {
                     journalSentDisable(m, "a STOP"); // the lines before the failure, its M18 among them maybe, went out
                 }
             };
+            if (machine.isEnabled()) {
+                // BR-92 (review MINOR 1): OpenPnP connected before this engine, and its moves may come before the
+                // catch-up reads M115: until then the idle cut counts, never the last connect's firmware
+                controllerReset.firmwareAtConnect(null, "not read yet: OpenPnP connected before the engine started");
+            }
             machine.addListener(machineListener);
             hook("catch-up");
             catchUpConnect(machine);
@@ -557,14 +562,28 @@ public final class DispenseService {
         return m115;
     }
 
-    /** BR-02: M115, and where it names the host watchdog its M990 report (a trip on record); null without a nozzle. */
+    /**
+     * BR-02: M115, and where it names the host watchdog its M990 report (a trip on record); null without a nozzle.
+     * BR-92: it also says whether the controller's idle timeout switches the screw's motor off (unread: it does).
+     */
     private List<String> watchdogAtConnect(Machine machine) throws Exception {
         if (!(machine instanceof ReferenceMachine) || nozzle == null) {
+            controllerReset.firmwareAtConnect(null, unavailableReason != null ? unavailableReason
+                    : "no dispenser nozzle");
             return null;
         }
-        OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
-        DriverGcodeChannel ch = new DriverGcodeChannel(mapper.getDriver());
-        List<String> m115 = ch.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
+        DriverGcodeChannel ch;
+        List<String> m115;
+        try {
+            OpenPnpRawMapper mapper = new OpenPnpRawMapper((ReferenceMachine) machine, nozzle, cfg.bAxisName);
+            ch = new DriverGcodeChannel(mapper.getDriver());
+            m115 = ch.sendAndCollect(ControllerCommands.CAPABILITY_QUERY, cfg.commandTimeoutMs);
+        }
+        catch (Exception e) {
+            controllerReset.firmwareAtConnect(null, String.valueOf(e.getMessage()));
+            throw e;
+        }
+        controllerReset.firmwareAtConnect(m115, null);
         readWatchdogTripAtConnect(ch, m115);
         return m115;
     }
@@ -712,7 +731,8 @@ public final class DispenseService {
     private void journalReset(ControllerReset.Event e) {
         try {
             String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
-                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code)
+                    e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code) || ControllerReset.EVENT_IDLE_CUT
+                            .equals(e.code) || ControllerReset.EVENT_IDLE_HOLD.equals(e.code)
                     || ControllerReset.EVENT_HOME_STARTED.equals(e.code) ? "INFO" : "WARN";
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
@@ -729,8 +749,9 @@ public final class DispenseService {
 
     /**
      * BR-02: what earlier engines journaled about controller resets and the screw's motor (the newest of each kind),
-     * so a restart keeps the screw count's epoch, an unknown position, the controller's idle clock and BR-97's
-     * levelling reference. Unreadable, it counts as an unread connect: unknown until a home.
+     * so a restart keeps the screw count's epoch, an unknown position, the controller's idle clock (and, BR-92,
+     * whether its firmware cuts the motor when idle) and BR-97's levelling reference. Unreadable, it counts as an
+     * unread connect: unknown until a home.
      */
     private List<ControllerReset.Event> resetHistory(boolean dbExisted) {
         List<ControllerReset.Event> h = new ArrayList<>();
@@ -752,6 +773,7 @@ public final class DispenseService {
                     ControllerReset.EVENT_KNOWN, ControllerReset.EVENT_COUNT_EPOCH, ControllerReset.EVENT_MOTOR_OFF,
                     ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_WATCHDOG_TRIP,
                     ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED,
+                    ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_IDLE_HOLD,
                     ControllerReset.EVENT_HOME_STARTED)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
@@ -1045,9 +1067,10 @@ public final class DispenseService {
     }
 
     /**
-     * Finds the dispenser nozzle. Each field is written once, the reason before a null nozzle: every config update
-     * resolves again, and a transient null made concurrent readers (the status's interlocks, availability) fail with a
-     * NullPointerException or "unavailable (null)".
+     * Finds the dispenser nozzle, never N1, the probe nozzle (BR-94 follow-up review, MAJOR 2: taken for both, the
+     * floors tested N1 twice and the real N2 never). Each field is written once, the reason before a null nozzle: every
+     * config update resolves again, and a transient null made concurrent readers (the status's interlocks,
+     * availability) fail with a NullPointerException or "unavailable (null)".
      */
     private void resolveNozzle() {
         Machine machine = configuration.getMachine();
@@ -1056,10 +1079,14 @@ public final class DispenseService {
         if (!(machine instanceof ReferenceMachine)) {
             why = "machine is not a ReferenceMachine";
         }
+        else if (cfg.nozzle == null) { // a hand edit (PUT /api/config refuses none): the engine starts, the API sets it
+            why = "'nozzle' is not set in the settings";
+        }
         else {
+            Nozzle probe = getProbeNozzle();
             for (Head h : machine.getHeads()) {
                 for (Nozzle n : h.getNozzles()) {
-                    if (cfg.nozzle.equals(n.getId())) {
+                    if (cfg.nozzle.equals(n.getId()) && n != probe) {
                         found = n;
                     }
                 }
@@ -1067,14 +1094,15 @@ public final class DispenseService {
             if (found == null) {
                 for (Head h : machine.getHeads()) {
                     for (Nozzle n : h.getNozzles()) {
-                        if (cfg.nozzle.equals(n.getName())) {
+                        if (cfg.nozzle.equals(n.getName()) && n != probe) {
                             found = n;
                         }
                     }
                 }
             }
             if (found == null) {
-                why = "no dispenser nozzle '" + cfg.nozzle + "' in the machine";
+                why = namesProbeNozzle(cfg.nozzle) ? "the settings' nozzle '" + cfg.nozzle + "' is N1, the probe nozzle"
+                        : "no dispenser nozzle '" + cfg.nozzle + "' in the machine";
             }
         }
         if (found == null) {
@@ -3866,6 +3894,12 @@ public final class DispenseService {
             }
         }
         return null;
+    }
+
+    /** {@code key} (the settings' {@code nozzle}) is N1's id or name: the probe nozzle, never the dispenser. */
+    public boolean namesProbeNozzle(String key) {
+        Nozzle p = getProbeNozzle();
+        return p != null && (key.equals(p.getId()) || key.equals(p.getName()));
     }
 
     /**
@@ -6677,9 +6711,34 @@ public final class DispenseService {
         }
     }
 
+    /** BR-101: the id {@link #startAs} hands to the run its task call makes on this thread, else null (a new id). */
+    private static final ThreadLocal<String> RUN_ID = new ThreadLocal<>();
+
+    /**
+     * BR-101: calls {@code task} (one task method) so that the run it makes takes {@code runId}: the caller labels the
+     * run and names it in its answer before the run can start.
+     */
+    public static <T> T startAs(String runId, Callable<T> task) throws Exception {
+        RUN_ID.set(runId);
+        try {
+            T started = task.call();
+            if (RUN_ID.get() != null) {
+                // every task method makes its run on its caller's thread today; one that does not names no run
+                Logger.warn("BR-101: the task started as run {} made no run on its caller's thread: its answer's runId "
+                        + "names no run", runId);
+            }
+            return started;
+        }
+        finally {
+            RUN_ID.remove();
+        }
+    }
+
     private RunResult newRun(String kind, String planId, String board, long calibrationId, int dots) {
         RunResult r = new RunResult();
-        r.runId = java.util.UUID.randomUUID().toString();
+        String id = RUN_ID.get();
+        RUN_ID.remove(); // one run per task call
+        r.runId = id != null ? id : java.util.UUID.randomUUID().toString();
         r.kind = kind;
         r.planId = planId;
         r.boardName = board;

@@ -15,7 +15,7 @@
  * 80 parts get paste (160 pads), 3 fiducials, the drawing, three packages new or suffixed, nothing that blocks
  * dispensing, PACKAGE_SUFFIXED a note, the attach offer naming ftp.board.xml and FID1, a package row focused from the
  * keyboard outlines its parts;
- * (6) save under a unique name, Use this board: the Board step has it, with its picture (every picture with its size
+ * (6) save under a unique name (Run's "Upload a design…" and the dialog say design), Use this design: the Board step has it, with its picture (every picture with its size
  * and parts), and the main column draws it before planning while the plan of (1) stays; (7) the same file dropped on
  * the drop zone under the same name: "exists", a two-press replace, Esc does nothing while it saves; (8) the import
  * planned at 30°: 160 pads and dots, R pads within 0.01 mm and LED pads within 0.04 mm of (1), copper and silkscreen
@@ -27,7 +27,7 @@
  * light and dark): the empty dialog, and for nano, ftp and mobo the preview, the saved state with its pad-type actions,
  * the Board step with the board chosen (the hero before planning), the board planned on Run and the pad inspector;
  * (15) no JavaScript errors, no native dialogs; (16) the hero draws a plan's dispensed dots on that plan only (another
- * plan starts with none; a stale index breaks nothing).
+ * plan starts with none; a stale index breaks nothing). Before (1): the Board step's list says design, as Start and Designs.
  *
  * Env: IL_BASE or IL_API_URL (the UI, trailing / optional), PLAYWRIGHT_DIR, OUT_DIR (results.json), SHOTS_DIR
  * (default OUT_DIR), IL_KICAD_FIXTURES (default src/test/resources/kicad), BI_SHOTS=0 skips (14).
@@ -179,6 +179,31 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
     await page.evaluate(() => IL.setTheme('light'));
     check('the board flow is loaded (IL.boardFlow, IL.boardImport) and Run calls it (#btn-board-upload in the Board step)',
       await page.evaluate(() => !!(IL.boardFlow && IL.boardImport)) && (await toBoardStep(page), await page.isVisible('#btn-board-upload')));
+    // the Board step's list is the designs list (its failed read says "Could not read the designs", as Start and Designs);
+    // nothing chosen (the session's plan set it): its first line, then (1) chooses ftp.board.xml through the list
+    await page.waitForFunction(() => !IL.run.boardsLoading && !!IL.run.boards, null, { timeout: 15000 }).catch(() => null);
+    const bs0 = await page.evaluate(async () => {
+      const s = document.getElementById('board-select');
+      const w = { label: document.querySelector('label[for="board-select"]').firstChild.textContent, count: document.getElementById('board-count').textContent,
+        groups: Array.from(s.querySelectorAll('optgroup')).map((g) => g.label) };
+      const settle = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 50)));
+      const $ = (id) => document.getElementById(id);
+      IL.run.formDirty = true;
+      IL.run.form.sel = '';
+      IL.render();
+      await settle();
+      Object.assign(w, { first: s.options[0] ? s.options[0].textContent : null, hint: $('board-hint').textContent, plan: $('plan-why').textContent, fid: $('btn-board-use-fid').title });
+      // "Other board file…" before a path is typed: what to type, not "choose"
+      Object.assign(IL.run.form, { sel: 'other', file: '' });
+      IL.render();
+      await settle();
+      return Object.assign(w, { otherHint: $('board-hint').textContent, otherPlan: $('plan-why').textContent });
+    });
+    check('the Board step\'s list says design, as Start and Designs: "Design", "N designs", the group "Designs", "Choose a design…", "Choose the design to paste.", '
+      + 'Plan and Camera is on FID1 "Choose a design (from the list) first"; Other board file… with no path: "Type the board file\'s path."',
+      bs0.label === 'Design' && /^(\d+ job · )?\d+ designs?$/.test(bs0.count) && bs0.groups.includes('Designs') && !bs0.groups.includes('Board files')
+        && bs0.first === 'Choose a design…' && bs0.hint === 'Choose the design to paste.' && bs0.plan === 'Choose a design first' && bs0.fid === 'Choose a design from the list first'
+        && bs0.otherHint === 'Type the board file\'s path.' && bs0.otherPlan === 'Type the board file first', bs0);
     // run alone (WEBUI_SCRIPTS="board-import", a fresh session): the machine connected and homed (Camera is on FID1
     // reads the camera), and a dispensable 0603 for the plans: webui-sim does both before it in the full run
     if (!(await page.evaluate(() => IL.S.status.machine.enabled))) {
@@ -308,16 +333,20 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
       outlined: document.querySelectorAll('#board-import-preview .pv-l-sel rect').length }));
     check('(5) keyboard: a focused package row outlines its parts on the drawing', kb.focused && kb.outlined > 0, kb);
 
-    // ---- (6) save, Use this board -------------------------------------------------------------------------------------
+    // ---- (6) save, Use this design -----------------------------------------------------------------------------------
     const name6 = 'ftp-kicad-' + TS;
     await saveAs(page, name6);
-    const sv = await page.evaluate(() => ({ saved: document.getElementById('board-import-saved').textContent, toast: document.getElementById('toast').textContent }));
+    const sv = await page.evaluate(() => ({ saved: document.getElementById('board-import-saved').textContent, toast: document.getElementById('toast').textContent,
+      title: document.querySelector('#dlg-board-import h2').textContent.trim(), up: document.getElementById('btn-board-upload').textContent.trim(),
+      use: document.getElementById('btn-board-import-use').textContent.trim(), next: document.querySelector('#board-import-saved .bi-saved__next').textContent }));
     check('(6) saved: "Saved …" and a toast', /^Saved/.test(sv.saved.trim()) && /Saved/.test(sv.toast), sv);
+    check('(6) Run\'s upload says design, as the dialog it opens: "Upload a design…" → "Upload a design", then "Use this design" (the button and the line)',
+      sv.up === 'Upload a design…' && sv.title === 'Upload a design' && sv.use === 'Use this design' && /^Use this design: put the top camera on FID1/.test(sv.next), sv);
     await page.click('#btn-board-import-use');
     await page.waitForSelector('#dlg-board-import', { state: 'detached', timeout: 5000 });
     await page.waitForFunction((n) => new RegExp('/' + n + '/' + n + '\\.board\\.xml$').test(document.getElementById('board-select').value), name6, { timeout: 15000 }).catch(() => {});
     const sel6 = await page.evaluate(() => document.getElementById('board-select').value);
-    check('(6) Use this board: the Board step has it chosen', new RegExp('/' + name6 + '/' + name6 + '\\.board\\.xml$').test(sel6), sel6);
+    check('(6) Use this design: the Board step has it chosen', new RegExp('/' + name6 + '/' + name6 + '\\.board\\.xml$').test(sel6), sel6);
     // the row is rebuilt when the board list reloads after the save (its new pictures decode again, even from the
     // cache): the check is the wait's own answer, not a second read that can land in a rebuild (#18's gate, 11-04)
     const pic6 = await page.waitForFunction(() => { const i = document.querySelector('#board-thumbs button.board-thumb[aria-pressed="true"] img'); return !!(i && i.complete && i.naturalWidth > 0); }, null, { timeout: 15000 })
@@ -466,6 +495,8 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
     await page.waitForSelector('#dlg-board-import[data-state="saved"]', { timeout: 60000 });
     const t10 = await page.textContent('#toast');
     check('(10) attach: a toast says the drawing is used for ftp.board.xml', /drawing is now used for .*ftp\.board\.xml/.test(t10), t10);
+    const w10 = await page.evaluate(() => ({ use: document.getElementById('btn-board-import-use').textContent.trim(), next: document.querySelector('#board-import-saved .bi-saved__next').textContent }));
+    check('(10) attach in Run: "Use this design, then plan it" (the button and the line)', w10.use === 'Use this design' && /^Use this design, then plan it/.test(w10.next), w10);
     await page.click('#btn-board-import-use');
     await page.waitForSelector('#dlg-board-import', { state: 'detached', timeout: 5000 });
     const b10 = await boards(page);

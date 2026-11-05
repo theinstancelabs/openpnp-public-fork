@@ -400,11 +400,13 @@ async function runFirstDots(page, n) {
     // ---- BR-82: the recipe's own lift and the pause after it (the 25G's 3 mm + 0.5 s), then back to the defaults -----
     {
       const prof = async () => (await (await page.request.get(BASE + 'api/status')).json()).dispense.profile;
-      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked. */
+      /** Types v into a profile field key by key; returns its error ('' = taken) and whether Save is locked (both set on
+       *  input); a refused value waits for both. */
       const typeIn = async (id, v, refused) => {
         await page.fill('#' + id, '');
         await page.locator('#' + id).pressSequentially(v);
-        await page.waitForFunction(([i, r]) => document.getElementById(i + '-err').hidden === !r, [id, refused], { timeout: 5000 }).catch(() => {});
+        await page.waitForFunction(([i, r]) => document.getElementById(i + '-err').hidden === !r && (!r || document.getElementById('btn-pf-save').disabled),
+          [id, refused], { timeout: 5000 }).catch(() => {});
         return page.evaluate((i) => { const m = document.getElementById(i + '-err'); return { err: m.hidden ? '' : m.textContent, save: document.getElementById('btn-pf-save').disabled }; }, id);
       };
       const fp0 = (await prof()).fingerprint;
@@ -452,18 +454,45 @@ async function runFirstDots(page, n) {
       r = await typeIn('pf-lift', '3e', true);
       check('profile: a lift that is not a number (“3e”) is refused, never read as blank (Save would clear the saved 3 mm; Save locked)',
         r.err === 'Enter a number or leave it blank.' && r.save, r);
-      await page.fill('#pf-lift', '');
-      await waitText(page, 'pf-diff-t', /lift after a dot 3\.0 mm → the machine’s hop height/, 5000).catch(() => {});
-      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
-      await page.click('#btn-pf-save');
-      const p2 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 0 && s.dispense.profile.liftMm === null, 10000).then((s) => s.dispense.profile, () => null);
-      check('profile: a blank lift is saved as null (the machine’s hop height); the fingerprint is the one before, byte for byte',
-        !!p2 && p2.fingerprint === fp0, { fp0, fp: p2 && p2.fingerprint, liftMm: p2 && p2.liftMm });
       // BR-85: the dots the touch-off does not count after the prime (the 25G's 3) are the recipe's, editable here; not part of a dot
       check('profile: “Dots not counted after the prime” comes after “Pause after the lift” and shows the recipe’s 0 (the SIM’s)', await page.evaluate(() => {
         const e = document.getElementById('pf-skip');
         return !!e && e.value === '0' && !!(document.getElementById('pf-liftpause').compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING);
       }));
+      await page.fill('#pf-lift', '');
+      await waitText(page, 'pf-diff-t', /lift after a dot 3\.0 mm → the machine’s hop height/, 5000).catch(() => {});
+      await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+      // a field refused while that save is still on its way (its PUT held): when the save ends, Save stays locked. IL.act's
+      // end once unlocked its button until the next render locked it again, and a read in between failed the checks below
+      // in the merge queue (#79's group, 11-05 14:51Z)
+      let releasePut = null;
+      const putHeld = new Promise((res) => { releasePut = res; });
+      const holdPut = async (route) => { if (route.request().method() === 'PUT') await putHeld; return route.fallback(); };
+      await page.route('**/api/config', holdPut);
+      await page.click('#btn-pf-save');
+      await page.waitForFunction(() => document.getElementById('btn-pf-save').getAttribute('aria-busy') === 'true', null, { timeout: 5000 }).catch(() => {});
+      await page.fill('#pf-skip', '6');
+      const busy6 = await page.evaluate(() => {
+        const b = document.getElementById('btn-pf-save'), m = document.getElementById('pf-skip-err');
+        window.__pfUnlocked = [];
+        window.__pfObs = new MutationObserver(() => { if (!b.disabled && !m.hidden) window.__pfUnlocked.push(m.textContent); });
+        window.__pfObs.observe(b, { attributes: true, attributeFilter: ['disabled'] });
+        return { busy: b.getAttribute('aria-busy') === 'true', err: m.hidden ? '' : m.textContent };
+      });
+      releasePut();
+      await page.waitForFunction(() => !document.getElementById('btn-pf-save').hasAttribute('aria-busy'), null, { timeout: 10000 }).catch(() => {});
+      await page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));   // the render after it
+      const end6 = await page.evaluate(() => {
+        window.__pfObs.disconnect();
+        const b = document.getElementById('btn-pf-save');
+        return { unlocked: window.__pfUnlocked, busy: b.hasAttribute('aria-busy'), save: b.disabled };
+      });
+      await page.unroute('**/api/config', holdPut);
+      const p2 = await waitStatus(page, (s) => s.dispense.profile.liftPauseMs === 0 && s.dispense.profile.liftMm === null, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: a blank lift is saved as null (the machine’s hop height); the fingerprint is the one before, byte for byte',
+        !!p2 && p2.fingerprint === fp0, { fp0, fp: p2 && p2.fingerprint, liftMm: p2 && p2.liftMm });
+      check('profile: a save that ends while a field shows its error leaves Save locked (never unlocked, not for a frame)',
+        busy6.busy && busy6.err === 'Must be 0 to 5 dots.' && !end6.busy && end6.unlocked.length === 0 && end6.save, { busy6, end6 });
       for (const [v, err] of [['6', 'Must be 0 to 5 dots.'], ['-1', 'Must be 0 to 5 dots.'], ['2.5', 'Must be a whole number.'], ['', 'Enter a number.']]) {
         r = await typeIn('pf-skip', v, true);
         check('profile: “' + v + '” dots not counted is refused at the field, as the engine refuses it (Save locked)', r.err === err && r.save, r);
@@ -790,17 +819,24 @@ async function runFirstDots(page, n) {
       await waitStatus(page, (s) => s.dispense.locations.blank && s.dispense.locations.blank.x === 150, 10000);
       // ---- the places' "Used for" and Scale shots' picker follow #12's paste zones: paste only on the sinks (the waste,
       // the towel, a cup: "cup" or "scale" as a part of the name), the coupons and the probed blank; every other place is
-      // moves and Z only. Extra places stubbed into the status (nothing is saved); "backup" and "cupboard" are not cups
+      // moves and Z only. Extra places stubbed into the status (nothing is saved); "backup" and "cupboard" are not cups.
+      // A place with its own probed surface ("blank2") takes a touch-off's or dot ladder's dots on it (OutputZones: a
+      // program's own surface; the board's too), unless the surface cannot be fitted ("blank3")
       {
         const coupon = await page.evaluate(() => (((IL.S.config || {}).padCalibration || {}).couponPlaces || ['coupon1'])[0]);
-        const extra = ['backup', 'cup1', 'cupboard', 'scale-2', 'towel', coupon, 'park'];
-        let noWaste = false;
+        const extra = ['backup', 'cup1', 'cupboard', 'scale-2', 'towel', coupon, 'park', 'blank2', 'blank3', 'board'];
+        const flat = { points: [{ x: 0, y: 0, z: 10 }, { x: 10, y: 0, z: 10 }, { x: 0, y: 10, z: 10 }], setAtMs: Date.now(), note: null, boundToBoard: false,
+          simulated: true, plane: { a: 10, b: 0, c: 0, slopeMmPerMm: 0, maxResidualMm: 0, minZ: 10, maxZ: 10, residuals: [0, 0, 0] } };
+        const blank3 = { points: [{ x: 0, y: 0, z: 10 }], setAtMs: Date.now(), note: null, boundToBoard: false, simulated: true, plane: null, error: 'at least 3 points' };
+        let noWaste = false, noneForShots = false;
         await page.route('**/api/status', async (route) => {
           try {
             const res = await route.fetch();
             const body = await res.json();
             extra.forEach((n, i) => { body.dispense.locations[n] = { x: 200 + 8 * i, y: 200, z: 10 }; });
             if (noWaste) delete body.dispense.locations[body.dispense.wasteLocationName || 'waste'];
+            if (noneForShots) [body.dispense.blankLocationName || 'blank', coupon].forEach((n) => delete body.dispense.locations[n]);
+            body.dispense.surfaces = Object.assign({ board: flat }, body.dispense.surfaces, { blank2: flat, blank3 });
             await route.fulfill({ response: res, json: body });
           } catch (e) { /* unrouted while it was being answered */ }
         });
@@ -809,8 +845,8 @@ async function runFirstDots(page, n) {
         extra, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
         const wantUse = { waste: 'prime, test dot, pressure on', blank: 'touch-off, dot ladder', cup1: 'scale shots', 'scale-2': 'scale shots',
           towel: 'drool while pressure is on', [coupon]: 'pad calibration coupon', backup: 'moves and Z only: no paste', cupboard: 'moves and Z only: no paste',
-          park: 'moves and Z only: no paste' };
-        check('places: "Used for" follows the paste zones of #12 (sinks, coupons, the blank; the others moves and Z only)', !!uses
+          park: 'moves and Z only: no paste', blank2: 'touch-off, dot ladder', blank3: 'moves and Z only: no paste', board: 'touch-off, dot ladder' };
+        check('places: "Used for" follows the paste zones of #12 (sinks, coupons, the blank, a place\'s own fitted surface; the others moves and Z only)', !!uses
           && Object.entries(wantUse).every(([n, u]) => uses[n] === u), { uses, wantUse });
         await page.evaluate(() => IL.go('#calibrate/shots'));
         const shots = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
@@ -830,6 +866,22 @@ async function runFirstDots(page, n) {
         // a chosen place: no "No cup place yet", and its own row in the list (the re-check's NIT on a7919144f0: a place row never shown passed)
         check('Scale shots with the waste chosen: no "No cup place yet", the list has the waste\'s place row', !!shots2 && !shots2.banner
           && /Place “waste”/.test(shots2.pre), shots2 && { banner: shots2.banner, pre: shots2.pre });
+        // the waste was the picker's own choice for want of a cup: a cup added later takes over; a place the operator chose
+        // stays when another cup comes, also the very place the picker had chosen (#51's re-check NIT: the preselect stuck)
+        const chosenOnce = (cup) => page.waitForFunction((c) => { const sel = document.getElementById('shots-place');
+          return sel && [...sel.options].some((o) => o.value === c) ? sel.value : null; }, cup, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        extra.push('cup1');
+        const cupLater = await chosenOnce('cup1');
+        check('Scale shots: a cup place added after the waste was chosen for want of one is chosen', cupLater === 'cup1', cupLater);
+        await page.selectOption('#shots-place', 'towel');
+        await page.selectOption('#shots-place', 'cup1');
+        extra.push('cup0');   // sorts first: the cup the picker would choose now
+        const kept = [await chosenOnce('cup0')];
+        extra.push('cup2');   // and once more: the kept choice did not become the picker's own
+        kept.push(await chosenOnce('cup2'));
+        check('Scale shots: the place the operator chose stays as cup places are added, also the one the picker had chosen',
+          kept.every((v) => v === 'cup1'), kept);
+        for (const n of ['cup0', 'cup1', 'cup2']) extra.splice(extra.indexOf(n), 1);
         // no sink at all (no cup, waste or towel): nothing is chosen, never the blank or a coupon by default; Run asks for a cup
         // place (the re-check's MINOR on e25fbf864a: the engine takes shots on the blank, 30 whole turns)
         extra.splice(extra.indexOf('towel'), 1);
@@ -845,20 +897,29 @@ async function runFirstDots(page, n) {
         // and it says why: no cup place (the banner, Run's reason), with no place of the blank in its list (the re-check's MINOR on 7e8eb5a59d)
         check('Scale shots with no sink place: "No cup place yet" and Run asks for a cup place; its list names no place (not the blank)', !!shots3
           && shots3.banner && /cup place/.test(shots3.why) && !/Place “blank”/.test(shots3.pre), shots3 && { why: shots3.why, pre: shots3.pre, banner: shots3.banner });
+        // places, but none the engine takes shots on (no sink, blank or coupon): the picker names what is missing (#51's NIT)
+        noneForShots = true;
+        const shots4 = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
+          return sel && ![...sel.options].some((o) => o.value === 'blank') ? [...sel.options].map((o) => [o.value, o.textContent]) : null; },
+        null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        check('Scale shots with places but none it takes shots on: its one option says "No cup place yet", not "No places yet"',
+          JSON.stringify(shots4) === JSON.stringify([['', 'No cup place yet']]), shots4);
         await page.unroute('**/api/status');
       }
       await nav(page, 'calibrate');
       await page.evaluate(() => IL.go('#calibrate/touch-off'));
       await page.waitForSelector('#to-pitch', { state: 'visible', timeout: 15000 });
-      // the card chose the only place there was before (the waste): the operator picks the blank
+      // the card's own pick moves to the blank once it is a place; the operator picks it too, as a person would
       await page.waitForFunction(() => [...document.getElementById('to-place').options].some((o) => o.value === 'blank'), null, { timeout: 10000 });
       await page.selectOption('#to-place', 'blank');
       const pf = await page.evaluate(() => ({ ph: document.getElementById('to-pitch').placeholder, unit: document.querySelector('#to-pitch-wrap .unit').textContent,
         hint: document.querySelector('#to-pitch-wrap .field__h').textContent }));
       check('touch-off: a Pitch field (mm, placeholder 1.6, "at least the dot + 0.4 mm")', pf.ph === '1.6' && pf.unit === 'mm' && pf.hint === 'at least the dot + 0.4 mm', pf);
       // the place chosen shows at the next render (the old line already ended "1.6 mm apart")
-      await waitText(page, 'to-plan', /on “blank” at gaps .* · 1\.6 mm apart$/, 10000).catch(() => {});
-      check('touch-off plan line: "· 1.6 mm apart" (the engine\'s pitch for a half-turn dot)', /^6 dots on “blank” at gaps 0\.125, .* · one profile dot each · 1\.6 mm apart$/.test(await textOf(page, 'to-plan')),
+      await waitText(page, 'to-plan', /on “blank”.* · 1\.6 mm apart$/, 10000).catch(() => {});
+      // BR-89: the run lays the ladder's 6, then 2 check dots at its first counted dot's gap (here the first dot's) after an empty space
+      check('touch-off plan line: the 6 dots and the 2 check dots after them (8), "· 1.6 mm apart" (the engine\'s pitch for a half-turn dot)',
+        /^8 dots on “blank”: 6 at gaps 0\.125, .*, then 2 check dots at 0\.125 mm after an empty space · one profile dot each · 1\.6 mm apart$/.test(await textOf(page, 'to-plan')),
         await textOf(page, 'to-plan'));
       // 1.0 mm leaves no room between half-turn dots: the engine's 400 is the field's error, and nothing moves
       await page.fill('#to-pitch', '1.0');
@@ -914,6 +975,25 @@ async function runFirstDots(page, n) {
       await press2(page, '#btn-to-run');
       await waitText(page, 'toast', /^Touch-off started, dots 1\.6 mm apart: /, 10000).catch(() => {});
       check('touch-off started: the toast names the 202\'s pitch', /^Touch-off started, dots 1\.6 mm apart: the result is shown only\.$/.test(await textOf(page, 'toast')), await textOf(page, 'toast'));
+      // every "head | line" the page renders for the touch-off that started after t0, until it ends (one render draws both)
+      const liveOf = async (t0) => {
+        await page.evaluate(() => { window.__toLive = []; });
+        return page.waitForFunction((t) => {
+          const seen = window.__toLive;
+          const r = IL.S.status && IL.S.status.run;
+          const h = document.querySelector('#to-live .cal-live__h'), d = document.querySelector('#to-live .cal-live__d');
+          const x = h && /^Running · dot \d+ of \d+/.test(h.textContent) ? h.textContent.replace(/ · [\d:]+$/, '') + ' | ' + (d ? d.textContent : '') : null;
+          if (x && seen[seen.length - 1] !== x) seen.push(x);
+          return r && r.label === 'needle touch-off' && r.startedAtMs > t && !r.running ? seen : null;
+        }, t0, { timeout: 240000, polling: 100 }).then((h) => h.jsonValue(), () => null);
+      };
+      // BR-89: after the ladder's 6 the run lays its 2 check dots at 0.125 mm: while they go down the live line names them,
+      // never the ladder's last gap, and once all 8 are laid it says only what the run does (the camera's look after)
+      const liveLines = await liveOf(t9);
+      const ll = liveLines || [];
+      check('touch-off run: the live line names the 2 check dots at their gap (0.125 mm) while they go down, never the ladder\'s last gap; once all 8 are laid only what the run does',
+        ll.some((x) => /^Running · dot [78] of 8 \| check dot at gap 0\.125 mm · /.test(x)) && !ll.some((x) => /dot [78] of 8 \| gap /.test(x))
+        && ll.some((x) => /after images/.test(x)) && ll.filter((x) => /after images/.test(x)).every((x) => /\| after images$/.test(x)), ll);
       const tr = await waitStatus(page, (x) => x.run && x.run.label === 'needle touch-off' && !x.run.running && x.run.startedAtMs > t9, 240000);
       check('touch-off run: OK without a contact (no paste in this SIM scene), nothing recorded', tr.run.status === 'OK'
         && /^no dot at the largest gap: /.test(tr.run.message || '') && (await touchOffs()).length === rows0, { status: tr.run.status, message: tr.run.message });
@@ -923,6 +1003,27 @@ async function runFirstDots(page, n) {
       check('touch-off that recorded nothing: "Finished hh:mm · no contact found: nothing recorded" with the run\'s message word for word',
         nc.shown && /^Finished \d\d:\d\d · no contact found: nothing recorded$/.test(nc.head) && nc.detail === tr.run.message, nc);
       await page.screenshot({ path: path.join(OUT, 'touchoff-nothing-recorded.png') });
+      // the page's request belongs to its own run even when the page never draws it (the operator on another screen for the
+      // whole run); a touch-off another tab or client starts next is not this page's: its live line says only what the run
+      // does, never the gaps or check dots of the page's request (binding it only while Calibrate draws the run would)
+      await page.fill('#to-steps', '3');
+      const t10 = Date.now() + (await page.evaluate(() => IL.S.skewMs));
+      await press2(page, '#btn-to-run');
+      await page.evaluate(() => IL.go('#records'));
+      // back only once the page's own status shows that run ended and the machine free: Calibrate never draws it running
+      // (where a binding made only while drawing would still take it), and the next POST finds the engine idle
+      const unseen = await page.waitForFunction((t) => { const st = IL.S.status, r = st && st.run;
+        return r && r.label === 'needle touch-off' && r.startedAtMs > t && !r.running && !(st.machine && st.machine.busy) ? r : null; },
+      t10, { timeout: 240000, polling: 100 }).then((h) => h.jsonValue(), () => null);
+      await page.evaluate(() => IL.go('#calibrate/touch-off'));
+      await page.waitForSelector('#to-plan', { state: 'visible', timeout: 15000 });
+      const t11 = Date.now() + (await page.evaluate(() => IL.S.skewMs));
+      const other = await page.request.post(BASE + 'api/calibrations/touch-off', { data: { startGapMm: 0.3, stepMm: 0.05, steps: 3, locationName: 'blank' } });
+      const otherLines = other.status() === 202 ? await liveOf(t11) : null;
+      check('touch-off: after one of this page\'s that it never drew (on Records the whole run), another client\'s touch-off shows only its phase, never this page\'s gaps or check dots',
+        !!unseen && unseen.status === 'OK' && other.status() === 202 && !!otherLines && otherLines.length > 0 && otherLines.every((x) => !/\| (gap|check dot) /.test(x)),
+        { unseen: unseen && unseen.status, status: other.status(), otherLines });
+      await page.fill('#to-steps', '6');
       // the result table of a recorded touch-off (a row added to the answer: this scene draws no paste): the dots after
       // the contact that the camera could not measure read "not measured" with the engine's note, "no dot" only for none
       const fake = { id: 990001, created_at: tr.run.startedAtMs - 120000, method: 'dot-ladder-touch-off (not applied)', z_offset_mm: -2.5275, previous_offset_mm: -2.59, operator: null,

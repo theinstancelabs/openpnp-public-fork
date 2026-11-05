@@ -576,7 +576,7 @@ Never `/dev/ttyACM*`, `/dev/serial/*`, `/dev/video*` or a real-mode OpenPnP.
   extra blocker `I4-z` (`Z check`, fix: Needle Z frame), never the surface item (Register board would not clear them). Recovery's home step is done without a home unless N1 is low. The run confirm
   shows `#run-confirm-home`; the Run step's phases add Home and Z check rows from `run.detail`.
 - **Board step:** `Board top Z (approximate, ±1 mm)`, prefilled when empty (`#board-z-note` says from where), the
-  plan's frame check under it; copy names Register board. Another board chosen there (picked, or "Use this board"
+  plan's frame check under it; copy names Register board. Another board chosen there (picked, or "Use this design"
   after an upload): the main column shows that board before planning (`R.pending` keeps the plan, which the other
   steps still show) until Plan.
 - **Setup › Probe the blank** (`probe-blank` view): automatic (`ol.phases#blank-phases`, `table#blank-targets`,

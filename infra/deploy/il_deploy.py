@@ -372,7 +372,14 @@ def released_value(action, hhmm, note=None, prev=None):
     text = base + (f"; {_safe_note(note)})" if note else ")")
     rest = " ".join((prev or "").split())
     m = _INFRA_STAMP.match(rest)
-    rest = rest[m.end():] if m else _NOBODY.sub("", rest, count=1).strip(" ;,.:-")
+    if m:
+        rest = rest[m.end():]
+    else:
+        lead, n = re.match(r"[*_]*", rest).group(), _NOBODY.match(rest)
+        rest = rest[n.end():] if n else rest
+        if n and lead and not n.group().endswith(("*", "_")):  # '**nobody since …** (…)': its closing '**' goes too
+            rest = rest.replace(lead[::-1], "", 1)
+        rest = rest.strip(" ;,.:-")
     if rest:
         text += "; earlier: " + rest
     return text if parse_holder("- **Holder:** " + text).idle else base + ")"
@@ -1435,7 +1442,8 @@ def stop_sequence(api, wait_s, stop_timeout, poll, clock):
 # watchdog trip always are (a rollback's old database would lose them).
 ENGINE_DB = os.path.join("instancelabs", "dispense.db")
 ROUTINE_JOURNAL = ("SCREW_MOTOR_OFF", "SCREW_MOTION", "SCREW_COUNT_EPOCH", "HOST_WATCHDOG_ARMED", "POSITION_KNOWN",
-                   "RESET_JOURNAL", "HOME_STARTED")  # HOME_STARTED: BR-97, every home's start, the health check's too
+                   "RESET_JOURNAL", "HOME_STARTED",  # HOME_STARTED: BR-97, every home's start, the health check's too
+                   "SCREW_IDLE_CUT", "SCREW_IDLE_HOLD")  # SCREW_IDLE_*: BR-92, the holdB marker read at every connect
 JOURNAL_SETTLE_S, JOURNAL_SETTLE_MAX_S = 1.0, 5.0  # the engine writes its journal on a thread, a moment later
 ENGINE_DB_TIMEOUT_S = 5.0  # a database another writer holds locked: give up (compared by bytes), never wait forever
 
@@ -2336,7 +2344,7 @@ class Deployer:
             return 1, note
         lost = self._link_lost_now(closed=True)
         if lost:  # #53's planned stop answers 200 on a lost link; the service stop would clear it
-            return self.not_idle([lost]), f"{lost}; OpenPnP left running, nothing deployed"
+            return self.not_idle([lost]), f"{lost}; OpenPnP left running, nothing changed"
         self.svc.stop()
         self.record("service-stop")
         end = self.clock.monotonic() + 15
@@ -2352,19 +2360,19 @@ class Deployer:
             self.clock.sleep(self.cfg.poll_interval)
 
     def stop_after_failure(self):
-        """STOP, then stop the service. False, with OpenPnP left running, unless the STOP was confirmed or the API
-        is gone: SIGTERM sends no STOP and leaves the outputs as they are."""
+        """STOP, then stop the service: (True, None). (False, why), with OpenPnP left running, unless the STOP was
+        confirmed or the API is gone: SIGTERM sends no STOP and leaves the outputs as they are."""
         ok, detail = self.stop_machine()
         self.record("stop", ok=ok, detail=detail)
         if not ok:
-            return False
+            return False, f"its STOP was not confirmed ({detail})"
         lost = self._link_lost_now(closed=False)
         if lost:  # BR-93: the restart would clear it, and the recovery would Start and home a build on it
             self.record("link-lost", detail=lost)
-            return False
+            return False, lost
         self.svc.stop()
         self.record("service-stop")
-        return True
+        return True, None
 
     def restore_running(self, was_running):
         if not was_running and self.svc.is_active():
@@ -3133,8 +3141,9 @@ class Deployer:
             self.state_line(f"{tag} installed but NOT verified: its health check did not finish ({failure}); "
                             f"OpenPnP left running, a person must check the machine{back}.")
             return 5, note
-        if not self.stop_after_failure():
-            note = f"{tag} failed its health check ({failure}) and OpenPnP could not be stopped safely; left alone"
+        stopped, why = self.stop_after_failure()
+        if not stopped:
+            note = f"{tag} failed its health check ({failure}); OpenPnP left running: {why}"
             self.set_hold(note)
             self.state_line(f"{tag} installed but NOT verified: {note}; a person must check the machine{back}.")
             return 5, note
@@ -3280,7 +3289,8 @@ class Deployer:
             return "OpenPnP left running (the Holder is no longer il_deploy's)"
         if rep["kind"] == "link-lost":
             return "OpenPnP left running with its lost controller link showing (BR-93)"
-        return "OpenPnP stopped" if self.stop_after_failure() else "OpenPnP could not be stopped safely, left alone"
+        stopped, why = self.stop_after_failure()
+        return "OpenPnP stopped" if stopped else f"OpenPnP left running: {why}"
 
     # --- state snapshots -------------------------------------------------------------------------
     def _snapname(self, label):

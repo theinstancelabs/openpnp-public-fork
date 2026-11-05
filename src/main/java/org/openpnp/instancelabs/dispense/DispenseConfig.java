@@ -894,6 +894,9 @@ public class DispenseConfig {
     /** Basic sanity checks; returns a list of problems (empty if OK). */
     public java.util.List<String> validate() {
         java.util.List<String> p = new java.util.ArrayList<>();
+        if (nozzle == null) { // the engine finds its needle by it: none failed it (a 500, and at its next start)
+            p.add("nozzle must be the dispenser nozzle's id or name in OpenPnP");
+        }
         // Pump and valve G-code: constants (ControllerCommands), nothing to validate here.
         // Z geometry (review finding: hop/travel values could move a nozzle down on the see-saw).
         // Machine-dependent bounds (travel Z inside the Z axis safe zone, hop <= travel) are checked

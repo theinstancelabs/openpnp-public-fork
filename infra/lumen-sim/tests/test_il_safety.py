@@ -102,10 +102,47 @@ class Settings(unittest.TestCase):
         with within(self, 5):
             b = il()
             b.write("M997\n")
+            b.run(0.05)
+            self.assertEqual(b.sim.take_transport_actions(), [])  # 0.1 s for USB to send what was due
+            self.assertEqual(b.sim.next_event_time(), 0.1)  # then the reset into DFU: the runner wakes for it
             b.run(0.1)
             self.assertEqual(b.sim.state(b.t)["halt_reason"], "DFU")
             self.assertEqual(b.sim.take_transport_actions(), [{"action": "disconnect", "down_s": None}])
             self.assertEqual(Bench().send("M997").lines, ['echo:Unknown command: "M997"', "ok"])
+
+    def test_m997_switches_every_output_off_and_lets_every_stepper_go_before_dfu(self):
+        """flashFirmware() (dfu_bootloader.cpp): planner.quick_stop(), il_outputs_off() (valve, pump, FAN1, FAN0),
+        disable_all_steppers() (a released Z drops), the echo, then the DFU bootloader."""
+        with within(self, 5):
+            b = il()
+            b.send("G28")
+            b.send("M17")  # A and B too: G28 energises X, Y and Z only
+            for p in (3, 2, 1, 0):
+                b.send("M106 P%d S255" % p)
+            b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)
+            st = b.sim.state(b.t)
+            self.assertEqual(st["enabled"], dict.fromkeys("XYZAB", True))
+            z = st["head"]["physical"]["Z"]
+            b.write("M997\n")
+            b.run(0.1)
+            st = b.sim.state(b.t)
+            self.assertEqual(st["halt_reason"], "DFU")
+            self.assertEqual(st["fans"], [0, 0, 0, 0])
+            self.assertEqual(st["enabled"], dict.fromkeys("XYZAB", False))
+            self.assertAlmostEqual(st["head"]["physical"]["Z"], z - 0.4, places=6)
+            self.assertIn("echo:M997: entering STM32 DFU bootloader (0483:df11)", [l for _, l in b.rx])
+
+    def test_m997_stops_a_move_where_the_head_is(self):
+        """planner.quick_stop() first: the move under way ends at once, short of its end."""
+        with within(self, 5):
+            b = il()
+            b.send("G1 X100 F600")  # acked when planned: M997 runs while it moves
+            b.run(5.0)
+            x = b.sim.state(b.t)["head"]["physical"]["X"]
+            b.write("M997\n")
+            b.run(3.0)
+            self.assertLess(x, 99)
+            self.assertAlmostEqual(b.sim.state(b.t)["head"]["physical"]["X"], x, places=6)
 
     def test_boot_report_with_160_steps_on_z(self):
         b = il()
