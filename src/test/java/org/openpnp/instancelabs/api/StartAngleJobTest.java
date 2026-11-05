@@ -222,7 +222,8 @@ public class StartAngleJobTest {
 
     /**
      * Process 11-04 16:4x: halves take at least 6 pairs. With 4 the error at each half is so uncertain that the measure
-     * answers "none" 70 % of the time (the honest 95 % coverage the small-n factors give): dots and time for nothing.
+     * answers "none" 70 % of the time at a 0.47 ripple (90 % at 0.3), with the honest 95 % coverage the small-n
+     * factors give: dots and time for nothing.
      */
     @Test
     public void halvesNeedSixPairsAtLeast() throws Exception {
