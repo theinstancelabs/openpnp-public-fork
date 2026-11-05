@@ -5,6 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.function.Consumer;
 
 import org.junit.jupiter.api.Test;
@@ -53,7 +56,7 @@ public class BedModelTest {
         refused("reserved", j -> obj(j, 1).addProperty("id", "bed"));
         refused("state", j -> obj(j, 1).addProperty("state", "gone"));
         refused("marginMm", j -> obj(j, 1).remove("marginMm"));
-        refused("measured.top", j -> obj(j, 1).getAsJsonObject("measured").add("top", JsonNull.INSTANCE));
+        refused("measured.top", j -> obj(j, 1).getAsJsonObject("measured").remove("top"));
         refused("how", j -> obj(j, 1).getAsJsonObject("measured").getAsJsonObject("top").addProperty("how", " "));
         refused("3 points", j -> plane(j).add("points", new JsonParser().parse("[[60,120,-3],[300,120,-2.96]]")));
         refused("on one line", j -> plane(j).add("points", new JsonParser().parse(
@@ -81,6 +84,63 @@ public class BedModelTest {
         assertNotNull(BedModel.parse(ok));
     }
 
+    /** A file the loaders refuse: what is wrong, the change to the fixture that makes it, words of the refusal. */
+    static final class Bad {
+        final String what, says;
+        final Consumer<JsonObject> change;
+
+        Bad(String what, Consumer<JsonObject> change, String says) {
+            this.what = what;
+            this.change = change;
+            this.says = says;
+        }
+    }
+
+    /**
+     * The bad files, in one list so lumen-sim's loader can mirror them (Infra): every string an exact JSON string (no
+     * trimming, no number taken as text) and null nowhere, a key given a value or left out (design §2 "Strings and
+     * null", 11-05).
+     */
+    static final List<Bad> BAD_FILES = Arrays.asList(
+            new Bad("an id with a trailing space", j -> obj(j, 0).addProperty("id", "holder-left "),
+                    "the id 'holder-left ' must be"),
+            new Bad("an id with a newline", j -> obj(j, 0).addProperty("id", "holder-left\n"),
+                    "the id 'holder-left\n' must be"),
+            new Bad("an id that is a number", j -> obj(j, 0).addProperty("id", 3), "objects[0].id is required (text)"),
+            new Bad("a kind with a leading space", j -> obj(j, 2).addProperty("kind", " movable"),
+                    "kind is fixed or movable"),
+            new Bad("a state with a newline", j -> obj(j, 0).addProperty("state", "measured\n"),
+                    "state is measured, added, moved or removed"),
+            new Bad("a name that is a number", j -> obj(j, 0).addProperty("name", 3),
+                    "objects[0] (holder-left).name is required (text)"),
+            new Bad("a how that is a number", j -> obj(j, 0).getAsJsonObject("measured").getAsJsonObject("top")
+                    .addProperty("how", 7), "objects[0] (holder-left).measured.top.how must say how"),
+            new Bad("bottomZ null beside aboveTipMm", j -> layer(j, 1, 1).add("bottomZ", JsonNull.INSTANCE),
+                    "tools[1].layers[1].bottomZ is null"),
+            new Bad("topZ null", j -> obj(j, 0).add("topZ", JsonNull.INSTANCE), "objects[0].topZ is null"),
+            new Bad("restRaw null", j -> j.getAsJsonObject("seesaw").add("restRaw", JsonNull.INSTANCE),
+                    "seesaw.restRaw is null"));
+
+    /** Each of {@link #BAD_FILES} is refused with its own words; every case is run, the wrong ones listed together. */
+    @Test
+    public void theBadFilesAreRefused() throws Exception {
+        List<String> wrong = new ArrayList<>();
+        for (Bad b : BAD_FILES) {
+            JsonObject j = BedFixture.json();
+            b.change.accept(j);
+            try {
+                BedModel.parse(j);
+                wrong.add(b.what + ": loaded");
+            }
+            catch (IllegalArgumentException e) {
+                if (!e.getMessage().contains(b.says)) {
+                    wrong.add(b.what + ": '" + b.says + "' not in: " + e.getMessage());
+                }
+            }
+        }
+        assertEquals("", String.join("\n", wrong));
+    }
+
     /** U2: N1 and the needle below, in and above their knees, on the tilted plane, each at its own tip. */
     @Test
     public void theSeeSawMaps() throws Exception {
@@ -103,7 +163,7 @@ public class BedModelTest {
         assertEquals(1.1 * (10 - rc1), BedModel.parse(j).tipZ(BedModel.parse(j).tool("n1"), 10.0, HX, HY), 1e-9);
     }
 
-    /** Unknown inputs are the worst case, never assumed: a null knee or raw Z puts the tip at its lowest end stop. */
+    /** Unknown inputs are the worst case, never assumed: no knee or raw Z puts the tip at its lowest end stop. */
     @Test
     public void unknownInputsAreTheWorstCase() throws Exception {
         double rc1 = BedFixture.rc(100, 120), rc2 = BedFixture.rc(149.469, 107.984);
@@ -111,12 +171,12 @@ public class BedModelTest {
         assertEquals(0 - rc1, m.tipZ(m.tool("n1"), null, HX, HY), 1e-9, "raw unknown: N1 at end stop 0");
         assertEquals(64.875 - rc2 - 63, m.tipZ(m.tool("needle"), null, HX, HY), 1e-9, "raw unknown: needle at 63");
         JsonObject j = BedFixture.json();
-        j.getAsJsonObject("seesaw").getAsJsonObject("n1").add("kneeRaw", JsonNull.INSTANCE);
-        j.getAsJsonObject("seesaw").getAsJsonObject("needle").add("kneeRaw", JsonNull.INSTANCE);
+        j.getAsJsonObject("seesaw").getAsJsonObject("n1").remove("kneeRaw");
+        j.getAsJsonObject("seesaw").getAsJsonObject("needle").remove("kneeRaw");
         BedModel k = BedModel.parse(j);
         assertEquals(0 - rc1, k.tipZ(k.tool("n1"), 31.5, HX, HY), 1e-9, "no knee: N1 at its lowest end stop");
         assertEquals(64.875 - rc2 - 63, k.tipZ(k.tool("needle"), 31.5, HX, HY), 1e-9);
-        j.getAsJsonObject("seesaw").getAsJsonObject("K").add("raw", JsonNull.INSTANCE);
+        j.getAsJsonObject("seesaw").getAsJsonObject("K").remove("raw");
         BedModel noK = BedModel.parse(j);
         assertEquals(Double.NEGATIVE_INFINITY, noK.tipZ(noK.tool("needle"), 31.5, HX, HY), 0, "no K: anywhere");
     }

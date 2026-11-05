@@ -5,7 +5,8 @@
     "Plane (guess): bed at N1 raw ~-3.0, below N1's reach (the waste found no seal down to raw 0.5): N1 at raw 0 hangs ~3.1 mm above the bare bed.",
     "With it the blanks' N1 contact ~5.3 gives their top ~8.3 and the needle's contact ~59.5 (K 64.875 - 5.35), the tile's ~10.7 a top ~13.6.",
     "The homing corner: N1's tip at raw 0 at head (0, 0) is (-24.178, -63.91), outside the bed outline and 3.1 mm above the plane there.",
-    "tipEnd of the needle is the SIM's N2 head offset (25.291, -75.926); the real 25G's end is camera + (18.93, -71.0)."
+    "tipEnd of the needle is the SIM's N2 head offset (25.291, -75.926); the real 25G's end is camera + (18.93, -71.0).",
+    "No key is null (design section 2, 11-05): a value not known is left out (the black blank's topZ, the see-saw's restRaw)."
   ],
   "schema": 1,
   "version": 1,
@@ -23,12 +24,12 @@
   },
   "objects": [
     {"id": "holder-left", "name": "the nozzle-tip holder (left)", "kind": "fixed", "role": "fixture", "note": "place and top (guess)",
-     "outline": {"box": [10, 95, 30, 115]}, "topZ": 14.0, "marginMm": 1.0, "noPaste": false, "surface": null, "touchable": false,
+     "outline": {"box": [10, 95, 30, 115]}, "topZ": 14.0, "marginMm": 1.0, "noPaste": false, "touchable": false,
      "measured": {"xy": {"how": "camera-edges", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
                   "top": {"how": "n1-touch", "by": "fixture", "atMs": 0, "errMm": 0.05, "rawZ": 10.99, "homeAtMs": 0, "evidence": "event:1"}},
      "state": "measured", "invalidatedBy": ["moved", "touched"]},
     {"id": "height-switch", "name": "the needle switch", "kind": "fixed", "role": "switch", "note": "place and top (guess); r 5 as BR-94's zone",
-     "outline": {"circle": [65, 25, 5]}, "topZ": 12.0, "marginMm": 1.0, "noPaste": true, "surface": null, "touchable": true,
+     "outline": {"circle": [65, 25, 5]}, "topZ": 12.0, "marginMm": 1.0, "noPaste": true, "touchable": true,
      "measured": {"xy": {"how": "camera-edges", "by": "fixture", "atMs": 0, "errMm": 0.2, "evidence": "photo:1"},
                   "top": {"how": "n1-press", "by": "fixture", "atMs": 0, "errMm": 0.05, "evidence": "event:1"}},
      "state": "measured", "invalidatedBy": ["moved", "touched"]},
@@ -44,8 +45,8 @@
                   "top": {"how": "n1-touch", "by": "fixture", "atMs": 0, "errMm": 0.025, "rawZ": 10.7, "homeAtMs": 0, "evidence": "event:1"}},
      "state": "measured", "invalidatedBy": ["moved", "touched"]},
     {"id": "blank-black", "name": "the black blank", "kind": "movable", "role": "blank", "note": "put down, not measured (place a guess; its front at y 222 keeps the camera's r 20 + margin 1 clear at the homing fiducial (217.081, 200.223), which needs y0 >= 221.25)",
-     "outline": {"box": [200, 222, 260, 300]}, "topZ": null, "marginMm": 1.0, "noPaste": false, "surface": null, "touchable": false,
-     "measured": {"xy": null, "top": null}, "state": "added", "invalidatedBy": ["moved", "touched"]}
+     "outline": {"box": [200, 222, 260, 300]}, "marginMm": 1.0, "noPaste": false, "touchable": false,
+     "measured": {}, "state": "added", "invalidatedBy": ["moved", "touched"]}
   ],
   "tools": [
     {"id": "n1", "moves": "n1", "tipEnd": {"dx": -24.178, "dy": -63.91, "setup": "N1", "atMs": 0},
@@ -63,7 +64,7 @@
      "layers": [{"name": "camera and light", "at": "head", "outline": {"circle": [0, 0, 20]}, "bottomZ": 40}]}
   ],
   "seesaw": {"note": "end stops, knees, gains: Process's desk answers 11-04 (gain to confirm); K 64.875 Process 11-04; homeRepeatMm and errMm 0.05 (guess)",
-             "endStopsRaw": [0, 63], "restRaw": null,
+             "endStopsRaw": [0, 63],
              "n1": {"kneeRaw": 31.5, "mmPerRaw": 1.0}, "needle": {"kneeRaw": 31.5, "mmPerRaw": 1.0},
              "K": {"raw": 64.875, "homeAtMs": 0, "surface": "blank-front"},
              "homeRepeatMm": 0.1,

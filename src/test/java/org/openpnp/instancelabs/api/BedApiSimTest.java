@@ -31,6 +31,7 @@ import org.openpnp.model.Configuration;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -207,7 +208,7 @@ public class BedApiSimTest {
         assertEquals(2, added.get("version").getAsInt());
         JsonObject reel = object("a-reel");
         assertEquals("added", reel.get("state").getAsString());
-        assertTrue(reel.get("topZ").isJsonNull());
+        assertFalse(reel.has("topZ"), "no top, and null nowhere (design §2): " + reel);
         assertEquals(1.0, reel.get("marginMm").getAsDouble(), 0, "Process's X/Y margin");
         JsonObject row = rows(BedModelStore.EVENT).get(0);
         assertEquals("POST /api/bed/objects", row.get("what").getAsString());
@@ -274,6 +275,7 @@ public class BedApiSimTest {
         assertEquals("moved", object("blank-front").get("state").getAsString());
         JsonObject moved = object("blank-front-2");
         assertEquals("added", moved.get("state").getAsString());
+        assertFalse(moved.has("topZ"), moved.toString());
         assertEquals("[60,210,160,290]", moved.getAsJsonObject("outline").get("box").toString(), "kept as written");
         assertEquals(3, ok("GET", "/api/status", null).getAsJsonObject("bed").get("unmeasured").getAsInt());
         ok("POST", "/api/bed/objects/blank-front/removed", "{}");
@@ -349,6 +351,10 @@ public class BedApiSimTest {
         plane.addProperty("atMs", System.currentTimeMillis());
         plane.addProperty("evidence", evidence());
         ok("PUT", "/api/bed/plane", plane.toString());
+        // null nowhere (design §2, 11-05): the writer refuses it in the loader's words, nothing written
+        JsonObject withNull = BedFixture.json().getAsJsonObject("seesaw");
+        withNull.add("restRaw", JsonNull.INSTANCE);
+        refused(400, "bad-request", "seesaw.restRaw is null", call("PUT", "/api/bed/seesaw", withNull.toString(), UI));
         JsonObject seesaw = BedFixture.json().getAsJsonObject("seesaw");
         seesaw.getAsJsonObject("K").addProperty("raw", 64.9);
         refused(409, "measurement-needed", "seesaw.measured", call("PUT", "/api/bed/seesaw", seesaw.toString(), UI));

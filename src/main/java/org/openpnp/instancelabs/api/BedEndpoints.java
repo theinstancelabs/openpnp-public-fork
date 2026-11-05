@@ -98,14 +98,15 @@ final class BedEndpoints {
                 .replaceAll("^-|-$", "")));
         o.addProperty("name", name);
         o.addProperty("kind", Json.str(b, "kind", "movable"));
-        o.add("role", b.has("role") ? b.get("role") : JsonNull.INSTANCE);
+        if (b.has("role")) {
+            o.add("role", b.get("role"));
+        }
         o.add("outline", b.get("outline"));
-        o.add("topZ", JsonNull.INSTANCE);
+        // no topZ and no surface: not known, so left out (null nowhere, design §2)
         o.addProperty("marginMm", Json.num(b, "marginMm", ADDED_MARGIN_MM));
         o.addProperty("noPaste", Json.bool(b, "noPaste", false));
-        o.add("surface", JsonNull.INSTANCE);
         o.addProperty("touchable", Json.bool(b, "touchable", false));
-        o.add("measured", new JsonParser().parse("{\"xy\": null, \"top\": null}"));
+        o.add("measured", new JsonObject());
         o.addProperty("state", "added");
         o.add("invalidatedBy", b.has("invalidatedBy") ? b.get("invalidatedBy") : new JsonParser().parse(
                 "[\"moved\", \"touched\"]"));
@@ -164,8 +165,8 @@ final class BedEndpoints {
             JsonObject n = copy(o);
             n.addProperty("id", unique(m, id + "-2"));
             n.add("outline", b.get("outline"));
-            n.add("topZ", JsonNull.INSTANCE);
-            n.add("measured", new JsonParser().parse("{\"xy\": null, \"top\": null}"));
+            n.remove("topZ");
+            n.add("measured", new JsonObject());
             n.addProperty("state", "added");
             next.getAsJsonArray("objects").add(n);
             after.add(n);

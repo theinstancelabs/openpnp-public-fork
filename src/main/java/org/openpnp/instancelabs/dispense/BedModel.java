@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -17,13 +18,15 @@ import com.google.gson.JsonParser;
  * BR-98: the machine collision model, {@code <config>/instancelabs/collision-model.json} (collision-model-design.md
  * §2): the bed and its plane, every object on it, every tool's layers and the see-saw. Read from the file's JSON tree,
  * which is kept as written, so keys this build does not read (notes, lumen-sim's) survive a rewrite. {@link #parse} is
- * the loader's and every write's validation: the first problem throws, in words.
+ * the loader's and every write's validation: the first problem throws, in words. Every string is an exact JSON string
+ * (no trimming, no number taken as text) and null is nowhere: a key is given a value or left out (design §2, Infra and
+ * Backend 11-05), so both loaders read the same file the same way.
  *
  * <p>Frames: X/Y in machine mm (head X/Y = raw X/Y), heights above the bed plane. The plane is the least-squares fit
  * rc(x, y) of {@code bed.plane.points} [x, y, rawN1]. N1's tip is h1 = g1 (min(r, k1) - rc), the needle's h2 = g2
  * ((K - rc) - max(r, k2)), each at its own tip's X/Y (§2 "Tip heights on a tilted bed"). Unknown inputs are the worst
- * case: an unknown raw Z or a null knee puts that tip at its lowest end stop, a null K leaves the needle's height
- * unknown (minus infinity: it meets everything under it).</p>
+ * case: an unknown raw Z or no knee puts that tip at its lowest end stop, no K leaves the needle's height unknown
+ * (minus infinity: it meets everything under it).</p>
  */
 public final class BedModel {
     public static final int SCHEMA = 1;
@@ -230,7 +233,7 @@ public final class BedModel {
             this.touchable = touchable;
         }
 
-        /** Not measured (a null top, or added, moved or removed): it blocks its outline at every height. */
+        /** Not measured (no top, or added, moved or removed): it blocks its outline at every height. */
         public boolean blocksEveryHeight() {
             return topZ == null || !"measured".equals(state);
         }
@@ -348,6 +351,7 @@ public final class BedModel {
 
     private BedModel(JsonObject j) {
         this.json = j;
+        scan(j, "");
         if (integer(j, "schema", "") != SCHEMA) {
             throw new IllegalArgumentException("schema must be " + SCHEMA);
         }
@@ -476,7 +480,7 @@ public final class BedModel {
             how(t.getAsJsonObject(), path + ".measured.top");
             topErr = atLeast0(t.getAsJsonObject(), "errMm", path + ".measured.top");
         }
-        String name = o.get("name") != null && o.get("name").isJsonPrimitive() ? o.get("name").getAsString() : id;
+        String name = o.has("name") ? text(o, "name", path) : id;
         return new Obj(id, name, kind, state, poly, top, margin, topErr, flag(o, "touchable", path));
     }
 
@@ -694,6 +698,23 @@ public final class BedModel {
         return path.isEmpty() ? key : path + "." + key;
     }
 
+    /** The whole document, before any field is read: null nowhere. */
+    private static void scan(JsonElement e, String path) {
+        if (e.isJsonNull()) {
+            throw new IllegalArgumentException(path + " is null: give the key a value or leave it out");
+        }
+        if (e.isJsonArray()) {
+            for (int i = 0; i < e.getAsJsonArray().size(); i++) {
+                scan(e.getAsJsonArray().get(i), path + "[" + i + "]");
+            }
+        }
+        else if (e.isJsonObject()) {
+            for (Map.Entry<String, JsonElement> m : e.getAsJsonObject().entrySet()) {
+                scan(m.getValue(), at(path, m.getKey()));
+            }
+        }
+    }
+
     private static JsonObject object(JsonObject o, String key, String path) {
         JsonElement e = o.get(key);
         if (e == null || !e.isJsonObject()) {
@@ -710,25 +731,27 @@ public final class BedModel {
         return e.getAsJsonArray();
     }
 
+    /** An exact JSON string, not empty: never trimmed, never a number. */
     private static String text(JsonObject o, String key, String path) {
         JsonElement e = o.get(key);
-        if (e == null || !e.isJsonPrimitive() || e.getAsString().trim().isEmpty()) {
+        if (e == null || !e.isJsonPrimitive() || !e.getAsJsonPrimitive().isString() || e.getAsString().isEmpty()) {
             throw new IllegalArgumentException(at(path, key) + " is required (text)");
         }
-        return e.getAsString().trim();
+        return e.getAsString();
     }
 
     /** A measurement record says how it was measured: any words (Process's per-part methods, never a fixed list). */
     private static void how(JsonObject o, String path) {
         JsonElement e = o.get("how");
-        if (e == null || !e.isJsonPrimitive() || e.getAsString().trim().isEmpty()) {
+        if (e == null || !e.isJsonPrimitive() || !e.getAsJsonPrimitive().isString() || e.getAsString().trim()
+                .isEmpty()) {
             throw new IllegalArgumentException(path + ".how must say how it was measured");
         }
     }
 
     private static boolean flag(JsonObject o, String key, String path) {
         JsonElement e = o.get(key);
-        if (e == null || e.isJsonNull()) {
+        if (e == null) {
             return false;
         }
         if (!e.isJsonPrimitive() || !e.getAsJsonPrimitive().isBoolean()) {
@@ -737,13 +760,14 @@ public final class BedModel {
         return e.getAsBoolean();
     }
 
+    /** A number, or null when the key is left out (an explicit null never comes here: {@link #scan}). */
     private static Double optional(JsonObject o, String key, String path) {
         JsonElement e = o.get(key);
-        if (e == null || e.isJsonNull()) {
+        if (e == null) {
             return null;
         }
         if (!e.isJsonPrimitive() || !e.getAsJsonPrimitive().isNumber() || !Double.isFinite(e.getAsDouble())) {
-            throw new IllegalArgumentException(at(path, key) + " must be a number or null");
+            throw new IllegalArgumentException(at(path, key) + " must be a number");
         }
         return e.getAsDouble();
     }
