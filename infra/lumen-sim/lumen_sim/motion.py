@@ -104,6 +104,7 @@ class Stepper:
         self.endstop_hit = False            # latched like Endstops::hit_state
         self.freeze_at = None               # kill(): the stepper ISR stops at this time
         self.frozen = False
+        self.on_move = None                 # called after the head moved (a block ended or was cut)
 
     # --- queries ---
     def update(self, now):
@@ -239,3 +240,5 @@ class Stepper:
         for i in range(NAXES):
             self.physical[i] += (counts[i] - self.counts[i]) / self.steps[i]
         self.counts = list(counts)
+        if self.on_move:
+            self.on_move()
