@@ -90,6 +90,9 @@ class HostCheck(unittest.TestCase):
                      "evil." + TAILNET, "", None):
             self.assertEqual(self.ask(t, host), 403, host)
         self.assertEqual(len(FakeApi.hits), 4)
+        # the flag's case does not matter either (the review of #59: a lower-case TAILNET let a dropped .lower() pass)
+        u = self.serve(devproxy.make_handler(self.web, self.api, None, allow_host=TAILNET.upper()))
+        self.assertEqual(self.ask(u, TAILNET), 200, "an upper-case --allow-host allows the name in lower case")
 
 
 if __name__ == "__main__":

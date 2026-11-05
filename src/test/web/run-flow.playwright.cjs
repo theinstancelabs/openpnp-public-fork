@@ -385,12 +385,17 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
     await page.evaluate(() => IL.attest.clear('regulator'));
     const suFix = () => page.waitForFunction(() => { const b = document.querySelector('.band__item[data-step="regulator"] [data-fix]'); return b && !b.closest('[hidden]') ? b.dataset.fix : null; },
       null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
-    const reg9 = await page.waitForFunction(() => { const r = IL.ready().items.find((x) => x.key === 'regulator');
-      return r && r.state === 'need' && IL.hasPumpOnly(IL.S.status) ? r.fixes.map((f) => f.fix || 'view:' + f.view) : null; }, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+    // Checks' own Regulator card on the page, not the model (the review of #59: a card that rewrites its fixes passed)
+    const reg9 = await page.waitForFunction(() => { const bs = [...document.querySelectorAll('#chk-needs .ri[data-key="regulator"] [data-fix]')];
+      return bs.length && IL.hasPumpOnly(IL.S.status) ? bs.map((b) => b.dataset.fix) : null; }, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+    const gate9 = await page.evaluate(() => IL.fixes['pressure-pump'].gate(IL.S.status) || '');
     await page.evaluate(() => IL.go('#setup'));
     const su9 = await suFix();
+    const suText9 = await page.evaluate(() => (document.querySelector('.band__item[data-step="regulator"]') || {}).textContent || '');
     check('(9b) Checks\' Regulator card and Setup\'s row: Pump on to read the gauge (I12), not Pressure on', !!reg9 && reg9[0] === 'pressure-pump'
       && !reg9.some((f) => f === 'pressure-on' || f === 'view:pressure') && su9 === 'pressure-pump', { reg9, su9 });
+    check('(9b) with I12 Setup\'s row says the pump keeps the valve closed, not "Switch the pressure on" (the review of #59)',
+      /valve stays closed/.test(suText9) && !/Switch the pressure on/.test(suText9), suText9);
     await fakeStatus(page, (st) => { st.interlocks = (st.interlocks || []).filter((i) => i.id !== 'I12'); });
     const reg9b = await page.waitForFunction(() => { const r = IL.ready().items.find((x) => x.key === 'regulator');
       return r && r.state === 'need' && !IL.hasPumpOnly(IL.S.status) ? r.fixes.map((f) => f.fix || 'view:' + f.view) : null; }, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
@@ -398,6 +403,9 @@ const tick = (page, id, on) => page.evaluate(([i, v]) => { const c = document.ge
       return b && !b.closest('[hidden]') && b.dataset.fix !== 'pressure-pump' ? b.dataset.fix : null; }, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
     check('(9b) no I12 (a backend before #12): Checks\' card opens the Pressure panel and Setup\'s row is Pressure on, no Pump on', !!reg9b && reg9b[0] === 'view:pressure'
       && !reg9b.includes('pressure-pump') && su9b === 'pressure-on', { reg9b, su9b });
+    // the pump-only fix is locked without I12 wherever it is offered: its own gate, not only the cards' choice (the review of #59)
+    const gate9b = await page.evaluate(() => { const b = IL.fixButton({ fix: 'pressure-pump', label: 'Pump on' }); return { disabled: b.disabled, why: b.dataset.fixGate || '' }; });
+    check('(9b) the Pump on fix is locked without I12, naming it; with I12 its gate does not', gate9b.disabled && /I12/.test(gate9b.why) && !/I12/.test(gate9), { gate9, gate9b });
     await page.unroute('**/api/status');
     await page.evaluate((v) => IL.attest.set('regulator', v), psi9);
 
