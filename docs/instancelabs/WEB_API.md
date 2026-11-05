@@ -685,7 +685,7 @@ Added on `il/bench-sync-autoreg` and its web branches (`UI_DESIGN.md` §8.1.2–
 - **Board drawing** (merged): the board's copper, mask, silkscreen and holes under the dots (Full, Quiet, Off), the
   path preview (play, scrub, speeds 1×, 4×, 16× on the plan's clock), the pad inspector (a pad or part click: its
   pads, dots, pad type and the rule that chose it, flags), the Records map on the drawing.
-- **KiCad upload**: `Upload KiCad board…` in the Board step opens the dialog (choose → reading →
+- **KiCad upload**: `Upload a design…` in the Board step opens the dialog (choose → reading →
   preview → saving → saved), board thumbnails, "Camera is on FID1" (the origin from the top camera on the first
   fiducial), the chosen board's drawing at its seat before planning.
 - **Missing paste profiles** (pc-web, `padprofile.js` + `padprofile.css`, `PROFILE_CALIBRATION_DESIGN.md` §13;

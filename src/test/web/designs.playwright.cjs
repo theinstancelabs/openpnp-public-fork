@@ -6,7 +6,7 @@
  * design", "Design name", "Save the design"), the parts that get no paste under "No paste" (the Nano's bottom side
  * is not read yet: BR-25), and Save the design opens its Set up while Designs lists it, after one read of the list,
  * and leaves an operator who went elsewhere meanwhile where they are; the drawing given to a board file keeps the
- * preview's "paste the DNP parts"; (3) Set up of a design that
+ * preview's "paste the DNP parts", and its saved step's button and line name Set up (Open its Set up); (3) Set up of a design that
  * waits (padcal under a new name): the checklist B1-B6 (the top read; the bottom's parts from the upload's record,
  * GET /api/boards' `imported.skipped` (BR-88 (a)); paste per pad with the groups that wait; one row per part that needs another
  * tip, with Change the tip; missing doses; the copper check, the fine-pitch rehearsal, feeders and the holder not
@@ -264,8 +264,9 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
 
     // ---- (2e) the drawing given to a board file keeps the preview's "paste the DNP parts" (Backend's #40 review: the
     // attach re-reads the file, and without the same flag it no longer matches the preview: 409), off and on
-    ST.attachOffer = { file: '/stub/designs-attach.board.xml', name: 'designs-attach', maxOffsetMm: 0, offsets: [] };
-    const attachOnce = async (dnp) => {
+    // the Nano saved in (2) as the board file the drawing goes to: its Set up is where Open its Set up must land
+    ST.attachOffer = { file: nano ? nano.file : '/stub/designs-attach.board.xml', name: 'designs-attach', maxOffsetMm: 0, offsets: [] };
+    const attachOnce = async (dnp, open) => {
       ST.attachDnp = dnp;
       ST.attachUrl = null;
       await page.evaluate(() => IL.go('#designs'));
@@ -276,12 +277,22 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       const on = await page.evaluate(() => { const c = document.getElementById('board-import-paste-dnp'); return !!c && c.checked; });
       await page.click('#btn-board-import-attach');
       await page.waitForFunction(() => document.getElementById('dlg-board-import').dataset.state === 'saved', null, { timeout: 15000 }).catch(() => null);
-      await page.keyboard.press('Escape');
+      const words = await page.evaluate(() => { const u = document.getElementById('btn-board-import-use'), x = document.querySelector('#board-import-saved .bi-saved__next');
+        return { use: u ? u.textContent.trim() : null, next: x ? x.textContent : null }; });
+      if (open) await page.click('#btn-board-import-use', { timeout: 5000 }).catch(() => null);   // a failed attach: this check fails, the rest run
+      else await page.keyboard.press('Escape');
       await page.waitForSelector('#dlg-board-import', { state: 'detached', timeout: 10000 }).catch(() => null);
-      return { on, attach: ST.attachUrl };
+      const at = open ? await page.waitForFunction((h) => location.hash === h && !document.getElementById('design-setup').hidden && !document.getElementById('dlg-board-import'),
+        routeOf(nano), { timeout: 15000 })
+        .then(() => true, () => false) : null;
+      return { on, attach: ST.attachUrl, words, at };
     };
-    const dnpOff = await attachOnce(false);
+    const dnpOff = await attachOnce(false, !!nano);
     check('(2e) Use the drawing for a board file, DNP parts not pasted: the attach sends no pasteDnp', !dnpOff.on && dnpOff.attach !== null && !/pasteDnp/.test(dnpOff.attach), dnpOff);
+    // its button opens the design's Set up (Designs' onSaved), so it and its line say so, not Run's "then plan it"
+    check('(2e) after an attach in Designs the button and its line name Set up, and the button opens the design\'s Set up: "Open its Set up"',
+      dnpOff.words.use === 'Open its Set up' && /Set up/.test(dnpOff.words.next || '') && !/plan it|Use this/.test(dnpOff.words.next || '') && dnpOff.at === true,
+      { words: dnpOff.words, at: dnpOff.at, hash: await page.evaluate(() => location.hash) });
     const dnpOn = await attachOnce(true);
     check('(2e) Use the drawing for a board file, DNP parts pasted: the attach sends pasteDnp=1, as the save does', dnpOn.on && /(^|[?&])pasteDnp=1(&|$)/.test(dnpOn.attach || ''), dnpOn);
 
@@ -468,7 +479,7 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     check('(5c2) a file dropped on the Designs page: Save the design opens its Set up (not Run)', dropped2, await page.evaluate(() => location.hash));
 
     // ---- (5d) the menu line follows a design saved in Run's Board step in this tab ('boards'; another tab's: (2c)): the
-    // dialog with Run's options, saved, then closed without Use this board
+    // dialog with Run's options, saved, then closed without Use this design
     await holdImport();
     await page.evaluate(() => IL.go('#machine'));
     const elseName = 'designs-else-' + TS;
