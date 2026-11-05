@@ -184,10 +184,12 @@ class Load(unittest.TestCase):
 
     def test_the_ids_and_depths_backend_allows_load(self):
         """contactDepthMm 0 and 1.0; a 64-character id of every allowed kind of character; an object with a tool's id
-        (only objects among themselves and tools among themselves must differ). 1.01 is refused in Backend's words."""
+        (only objects among themselves and tools among themselves must differ); a tool called bed (only an object's id
+        may not be the bed's, as the engine loads it). 1.01 is refused in Backend's words."""
         for depth in (0, 1.0):
             self.assertEqual(cm(loaded(model((("contactDepthMm",), depth))))["version"], 7)
-        b = loaded(model((("objects", 0, "id"), "needle"), (("objects", 1, "id"), "Az09._-" + "x" * 57)))
+        b = loaded(model((("objects", 0, "id"), "needle"), (("objects", 1, "id"), "Az09._-" + "x" * 57),
+                         (("tools", 2, "id"), "bed")))
         to(b, 145, 150)
         to(b, z=50)  # the needle's hub over the block, now called "needle"
         self.assertEqual(hits(b), [("needle", "needle", "hub", 0.4)])
@@ -195,7 +197,7 @@ class Load(unittest.TestCase):
         self.assertEqual(reply["error"], "ValueError: collision_model.contactDepthMm must be 0 to 1.0, not 1.01")
 
     def test_the_cli_flag_loads_the_file(self):
-        """At boot Z is not powered: the head starts at restRaw, the fall swept (the hub's edge over the block, as in
+        """At boot Z is not powered: the head starts at restRaw, checked there (the hub's edge over the block, as in
         SeeSaw's fall test)."""
         tmp = tempfile.mkdtemp(prefix="lumen-sim-test-")
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -354,6 +356,45 @@ class Sweep(unittest.TestCase):
         b.send("M400")
         self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
 
+    def test_a_set_mid_move_checks_where_the_leg_began(self):
+        """A set sweeps nothing: during G1 Y190 F600 with the hub clear at its start and across the block by 6 s, it
+        reports nothing, and the move reports the crossing once, at its end (its line). After a jump mid-move the leg
+        began where the head landed: from X 105 Y 150 (the hub 39 mm left of the block, level with it), a jump 40 mm
+        to the right at 3 s puts the hub past the block; at the move's start moved by the jump it would be in it."""
+        b = self.at_the_start()
+        b.send("G1 Y190 F600")
+        b.run(6.0)
+        put(b, MODEL)
+        self.assertEqual(hits(b), [])
+        b.send("M400")
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
+        self.assertEqual(state(b)["sim_errors"][0]["line"], "G1 Y190 F600")
+        b = loaded()
+        to(b, 105, 150)
+        to(b, z=50)
+        b.send("G1 Y190 F600")
+        b.run(3.0)
+        self.assertTrue(b.sim.control({"cmd": "fault", "fault": "lost_steps", "x": 40}, b.t)["ok"])
+        put(b, MODEL)
+        b.send("M400")
+        self.assertEqual(hits(b), [])
+
+    def test_a_set_after_a_move_ended_unseen_keeps_its_report(self):
+        """The board, in M485's packet waits, has not looked at the stepper since the hub's 1 mm move in the block
+        ended: a set 1 ms after that end sweeps the move with the model it ran under first, so the same file again
+        leaves the hub reported once (the PA5 switch, wired far off, reads the head at the set)."""
+        b = loaded()
+        far = {"tool": "needle", "x0": 10.0, "y0": 10.0, "x1": 12.0, "y1": 12.0, "trip_z": 52.0}
+        self.assertTrue(b.sim.control({"cmd": "set", "pa5_switch": {"presses": [far]}}, b.t)["ok"])
+        to(b, 145, 150)
+        to(b, z=50)  # the hub in the block: reported
+        b.write("G1 Y151 F600\n" + "M485 0102\n" * 6)
+        b.run(0.15)  # the move under way: it starts 0.1 s on and takes 0.1 s
+        b.run_until(b.sim.fw.stepper.blocks[0].t_end + 0.001)
+        put(b, MODEL)
+        b.send("M400")
+        self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
+
     def test_after_a_fault_jump_once_counts_from_where_the_head_is(self):
         """A jump that leaves the hub in the block keeps that collision reported; one that carries it out makes a
         move back in a new collision; one that lands it in the block is reported by the next leg."""
@@ -453,6 +494,17 @@ class Sweep(unittest.TestCase):
         to(b, x=145)
         self.assertEqual(hits(b), [("height-switch", "needle", "tip", 0.2)])
 
+    def test_a_tip_flush_with_the_tops_edge_rests(self):
+        """The inside test's edge, as the engine's: N1's tip as a 1 mm square 0.2 mm into the blank (raw 5.4), slid
+        until flush with its edge at x 200, rests; 0.05 mm over it, it collides."""
+        square = {"name": "tip", "at": "tip-end", "outline": {"box": [-0.5, -0.5, 0.5, 0.5]}, "aboveTipMm": 0}
+        for x, found in ((220.5, []), (220.45, [("blank", "n1", "tip", 0.2)])):
+            b = loaded(model((("tools", 0, "layers"), [square])))
+            to(b, 230, 290)  # N1's tip at (210, 230), over the blank (x 200..260)
+            to(b, z=5.4)
+            to(b, x=x)       # its left side at x 200, or 199.95
+            self.assertEqual(hits(b), found, x)
+
     def test_every_other_layer_is_strict_on_a_touchable_top(self):
         """Only a tip rests: the hub 0.1 mm into the block made touchable collides, swept across it as above or
         pressed down inside it at both ends (the needle without its tip layer, which would be 5.1 mm into it)."""
@@ -500,6 +552,24 @@ class Sweep(unittest.TestCase):
         b.send("M400")
         self.assertEqual(hits(b), [("block", "needle", "hub", 0.4)])
 
+    def test_a_second_fault_in_a_move_sweeps_on_from_where_the_first_landed(self):
+        """From X 105, G1 Y190 F600 takes the hub past the block's Y, 39 mm to its left, by 6 s; a jump 40 mm to the
+        right then and one 1 mm on in Y 0.3 s later: the part between them is swept from where the first landed, not
+        from the move's start moved by the first jump (across the block)."""
+        def lost(**xy):
+            self.assertTrue(b.sim.control(dict(cmd="fault", fault="lost_steps", **xy), b.t)["ok"])
+        b = loaded()
+        to(b, 105, 120)
+        to(b, z=50)
+        b.send("G1 Y190 F600")
+        b.run(6.0)
+        lost(x=40)
+        b.run(0.3)
+        lost(y=1)
+        b.send("M400")
+        self.assertEqual(state(b)["head"]["physical"], {"X": 145.0, "Y": 191.0, "Z": 50.0})
+        self.assertEqual(hits(b), [])
+
 
 class SeeSaw(unittest.TestCase):
     def test_with_the_z_motor_off_it_rests_at_rest_raw(self):
@@ -532,7 +602,8 @@ class SeeSaw(unittest.TestCase):
 
     def test_a_model_set_while_z_is_off_puts_it_at_rest(self):
         """Z not powered since the boot, or let go before the model came: the arm already rests at restRaw, so the
-        head goes there when the model is set, the fall swept as above; a power cycle then leaves it there."""
+        head is there when the model is set, checked there with no sweep (line null); a power cycle then leaves it
+        there."""
         for how in ("boot", "M18 Z"):
             with self.subTest(how):
                 b = Bench(park=(145.0, 150.0, 31.5))
@@ -543,6 +614,7 @@ class SeeSaw(unittest.TestCase):
                 put(b, model((("seesaw", "restRaw"), 60.0)))
                 self.assertEqual(z(b), 60.0)
                 self.assertEqual(hits(b), [("block", "needle", "hub", 10.4)])
+                self.assertIsNone(state(b)["sim_errors"][0]["line"])
                 b.sim.power_cycle(b.t)
                 self.assertEqual((z(b), len(hits(b))), (60.0, 1))
 
@@ -604,6 +676,34 @@ class SeeSaw(unittest.TestCase):
         self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": 10.0}, b.t)["ok"])
         to(b, z=62)
         self.assertEqual((z(b), hits(b)), (65.0, [("bed", "needle", "tip", 3.0), ("bed", "needle", "hub", 1.0)]))
+
+    def test_a_z_shift_while_a_stop_holds_z_mid_move_keeps_the_lost_steps_lost(self):
+        """A z_shift moves the head from where the stop holds it, and the counts still to go move it on from there.
+        Stops [-1, 50]: G1 Z56 F60 from raw 40, held at 50 from count 50; -10 at count 54 puts it at 40, and it ends at
+        42 (not 44 and 46). Stops [-1, 46]: G1 X200 Z62 F600 from (100, 150, 30), -10 at count 60: 36, then 38 at the
+        end, the needle's tip (64 - r) 6 mm over the post's top (4 + 16) it ends over, not 2 mm into it."""
+        def shift_at(count):
+            while state(b)["head"]["logical"]["Z"] < count:
+                b.run(0.005)
+            self.assertEqual(state(b)["head"]["logical"]["Z"], count)
+            self.assertTrue(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": -10.0}, b.t)["ok"])
+            return z(b)
+        b = loaded(model((("seesaw", "endStopsRaw"), [-1, 50])))
+        to(b, 100, 300)
+        to(b, z=40)
+        b.send("G1 Z56 F60")
+        self.assertEqual(shift_at(54), 40.0)
+        b.send("M400")
+        self.assertEqual(z(b), 42.0)
+        post = {"id": "post", "kind": "fixed", "outline": {"box": [220, 70, 240, 90]}, "topZ": 16.0,
+                "state": "measured"}
+        b = loaded(model((("seesaw", "endStopsRaw"), [-1, 46]), (("objects",), [post])))
+        to(b, 100, 150)
+        to(b, z=30)
+        b.send("G1 X200 Z62 F600")
+        self.assertEqual(shift_at(60), 36.0)
+        b.send("M400")
+        self.assertEqual((z(b), hits(b)), (38.0, []))
 
     def test_without_a_rest_the_z_drop_applies(self):
         b = loaded()

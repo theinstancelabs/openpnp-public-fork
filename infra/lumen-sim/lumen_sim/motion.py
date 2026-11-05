@@ -175,10 +175,11 @@ class Stepper:
         during it; the head when no block runs."""
         return self._at(self.swept or self.counts)[:3]
 
-    def _at(self, counts):
-        """The head at these counts of the running block (physical: at its start, self.counts)."""
+    def _at(self, counts, held=True):
+        """The head at these counts of the running block (physical: at its start, self.counts); held=False: where the
+        counts alone put it, before the end stops hold Z."""
         out = [p + (c - k) / s for p, c, k, s in zip(self.physical, counts, self.counts, self.steps)]
-        if self.limit_z:  # a block is straight: Z goes one way, so the stop holds it from there to the block's end
+        if held and self.limit_z:  # a block is straight: Z goes one way, so the stop holds it from there to its end
             out[2] = self.limit_z(out[2])
         return out
 
@@ -213,8 +214,8 @@ class Stepper:
             if self.on_move:
                 self.on_move(self.origin(), self.blocks[0].line, here)
             self.swept = counts
-        for i in range(3):
-            self.physical[i] += to[i] - here[i]
+        for i, p in enumerate(self._at(counts, held=False)[:3]):  # where the counts put it: steps past a stop stay lost
+            self.physical[i] += to[i] - p
         return to
 
     def freeze(self, at):

@@ -588,6 +588,7 @@ class Firmware:
         model's restRaw all along and the end stops hold Z, so the head is there now. The model checks it where the leg
         under way began, with no sweep: a collision the old model reported stays reported while its layer is still in
         that object there; any other is new."""
+        self.stepper.update(self.now)  # a move that ended unseen (a busy wait) is swept by the model it ran under
         old, self.machine.collision = self.machine.collision, model
         if model is None:
             return
