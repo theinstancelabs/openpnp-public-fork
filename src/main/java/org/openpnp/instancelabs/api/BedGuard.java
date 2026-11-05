@@ -20,7 +20,6 @@ import org.openpnp.spi.HeadMountable;
 import org.openpnp.spi.Machine;
 import org.openpnp.spi.base.AbstractHeadMountable;
 
-import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
@@ -305,40 +304,33 @@ final class BedGuard {
             return out;
         }
         JsonObject j = m.json();
-        Gson g = Json.GSON;
-        out.put("changedAtMs", g.fromJson(j.get("changedAtMs"), Object.class));
-        out.put("changedBy", g.fromJson(j.get("changedBy"), Object.class));
+        out.put("changedAtMs", j.get("changedAtMs"));
+        out.put("changedBy", j.get("changedBy"));
         out.put("zMarginMm", m.zMarginMm);
         out.put("contactDepthMm", m.contactDepthMm);
-        out.put("bed", g.fromJson(j.get("bed"), Object.class));
-        List<Object> objects = new ArrayList<>();
+        out.put("bed", j.get("bed"));
         for (JsonElement e : j.getAsJsonArray("objects")) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> o = g.fromJson(e, Map.class);
-            o.put("stateLabel", stateLabel(m.object((String) o.get("id"))));
-            objects.add(o);
+            JsonObject o = e.getAsJsonObject();
+            o.addProperty("stateLabel", stateLabel(m.object(o.get("id").getAsString())));
         }
-        out.put("objects", objects);
-        List<Object> tools = new ArrayList<>();
+        out.put("objects", j.get("objects"));
         for (JsonElement e : j.getAsJsonArray("tools")) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> t = g.fromJson(e, Map.class);
-            BedModel.Tool tool = m.tool((String) t.get("id"));
+            JsonObject t = e.getAsJsonObject();
+            BedModel.Tool tool = m.tool(t.get("id").getAsString());
             double low = lowestNow(m, tool, s);
-            t.put("lowestZNow", Double.isFinite(low) ? low : null);
-            t.put("lowest", !tool.rides() ? "measured" : s != null && s.known && m.mapKnown(tool) ? "homed"
+            t.addProperty("lowestZNow", Double.isFinite(low) ? low : null);
+            t.addProperty("lowest", !tool.rides() ? "measured" : s != null && s.known && m.mapKnown(tool) ? "homed"
                     : "worst-case");
-            tools.add(t);
         }
-        out.put("tools", tools);
-        @SuppressWarnings("unchecked")
-        Map<String, Object> seesaw = g.fromJson(j.get("seesaw"), Map.class);
-        seesaw.put("state", s != null && s.known ? "homed" : "worst-case");
-        seesaw.put("source", s != null && s.known ? "home" : "unknown");
-        seesaw.put("atMs", s != null && s.known ? s.homeAtMs : null);
-        seesaw.put("rawZ", s != null && s.known ? s.z : null);
+        out.put("tools", j.get("tools"));
+        JsonObject seesaw = j.getAsJsonObject("seesaw");
+        boolean known = s != null && s.known;
+        seesaw.addProperty("state", known ? "homed" : "worst-case");
+        seesaw.addProperty("source", known ? "home" : "unknown");
+        seesaw.addProperty("atMs", known ? s.homeAtMs : null);
+        seesaw.addProperty("rawZ", known ? s.z : null);
         out.put("seesaw", seesaw);
-        out.put("reach", g.fromJson(j.getAsJsonObject("bed").get("reach"), Object.class));
+        out.put("reach", j.getAsJsonObject("bed").get("reach"));
         return out;
     }
 
