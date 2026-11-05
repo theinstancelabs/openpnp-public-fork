@@ -249,7 +249,11 @@ public final class NeedleEndMeasure {
         String at = String.format(Locale.ROOT, "%s at raw Z %.3f", tool, l.rawZ);
         double[][] px = new double[STEPS.length][];
         if (needle) {
-            EndFromBelow.Spot s0 = EndFromBelow.spot(f[0], bcx, bcy, s.searchPx, s.kernelPx);
+            if (!(mmPerPx > 0)) {
+                throw new IllegalStateException("the bottom camera has no scale: OpenPnP's units per pixel");
+            }
+            int searchPx = (int) Math.round(s.searchMm / mmPerPx);
+            EndFromBelow.Spot s0 = EndFromBelow.spot(f[0], bcx, bcy, searchPx, s.kernelPx);
             for (int k = 0; k < STEPS.length; k++) {
                 EndFromBelow.Spot sk = k == 0 ? s0 : EndFromBelow.spot(f[k], s0.x, s0.y, s.followPx, s.kernelPx);
                 double ratio = sk.backgroundSd > 0 ? sk.peak / sk.backgroundSd : sk.peak > 0
@@ -257,7 +261,7 @@ public final class NeedleEndMeasure {
                 if (!(sk.peak > 0 && ratio >= s.minPeakToSd)) {
                     boolean follow = k > 0;
                     BufferedImage pic = draw(f[k], g -> {
-                        circle(g, Color.YELLOW, bcx, bcy, s.searchPx);
+                        circle(g, Color.YELLOW, bcx, bcy, searchPx);
                         if (follow) {
                             circle(g, Color.CYAN, s0.x, s0.y, s.followPx);
                         }
@@ -272,7 +276,7 @@ public final class NeedleEndMeasure {
                 px[k] = new double[] {sk.x, sk.y};
             }
             l.picture = draw(f[0], g -> {
-                circle(g, Color.YELLOW, bcx, bcy, s.searchPx);
+                circle(g, Color.YELLOW, bcx, bcy, searchPx);
                 circle(g, Color.CYAN, s0.x, s0.y, s.followPx);
                 cross(g, Color.GREEN, s0.x, s0.y);
             });

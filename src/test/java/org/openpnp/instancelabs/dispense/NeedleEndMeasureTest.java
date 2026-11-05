@@ -121,7 +121,7 @@ public class NeedleEndMeasureTest {
             assertEquals(want[1], h.dyMm, 0.01, "dy at " + h.rawZ);
             assertEquals(sc.needleScale(h.rawZ), h.pxPerMm, 0.02 * h.pxPerMm, "k at " + h.rawZ);
             assertTrue(h.residualPx < 0.3 && h.driftPx < 0.3, h.residualPx + " " + h.driftPx);
-            assertTrue(h.peakToSd > 3, String.valueOf(h.peakToSd));
+            assertTrue(h.peakToSd >= 10, String.valueOf(h.peakToSd));
         }
         assertEquals(0.019, e.tiltXMmPerRawMm, 0.003);
         assertEquals(-0.076, e.tiltYMmPerRawMm, 0.003);
@@ -233,8 +233,8 @@ public class NeedleEndMeasureTest {
     }
 
     /**
-     * No end and no mark: the brightest noise in the window is some 6 times its sd (check a's 3 lets it through), but
-     * it does not follow the head's steps (b).
+     * No end and no mark: the brightest noise in the window is some 6 times its sd, under check (a)'s 10 (Process 11-05
+     * 04:3x: real ends 15-45 times), so the first frame is refused.
      */
     @Test
     public void noEndIsTheEndNotFound() throws Exception {
@@ -242,8 +242,36 @@ public class NeedleEndMeasureTest {
         sc.needle = false;
         Camera cam = new Camera(sc);
         NeedleEndMeasure.Result r = NeedleEndMeasure.measure(cam, plan(sc, sc.endDx, sc.endDy));
-        refused(r, NeedleEndMeasure.NOT_FOUND, "the end was not found (light or focus): the needle at raw Z 36.000",
-                cam);
+        refused(r, NeedleEndMeasure.NOT_FOUND, "the end was not found (light or focus): the needle at raw Z 36.000, "
+                + "frame 1 of 6", cam);
+        assertTrue(r.why.contains("(at least 10.0)"), r.why);
+    }
+
+    /**
+     * Process 11-05 04:3x: the end is searched ±3 mm around where the tip setup puts it (searchMm, in px by the camera's
+     * scale). A brighter object 5 mm from the end that moves with the head (a glint off the holder) does not take the
+     * aim: the end comes out as drawn. (Here the frames are followed 30 px around the first spot: a 1 mm step moves the
+     * end at most 17 px, and with np1.py's 60 the object comes within 4.35 mm, 62 px at raw 36, of the first spot in a
+     * stepped frame.) An end more than 3 mm off is not found, the safe failure.
+     */
+    @Test
+    public void aBrighterObject5mmAwayDoesNotTakeTheAim() throws Exception {
+        FromBelowScene sc = new FromBelowScene(16);
+        sc.brightMm = new double[] {-3.536, -3.536};
+        Camera cam = new Camera(sc);
+        NeedleEndMeasure.Plan p = plan(sc, sc.endDx, sc.endDy);
+        p.s.followPx = 30;
+        NeedleEndMeasure.Result r = NeedleEndMeasure.measure(cam, p);
+        assertTrue(r.ok, r.why);
+        for (DispenseConfig.EndHeight h : r.end.heights) {
+            assertEquals(sc.end(h.rawZ)[0], h.dxMm, 0.01, "dx at " + h.rawZ);
+            assertEquals(sc.end(h.rawZ)[1], h.dyMm, 0.01, "dy at " + h.rawZ);
+        }
+        FromBelowScene off = new FromBelowScene(17);
+        Camera cam2 = new Camera(off);
+        NeedleEndMeasure.Result far = NeedleEndMeasure.measure(cam2, plan(off, off.endDx - 3.5, off.endDy));
+        assertEquals(NeedleEndMeasure.NOT_FOUND, far.code, far.why);
+        assertNull(far.end);
     }
 
     /** A loose tip creeping 0.3 px a frame: the centre frames 1.5 px apart (c). */

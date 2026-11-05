@@ -442,8 +442,12 @@ public class DispenseConfig {
         public int settleMs = 300;
         /** The white top-hat's ellipse (px): np1.py, parallax_k.py. */
         public int kernelPx = 17;
-        /** Each height's first needle frame is searched this far around the camera's pixel (px): np1.py. */
-        public int searchPx = 220;
+        /**
+         * Each height's first needle frame is searched this far around the camera's pixel, where the tip setup puts the
+         * end (mm, in px by the bottom camera's scale, OpenPnP's units per pixel): Process 11-05 04:3x, ±3 mm (~47 px
+         * at 15.5 px/mm). A tip further off is not found, and a brighter object further off cannot take the aim.
+         */
+        public double searchMm = 3.0;
         /** Its other frames this far around that first spot (px): np1.py. */
         public int followPx = 60;
         /** N1's template's half side (px): parallax_k.py's --half 8. */
@@ -456,8 +460,11 @@ public class DispenseConfig {
          * over its x-axis (the bottom camera's flip-x; Process's lumen.py flips it back): y 1079 − 544.2.
          */
         public java.util.List<Double> centrePx = new java.util.ArrayList<>(java.util.Arrays.asList(957.5, 534.8));
-        /** Check (a): the end's top-hat peak at least this many times the sd of the rest of its window. */
-        public double minPeakToSd = 3;
+        /**
+         * Check (a): the end's top-hat peak at least this many times the sd of the rest of its window (Process 11-05
+         * 04:3x: real ends 15-45 times, noise about 6).
+         */
+        public double minPeakToSd = 10;
         /** Check (b): the frames' rms distance from the step fit at most (px). */
         public double maxResidualPx = 1.0;
         /** Check (c): the first and last centre frames at most this far apart (px). */
@@ -493,10 +500,10 @@ public class DispenseConfig {
             if (!(approachMm > 0 && approachMm <= 1) || settleMs < 0 || settleMs > 5000) {
                 p.add("needleEndMeasure.approachMm must be above 0 and at most 1 mm, settleMs 0..5000");
             }
-            if (kernelPx < 3 || kernelPx % 2 == 0 || searchPx < 1 || followPx < 1 || n1TemplateHalfPx < 2
-                    || n1SearchPx < 1) {
-                p.add("needleEndMeasure: kernelPx must be odd and at least 3; searchPx, followPx, n1TemplateHalfPx "
-                        + "and n1SearchPx positive");
+            if (kernelPx < 3 || kernelPx % 2 == 0 || !(searchMm > 0 && searchMm <= 10) || followPx < 1
+                    || n1TemplateHalfPx < 2 || n1SearchPx < 1) {
+                p.add("needleEndMeasure: kernelPx must be odd and at least 3; searchMm above 0 and at most 10 mm; "
+                        + "followPx, n1TemplateHalfPx and n1SearchPx positive");
             }
             if (centrePx == null || centrePx.size() != 2 || centrePx.stream().anyMatch(v -> v == null
                     || !(v >= 0 && v < 100000))) {

@@ -34,6 +34,8 @@ public class FromBelowScene {
     public boolean paste;
     /** A bright mark on the camera's window that does not move with the head. */
     public boolean mark;
+    /** A brighter small object this far from the end (head mm) that moves with it (a glint off the holder), or null. */
+    public double[] brightMm;
     /** The end creeps by this much per frame (px, along x): a loose tip. */
     public double creepPx;
     public double noise = 3;
@@ -111,6 +113,10 @@ public class FromBelowScene {
             blob(px, ex + 1.5 * s, ey + 0.4 * s, 0.6 * s, 90, 90, 90); // the hub's glint
             if (paste) {
                 disc(px, ex + 0.65 * s, ey, 0.325 * s, 200, 200, 200, true);
+            }
+            if (brightMm != null) {
+                // saturated white, 0.5 mm across: brighter in the top-hat than the end
+                disc(px, ex + s * brightMm[0], ey - s * brightMm[1], 0.25 * s, 255, 255, 255, true);
             }
         }
         return img;
