@@ -3,6 +3,7 @@ package org.openpnp.instancelabs.api;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
@@ -12,6 +13,8 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterEach;
@@ -198,6 +201,18 @@ public class HeightSwitchSimTest {
 
     JsonObject heightSwitchStatus() throws Exception {
         return ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("heightSwitch");
+    }
+
+    long count(String line) {
+        return sim.server.all().stream().filter(line::equals).count();
+    }
+
+    void waitFor(java.util.function.BooleanSupplier ok) throws Exception {
+        long until = System.currentTimeMillis() + 60000;
+        while (!ok.getAsBoolean()) {
+            assertTrue(System.currentTimeMillis() < until, "timed out: " + sim.server.all());
+            Thread.sleep(2);
+        }
     }
 
     /**
@@ -908,5 +923,64 @@ public class HeightSwitchSimTest {
             assertTrue(lastBody.contains("no clean-check thresholds for this tip kind: Process sets them"), lastBody);
         }
         assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "nothing sent");
+    }
+
+    /**
+     * #60 re-review MINOR 1: a needle change recorded while the needle's measure waits for its final lift's M400: the
+     * old needle's trip must not be recorded after the change.
+     */
+    @Test
+    public void aNeedleChangeDuringTheFinalLiftKeepsNoTrip() throws Exception {
+        svc.setLocation(HeightSwitch.PLACE, 150, 200, 0);
+        assertTrue(svc.measureHeightSwitch("n1", 5, N1_TRIP + 1, N1_TRIP - 0.5).get(120, TimeUnit.SECONDS).accepted);
+        String lift = "G1 Z31.500 F600"; // the press's own (the end from below lifts at other speeds)
+        CountDownLatch first = new CountDownLatch(1), second = new CountDownLatch(1), m400 = new CountDownLatch(1);
+        try {
+            long before = count(lift);
+            sim.server.holdOkUntil.put(lift, first);
+            Future<HeightSwitch.Result> f = svc.measureHeightSwitch("needle", 5, NEEDLE_TRIP - 1, NEEDLE_TRIP + 0.5);
+            waitFor(() -> count(lift) == before + 1);
+            sim.server.holdOkUntil.put(lift, second);
+            first.countDown();
+            waitFor(() -> count(lift) == before + 2); // the final lift
+            long m400s = count("M400");
+            sim.server.holdOkUntil.remove(lift);
+            sim.server.holdOkUntil.put("M400", m400);
+            second.countDown();
+            waitFor(() -> count("M400") == m400s + 1); // the final lift's M400, its ok held
+            svc.recordNeedleChange("the needle came off", "test");
+            m400.countDown();
+            HeightSwitch.Result r = f.get(120, TimeUnit.SECONDS);
+            assertFalse(r.accepted && !r.refused, "a measure of the needle that came off: " + r.why);
+            assertEquals("the needle was reported changed", r.why, "the change stops the task (WEB_API.md)");
+            assertNull(HeightSwitch.needleTrip(svc.getConfig()));
+        }
+        finally {
+            first.countDown();
+            second.countDown();
+            m400.countDown();
+        }
+    }
+
+    /**
+     * #60 re-review MINOR 2: a clock set back after the trip (emulated by a trip stamped an hour ahead): the change's
+     * token still comes later than the trip, so the old trip is void; a new trip then counts at once.
+     */
+    @Test
+    public void aClockSetBackDoesNotKeepTheOldNeedlesTrip() throws Exception {
+        svc.setLocation(HeightSwitch.PLACE, 150, 200, 0);
+        assertTrue(svc.measureHeightSwitch("n1", 5, N1_TRIP + 1, N1_TRIP - 0.5).get(120, TimeUnit.SECONDS).accepted);
+        assertTrue(svc.measureHeightSwitch("needle", 5, NEEDLE_TRIP - 1, NEEDLE_TRIP + 0.5)
+                .get(120, TimeUnit.SECONDS).accepted);
+        DispenseConfig c = svc.getConfig();
+        c.heightSwitch.needle.atMs += 3_600_000;
+        svc.updateConfig(c);
+        svc.recordNeedleChange("the needle came off", "test");
+        assertNull(HeightSwitch.needleTrip(svc.getConfig()), "the old needle's trip");
+        // the new needle needs no checked landing (#60's stopgap is gone): its end from below aims it
+        assertTrue(svc.measureHeightSwitch("needle", 5, NEEDLE_TRIP - 1, NEEDLE_TRIP + 0.5)
+                .get(120, TimeUnit.SECONDS).accepted);
+        assertNotNull(HeightSwitch.needleTrip(svc.getConfig()), "the new needle's trip counts though the clock is behind");
+        assertFalse(heightSwitchStatus().get("kSwitch").isJsonNull(), "in this home, since the place was set");
     }
 }

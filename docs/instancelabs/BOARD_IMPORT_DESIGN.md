@@ -563,7 +563,7 @@ server:  same gates, same pipeline; sha256 must match; files staged; ONE EdtRunn
          allocate (digest must equal `decisions`) → packages, parts → board → read back → move files → addBoard
          → packages.xml, parts.xml, boards.xml → index.json; any failure undoes all of it
          ◀── 201 {file, slug, packages, parts, art, boards}
-browser: "Use this board" → Board step selects it → position (Camera is on FID1) → Plan → Register board (AR)
+browser: "Use this design" → Board step selects it → position (Camera is on FID1) → Plan → Register board (AR)
 ```
 
 There is no server-side preview session, no import id, no expiry and no DELETE: the save re-parses the bytes (1–3 s
@@ -1410,7 +1410,7 @@ boardimport.css (`.dialog` is 760 px, W/app.css:639).
 dropped anywhere outside a drop zone makes Chrome open it in the tab, replacing the app and its STOP button.
 `boardimport.js` adds document-level `dragover` and `drop` listeners that call `preventDefault()` for every drag whose
 `dataTransfer.types` includes `Files`. A `.kicad_pcb` dropped outside `#board-import-drop` opens the dialog with that
-file; any other file gives a toast: `Drop a .kicad_pcb file on the upload box (Run › Board › Upload KiCad board).`
+file; any other file gives a toast: `Only a KiCad board (a .kicad_pcb file) can be dropped here.`
 
 | State | What shows | Ids |
 |---|---|---|
@@ -1420,7 +1420,7 @@ file; any other file gives a toast: `Drop a .kicad_pcb file on the upload box (R
 | 3a attach offer | when `attach[]` is not empty: `#board-import-attach` notebox `This is the board in ftp.board.xml: all 83 parts match (FID1 is 0.31 mm away from the board file's position; the drawing shows KiCad's). Use this drawing for ftp.board.xml: nothing else changes.` + `#btn-board-import-attach` (`Use the drawing for ftp.board.xml`), next to the normal save | listed |
 | 4 name | `#board-import-name` (default: the file name without `.kicad_pcb`), `#board-import-slug` `Saved as instancelabs/boards/ftp/ftp.board.xml`; when taken: `#board-import-exists` notebox `A board named "ftp" exists (imported 13:02). Saving replaces it: plans made with it must be planned again.` and `#btn-board-import-save` becomes `IL.press2` with the verb `replace board` (W/core.js:2241; UI_DESIGN.md:828-833) | listed |
 | 5 saving | the Save button busy; **Esc and Cancel do nothing** while the save runs; refusals in a `[data-refusals]` foot | `#btn-board-import-save`, `#btn-board-import-cancel` |
-| 6 saved | `#board-import-saved` `Saved FTP test board: 80 parts, 3 fiducials. New packages: R_0603_1608Metric~2, LED_0603_1608Metric~2, Fiducial_1mm_Mask3mm~2.`; **actions** for every package without a pad type (`New pad type for WSON-8…`, `#btn-board-import-newtype[data-package]`); `#btn-board-import-use` `Use this board` (primary), `#btn-board-import-again` `Upload another` | listed |
+| 6 saved | `#board-import-saved` `Saved FTP test board: 80 parts, 3 fiducials. New packages: R_0603_1608Metric~2, LED_0603_1608Metric~2, Fiducial_1mm_Mask3mm~2.`; **actions** for every package without a pad type (`New pad type for WSON-8…`, `#btn-board-import-newtype[data-package]`); `#btn-board-import-use` `Use this design` (primary; opened from Designs: `Open its Set up`), `#btn-board-import-again` `Upload another` | listed |
 | 7 use | Closes; Board step: `loadBoards()`, select `file:` + file (W/run.js:1084-1146); hint `Put the top camera on FID1 and press "Camera is on FID1" (or type the origin), then Plan. Register board then finds the fiducials.` | – |
 
 - Every save or attach result also ends in `IL.toast` (W/core.js:534), so a dialog closed early still reports.
@@ -1433,7 +1433,7 @@ file; any other file gives a toast: `Drop a .kicad_pcb file on the upload box (R
 
 ### 5.9 Board step: upload, thumbnails, origin, the hero before planning
 
-- `#btn-board-upload` (`Upload KiCad board…`, `i-plus`) in `.board-sel-row` next to `#btn-board-refresh`
+- `#btn-board-upload` (`Upload a design…`, `i-plus`) in `.board-sel-row` next to `#btn-board-refresh`
   (W/run.js:1183), mounted by H1. While a task runs it is greyed with `IL.gate(btn, 'Upload the board when the run has
   finished.')` (W/core.js:683), the same refusal as the API (§3.4).
 - `select#board-select` stays (PW drives it, PW:440-447). Under it `#board-thumbs`: **one horizontally scrolling row**

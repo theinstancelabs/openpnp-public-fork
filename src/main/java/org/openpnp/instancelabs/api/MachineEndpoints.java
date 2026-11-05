@@ -5,6 +5,7 @@ import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,6 +39,8 @@ import org.openpnp.spi.Machine;
 import org.openpnp.spi.Nozzle;
 import org.pmw.tinylog.Logger;
 
+import com.google.gson.JsonElement;
+
 /** STOP, start, home, machine state and the top-camera snapshot. */
 final class MachineEndpoints {
     /**
@@ -57,6 +60,9 @@ final class MachineEndpoints {
      * reader join (3 s), with room to spare.
      */
     static final long START_WAITS_FOR_SWITCH_OFF_MS = 20000;
+    /** BR-96: a reset home's evidence (a run id, picture ids, a model's proof) as JSON text, at most this long. */
+    static final int MAX_EVIDENCE_BYTES = 4096;
+    static final int MAX_ATTESTED_BY = 200;
     /** BR-75: how long the planned stop waits for its machine task to start and end; tests shorten it. */
     static volatile long plannedStopWaitMs = START_WAITS_FOR_SWITCH_OFF_MS;
     /** Tests only (BR-75 review): runs between the planned stop's checks and its task's submit (the task checks again). */
@@ -213,6 +219,7 @@ final class MachineEndpoints {
             throw ApiException.refused("No planned stop: " + (m == null ? "OpenPnP has no machine configured"
                     : "the dispense engine is not running") + ". The real STOP is POST /api/stop");
         }
+        ctx.requireLink(); // BR-93: on a lost link no answer may say the screw's motor stays powered
         String working = working(svc, m);
         if (working != null) {
             throw refusedWhile(working);
@@ -236,6 +243,7 @@ final class MachineEndpoints {
                 return now;
             }
             try {
+                ctx.requireLink(); // again on the machine thread, as working()
                 GcodeDriver.PlannedStop p = svc.plannedStop(m, () -> ctx.switchOff.stop(m));
                 if (p == null) {
                     actions.add("machine was already stopped");
@@ -253,8 +261,13 @@ final class MachineEndpoints {
                 actions.add("planned stop: OpenPnP Stop, its DISABLE_COMMAND without the screw-off line: "
                         + (sent.isEmpty() ? "no line acknowledged" : String.join(", ", sent))
                         + (failed.isEmpty() ? "" : " (no ok for " + String.join(", ", failed) + ")")
-                        + "; the link closed, the screw's motor stays powered");
+                        + (ctx.linkLoss() != null // BR-93: lost while the lines went out, so it recorded the motor off
+                                ? "; the link was lost meanwhile: the screw's motor counts as off"
+                                : "; the link closed, the screw's motor stays powered"));
                 return null;
+            }
+            catch (ApiException e) {
+                return e; // the link's refusal, the same as before the checks
             }
             catch (Exception e) {
                 Logger.warn(e, "web planned stop failed");
@@ -279,6 +292,9 @@ final class MachineEndpoints {
         }
         if (out instanceof String) {
             throw refusedWhile((String) out);
+        }
+        if (out instanceof ApiException) {
+            throw (ApiException) out;
         }
         if (out instanceof Exception) {
             throw ApiException.refused("No planned stop: " + rootMessage((Exception) out) + ". The real STOP is "
@@ -382,15 +398,32 @@ final class MachineEndpoints {
         // OpenPnP homing or jogging by itself: a home queued behind a task of its own that fails is dropped (rc1 review)
         ctx.requireMachineIdle();
         boolean wait = Json.bool(r.json(), "wait", false);
-        // BR-02: after a controller reset the home is G28 straight away, only on the operator's word that nothing is
-        // under either tool (the engine checks again on the machine thread)
+        // BR-02: after a controller reset the home is G28 straight away, only on the word of whoever checked that
+        // nothing is under either tool (the engine checks again on the machine thread)
         boolean attested = Json.bool(r.json(), "clearBelowAttested", false);
+        // BR-96: who attests it (the lock holder unless named; then the holder too) and their evidence, opaque, kept as
+        // its JSON text
+        MachineLock.Holder holder = r.lockActivity == null ? null : r.lockActivity.holder;
+        String lockName = holder == null ? MachineLock.USER_NAME : holder.name();
+        String named = Json.line(r.json(), "attestedBy", lockName);
+        if (named.length() > MAX_ATTESTED_BY) {
+            throw ApiException.badRequest("'attestedBy' is at most " + MAX_ATTESTED_BY + " characters");
+        }
+        String by = holder == null || named.equals(lockName) ? named : named + " (lock: " + lockName + ")";
+        JsonElement ev = r.json().get("evidence");
+        String evidence = ev == null || ev.isJsonNull() ? null : ev.toString();
+        int evidenceBytes = evidence == null ? 0 : evidence.getBytes(StandardCharsets.UTF_8).length;
+        if (evidenceBytes > MAX_EVIDENCE_BYTES) {
+            throw ApiException.badRequest("'evidence' is at most " + MAX_EVIDENCE_BYTES + " bytes of JSON (a run id, "
+                    + "picture ids): this one is " + evidenceBytes);
+        }
         String unknown = svc == null ? null : svc.positionUnknownWhy();
         if (unknown != null && !attested) {
             throw ApiException.refused("MACHINE: " + unknown + ". " + capitalize(ControllerReset.HOME_CHECK)
-                    + "; then home again saying so (clearBelowAttested): G28 is then the first line, with no Z move "
-                    + "before it.");
+                    + "; then home again saying so (clearBelowAttested; attestedBy and evidence say who checked and "
+                    + "how): G28 is then the first line, with no Z move before it.");
         }
+        ControllerReset reset = svc == null ? null : svc.getControllerReset();
         // With the engine: N1 raised first when a STOP left it low, and a STOP during the home stops the
         // head for good (the drivers are disconnected), as the engine's own homes (§2.3).
         boolean safe = svc != null && svc.isAvailable();
@@ -409,8 +442,14 @@ final class MachineEndpoints {
                 if (!m.isEnabled()) {
                     throw new Exception("the machine is not started: press Start first");
                 }
+                if (attested && reset != null) {
+                    reset.attest(by, evidence);
+                }
                 if (safe) {
                     return svc.homeSafely(attested);
+                }
+                if (reset != null) {
+                    reset.homeStarted(); // BR-97, as homeSafely does
                 }
                 m.home();
                 return null;
@@ -418,6 +457,11 @@ final class MachineEndpoints {
             catch (Exception e) {
                 Logger.warn(e, "web home failed");
                 return e;
+            }
+            finally {
+                if (attested && reset != null) {
+                    reset.attest(null, null); // a home that ended unhomed leaves no word for a later one
+                }
             }
         }, null, true);
         if (!wait) {

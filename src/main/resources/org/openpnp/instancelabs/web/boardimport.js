@@ -5,14 +5,17 @@
    existing board file whose placements match (attach).
 
    States: choose (drop zone, file picker) → reading (Cancel aborts) → preview (board, found, warnings, packages, name)
-   → saving (Esc and Cancel do nothing) → saved (pad types to add, Use this board, Upload another). A refused or failed
+   → saving (Esc and Cancel do nothing) → saved (pad types to add, Use this design, Upload another). A refused or failed
    read shows its reason with "Choose another file".
 
    API (IL.boardImport):
-     IL.boardImport.open({file, onSaved(result)})   file: a File to read at once (a drop); onSaved: after "Use this
-         board" (and before the dialog's pad-type links leave the page), with {file, name, slug, how: 'import' |
-         'attach', fiducial} (the board file to select in the Board step)
+     IL.boardImport.open({file, onSaved(result), saveCloses})   file: a File to read at once (a drop); onSaved: after
+         "Use this design" (and before the dialog's pad-type links leave the page), with {file, name, slug, how: 'import' |
+         'attach', fiducial} (the board file to select in the Board step); saveCloses: a save goes straight to onSaved
+         (Designs: the button after an attach is "Open its Set up"). A file dropped on the open dialog keeps the options
+         it was opened with.
      IL.boardImport.isOpen()
+   Event: 'boards' (the saved result) after every save or attach (Designs reads its list again).
    The drop guard (at load): a file dropped outside the drop zone never replaces the app (and its STOP button); a
    .kicad_pcb opens the dialog with it, any other file gets a toast. */
 'use strict';
@@ -113,11 +116,11 @@
   function open(opts) {
     const o = opts || {};
     if (M && !M.h.closed) {
-      if (o.onSaved) M.onSaved = o.onSaved;
+      // a file dropped on the open dialog: it keeps the options it was opened with (Designs' Save goes to its Set up)
       if (o.file) choose(o.file);
       return M;
     }
-    M = { onSaved: o.onSaved || null, state: 'choose', file: null, pv: null, ctl: null, bv: null, replace: false, saved: null, types: null };
+    M = { onSaved: o.onSaved || null, saveCloses: !!o.saveCloses, state: 'choose', file: null, pv: null, ctl: null, bv: null, replace: false, saved: null, types: null };
     build();
     loadTypes();
     if (o.file) choose(o.file);
@@ -185,7 +188,7 @@
     n.nameErr = el('div', { class: 'field__err', id: 'board-import-name-err', hidden: true });
     n.slug = el('div', { class: 'field__h bi-slug', id: 'board-import-slug' });
     n.nameField = el('div', { class: 'field bi-name', hidden: true, 'data-enter-submits': 'btn-board-import-save' },
-      el('label', { class: 'field__l', for: 'board-import-name' }, el('span', { text: 'Board name' })), n.name, n.nameErr, n.slug);
+      el('label', { class: 'field__l', for: 'board-import-name' }, el('span', { text: 'Design name' })), n.name, n.nameErr, n.slug);
     n.cancel = el('button', { type: 'button', class: 'btn', id: 'btn-board-import-cancel' }, 'Cancel');
     n.cancel.addEventListener('click', () => {
       if (M.state === 'saving') return;
@@ -201,15 +204,16 @@
       M.h.close('cancel');
     });
     n.save = el('button', { type: 'button', class: 'btn btn--primary btn--lg', id: 'btn-board-import-save', hidden: true });
-    IL.press2(n.save, () => (M && M.replace ? 'replace board' : null), () => save(), { refusalIn: null });
+    IL.press2(n.save, () => (M && M.replace ? 'replace the design' : null), () => save(), { refusalIn: null });
     n.again = el('button', { type: 'button', class: 'btn', id: 'btn-board-import-again', hidden: true }, 'Upload another');
     n.again.addEventListener('click', () => reset());
-    n.use = el('button', { type: 'button', class: 'btn btn--primary btn--lg', id: 'btn-board-import-use', hidden: true }, 'Use this board');
+    // Designs' onSaved opens the design's Set up; Run's chooses it in the Board step
+    n.use = el('button', { type: 'button', class: 'btn btn--primary btn--lg', id: 'btn-board-import-use', hidden: true }, M.saveCloses ? 'Open its Set up' : 'Use this design');
     n.use.addEventListener('click', () => use());
     n.refusals = el('div', { class: 'bi-refusals', 'data-refusals': '' });
     n.why = el('div', { class: 'reason bi-why', hidden: true });
     const body = el('div', { class: 'bi-body' }, n.drop, n.status, n.grid, n.saved);
-    M.h = IL.dialog.open({ id: 'dlg-board-import', size: 'wide', eyebrow: 'Board file', title: 'Upload a KiCad board', body,
+    M.h = IL.dialog.open({ id: 'dlg-board-import', size: 'wide', eyebrow: 'New design', title: 'Upload a design', body,
       foot: [n.refusals, n.nameField, el('span', { class: 'spacer' }), n.why, n.again, n.cancel, n.save, n.use],
       initialFocus: n.choose,
       onClose: () => {
@@ -267,7 +271,8 @@
       IL.setAttr(n.cancel, 'title', null);
     }
     if (M.state !== 'saving') IL.gate(n.save, lock || (M.state === 'reading' ? 'Wait for the new preview.' : null));
-    if (n.attachBtn) IL.gate(n.attachBtn, M.state === 'saving' ? 'The board is being saved.' : lock);
+    if (n.attachBtn) IL.gate(n.attachBtn, M.state === 'saving' ? 'The board is being saved.' : lock || (M.state === 'reading' ? 'Wait for the new preview.' : null));
+    n.dnp.firstChild.disabled = M.state === 'saving';   // a change would read the file again under the save
     IL.setText(n.why, lock && (M.state === 'preview' || M.state === 'choose') ? lock : '');
     IL.show(n.why, !!lock && (M.state === 'preview' || M.state === 'choose'));
   }
@@ -383,7 +388,7 @@
     paintAttach(pv);
     // do-not-place parts: one checkbox makes them pasted, disabled placements (§13 item 1)
     const dnpRefs = (pv.skipped && pv.skipped.dnp) || [];
-    const dnpOn = !!pv.pasteDnp || n.dnp.firstChild.checked;
+    const dnpOn = !!pv.pasteDnp;   // the box shows what a save or attach sends
     IL.show(n.dnp, dnpRefs.length > 0 || dnpOn);
     n.dnp.firstChild.checked = dnpOn;
     IL.setAttr(n.dnp, 'title', 'Do-not-place parts are not placed, so by default they get no paste. Ticked, they are saved as disabled parts, which the dispenser pastes.');
@@ -412,8 +417,17 @@
   }
   /** Part hit rects tinted by outcome: no pad type (red hatch), pad type to characterize (amber hatch), not dispensed (dimmed). */
   function tint(pv) {
-    const bv = M.bv;
-    const out = M.out;
+    // drawn-only and bottom-side parts are not placements: dimmed
+    const has = hatch(M.bv, pv.art, (ref) => M.out.get(ref) || 'none');
+    for (const sp of M.n.key.children) IL.show(sp, sp.dataset.k === 'paste' || has.has(sp.dataset.k));
+  }
+  /**
+   * Hatches a lite boardview's part rects by stateOf(ref): 'block' red, 'wait' amber, 'none' dimmed, anything else
+   * plain, with patterns of its own (ids `<prefix>-hatch-*`: two pictures on one page never share one). Returns the
+   * states it drew. Designs › Set up uses it too.
+   */
+  function hatch(bv, art, stateOf, prefix) {
+    const pre = prefix || 'bi';
     const svg = bv.svg;
     let defs = svg.querySelector('defs.bi-defs');
     if (!defs) {
@@ -421,26 +435,26 @@
       svg.insertBefore(defs, svg.firstChild);
     }
     // the hatch in board mm, about 6 px apart whatever the board's size
-    const size = (pv.art && pv.art.size) || [50, 50];
+    const size = (art && art.size) || [50, 50];
     const s = Math.max(0.25, Math.max(Number(size[0]) || 50, Number(size[1]) || 50) / 70);
     defs.replaceChildren();
     for (const k of ['block', 'wait']) {
-      const pat = IL.svgEl('pattern', { id: 'bi-hatch-' + k, patternUnits: 'userSpaceOnUse', width: String(s), height: String(s), patternTransform: 'rotate(45)' });
+      const pat = IL.svgEl('pattern', { id: pre + '-hatch-' + k, patternUnits: 'userSpaceOnUse', width: String(s), height: String(s), patternTransform: 'rotate(45)' });
       pat.append(IL.svgEl('rect', { width: String(s), height: String(s), class: 'bi-hatch__bg' }),
         IL.svgEl('line', { x1: '0', y1: '0', x2: '0', y2: String(s), class: 'bi-hatch__line', 'stroke-width': String(s * 0.32) }));
       pat.classList.add('bi-hatch--' + k);
       defs.appendChild(pat);
     }
+    const has = new Set();
     for (const r of svg.querySelectorAll('rect.pv-part')) {
-      const o = out.get(r.dataset.ref) || 'none';   // drawn-only and bottom-side parts are not placements
+      const o = stateOf(r.dataset.ref);
       r.classList.remove('bi-part--block', 'bi-part--wait', 'bi-part--dim');
-      if (o !== 'paste') r.classList.add(o === 'none' ? 'bi-part--dim' : 'bi-part--' + o);
+      r.style.fill = o === 'block' || o === 'wait' ? 'url(#' + pre + '-hatch-' + o + ')' : '';
+      if (o === 'block' || o === 'wait' || o === 'none') { r.classList.add(o === 'none' ? 'bi-part--dim' : 'bi-part--' + o); has.add(o); }
     }
-    // the key names only what this board has
-    const has = new Set(out.values());
-    for (const sp of M.n.key.children) IL.show(sp, sp.dataset.k === 'paste' || has.has(sp.dataset.k) || (sp.dataset.k === 'none' && svg.querySelector('rect.pv-part.bi-part--dim')));
+    return has;
   }
-  /** Two lines: what gets paste (and what does not yet), then fiducials and what is skipped. */
+  /** Two lines: what gets paste (and what does not yet), then what gets no paste: fiducials and what is skipped. */
   function foundLines(pv) {
     const pls = (pv.placements || []).filter((p) => p.type !== 'Fiducial');
     const by = (k) => pls.filter((p) => M.out.get(p.id) === k);
@@ -458,15 +472,22 @@
     // NEEDS_PROFILE warning say
     if (block.length) first.push(el('b', { class: 'bi-found--block', text: IL.plural(block.length, 'part needs', 'parts need') + (IL.padProfile ? ' a profile (' : ' a pad type (')
       + IL.plural(sum(block), 'pad') + ')' }));
+    // the parts this tip cannot paste (the check's tip and part reasons) are "not dispensed" above: named here, so the line
+    // adds up to every part
+    const pk = new Map((pv.packages || []).map((k) => [k.id, k]));
+    const tip = pls.filter((p) => M.out.get(p.id) === 'none' && ['tip', 'part'].includes((pk.get(p.packageId) || {}).profileReason));
+    if (tip.length) first.push(el('b', { class: 'bi-found--block', text: IL.plural(tip.length, 'part needs', 'parts need') + ' another tip (' + refList(tip.map((p) => p.id), 3) + ')' }));
     const second = [el('span', { text: IL.plural(fids, 'fiducial') })];
     const skip = (list, one, many, tail) => {
       if (!list || !list.length) return;
       second.push(el('span', { title: list.join(', ') }, IL.plural(list.length, one, many) + tail + ' (' + refList(list, 3) + ')'));
     };
-    skip(sk.dnp, 'part', 'parts', ' not placed (DNP)' + (pv.pasteDnp ? ': pasted' : ': no paste'));
-    skip(sk.bottom, 'bottom-side part', 'bottom-side parts', ' skipped');
+    // ticked, do-not-place parts get paste: the checkbox says so
+    if (!pv.pasteDnp) skip(sk.dnp, 'part', 'parts', ' not placed (DNP)');
+    // named, not counted: the bottom's footprints are parts, fiducials, headers and logos alike until it is read (BR-25)
+    if ((sk.bottom || []).length) second.push(el('span', { title: sk.bottom.join(', ') }, 'the bottom side (' + refList(sk.bottom, 3) + '): not read yet'));
     skip(art, 'part', 'parts', ' drawn only');
-    return [el('div', { class: 'bi-found__a' }, join(first)), el('div', { class: 'bi-found__b' }, join(second))];
+    return [el('div', { class: 'bi-found__a' }, join(first)), el('div', { class: 'bi-found__b' }, el('b', { text: 'No paste: ' }), join(second))];
   }
   function paintAttach(pv) {
     const n = M.n;
@@ -602,9 +623,9 @@
       IL.setText(n.exists, ex.how === 'attach'
         ? 'The name "' + slug + '" holds the KiCad drawing of ' + String(ex.file || '').split('/').pop() + (at ? ' (added ' + at + ')' : '')
           + '. Saving under it replaces that drawing: choose another name to keep it.'
-        : 'A board named "' + (ex.name || slug) + '" exists' + (at ? ' (imported ' + at + ')' : '') + '. Saving replaces it: plans made with it must be planned again.');
+        : 'A design named "' + (ex.name || slug) + '" exists' + (at ? ' (imported ' + at + ')' : '') + '. Saving replaces it: plans made with it must be planned again.');
     }
-    if (!IL.isArmed(n.save)) IL.setText(n.save, ex ? 'Replace board' : 'Save board');
+    if (!IL.isArmed(n.save)) IL.setText(n.save, ex ? 'Replace the design' : 'Save the design');
   }
 
   // ------------------------------------------------------------------------------------------ save, attach, use
@@ -626,7 +647,7 @@
     n.save.disabled = true;
     n.save.setAttribute('aria-busy', 'true');
     const q = query({ file: M.file.name, name, replace: M.replace ? 1 : 0, sha256: pv.file && pv.file.sha256, decisions: pv.decisions,
-      pasteDnp: n.dnp.firstChild.checked ? 1 : undefined });
+      pasteDnp: pv.pasteDnp ? 1 : undefined });
     try {
       const r = await post('/api/boards/import/save?' + q, M.file, null);
       if (!M) { IL.toast('Saved ' + name + '.', 'ok'); return; }
@@ -687,7 +708,9 @@
       let r = null;
       while (!r) {
         const name = attachName(c, base, taken);
-        const q = query({ file: M.file.name, board: c.file, name, replace: M.attachReplace ? 1 : 0, sha256: pv.file && pv.file.sha256 });
+        // the file is read again: with the same "paste the DNP parts" as the preview's, or it no longer matches (409)
+        const q = query({ file: M.file.name, board: c.file, name, replace: M.attachReplace ? 1 : 0, sha256: pv.file && pv.file.sha256,
+          pasteDnp: pv.pasteDnp ? 1 : undefined });
         try {
           r = await post('/api/boards/import/attach?' + q, M.file, null);
         } catch (e) {
@@ -714,7 +737,7 @@
       IL.pollNow();
     }
   }
-  /** State 6: what was saved, the pad types still to add (actions now), Use this board. */
+  /** State 6: what was saved, the pad types still to add (actions now), Use this design (Designs: Open its Set up). */
   function saved(r, how, name) {
     const n = M.n;
     const pv = M.pv;
@@ -762,13 +785,15 @@
       !pp && crows.length ? el('div', { class: 'bi-todo' },
         el('h3', { text: crows.length === 1 ? 'Characterize this pad type before its parts get paste' : 'Characterize these pad types before their parts get paste' }),
         el('ul', {}, crows)) : null,
-      el('p', { class: 'bi-saved__next', text: how === 'attach'
-        ? 'Use this board, then plan it: the drawing shows under its dots.'
-        : 'Use this board: put the top camera on ' + (M.saved.fiducial || 'the first fiducial') + ' and press "Camera is on ' + (M.saved.fiducial || 'FID1')
+      el('p', { class: 'bi-saved__next', text: M.saveCloses ? 'Set up shows what this design still needs.'
+        : how === 'attach' ? 'Use this design, then plan it: the drawing shows under its dots.'
+        : 'Use this design: put the top camera on ' + (M.saved.fiducial || 'the first fiducial') + ' and press "Camera is on ' + (M.saved.fiducial || 'FID1')
           + '" (or type the origin), then Plan. Register board then finds the fiducials.' })].filter(Boolean));
     paint();
     IL.toast(how === 'attach' ? 'The KiCad drawing is now used for ' + base + '.' : 'Saved ' + M.saved.name + ': ' + IL.plural(parts, 'part') + ', ' + IL.plural(fids, 'fiducial') + '.', 'ok');
-    n.use.focus({ preventScroll: true });
+    IL.emit('boards', M.saved);   // a board saved or given a drawing: Designs counts it at once
+    if (M.saveCloses && how === 'import') use();   // Designs: its Set up says what is left
+    else n.use.focus({ preventScroll: true });
   }
   function use() {
     const s = M && M.saved;
@@ -777,7 +802,7 @@
     M.h.close('use');
     if (cb) IL.safe(() => cb(s), 'board import');
   }
-  /** A pad-type action after the save: the board is chosen in the Board step first (as Use this board), then hash opens. */
+  /** A pad-type action after the save: the board is chosen in the Board step first (as Use this design), then hash opens. */
   async function leaveTo(hash) {
     const s = M && M.saved;
     const cb = M && M.onSaved;
@@ -803,9 +828,11 @@
     if (!f) return;
     if (isPcb(f.name)) {
       if (taskLock()) { IL.toast(RUNNING, 'need'); return; }
-      open({ file: f, onSaved: IL.boardFlow ? IL.boardFlow.onImported : null });
-    } else IL.toast('Drop a .kicad_pcb file on the upload box (Run › Board › Upload KiCad board).', 'need');
+      // on Designs a dropped file is Designs' upload (Save opens its Set up); anywhere else Run's
+      const o = IL.active() === 'designs' && IL.designFlow ? IL.designFlow.uploadOptions() : { onSaved: IL.boardFlow ? IL.boardFlow.onImported : null };
+      open(Object.assign({ file: f }, o));
+    } else IL.toast('Only a KiCad board (a .kicad_pcb file) can be dropped here.', 'need');
   });
 
-  IL.boardImport = { open, isOpen: () => !!M, slugOf, refList };
+  IL.boardImport = { open, isOpen: () => !!M, slugOf, refList, hatch };
 })();

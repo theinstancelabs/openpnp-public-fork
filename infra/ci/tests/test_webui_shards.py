@@ -67,6 +67,46 @@ class Shards(unittest.TestCase):
             webui_shards.scripts_for(all_, key)  # raises if a named one is missing
 
 
+class RunnerList(unittest.TestCase):
+    """run-webui-sim-test.sh's ALL_SCRIPTS holds one script per line, so PRs adding scripts at different places merge
+    cleanly, and the runner still reads it as one list."""
+
+    def setUp(self):
+        with open(RUNNER) as f:
+            self.text = f.read()
+
+    def run_list(self, **env):
+        """The runner's own lines, from ALL_SCRIPTS to its WEBUI_SCRIPTS check, in bash; prints WEBUI_SCRIPTS."""
+        snippet = re.search(r'^ALL_SCRIPTS=".*?^done$', self.text, re.M | re.S).group(0)
+        base = {k: v for k, v in os.environ.items() if k != "WEBUI_SCRIPTS"}
+        return subprocess.run(["bash", "-c", 'set -euo pipefail\n' + snippet + '\nprintf "%s" "$WEBUI_SCRIPTS"'],
+                              env=dict(base, **env), capture_output=True, text=True, timeout=30)
+
+    def test_every_playwright_script_but_boardview_is_listed(self):
+        """A script dropped from the list (a merge that keeps the wrong side) or a typo fails here, not in the slow
+        rest leg. boardview runs in its own job (ci.yml ui-boardview)."""
+        web = os.path.dirname(RUNNER)
+        files = sorted(f[:-len(".playwright.cjs")] for f in os.listdir(web) if f.endswith(".playwright.cjs"))
+        self.assertEqual(sorted(webui_shards.all_scripts(self.text)), [f for f in files if f != "boardview"])
+
+    def test_one_script_per_line(self):
+        literal = re.search(r'^ALL_SCRIPTS="([^"]*)"', self.text, re.M).group(1)
+        self.assertEqual([l for l in literal.splitlines() if len(l.split()) > 1], [])
+
+    def test_the_default_runs_every_script_in_order(self):
+        r = self.run_list()
+        self.assertEqual((r.returncode, r.stdout), (0, " ".join(webui_shards.all_scripts(self.text))), r.stderr)
+
+    def test_a_named_script_is_known_and_an_unknown_one_refused_with_the_list_on_one_line(self):
+        r = self.run_list(WEBUI_SCRIPTS="lock-real webui-sim")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.run_list(WEBUI_SCRIPTS="nope")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.run_list(WEBUI_SCRIPTS="tip").returncode, 2, "a part of a name is no name")
+        known = " ".join(webui_shards.all_scripts(self.text))
+        self.assertIn("unknown script 'nope' (known: %s)" % known, r.stderr)
+
+
 class Wiring(unittest.TestCase):
     """ci.yml runs one ui-e2e leg per key, each with its own WEBUI_SCRIPTS and artifact, and gate waits for all."""
 

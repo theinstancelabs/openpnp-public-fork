@@ -7,6 +7,7 @@
 
 /* the design cards: a picture each, the chosen one pressed */
 .rf-designs { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.rf-designs .rf-note { grid-column: 1 / -1; margin: 0; }
 .rf-designs .design { gap: 6px; padding: 10px; text-align: left; font: inherit; color: var(--ink); cursor: pointer; min-width: 0; }
 .rf-designs .design:hover { border-color: var(--accent); }
 .rf-designs .design[aria-pressed="true"] { border: 2px solid var(--accent); padding: 9px; box-shadow: 0 0 0 4px var(--accent-tint); }

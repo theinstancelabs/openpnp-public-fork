@@ -17,7 +17,7 @@
      setSource({planId} | {boardFile, boardName})   current() → {kind, check, label, planId?, boardFile?} | null
      mountNeeds(host)  profileHooks(pt)  importRows(table, preview)  importSaved(preview, {leaveTo}) → node | null
      inspectorBlock(host, pad, plan) → shown?  amountText(pad)  openCal(request)  taskParts(run)  verdict(status)
-     jobLock(status)  jobActive(status)  needsHref()
+     jobLock(status)  jobActive(status)  idle(status) / calIdle(status) → why a use / a calibration waits, or null  needsHref()
    Fix-its: profile-use (arg: group id, plans again), profile-needs, pcal-open, pcal-area, pcal-wiped (two-press).
    sessionStorage: il.pp.source (a board file as the source), il.pcal.req (the calibration before start), il.pcal.job
    (the job this tab started), il.pcal.loaded (job ids whose new plan this tab loaded). Styles: padprofile.css. */
@@ -2128,6 +2128,6 @@
   }
 
   IL.padProfile = { groups: (plan) => split(plan && plan.profileCheck), split, padTypesItem, setSource, current, mountNeeds, profileHooks,
-    importRows, importSaved, inspectorBlock, amountText, openCal, startManual, pendingForm, taskParts, verdict, jobLock, jobActive, needsHref, estimate,
-    turnAdj, typeLabel };
+    importRows, importSaved, inspectorBlock, amountText, openCal, startManual, pendingForm, taskParts, verdict, jobLock, jobActive, idle, calIdle, needsHref, estimate,
+    turnAdj, typeLabel, apply, calRequest, usable, calibrates };
 })();

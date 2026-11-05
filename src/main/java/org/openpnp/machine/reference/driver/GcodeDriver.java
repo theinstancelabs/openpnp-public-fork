@@ -548,8 +548,10 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
     }
 
     public synchronized void connect() throws Exception {
+        // Instance Labs (BR-93): the old link's reader, closed below, reports nothing; the generation first, so it never
+        // sees the flag cleared while it still counts as the current link's
+        linkGeneration++;
         disconnectRequested = false;
-        linkGeneration++; // Instance Labs (BR-93): the old link's reader, closed below, reports nothing
         getCommunications().setDriverName(getName());
         Logger.debug("[{}] Connect", getCommunications().getConnectionName());
         getCommunications().connect();
@@ -1779,9 +1781,12 @@ public class GcodeDriver extends AbstractReferenceDriver implements Named {
         /** Instance Labs (BR-93): the connect this reader belongs to. */
         private final int generation = linkGeneration;
 
-        /** Instance Labs (BR-93): a loss of this reader's own link only. */
+        /**
+         * Instance Labs (BR-93): a loss of this reader's own link only. The flag before the generation, the reverse of
+         * connect()'s writes: a reader that sees the flag cleared also sees the new generation.
+         */
         private void lost(String cause) {
-            if (generation == linkGeneration) {
+            if (!disconnectRequested && generation == linkGeneration) {
                 linkLost(cause);
             }
         }

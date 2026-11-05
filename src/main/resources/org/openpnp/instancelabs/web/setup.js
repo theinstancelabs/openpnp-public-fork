@@ -26,11 +26,14 @@
   /** Settings only their own actions may change: never sent by the JSON editor (WEB_API.md, PUT /api/config). Since the
    *  tip setups (PROFILE_CALIBRATION_DESIGN.md §22.1) the mounted tip, what the other tips keep, where the needle lands
    *  and its trim are set by Setup › Dispenser & tip, Check where it lands and the trim panel; the tip's dose anchor and the
-   *  switch's measures by their own steps, the needle's end from below by its measure. */
+   *  switch's measures by their own steps, the needle's end from below by its measure. WebEditorSettingsListsTest keeps these
+   *  lists covering the server's. */
   const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleZOffsetHomeAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces',
     'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs', 'doseAnchor',
     'heightSwitch', 'needleEnd']);
-  const STAMPED_NESTED = new Set(['profile.startAngleSetAtMs', 'profile.startAngleChangedAtMs', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
+  const STAMPED_NESTED = new Set(['profile.startAngleDeg', 'profile.startAngleSetAtMs', 'profile.startAngleChangedAtMs',
+    'profile.startAngleFeature', 'purgeRow.resetAtMs', 'purgeRow.usedSpots', 'calibrationArea.usedMm', 'calibrationArea.resetAtMs',
+    'paste.loadedAtMs']);
   const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe', 'paste', 'calibrationArea', 'padCalibration',
     'outputZones', 'needleEndMeasure']);
   /** Maps PUT /api/config replaces whole: the editor diffs them per entry and Save sends the server's map as it is then
@@ -265,7 +268,8 @@
     const ri = it.regulator;
     add({ key: 'regulator', title: 'Regulator', state: ri.state, card: 'pressure', code: 'I6', you: !!reg,
       value: reg ? psi + ' psi · ' + IL.fmtTime(reg.atMs) : 'read the gauge', detail: ri.detail,
-      fixes: [{ fix: 'pressure-on', label: 'Pressure on', icon: 'i-gauge' }, { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
+      fixes: [IL.hasPumpOnly(s) ? { fix: 'pressure-pump', label: 'Pump on', icon: 'i-gauge' } : { fix: 'pressure-on', label: 'Pressure on', icon: 'i-gauge' },
+        { fix: 'attest-regulator', label: 'Reads ' + psi + ' psi' }] });
     // 4 Places
     const wn = d.wasteLocationName || 'waste', bn = d.blankLocationName || 'blank';
     const missing = [wn, bn].filter((n) => !locs[n]);
@@ -456,7 +460,8 @@
       case 'regulator':
         q = 'Read the regulator gauge: ' + IL.fmtPsi(prof.pressurePsi) + ' psi';
         code = 'I6 · no sensor';
-        dd = 'Switch the pressure on with the needle over the waste, read the gauge, then tick it. Kept in this browser for 8 h.';
+        dd = (IL.hasPumpOnly(s) ? 'Switch the pump on (the valve stays closed, nothing moves), read the gauge'
+          : 'Switch the pressure on with the needle over the waste, read the gauge') + ', then tick it. Kept in this browser for 8 h.';
         acts = x.fixes.map((f) => IL.fixButton(f));
         break;
       case 'needle':
@@ -1653,9 +1658,16 @@
     return c.root;
   }
   function usedFor(name, d) {
-    if (name === (d.wasteLocationName || 'waste')) return 'prime, test dot';
+    if (name === (d.wasteLocationName || 'waste')) return 'prime, test dot, pressure on';
     if (name === (d.blankLocationName || 'blank')) return 'touch-off, dot ladder';
-    return 'scale shots, calibrations';
+    // #12's paste zones: the other sinks, the coupons and a place's own probed surface take paste; every other place none
+    if (IL.isCupPlace(name)) return 'scale shots';
+    if (IL.isSinkPlace(name, d)) return 'drool while pressure is on';
+    if ((((S.config || {}).padCalibration || {}).couponPlaces || ['coupon1', 'coupon2']).includes(name)) return 'pad calibration coupon';
+    // a touch-off or dot ladder at a place lays its dots on the fitted surface of that name (OutputZones: a program's own
+    // surface; the board's too, until BR-81 refuses a paste place that lies on a board, by position, whatever its name)
+    if (((d.surfaces || {})[name] || {}).plane) return 'touch-off, dot ladder';
+    return 'moves and Z only: no paste';
   }
   function placeRow(name) {
     const r = { name };
@@ -2142,14 +2154,15 @@
     c.jErr = el('div', { class: 'field__err', id: 'su-json-err', role: 'status' });
     c.jStale = el('div', { class: 'notebox notebox--need su-json-stale', hidden: true });
     c.jDiff = el('div', { id: 'set-json-diff', class: 'su-diff' });
-    c.jReload = btn('Reload and keep my edits', { class: 'btn' }, 'i-refresh');
+    c.jReload = btn('Reload and keep my edits', { id: 'btn-settings-json-reload', class: 'btn' }, 'i-refresh');
     c.jSave = btn('Save changed keys', { id: 'btn-settings-json', class: 'btn' });
     c.jReason = el('span', { class: 'reason su-foot-reason' });
     c.adv = el('details', { class: 'disclose su-adv', id: 'set-advanced' }, el('summary', { text: 'All settings (advanced JSON)' }),
       el('div', { class: 'su-col', 'data-refusals': '' },
-        el('p', { class: 'su-note', text: 'Every engine setting. Save sends only the keys you changed (one level deep for profile, purgeRow and cleanPadCheck). Keys stamped by the engine are read-only here: '
-          + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, profile.startAngleSetAtMs; the tip (tip, parkedTips) is set in Setup › Dispenser & tip, '
-          + 'where the needle lands (needleLanding, needleXyTrim) by Check where it lands and the trim panel. The profile is the mounted tip’s recipe. '
+        el('p', { class: 'su-note', text: 'Every engine setting. Save sends only the keys you changed (one level deep for the grouped settings: profile, purgeRow, cleanPadCheck, paste, calibrationArea and the like). Keys stamped by the engine are read-only here: '
+          + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, calibrationArea.usedMm and resetAtMs, paste.loadedAtMs, the start angle (profile.startAngleDeg, startAngleSetAtMs, startAngleChangedAtMs and startAngleFeature: set or measured in Profiles); the tip (tip, parkedTips) is set in Setup › Dispenser & tip, '
+          + 'where the needle lands (needleLanding, needleXyTrim) by Check where it lands and the trim panel; the tip’s dose anchor (doseAnchor) and '
+          + 'the switch’s measures (heightSwitch) are set by their own steps. The profile is the mounted tip’s recipe. '
           + 'Places (locations) are sent one by one: a place saved elsewhere meanwhile is kept.' }),
         F.json.el, c.jErr, c.jStale, c.jDiff,
         el('div', { class: 'btn-row' }, c.jSave, c.jReload, c.jReason)));

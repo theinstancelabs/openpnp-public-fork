@@ -209,13 +209,15 @@ public class LockApiSimTest {
                 .getAsString());
         assertError(409, "locked", post("/api/machine/home", "{\"wait\":true}", null));
         assertError(409, "locked", call("PUT", "/api/config", "{}", null));
+        // BR-77: the start-angle measure is a guarded write too
+        assertError(409, "locked", post("/api/screw/start-angle/measure", "{\"mode\":\"halves\"}", null));
         // data writes and GETs never need it
         assertEquals(200, call("GET", "/api/status", null, UI).status);
         // its own API calls pass with its token
         ok(post("/api/needle/offset", NEEDLE_OFFSET, token));
         // refused lines: nothing is sent (test 6)
         sim.server.mark();
-        for (String bad : new String[] {"G28", "G92 X0", "M18", "G1 X500", "M106 P2 S128"}) {
+        for (String bad : new String[] {"G28", "G92 X0", "M18", "G1 X500", "M106 P2 S128", "M99999999999"}) {
             Res refused = gcode(token, "M114", bad);
             assertError(400, "refused-line", refused);
             assertEquals(1, refused.json.get("index").getAsInt(), refused.toString());

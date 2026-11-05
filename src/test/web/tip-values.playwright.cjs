@@ -7,8 +7,13 @@
  * tip's own anchor as "Paste per pad (target)" with its number, the pad type's name, source and time; the family's says
  * this tip has no number of its own yet; (2) Calibrate › the last touch-off: "Normal dot 1.35 mm, from the tip's ladder
  * of 14:07."; one from before BR-85 (no referenceFrom) says only the size; one without a reference shows no line; one
- * that left dots out after the prime says so; (2b) the touch-off's Steps follow the mounted tip's recipe: at least its
- * touchOffSkipDots + 3 (the engine refuses a shorter ladder), refused at the field with why; (3) no JavaScript errors.
+ * that left dots out after the prime says so; (2b) the touch-off follows the mounted tip's recipe: it opens at its ladder
+ * (start 0.125 + touchOffSkipDots × step rounded up to 1 µm, skip + 10 steps; 0.125 and 6 with no skip), and Steps below
+ * skip + 3 or a start whose counted dots begin below 0.125 mm are refused at their fields with why (the engine refuses
+ * both), typed values kept; the plan line counts the 2 check dots BR-89 lays after the ladder at the first counted dot's
+ * gap; (2c) a touch-off the engine did not apply for its check dots (BR-89's landingProblem) offers no Use, the engine's
+ * words instead; (2d) its check dots as rows under the ladder's (Calibrate and Records › Touch-offs), and Records says
+ * why it was not applied; none for a touch-off from before BR-89; (3) no JavaScript errors.
  * Nothing moves.
  *
  * Env: IL_BASE or IL_API_URL (the UI), PLAYWRIGHT_DIR, OUT_DIR (tip-values-results.json, tip-values.png).
@@ -156,19 +161,112 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     const skipped1 = await page.evaluate(() => { const n = document.getElementById('to-ref'); return n ? n.textContent : null; });
     check('(2) one dot not counted: said in the singular', skipped1 === 'Normal dot 1.35 mm, from the tip’s ladder of 14:07. The first dot after the prime was not counted.', skipped1);
 
+    // ---- (2c) BR-89: the check dots say the tip may have moved, so the engine did not apply the touch-off; Use would apply
+    // it anyway (POST /api/needle/offset): never offered, the engine's words instead
+    const PROBLEM = 'the 2nd check dot landed 0.150 mm from where the first two counted dots landed (at most 0.1 mm): the tip may have moved; look at it from below and run the touch-off again';
+    const moved = touchOffRow(true, true, 3);
+    const movedDet = JSON.parse(moved.details);
+    // its check gap is no gap of its ladder and not 0.125: the rows below must take checkGapMm
+    Object.assign(movedDet.analysis, { dotsLaid: 15, checkGapMm: 0.15, landingShiftMm: 0.15, landingProblem: PROBLEM,
+      checkDots: [{ state: 'dot', diameterMm: 1.32, dxMm: 0.01, dyMm: -0.02, areaMm2: 1.368 }, { state: 'dot', diameterMm: 1.29, dxMm: 0.16, dyMm: -0.01, areaMm2: 1.307 }] });
+    ST.touchOff = Object.assign(moved, { id: 990099, method: 'dot-ladder-touch-off (not applied: the tip may have moved)', details: JSON.stringify(movedDet) });
+    await page.evaluate(() => IL.pcr.loadCalibrations());
+    await page.waitForFunction(() => /0\.150 mm/.test((document.getElementById('to-sum') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
+    const mv = await page.evaluate(() => ({ use: !!document.getElementById('to-use'), sum: (document.getElementById('to-sum') || {}).textContent || '',
+      hist: [...document.querySelectorAll('#to-history-t tbody tr')].map((r) => r.textContent).find((t) => /not used|refused|shown only/.test(t)) || null }));
+    check('(2c) the check dots say the tip may have moved (BR-89): no "Use for the needle offset", the engine\'s words instead', !mv.use
+      && mv.sum.includes('Not applied: ' + PROBLEM + '.'), mv);
+    check('(2c) its row in the history says why it is not used (its check dots failed, whichever way), not "shown only"', /Touch-off \(not used: its check dots failed\)/.test(mv.hist || ''), mv.hist);
+
+    // ---- (2d) BR-89's 2 check dots (laid after the ladder at its first counted dot's gap) as rows under the ladder's,
+    // headed "Check dots", in Calibrate and in Records › Touch-offs; Records also says why the touch-off was not applied
+    const rowsOf = (sel) => page.evaluate((s) => [...document.querySelectorAll(s + ' tbody tr')].map((tr) => [...tr.cells].map((c) => c.textContent)), sel);
+    await page.waitForFunction(() => document.querySelectorAll('#to-result .cal-to__t tbody tr').length === 8, null, { timeout: 8000 }).catch(() => null);
+    const calRows = await rowsOf('#to-result .cal-to__t');
+    check('(2d) Calibrate: the 5 ladder rows, then "Check dots" and the 2 check dots at the check gap (+0.150) with their sizes', calRows.length === 8
+      && JSON.stringify(calRows.slice(5)) === JSON.stringify([['Check dots'], ['+0.150', '1.320', ''], ['+0.150', '1.290', '']]), calRows);
+    await page.evaluate(() => document.getElementById('to-result').scrollIntoView({ block: 'center' }));
+    await page.screenshot({ path: path.join(OUT, 'touchoff-check-dots.png') });
+    await page.evaluate(() => IL.go('#records/touch-offs/990099'));
+    await page.waitForFunction(() => /Not applied/.test((document.getElementById('panel') || {}).textContent || ''), null, { timeout: 8000 }).catch(() => null);
+    const recTo = { rows: await rowsOf('#panel .rec-mini-t'), why: await page.evaluate(() => [...document.querySelectorAll('#panel p')].map((p) => p.textContent).find((t) => /^Not applied/.test(t)) || null) };
+    check('(2d) Records › Touch-offs: the same check rows under the ladder, and why it was not applied in the engine\'s words', recTo.rows.length === 8
+      && JSON.stringify(recTo.rows.slice(5)) === JSON.stringify([['Check dots'], ['+0.150', '1.320'], ['+0.150', '1.290']]) && recTo.why === 'Not applied: ' + PROBLEM + '.', recTo);
+    await page.screenshot({ path: path.join(OUT, 'records-touchoff-check-dots.png') });
+    await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); IL.go('#calibrate/touch-off'); });
+    await page.waitForSelector('#to-sum', { timeout: 15000 });
+    // a check dot the camera could not measure reads "not measured", one that left no paste "no dot" (as the ladder's)
+    const lost = touchOffRow(true, true, 3);
+    const lostDet = JSON.parse(lost.details);
+    Object.assign(lostDet.analysis, { dotsLaid: 15, checkGapMm: 0.15, checkDots: [{ state: 'unmeasured', diameterMm: null, dxMm: null, dyMm: null, areaMm2: null },
+      { state: 'none', diameterMm: null, dxMm: null, dyMm: null, areaMm2: null }],
+    landingProblem: 'the 2nd check dot at gap 0.150 mm left no dot: the landing cannot be checked; look at the tip from below and run the touch-off again' });
+    ST.touchOff = Object.assign(lost, { id: 990098, method: 'dot-ladder-touch-off (not applied: the landing cannot be checked)', details: JSON.stringify(lostDet) });
+    await page.evaluate(() => IL.pcr.loadCalibrations());
+    await page.waitForFunction(() => /no dot/.test([...document.querySelectorAll('#to-result .cal-to__t tbody tr')].slice(-1).map((r) => r.textContent).join('')), null, { timeout: 8000 }).catch(() => null);
+    const lostRows = await rowsOf('#to-result .cal-to__t');
+    check('(2d) a check dot the camera could not measure: "not measured"; one that left no dot: "no dot"', lostRows.length === 8
+      && JSON.stringify(lostRows.slice(5)) === JSON.stringify([['Check dots'], ['+0.150', 'not measured', ''], ['+0.150', 'no dot', '']]), lostRows);
+    ST.touchOff = touchOffRow(true, true, 1);
+    await page.evaluate(() => IL.pcr.loadCalibrations());
+    await page.waitForFunction(() => !!document.getElementById('to-use'), null, { timeout: 8000 }).catch(() => null);
+    check('(2c) a touch-off without that problem offers Use again', await page.evaluate(() => !!document.getElementById('to-use')),
+      await page.evaluate(() => ({ era: !!document.getElementById('to-era'), sum: (document.getElementById('to-sum') || {}).textContent || '' })));
+    check('(2d) a touch-off from before BR-89 (no check dots): its 5 ladder rows only, no "Check dots"', JSON.stringify((await rowsOf('#to-result .cal-to__t')).map((r) => r.length)) === '[3,3,3,3,3]',
+      await rowsOf('#to-result .cal-to__t'));
+
     // ---- (2b) the touch-off's smallest ladder follows the mounted tip's recipe (BR-85: skip + the reference pair + one) --
     const stepsField = () => page.evaluate(() => ({ unit: (document.querySelector('#to-steps-wrap .unit') || {}).textContent || null,
       min: document.getElementById('to-steps').getAttribute('min'), err: (document.getElementById('to-steps-err') || {}).hidden ? '' : document.getElementById('to-steps-err').textContent,
-      value: document.getElementById('to-steps').value }));
+      value: document.getElementById('to-steps').value, focused: document.activeElement === document.getElementById('to-steps'), start: document.getElementById('to-start').value,
+      startFocused: document.activeElement === document.getElementById('to-start'),
+      startErr: (document.getElementById('to-start-err') || {}).hidden ? '' : document.getElementById('to-start-err').textContent,
+      plan: (document.getElementById('to-plan') || {}).textContent || '' }));
     const unitIs = (u) => page.waitForFunction((x) => ((document.querySelector('#to-steps-wrap .unit') || {}).textContent || '') === x, u, { timeout: 8000 }).catch(() => null);
-    // the field as it opens (nothing typed yet) fits the recipe: 6 steps, or skip + 3 when that is more
+    // the ladder as it opens (nothing typed yet) fits the recipe (Process 11-04 12:4x, the 25G): the uncounted dots go above
+    // 0.125 mm, where the counted ones start (the engine's rule, #44), and 10 are counted, down to −0.100 mm at step 0.025
+    ST.skip = 3;
+    await unitIs('6 to 20');
+    const f25 = await stepsField();
+    // BR-89: the run lays the 13 and then 2 check dots at the first counted dot's gap (0.200 − 3 × 0.025), after an empty space
+    check('(2b) the 25G\'s recipe (3 dots not counted): the ladder opens at 0.200 mm, 13 steps, nothing refused, down to −0.100; the plan line counts the 2 check dots at 0.125 mm (15 dots)',
+      f25.start === '0.200' && f25.value === '13' && f25.err === '' && f25.startErr === ''
+      && /^15 dots( on “[^”]*”)?: 13 at gaps 0\.200, .*[-−]0\.100 mm, then 2 check dots at 0\.125 mm after an empty space · /.test(f25.plan), f25);
+    // the start follows a typed Step, rounded up as the engine's minimum is (0.125 + 3 × 0.0375 = 0.2375: 0.238, never 0.237)
+    await page.fill('#to-step', '0.0375');
+    await page.waitForFunction(() => document.getElementById('to-start').value !== '0.200', null, { timeout: 5000 }).catch(() => null);
+    const fStep = await stepsField();
+    check('(2b) the Step typed 0.0375: the start follows at 0.238 mm (rounded up, as the engine\'s minimum), not refused', fStep.start === '0.238' && fStep.startErr === '', fStep);
+    await page.fill('#to-start', '0.237');
+    await page.waitForFunction(() => !document.getElementById('to-start-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    const fStepLow = await stepsField();
+    check('(2b) at that Step, a start of 0.237 is refused with the same rounded-up minimum (0.238)', /^At least 0\.238 mm: /.test(fStepLow.startErr), fStepLow);
+    await page.fill('#to-start', '');
+    await page.fill('#to-step', '0.025');
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.200', null, { timeout: 5000 }).catch(() => null);
+    await page.fill('#to-start', '0.125');
+    await page.waitForFunction(() => !document.getElementById('to-start-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    const fLow = await stepsField();
+    check('(2b) a start gap that leaves the counted dots below 0.125 mm is refused at the field with why', fLow.startErr
+      === 'At least 0.200 mm: the tip’s recipe does not count the first 3 dots after the prime, so they go above 0.125 mm, where the counted dots start.', fLow);
+    // a typed start, the field left, then the recipe changes: it stays (not filled again), refused only below the new minimum
+    await page.fill('#to-start', '0.300');
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
     ST.skip = 5;
     await unitIs('8 to 20');
+    const fTyped = await stepsField();
+    check('(2b) a typed start 0.300, the field left, the recipe now does not count 5: it stays (not 0.250), not refused', !fTyped.startFocused && fTyped.start === '0.300' && fTyped.startErr === '', fTyped);
+    // the check dots go at the first counted dot's gap: 0.300 − 5 × 0.025 (the engine's checkGapMm), not 0.125 or the start
+    check('(2b) not counting 5 from a typed 0.300: the plan line puts the 2 check dots at 0.175 mm', /, then 2 check dots at 0\.175 mm after an empty space · /.test(fTyped.plan), fTyped.plan);
+    await page.fill('#to-start', '');
+    await page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.250', null, { timeout: 8000 }).catch(() => null);
     const f8 = await stepsField();
-    check('(2b) a recipe that does not count 5 dots: Steps opens at 8, nothing refused', f8.unit === '8 to 20' && f8.value === '8' && f8.err === '', f8);
+    check('(2b) a recipe that does not count 5 dots: the ladder opens at 0.250 mm, 15 steps, nothing refused', f8.unit === '8 to 20' && f8.start === '0.250'
+      && f8.value === '15' && f8.err === '' && f8.startErr === '', f8);
     ST.skip = 2;
     await unitIs('5 to 20');
-    check('(2b) back to a recipe that does not count 2: Steps opens at 6 again', (await stepsField()).value === '6', await stepsField());
+    check('(2b) a recipe that does not count 2: the ladder opens at 0.175 mm, 12 steps', (await stepsField()).start === '0.175' && (await stepsField()).value === '12', await stepsField());
     await page.fill('#to-steps', '4');
     await page.waitForFunction(() => !document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
     const f4 = await stepsField();
@@ -181,6 +279,12 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     check('(2b) the recipe now counts every dot: the typed 4 stays and is no longer refused', (await stepsField()).err === '' && (await stepsField()).value === '4', await stepsField());
     ST.skip = 1;
     await unitIs('4 to 20');
+    await page.fill('#to-start', '0.125');
+    await page.waitForFunction(() => !document.getElementById('to-start-err').hidden, null, { timeout: 5000 }).catch(() => null);
+    const fOne = await stepsField();
+    check('(2b) one dot not counted: a start of 0.125 is refused, said in the singular', fOne.startErr
+      === 'At least 0.150 mm: the tip’s recipe does not count the first dot after the prime, so it goes above 0.125 mm, where the counted dots start.', fOne);
+    await page.fill('#to-start', '');
     await page.fill('#to-steps', '3');
     await page.waitForFunction(() => !document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
     const f3 = await stepsField();
@@ -190,12 +294,12 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     check('(2b) 4 steps pass', (await stepsField()).err === '', await stepsField());
     // the field left, then the recipe changes: the typed 4 stays (now refused), it is not filled again
     await page.evaluate(() => document.activeElement && document.activeElement.blur());
-    ST.skip = 5;   // its default (8) differs from the field's last one (6): a refill on a changed default would show here
+    ST.skip = 5;   // its default (15) differs from the field's last one (12): a refill on a changed default would show here
     await unitIs('8 to 20');
     await page.waitForFunction(() => !document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
     const kept = await stepsField();
-    check('(2b) a typed 4, the field left, the recipe now does not count 5: the 4 stays, refused (at least 8)', kept.value === '4' && /^At least 8:/.test(kept.err), kept);
-    // an engine without the field, or a null one: every dot counts (from 2, so the minimum visibly drops)
+    check('(2b) a typed 4, the field left, the recipe now does not count 5: the 4 stays, refused (at least 8)', !kept.focused && kept.value === '4' && /^At least 8:/.test(kept.err), kept);
+    // an engine without the field, or a null one: every dot counts (null from 5, missing from 2: the minimum visibly drops)
     ST.skip = null;
     await unitIs('3 to 20');
     await page.waitForFunction(() => document.getElementById('to-steps-err').hidden, null, { timeout: 5000 }).catch(() => null);
@@ -216,7 +320,13 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     check('(2b) every dot counted: Steps "3 to 20", and 2 is refused (the pair that sets the normal dot and one more)', f2.unit === '3 to 20' && f2.min === '3'
       && f2.err === 'At least 3: the first two dots after the prime set the normal dot size, and one more shows the contact.', f2);
     await page.fill('#to-steps', '6');
+    ST.skip = 3;
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.200', null, { timeout: 8000 }).catch(() => null);
+    const from25 = (await stepsField()).start;
     ST.skip = undefined;
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.125', null, { timeout: 8000 }).catch(() => null);
+    const fSim = await stepsField();
+    check('(2b) the SIM\'s own recipe (every dot counted) after the 25G\'s: the start gap opens at 0.125 mm again', from25 === '0.200' && fSim.start === '0.125', { from25, fSim });
 
     check('(3) no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
   } catch (e) {

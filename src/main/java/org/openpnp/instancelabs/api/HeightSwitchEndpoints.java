@@ -100,7 +100,8 @@ final class HeightSwitchEndpoints {
                 : null;
         String why = svc.positionUnknownWhy();
         if (why == null && who != null) {
-            why = who + " has no accepted trip on the height switch in this home since its place was set";
+            why = who + " has no accepted trip on the height switch " + ("the needle".equals(who) && needle == null
+                    && c.heightSwitch.needle != null ? "since it was put on" : "in this home since its place was set");
         }
         HeightSwitch.Read last = svc.getLastHeightSwitchRead();
         HeightSwitch.Window w = svc.needleWindow();

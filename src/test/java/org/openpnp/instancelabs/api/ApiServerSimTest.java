@@ -32,6 +32,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
+import org.openpnp.instancelabs.dispense.DispenseProfile;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DotImager;
 import org.openpnp.instancelabs.dispense.FlatVacuum;
@@ -1302,11 +1303,29 @@ public class ApiServerSimTest {
         Res forged = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"startAngleSetAtMs\":" + System.currentTimeMillis() + "}}");
         assertEquals(400, forged.status, forged.toString());
         assertTrue(forged.body.contains("profile.startAngleSetAtMs"), forged.toString());
-        // ... and a changed start angle is stamped (it is a calibration of this controller power-up)
+        // ... and so is the angle itself (BR-77): only its own route sets it (BR-02's checks) and stamps it
         long t0 = System.currentTimeMillis();
-        p = ok(call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"startAngleDeg\":118}}")).getAsJsonObject("profile");
+        svc.updateConfigAtomically(live -> {
+            live.profile.startAngleFeature = new DispenseProfile.StartAngleFeature("halves", 179.1, t0, "pc-1");
+            return live;
+        });
+        JsonObject was = ok(call("GET", "/api/config", null)).getAsJsonObject("profile");
+        Res byPut = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"startAngleDeg\":118}}");
+        assertEquals(400, byPut.status, byPut.toString());
+        assertTrue(byPut.body.contains("profile.startAngleDeg"), byPut.toString());
+        Res feature = call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"startAngleFeature\":null}}");
+        assertEquals(400, feature.status, feature.toString());
+        p = ok(call("GET", "/api/config", null)).getAsJsonObject("profile");
+        for (String k : new String[] {"startAngleDeg", "startAngleSetAtMs", "startAngleFeature"}) {
+            assertEquals(was.get(k), p.get(k), k + " unchanged");
+        }
+        assertEquals("pc-1", p.getAsJsonObject("startAngleFeature").get("runId").getAsString());
+        assertEquals(179.1, ok(get("/api/status")).getAsJsonObject("dispense").getAsJsonObject("profile")
+                .getAsJsonObject("startAngleFeature").get("deg").getAsDouble(), 0, "the profile view shows it");
+        p = ok(post("/api/screw/start-angle", "{\"startAngleDeg\":118}"));
         assertEquals(118, p.get("startAngleDeg").getAsDouble(), 1e-9);
         assertTrue(p.get("startAngleSetAtMs").getAsLong() >= t0, p.toString());
+        assertTrue(p.get("startAngleFeature").isJsonNull(), "set without a measure: the feature is unknown");
         // an unchanged stamp in a round-trip is fine
         assertEquals(200, call("PUT", "/api/config", "{\"forTip\":\"ad22tta-b\",\"profile\":{\"startAngleSetAtMs\":"
                 + p.get("startAngleSetAtMs").getAsLong() + ",\"dwellMs\":250}}").status);

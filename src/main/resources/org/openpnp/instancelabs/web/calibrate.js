@@ -63,7 +63,7 @@
     const ladder = /dot-ladder-touch-off/.test(row.method || '');
     return { row, det, analysis: a, ladder, applied: !/not applied/.test(row.method || ''),
       delta: isNum(row.previous_offset_mm) ? row.z_offset_mm - row.previous_offset_mm : null,
-      method: ladder ? (/not applied/.test(row.method) ? 'Touch-off (shown only)' : 'Touch-off (used)') : /needle-frame/.test(row.method || '') ? 'Needle frame recorded' : /manual/.test(row.method || '') ? 'Offset entered or confirmed' : row.method,
+      method: ladder ? (a && a.landingProblem ? 'Touch-off (not used: its check dots failed)' : /not applied/.test(row.method) ? 'Touch-off (shown only)' : 'Touch-off (used)') : /needle-frame/.test(row.method || '') ? 'Needle frame recorded' : /manual/.test(row.method || '') ? 'Offset entered or confirmed' : row.method,
       note: det ? null : row.details };
   };
   /**
@@ -76,6 +76,17 @@
     const d = ((a && a.diametersMm) || [])[i];
     if (st === 'unmeasured') return { text: 'not measured', note: ((a.dotNotes || [])[i]) || null };
     return { text: isNum(d) ? IL.fmt(d, 3) : !st || st === 'none' ? 'no dot' : '—', note: null };
+  };
+  /**
+   * BR-89: a touch-off's check dots (laid after its ladder at the first counted dot's gap) as rows under the ladder's
+   * table of `cols` columns: a "Check dots" row, then each dot's gap and size read as the ladder's. None before BR-89.
+   */
+  pcr.touchOffCheckRows = function (a, cols) {
+    const dots = (a && a.checkDots) || [];
+    return dots.length ? [el('tr', {}, el('th', { colspan: String(cols), text: 'Check dots' }))].concat(dots.map((d) => el('tr', { 'data-state': d.state || null },
+      el('td', { class: 'r', text: IL.fmtSigned(a.checkGapMm, 3) }),
+      el('td', { class: 'r', text: pcr.touchOffDot({ dotStates: [d.state], diametersMm: [d.diameterMm] }, 0).text }),
+      cols > 2 ? el('td', {}) : null))) : [];
   };
   const taskOf = (s) => (s && s.run && CAL_TASKS.has(s.run.label) ? s.run : null);
   /** The engine ends a touch-off OK even when its analysis found no contact (then nothing is recorded): say so. */
@@ -103,7 +114,7 @@
   const reasonEl = (id) => el('div', { class: 'reason', id, hidden: true });
   const liveEl = (id) => el('div', { class: 'cal-live', id, hidden: true, role: 'status' });
   const sub = (t) => el('div', { class: 'section-k' }, el('span', { text: t }), el('span', { class: 'rule' }));
-  const placeSel = (id) => el('select', { class: 'input', id }, el('option', { value: '', text: 'No places yet' }));
+  const placeSel = (id, none) => el('select', { class: 'input', id, 'data-none': none }, el('option', { value: '', text: none || 'No places yet' }));
   const abbr = (t, title) => el('abbr', { title, text: t });
 
   // ================================================================================== prerequisites
@@ -192,7 +203,7 @@
       [el('div', { class: 'cal-split' },
         el('div', { class: 'cal-form' },
           el('div', { class: 'fgrid fgrid--3' },
-            pcr.field('to-start', 'Start gap', 'mm', pcr.numInput('to-start', '0.125', '0.005'), 'The first, largest gap.'),
+            pcr.field('to-start', 'Start gap', 'mm', pcr.numInput('to-start', null, '0.005'), 'The first, largest gap.'),
             pcr.field('to-step', 'Step', 'mm', pcr.numInput('to-step', '0.025', '0.005', { min: '0' })),
             pcr.field('to-steps', 'Steps', '3 to 20', pcr.numInput('to-steps', null, '1', { min: '3', max: '20' }))),
           el('div', { class: 'fgrid' },
@@ -431,10 +442,10 @@
         el('div', { class: 'cal-form' },
           el('div', { class: 'cal-step' }, el('span', { class: 'st st--num st--sm', text: '1' }), 'Dispense the shots'),
           el('div', { class: 'fgrid fgrid--3' },
-            pcr.field('shots-place', 'Cup place', null, placeSel('shots-place')),
+            pcr.field('shots-place', 'Cup place', null, placeSel('shots-place', 'No cup place yet')),
             pcr.field('shots-rot', 'Turn per shot', '°', pcr.numInput('shots-rot', '360', '1', { min: '1', max: '3600' })),
             pcr.field('shots-count', 'Shots', '1 to 200', pcr.numInput('shots-count', '30', '1', { min: '1', max: '200' }))),
-          el('div', { id: 'shots-noplace', class: 'reason reason--need', hidden: true }, el('span', {}, 'No places yet: add the cup in ', el('button', { type: 'button', class: 'link', text: 'Setup › Places', onclick: () => IL.go('#setup/places') }), '.')),
+          el('div', { id: 'shots-noplace', class: 'reason reason--need', hidden: true }, el('span', {}, 'No cup place yet: add the cup in ', el('button', { type: 'button', class: 'link', text: 'Setup › Places', onclick: () => IL.go('#setup/places') }), '.')),
           el('div', { id: 'shots-pre' }), liveEl('shots-live'),
           el('div', { class: 'btn-row' }, run), reasonEl('shots-reason')),
         el('div', { class: 'cal-form', 'data-enter-submits': 'btn-ss-save' },
@@ -492,10 +503,20 @@
   const pitchKey = (pitch, rot) => JSON.stringify([pitch, rot, ((S.status && S.status.dispense && S.status.dispense.profile) || {}).netStepsPerDot]);
   /**
    * BR-85: the dots the mounted tip's recipe does not count after the prime (profile.touchOffSkipDots, 0-5), then the
-   * reference pair, then one dot to show the contact: the engine refuses a shorter ladder (400), so the field says it first
-   * and opens at 6 steps or that minimum.
+   * reference pair, then one dot to show the contact: the engine refuses a shorter ladder (400), so the field says it first.
+   * The form opens at the recipe's ladder (renderTouchOff).
    */
   const skipDots = () => { const k = ((S.status && S.status.dispense && S.status.dispense.profile) || {}).touchOffSkipDots; return Number.isInteger(k) && k > 0 ? k : 0; };
+  /** The engine's NeedleTouchOff.REFERENCE_GAP_MM: the counted dots start here, the uncounted ones go above it (#44). */
+  const REFERENCE_GAP_MM = 0.125;
+  /** The engine's NeedleTouchOff.CHECK_DOTS (BR-89): laid after the ladder, one space on, at its first counted dot's gap. */
+  const CHECK_DOTS = 2;
+  /** The lowest start that keeps the counted dots at 0.125 mm or above, rounded up to 1 µm as the engine's 400 is. */
+  const minStart = (skip, step) => Math.ceil((REFERENCE_GAP_MM + skip * step) * 1000 - 1e-9) / 1000;
+  function minStartText(skip, step) {
+    return 'At least ' + IL.fmt(minStart(skip, step), 3) + ' mm: the tip’s recipe does not count the first ' + (skip === 1 ? 'dot after the prime, so it goes' : skip + ' dots after the prime, so they go')
+      + ' above ' + IL.fmt(REFERENCE_GAP_MM, 3) + ' mm, where the counted dots start.';
+  }
   function minStepsText(skip) {
     return 'At least ' + (skip + 3) + (skip ? ': the tip’s recipe does not count the first ' + (skip === 1 ? 'dot' : skip + ' dots') + ' after the prime, the next two set the normal dot size, and one'
       : ': the first two dots after the prime set the normal dot size, and one') + ' more shows the contact.';
@@ -504,6 +525,7 @@
     const a = pcr.check('to-start', { required: true, max: 2, unit: 'mm' });
     const b = pcr.check('to-step', { required: true, min: 0, minExcl: true, max: 0.5, unit: 'mm' });
     const skip = skipDots();
+    if (!a.err && !b.err && skip > 0 && a.v - skip * b.v < REFERENCE_GAP_MM - 1e-9) a.err = minStartText(skip, b.v);
     const n = pcr.check('to-steps', { required: true, int: true, max: 20 });
     if (!n.err && n.v < skip + 3) n.err = minStepsText(skip);
     const rot = pcr.check('to-rot', { min: 0, minExcl: true, max: 720, unit: '°' });
@@ -511,22 +533,26 @@
     // the smallest pitch is the engine's (the dot of the dose + 0.4 mm): its refusal shows at the field (F14)
     const refused = C.pitchErr && C.pitchErr.key === pitchKey(pitch.v, rot.v) ? C.pitchErr.text : null;
     const errs = { 'to-start': a.err, 'to-step': b.err, 'to-steps': n.err, 'to-rot': rot.err, 'to-pitch': pitch.err || refused };
-    let gaps = null, lowest = null;
+    let gaps = null, lowest = null, check = null;
     if (!a.err && !b.err && !n.err) {
       gaps = [];
       for (let i = 0; i < n.v; i++) gaps.push(a.v - i * b.v);
       lowest = gaps[gaps.length - 1];
+      check = a.v - skip * b.v;   // the engine's NeedleTouchOff.checkGapMm
       if (lowest < -0.1 - 1e-9) errs['to-steps'] = 'The lowest gap would be ' + IL.fmt(lowest, 3) + ' mm: keep it at −0.100 mm or above.';
     }
-    return { errs, gaps, lowest, body: { startGapMm: a.v, stepMm: b.v, steps: n.v, rotationDeg: rot.v, pitchMm: pitch.v, locationName: $('to-place').value || undefined, apply: $('to-apply').checked } };
+    return { errs, gaps, check, lowest, body: { startGapMm: a.v, stepMm: b.v, steps: n.v, rotationDeg: rot.v, pitchMm: pitch.v, locationName: $('to-place').value || undefined, apply: $('to-apply').checked } };
   }
   async function startTouchOff() {
     const p = touchOffPlan();
     const e = Object.values(p.errs).find(Boolean);
     if (e) throw new Error(e);
-    C.toReq = { gaps: p.gaps, at: Date.now() };
+    // its gaps name only the dots of the first run that starts after it: the status listener (at mount) binds its runId
+    const req = { gaps: p.gaps, check: p.check, after: ((S.status && S.status.run) || {}).startedAtMs || 0 };
     try {
-      return await IL.api('POST', '/api/calibrations/touch-off', p.body);
+      const r = await IL.api('POST', '/api/calibrations/touch-off', p.body);
+      C.toReq = req;
+      return r;
     } catch (x) {
       // a pitch with no room between these dots (400 before anything moves): the reason goes to the Pitch field
       if (x.status !== 400 || !/^the touch-off pitch /.test(x.message)) throw x;
@@ -689,29 +715,35 @@
   }
   function renderTouchOff(s) {
     const d = s.dispense || {}, n = d.needle || {};
-    const place = $('to-place').value;
     pcr.fillPlaces($('to-place'), s, d.blankLocationName);
+    const place = $('to-place').value;
     if (!C.applyTouched) $('to-apply').checked = !n.touchedOff;
     setState('cal-touch-off', !n.anchored ? 'block' : n.touchedOff ? 'ok' : 'need',
       !n.anchored ? 'No needle frame' : n.touchedOff ? offsetWord(n) + ' ' + (n.setAtMs ? IL.fmtTime(n.setAtMs - S.skewMs) : '') : 'Not touched off');
-    const minSteps = skipDots() + 3;
-    prefill('to-steps', String(Math.max(6, minSteps)));
+    const skip = skipDots(), minSteps = skip + 3, step = IL.num('to-step');
+    // the ladder opens at the recipe's: a tip that does not count dots (the 25G) counts 10 from 0.125 mm (Process 11-04
+    // 12:4x: a contact anywhere from −0.05 to +0.075, two squashed dots below it, two free above); the 22G keeps its 6
+    prefill('to-start', minStart(skip, step > 0 ? step : 0.025).toFixed(3));
+    prefill('to-steps', String(skip ? skip + 10 : 6));
     const p = touchOffPlan();
     showErrs(p.errs);
     IL.setText($('to-steps-wrap').querySelector('.unit'), minSteps + ' to 20');
     IL.setAttr($('to-steps'), 'min', String(minSteps));
-    IL.setText($('to-plan'), p.gaps ? IL.plural(p.gaps.length, 'dot') + (place ? ' on “' + place + '”' : '') + ' at gaps ' + p.gaps.map((g) => IL.fmt(g, 3)).join(', ') + ' mm'
-      + ' · one profile dot each' + (IL.num('to-rot') ? ' (here ' + IL.fmt(IL.num('to-rot'), 2) + '°)' : '') + ' · ' + pitchLine(s, p.body.pitchMm) : 'Enter the gaps to see the dots.');
+    IL.setText($('to-plan'), p.gaps ? IL.plural(p.gaps.length + CHECK_DOTS, 'dot') + (place ? ' on “' + place + '”' : '') + ': ' + p.gaps.length + ' at gaps ' + p.gaps.map((g) => IL.fmt(g, 3)).join(', ') + ' mm'
+      + ', then ' + CHECK_DOTS + ' check dots at ' + IL.fmt(p.check, 3) + ' mm after an empty space · one profile dot each' + (IL.num('to-rot') ? ' (here ' + IL.fmt(IL.num('to-rot'), 2) + '°)' : '') + ' · ' + pitchLine(s, p.body.pitchMm) : 'Enter the gaps to see the dots.');
     const blockers = renderPrereqs($('to-pre'), prereqs(s, { machine: true, engine: true, frame: true, zmoved: true, place: true, surface: true, pressure: true }, place));
     const first = Object.values(p.errs).find(Boolean);
     // the long refusals (the engine's pitch, too few steps) stand at their fields: the line under the button points there
     const own = (first && C.pitchErr && first === C.pitchErr.text ? 'The pitch is too small for these dots: see the Pitch field.'
-      : first && first === minStepsText(skipDots()) ? 'Too few steps: see the Steps field.' : first) || (!place ? 'Choose the place.' : null);
+      : first && first === minStepsText(skipDots()) ? 'Too few steps: see the Steps field.'
+        : first && first === minStartText(skipDots(), IL.num('to-step')) ? 'The start gap is too low for this tip’s recipe: see the Start gap field.' : first) || (!place ? 'Choose the place.' : null);
     IL.gate($('btn-to-run'), runReason(s, blockers, own), $('to-reason'));
     renderLive($('to-live'), s, 'needle touch-off', (run) => {
-      const g = C.toReq && C.toReq.gaps;
-      const i = Math.min(run.dotsDone, (g || []).length - 1);
-      return g && g.length ? 'gap ' + IL.fmt(g[i], 3) + ' mm · ' + (run.phase || '') : run.phase || '';
+      const q = C.toReq;
+      const g = q && q.runId && q.runId === run.runId ? q.gaps : null;
+      // the ladder's dots, then its check dots (the engine's dotsPlanned counts them); once laid, only what the run does
+      return g && run.dotsDone < g.length + CHECK_DOTS ? (run.dotsDone < g.length ? 'gap ' + IL.fmt(g[run.dotsDone], 3) : 'check dot at gap ' + IL.fmt(q.check, 3))
+        + ' mm · ' + (run.phase || '') : run.phase || '';
     }, (run) => (noContact(run) ? { kind: 'need', head: 'Finished {t} · no contact found: nothing recorded' } : null));
     renderTouchOffResult(s);
   }
@@ -743,6 +775,8 @@
             isNum(a.referenceDiameterMm) ? el('div', { class: 'dim', id: 'to-ref', text: 'Normal dot ' + IL.fmt(a.referenceDiameterMm, 2) + ' mm' + (a.referenceFrom ? ', from ' + a.referenceFrom : '') + '.'
               + (a.skippedDots > 0 ? ' The first ' + (a.skippedDots === 1 ? 'dot after the prime was' : a.skippedDots + ' dots after the prime were') + ' not counted.' : '') }) : null,
             era ? el('div', { class: 'cal-to__old', id: 'to-era' }, IL.glyph('need', 'xs'), ' ' + eraText(era))
+              // BR-89: the check dots say the tip may have moved, so the engine did not apply it: Use would apply it anyway
+              : a.landingProblem ? el('div', { class: 'cal-to__old', id: 'to-moved' }, IL.glyph('block', 'xs'), ' Not applied: ' + a.landingProblem + '.')
               : inUse ? el('div', { class: 'cal-to__ok' }, IL.glyph('ok', 'xs'), ' In use as the needle offset')
                 : el('div', { class: 'btn-row', 'data-refusals': '' }, use)),
           el('table', { class: 'tbl cal-to__t' }, el('thead', {}, el('tr', {}, el('th', { class: 'r' }, IL.unitText('Gap mm')), el('th', { class: 'r' }, IL.unitText('Dot Ø mm')), el('th', { text: '' }))),
@@ -752,7 +786,7 @@
               return el('tr', { class: inBracket(g) ? 'is-contact' : null, 'data-state': ((a.dotStates || [])[i]) || null },
                 el('td', { class: 'r', text: IL.fmtSigned(g, 3) }), el('td', { class: 'r', text: dot.text, title: dot.note }),
                 el('td', { class: 'dim', text: isNum(a.contactGapMm) && Math.abs(g - a.contactGapMm) < 1e-9 ? 'contact' : inBracket(g) ? 'bracket' : dot.note ? IL.nb(dot.note) : '' }));
-            })))),
+            }), pcr.touchOffCheckRows(a, 3)))),
         el('button', { type: 'button', class: 'btn btn--sm btn--quiet', onclick: () => IL.go('#records/touch-offs') }, 'Last 20 touch-offs', IL.icon('i-chev'))];
     });
     IL.gate($('to-use'), IL.lockReason(s, { pressureOff: false }));
@@ -805,8 +839,8 @@
   }
   function renderLadder(s) {
     const d = s.dispense || {};
-    const place = $('dl-place').value;
     pcr.fillPlaces($('dl-place'), s, d.blankLocationName);
+    const place = $('dl-place').value;
     const p = ladderPlan();
     showErrs(p.errs);
     const ok = !Object.values(p.errs).some(Boolean);
@@ -822,12 +856,17 @@
   }
   function renderShots(s) {
     const d = s.dispense || {}, prof = d.profile || {};
-    const names = pcr.fillPlaces($('shots-place'), s, pcr.places(s).find((nm) => /cup|scale/i.test(nm)));
-    IL.show($('shots-noplace'), !names.length);
+    // the places the engine takes shots on (shotsRun): the sinks, the blank (a reference) and a coupon; its zones refuse the
+    // others ("takes no paste"); a cup first, else the waste; never the blank or a coupon by default (30 whole turns)
+    const coupons = ((S.config || {}).padCalibration || {}).couponPlaces || ['coupon1', 'coupon2'];
+    pcr.fillPlaces($('shots-place'), s, pcr.places(s).find(IL.isCupPlace) || d.wasteLocationName || 'waste',
+      (nm) => IL.isSinkPlace(nm, d) || nm === (d.blankLocationName || 'blank') || coupons.includes(nm), true);
     const place = $('shots-place').value;
+    IL.show($('shots-noplace'), !place);
     const p = shotsPlan();
     showErrs(p.errs);
-    const blockers = renderPrereqs($('shots-pre'), prereqs(s, { machine: true, engine: true, place: true, pressure: true }, place));
+    // nothing chosen: no place row (prereqs would fall back to the blank), the banner and Run's reason say why
+    const blockers = renderPrereqs($('shots-pre'), prereqs(s, { machine: true, engine: true, place: !!place, pressure: true }, place));
     IL.gate($('btn-shots-run'), runReason(s, blockers, Object.values(p.errs).find(Boolean) || (!place ? 'Add a cup place in Setup › Places first.' : null)), $('shots-reason'));
     renderLive($('shots-live'), s, 'scale shots');
     prefill('ss-psi', isNum(prof.pressurePsi) ? IL.fmtPsi(prof.pressurePsi) : null);
@@ -1163,6 +1202,8 @@
       pcr.stickyTop(root);
       IL.on('taskend', (run) => { if (CAL_TASKS.has(run.label) || C.data) loadCalibrations(); if (run.label === 'pad calibration') loadArea(); });
       IL.on('coupon-reading', () => loadArea());   // a pending coupon weighed or skipped (padprofile.js pendingForm)
+      // this page's touch-off request belongs to the first run that starts after it, seen from any screen
+      IL.on('status', (st) => { const q = C.toReq, r = st && st.run; if (q && !q.runId && r && r.label === 'needle touch-off' && r.startedAtMs > q.after) q.runId = r.runId; });
     },
     show() { loadCalibrations(); loadArea(); if (!S.config) IL.loadConfig(); },
     route(r) {

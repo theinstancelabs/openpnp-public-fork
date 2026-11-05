@@ -13,7 +13,7 @@
  * blank, the coupon places, the regulator and paste-life ticks, chip-0603 characterized.
  * Checks: (1) upload: a profile badge per package row, one NEEDS_PROFILE warning in group 1 and no NO_PAD_TYPE; save;
  * "Needs a profile…" goes to #profile/needs/<g>; (2) the board planned: Pad types Blocked with "Needs a profile:
- * SW_SPST_3.9x2.9mm"; (3) #pt-needs: 3 rows (J, T, Q), the tip details hold the 2 WSON groups, nav "Needs 3 profiles";
+ * SW_SPST_3.9x2.9mm"; (3) #pt-needs: 3 rows (J, T, Q), the tip details hold the 2 WSON groups, Designs "… to set up";
  * (4) the SW card: "New pad type SW_SPST_3.9x2.9mm", 4 suggested dots on J1, the plan's dot count unchanged; (5) Use Chip
  * 0603 on TestChip_A: a new plan shown, its row gone; (6) inspector on J1.1: one profile notebox, no NO_PAD_TYPE
  * flag, no "New pad type"; (7) Calibrate automatically: the summary says it needs you once (the test dots' X and Y in
@@ -339,7 +339,17 @@ async function weighCoupon(page, place) {
       nav: document.querySelector('#tab-btn-designs .nav__s').textContent, src: document.getElementById('pt-needs-src').textContent }));
     check('(3) three fixable rows with data-reason (J, T, Q)', list.rows.length === 3 && list.rows.every((r) => r[0] === 'no-type'), list.rows);
     check('(3) the tip details (collapsed) hold the 2 WSON groups', list.tip.length === 2 && !list.tipOpen && /22G bent taper/.test(list.tipText), list);
-    check('(3) nav sub "Needs 3 profiles" (under Designs: pad types serve the designs, the agreed menu of 11-02)', list.nav === 'Needs 3 profiles', list.nav);
+    // the Designs menu line counts the designs by their checks (the agreed menu of 11-02, designflow.js), this board's
+    // design among them though it was uploaded from Run: the line follows an upload made anywhere
+    const want3 = await page.evaluate(async () => {
+      const files = (await IL.api('GET', '/api/boards')).files || [];
+      let ready = 0;
+      for (const f of files) { try { if ((await IL.api('GET', '/api/pad-profile/check?boardFile=' + encodeURIComponent(f.file))).ok) ready++; } catch (e) { /* not ready */ } }
+      return [ready ? ready + ' ready' : null, files.length - ready ? (files.length - ready) + ' to set up' : null].filter(Boolean).join(' · ');
+    });
+    const nav3 = await page.waitForFunction((w) => (document.querySelector('#tab-btn-designs .nav__s') || {}).textContent === w, want3, { timeout: 15000 }).then(() => true, () => false);
+    check('(3) the Designs menu line counts the designs by their checks, this board\'s among those to set up', nav3 && / to set up$/.test(want3),
+      { want3, nav: await page.evaluate(() => document.querySelector('#tab-btn-designs .nav__s').textContent) });
     // the profile panel's pad-type gate counts in words: "1 of 12 pad types is allowed", "2 of 13 … are allowed"
     await page.waitForFunction(() => / pad types (is|are) allowed/.test((document.querySelector('#pt-ov-gate .pt-gate__s') || {}).textContent || ''), null, { timeout: 15000 }).catch(() => null);
     const gate3 = await page.evaluate(() => (document.querySelector('#pt-ov-gate .pt-gate__s') || {}).textContent || '');

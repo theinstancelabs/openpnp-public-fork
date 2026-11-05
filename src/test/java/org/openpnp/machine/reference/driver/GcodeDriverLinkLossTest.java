@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.File;
 import java.nio.file.Path;
@@ -19,6 +20,7 @@ import org.openpnp.instancelabs.dispense.SimMachine;
 public class GcodeDriverLinkLossTest {
     @Test
     public void aSerialDevicePathThatVanishedIsGone(@TempDir Path dir) throws Exception {
+        assumeTrue(File.separatorChar == '/', "device paths are checked on Unix only");
         File dev = dir.resolve("usb-STMicroelectronics_MARLIN_OPULO_LUMEN_REV5-if00").toFile();
         assertTrue(dev.createNewFile());
         assertFalse(GcodeDriver.devicePathGone(dev.getPath()), "present");
@@ -56,6 +58,7 @@ public class GcodeDriverLinkLossTest {
      */
     @Test
     public void theUsbCheckLooksAtTheOpenedDevice(@TempDir Path dir) throws Exception {
+        assumeTrue(File.separatorChar == '/', "device paths are checked on Unix only");
         SimMachine sim = new SimMachine(false); // a configuration for the driver below
         try {
             GcodeDriver d = new GcodeDriver();
@@ -82,7 +85,7 @@ public class GcodeDriverLinkLossTest {
     /**
      * #53 re-review: the exit flag is set by a hook registered with jSerialComm itself (its hooks run before it closes the
      * ports), not by one of the JVM's (those run in no fixed order with jSerialComm's): a serial connect registers it
-     * once, even one that fails to open its port.
+     * once, before it opens the port (this connect fails to open; an earlier test's connect may have registered it).
      */
     @Test
     public void aSerialConnectRegistersTheExitFlagWithJSerialComm() throws Exception {

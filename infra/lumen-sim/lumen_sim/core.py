@@ -11,20 +11,22 @@ from collections import deque
 
 from . import personality as personalities
 from .faults import OK_FAULTS, Faults, seconds
-from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, Machine
-from .marlin import AXES, Firmware, f32
+from .machine import DEFAULT_PARK, OPEN_AIR_VACUUM, PA5_TOOLS, Machine, Pa5Switch
+from .marlin import AXES, DFU_DRAIN_S, Firmware, f32
 
 INJECT_KINDS = {"error": "Error:simulated fault", "start": "start", "unknown": 'echo:Unknown command: "M999999"'}
 # The keys each request takes besides "cmd" (and a fault's "fault"): an unknown one (a misspelt "surfaceZ" or "downs")
 # is refused, not ignored. Ok faults check theirs in faults.KEYS; physical faults take their axes (PHYSICAL_FAULTS).
 REQUEST_KEYS = {"state": (), "clear": (), "stop": (), "power_cycle": ("link", "down_s"),
                 "set": ("kill_messages", "sim_cap", "vacuum", "rs485", "mcp3426", "surface_z", "surfaces", "seal_drop",
-                        "homing_move_delay_s")}
+                        "homing_move_delay_s", "pa5_switch")}
 FAULT_KEYS = {"inject": ("kind", "text", "after_s"), "inject_bytes": ("hex", "text", "after_s"),
               "partial": ("text", "after_s"), "halt": ("reason",), "disconnect": ("down_s",), "frozen": ("on",)}
 # Faults of the physical machine (INF-08): fault -> the axis keys it takes (mm, signed; at least one)
 PHYSICAL_FAULTS = {"home_offset": ("x", "y"), "lost_steps": ("x", "y"), "z_shift": ("z",), "z_drop": ("z",)}
 REGION = ("x0", "y0", "x1", "y1", "z")  # a surface region of set's "surfaces" (physical mm)
+PA5_PRESS = ("tool", "x0", "y0", "x1", "y1", "trip_z")  # a press window of set's "pa5_switch" (physical mm)
+PA5_KEYS = ("presses", "overtravel_mm", "repeat_sd_mm", "pressed_level", "seed")
 
 
 def only(req, keys, what):
@@ -63,6 +65,7 @@ class Simulator:
         self._n = 0
         self._actions = []
         self._halt_seen = False
+        self._dfu_at = None         # when a board in flashFirmware() resets into DFU and its port goes away
         self.seq = 0
         self.boots = 0
         self.sim_errors = deque(maxlen=100)  # lines the model could not run (kept across power cycles)
@@ -83,16 +86,19 @@ class Simulator:
     def receive(self, data, t):
         self.run_until(t)
         self.fw.feed(bytes(data), t)
-        self._check_halt()
+        self._check_halt(t)
 
     def run_until(self, t):
         while self._timed and self._timed[0][0] <= t:
             when, _, data = heapq.heappop(self._timed)
             self.fw.advance(when)
-            self._check_halt()
+            self._check_halt(t)  # t, not when: the runner sees the halt now
             self._queue(when, data)
         self.fw.advance(t)
-        self._check_halt()
+        self._check_halt(t)
+        if self._dfu_at is not None and self._dfu_at <= t:
+            self._dfu_at = None
+            self._actions.append({"action": "disconnect", "down_s": None})
 
     def next_event_time(self):
         nt = self.fw.next_wake()
@@ -100,6 +106,8 @@ class Simulator:
             nt = min(nt, self._timed[0][0])
         if self.out:
             nt = min(nt, self.out[0][0])
+        if self._dfu_at is not None:
+            nt = min(nt, self._dfu_at)
         return nt
 
     def take_output(self, t):
@@ -128,10 +136,13 @@ class Simulator:
         self.faults.on_line(self.seq, text)
         return self.seq
 
-    def _check_halt(self):
+    def _check_halt(self, t):
         """Once the board stops dead (halt fault, kill, DFU, sim error) it sends nothing more: output it had not sent
         by then (an ok a delay_ok holds, and all queued behind it) and pending injections are dropped. DFU also takes
-        the port away."""
+        the port away, DFU_DRAIN_S later: flashFirmware() lets USB CDC send what was due (its echo with it) first, and
+        a pty master closed at once would take the bytes the host had not read yet with it. The drain counts from t,
+        when the caller sees the halt, so a late wake of the runner writes that output before the port goes (a stall
+        of DFU_DRAIN_S between a host read or a control request that sees it and the next write can still lose it)."""
         fw = self.fw
         if not fw.halted or self._halt_seen:
             return
@@ -140,7 +151,7 @@ class Simulator:
         self._last_release = self.out[-1][0] if self.out else -math.inf
         self._timed = []
         if fw.halt_reason == "DFU":
-            self._actions.append({"action": "disconnect", "down_s": None})
+            self._dfu_at = max(fw.halt_time, t) + DFU_DRAIN_S
 
     # ------------------------------------------------------------------ power
     def power_cycle(self, t):
@@ -158,6 +169,7 @@ class Simulator:
         self._timed = []
         self._last_release = -math.inf
         self._halt_seen = False
+        self._dfu_at = None        # a reset inside flashFirmware()'s wait for USB boots as usual: no DFU
         self.faults.clear()        # the ok faults are the controller's: the reboot ends them (the machine's stay)
         self.fw = self._boot(t)
 
@@ -200,7 +212,7 @@ class Simulator:
             self._actions.append({"action": "power_cycle", "link": link, "down_s": down})
             return {"ok": True}
         if cmd == "set":
-            return self._set(req)
+            return self._set(req, t)
         if cmd == "stop":
             self._actions.append({"action": "stop"})
             return {"ok": True}
@@ -241,7 +253,7 @@ class Simulator:
             if not isinstance(reason, str):
                 raise ValueError("reason must be a string, not %r" % (reason,))
             self.fw.halt(reason, t)
-            self._check_halt()
+            self._check_halt(t)
         elif kind == "disconnect":
             down = req.get("down_s", 0.0)
             down = None if down is None else seconds(down, "down_s")
@@ -275,11 +287,12 @@ class Simulator:
             m.switches[2] += v["z"]
         else:                        # z_drop: how far the head moves each time the Z driver lets go
             m.z_drop = v["z"]
+        self.fw.pa5(t)  # the head moved under the switch (or off it), where it is now (a move may run)
         # a homing move running toward a switch now ends where that switch triggers, and the firmware's wait with it
         self.fw.stepper.recheck_endstops(t)
         self.fw.wake(t)
 
-    def _set(self, req):
+    def _set(self, req, t):
         def integer(key):
             v = req[key]
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
@@ -295,6 +308,7 @@ class Simulator:
             raise ValueError("seal_drop must be an integer >= 0 (counts), not %r" % (drop,))
         homing_delay = seconds(req["homing_move_delay_s"], "homing_move_delay_s") \
             if "homing_move_delay_s" in req else None
+        pa5 = self._pa5_switch(req["pa5_switch"]) if "pa5_switch" in req else None
         rs485 = req.get("rs485", {})
         if not isinstance(rs485, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in rs485.items()):
             raise ValueError("rs485 must map request hex to reply hex (strings), not %r" % (rs485,))
@@ -317,7 +331,41 @@ class Simulator:
             self.machine.seal_drop = drop
         if homing_delay is not None:
             self.machine.homing_move_delay_s = homing_delay
+        if "pa5_switch" in req:
+            self.machine.pa5 = pa5
+            self.fw.pa5(t)  # wired under the head: its state from where the head is
         return {"ok": True}
+
+    @staticmethod
+    def _pa5_switch(raw):
+        """set's "pa5_switch": {presses: [{tool: n1|needle, x0, y0, x1, y1, trip_z}], overtravel_mm (0.5),
+        repeat_sd_mm (0), pressed_level (1), seed (0)}; null removes it."""
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or not set(raw) <= set(PA5_KEYS) or not isinstance(raw.get("presses"), list) \
+                or not raw["presses"]:
+            raise ValueError("pa5_switch takes presses (a non-empty list) and %s, not %r" % (", ".join(PA5_KEYS[1:]),
+                                                                                          raw))
+        presses = []
+        for r in raw["presses"]:
+            if not isinstance(r, dict) or set(r) != set(PA5_PRESS) or not isinstance(r["tool"], str) \
+                    or r["tool"] not in PA5_TOOLS:
+                raise ValueError("a PA5 press takes tool (%s), x0, y0, x1, y1 and trip_z (mm), not %r"
+                                 % (" or ".join(PA5_TOOLS), r))
+            v = dict({k: mm(r[k], k) for k in PA5_PRESS[1:]}, tool=r["tool"])
+            if v["x0"] > v["x1"] or v["y0"] > v["y1"]:
+                raise ValueError("a PA5 press needs x0 <= x1 and y0 <= y1, not %r" % (r,))
+            presses.append({k: v[k] for k in PA5_PRESS})
+        spec = {k: mm(raw[k], k) for k in ("overtravel_mm", "repeat_sd_mm") if k in raw}
+        if not (0 <= spec.get("overtravel_mm", 0) <= 10 and 0 <= spec.get("repeat_sd_mm", 0) <= 1):
+            raise ValueError("overtravel_mm must be 0-10 and repeat_sd_mm 0-1 (mm), not %r" % (spec,))
+        for k, ok in (("pressed_level", (0, 1)), ("seed", None)):
+            if k in raw:
+                v = raw[k]
+                if isinstance(v, bool) or not isinstance(v, int) or (ok is not None and v not in ok):
+                    raise ValueError("%s must be %s, not %r" % (k, "0 or 1" if ok else "an integer", v))
+                spec[k] = v
+        return Pa5Switch(presses, **spec)
 
     @staticmethod
     def _regions(raw):
@@ -361,6 +409,7 @@ class Simulator:
             "seal_drop": self.machine.seal_drop,
             "homing_move_delay_s": self.machine.homing_move_delay_s,
             "n1_sealed": self.machine.n1_sealed(fw),
+            "pa5": None if self.machine.pa5 is None else self.machine.pa5.describe(),
             "stepper_timeout_s": fw.stepper_timeout_ms / 1000.0,
             "homed": {"X": fw.homed[0], "Y": fw.homed[1], "Z": fw.homed[2]},
             "homing_phase": fw.homing_phase,

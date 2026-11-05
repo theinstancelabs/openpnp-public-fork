@@ -15,7 +15,7 @@
  * 80 parts get paste (160 pads), 3 fiducials, the drawing, three packages new or suffixed, nothing that blocks
  * dispensing, PACKAGE_SUFFIXED a note, the attach offer naming ftp.board.xml and FID1, a package row focused from the
  * keyboard outlines its parts;
- * (6) save under a unique name, Use this board: the Board step has it, with its picture (every picture with its size
+ * (6) save under a unique name (Run's "Upload a design…" and the dialog say design), Use this design: the Board step has it, with its picture (every picture with its size
  * and parts), and the main column draws it before planning while the plan of (1) stays; (7) the same file dropped on
  * the drop zone under the same name: "exists", a two-press replace, Esc does nothing while it saves; (8) the import
  * planned at 30°: 160 pads and dots, R pads within 0.01 mm and LED pads within 0.04 mm of (1), copper and silkscreen
@@ -256,7 +256,7 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
       return { overAllowed: over, dropAllowed: drop, toast: document.getElementById('toast').textContent };
     });
     check('(4) a file dropped on the page is taken by the guard (default prevented) and named in a toast', !dg.overAllowed && !dg.dropAllowed
-      && /Drop a \.kicad_pcb file/.test(dg.toast), dg);
+      && /Only a KiCad board \(a \.kicad_pcb file\) can be dropped here\./.test(dg.toast), dg);
     check('(4) the page stays (same address, STOP visible)', (await page.evaluate(() => location.href)) === href0 && (await page.isVisible('#btn-stop')));
 
     // ---- (5) upload ftp ---------------------------------------------------------------------------------------------
@@ -308,16 +308,20 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
       outlined: document.querySelectorAll('#board-import-preview .pv-l-sel rect').length }));
     check('(5) keyboard: a focused package row outlines its parts on the drawing', kb.focused && kb.outlined > 0, kb);
 
-    // ---- (6) save, Use this board -------------------------------------------------------------------------------------
+    // ---- (6) save, Use this design -----------------------------------------------------------------------------------
     const name6 = 'ftp-kicad-' + TS;
     await saveAs(page, name6);
-    const sv = await page.evaluate(() => ({ saved: document.getElementById('board-import-saved').textContent, toast: document.getElementById('toast').textContent }));
+    const sv = await page.evaluate(() => ({ saved: document.getElementById('board-import-saved').textContent, toast: document.getElementById('toast').textContent,
+      title: document.querySelector('#dlg-board-import h2').textContent.trim(), up: document.getElementById('btn-board-upload').textContent.trim(),
+      use: document.getElementById('btn-board-import-use').textContent.trim(), next: document.querySelector('#board-import-saved .bi-saved__next').textContent }));
     check('(6) saved: "Saved …" and a toast', /^Saved/.test(sv.saved.trim()) && /Saved/.test(sv.toast), sv);
+    check('(6) Run\'s upload says design, as the dialog it opens: "Upload a design…" → "Upload a design", then "Use this design" (the button and the line)',
+      sv.up === 'Upload a design…' && sv.title === 'Upload a design' && sv.use === 'Use this design' && /^Use this design: put the top camera on FID1/.test(sv.next), sv);
     await page.click('#btn-board-import-use');
     await page.waitForSelector('#dlg-board-import', { state: 'detached', timeout: 5000 });
     await page.waitForFunction((n) => new RegExp('/' + n + '/' + n + '\\.board\\.xml$').test(document.getElementById('board-select').value), name6, { timeout: 15000 }).catch(() => {});
     const sel6 = await page.evaluate(() => document.getElementById('board-select').value);
-    check('(6) Use this board: the Board step has it chosen', new RegExp('/' + name6 + '/' + name6 + '\\.board\\.xml$').test(sel6), sel6);
+    check('(6) Use this design: the Board step has it chosen', new RegExp('/' + name6 + '/' + name6 + '\\.board\\.xml$').test(sel6), sel6);
     // the row is rebuilt when the board list reloads after the save (its new pictures decode again, even from the
     // cache): the check is the wait's own answer, not a second read that can land in a rebuild (#18's gate, 11-04)
     const pic6 = await page.waitForFunction(() => { const i = document.querySelector('#board-thumbs button.board-thumb[aria-pressed="true"] img'); return !!(i && i.complete && i.naturalWidth > 0); }, null, { timeout: 15000 })
@@ -366,7 +370,7 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
       && /exists/.test(await page.textContent('#board-import-exists')), await page.textContent('#board-import-exists'));
     await page.click('#btn-board-import-save');
     const armed = (await page.textContent('#btn-board-import-save')).trim();
-    check('(7) first press: "Press again: replace board"', armed === 'Press again: replace board', armed);
+    check('(7) first press: "Press again: replace the design"', armed === 'Press again: replace the design', armed);
     await sleep(450);
     await page.click('#btn-board-import-save');
     const st7 = await page.evaluate(() => document.getElementById('dlg-board-import').dataset.state);   // the save runs (not a pending press)
@@ -466,6 +470,8 @@ const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y
     await page.waitForSelector('#dlg-board-import[data-state="saved"]', { timeout: 60000 });
     const t10 = await page.textContent('#toast');
     check('(10) attach: a toast says the drawing is used for ftp.board.xml', /drawing is now used for .*ftp\.board\.xml/.test(t10), t10);
+    const w10 = await page.evaluate(() => ({ use: document.getElementById('btn-board-import-use').textContent.trim(), next: document.querySelector('#board-import-saved .bi-saved__next').textContent }));
+    check('(10) attach in Run: "Use this design, then plan it" (the button and the line)', w10.use === 'Use this design' && /^Use this design, then plan it/.test(w10.next), w10);
     await page.click('#btn-board-import-use');
     await page.waitForSelector('#dlg-board-import', { state: 'detached', timeout: 5000 });
     const b10 = await boards(page);

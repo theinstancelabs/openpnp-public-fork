@@ -137,9 +137,10 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
   `lost_steps` or `home_offset` that lands while a homing move runs toward a switch is checked again at once: the
   move ends where the switch now triggers (at once if the head is already past it), and so does its wait.
 - A power cycle resets the belief and the counts; the head stays where it is (a released Z drops, below).
-- Releasing an energised Z (`M18`/`M84` with Z or no axis, the idle timeout, `M112`, a power cycle) moves the head
-  by the `z_drop` fault's distance (default 0). It stays there: the next block with Z steps re-energises Z (at once
-  when planned: `Z_LATE_ENABLE` is off, planner.cpp), as does `M17`. A move with no Z steps leaves Z released.
+- Releasing an energised Z (`M18`/`M84` with Z or no axis, the idle timeout, `M112` 0.85 s after the kill, `M997`, a
+  power cycle) moves the head by the `z_drop` fault's distance (default 0). It stays there: the next block with Z steps
+  re-energises Z (at once when planned: `Z_LATE_ENABLE` is off, planner.cpp), as does `M17`. A move with no Z steps
+  leaves Z released.
 - The control state's `head` gives X/Y/Z `physical`, `logical` (the step counts now, in G92 coordinates; M114 prints
   the planned end) and `offset` = physical - logical: what the controller does not know. At boot the offset is the
   park position; after a true home and no faults it is 0. Values are rounded to 1e-6 mm.
@@ -158,7 +159,7 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
   - `M260`/`M261`: style S0 raw, S1 hex, S2 int16 of the last two bytes, S3 decimal; `Error:Bad i2c request`.
   - `M485`: `rs485-reply: TIMEOUT` after 100 ms unless the reply table has the request; a reply comes after 54 ms.
   - `M3426`: `Error:MCP342X i2c error`; no MCP3426 is assumed.
-- Accepted and only acked: `M42 M43 M108 M110 M111 M122 M206 M569 M999 G17 G18 G19 G21`.
+- Accepted and only acked: `M42 M108 M110 M111 M122 M206 M569 M999 G17 G18 G19 G21`, and `M43` but for `M43 P5` (below).
 - Quick-stop and kill: `M410` and `M112` (below).
 
 **Vacuum model.** `M261 A109 B<n>` returns the reading big-endian as a 24-bit two's complement. The open-air value is
@@ -176,6 +177,36 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 - Because it follows the physical head, a `z_shift` or a `z_drop` moves the contact the backend's N1 touch reads.
 - The state shows `surface_z`, `surfaces`, `seal_drop` and `n1_sealed`. The I2C mux and register are not checked.
 - A callable `vacuum=(firmware) -> int` passed to `Simulator` replaces all of this.
+
+**The PA5 switch (the user, 11-04).** A limit switch near the first feeder on PA5 (the HACK header); N1 and the needle
+press it to measure the needle's Z directly. `M43 P5` answers the real board's line, then `ok`:
+`PIN: PA5  (A9)   M42 P53          <unused/unknown>                       Input  = 0` (runs/serial.log, 11-02). It reads
+the pin where the head is when the line runs (no wait for moves: send `M400` first). Other pins and a bare `M43` print
+nothing.
+- Without a switch it reads what the pin's input mode gives (`M42 P53 T2` pull-up: 1; `T3` pull-down or `T0`
+  floating: 0, as the board read 11-02; a power cycle resets it to that). `set {"pa5_switch": {"presses": [{"tool": "n1",
+  "x0": .., "y0": .., "x1": .., "y1": .., "trip_z": 12.0}, {"tool": "needle", ..., "trip_z": 52.0}], "overtravel_mm":
+  0.5, "repeat_sd_mm": 0.003, "pressed_level": 1, "seed": 0}}` wires one (all but `presses` optional, these are the
+  defaults but `repeat_sd_mm`, 0; `overtravel_mm` 0-10, `repeat_sd_mm` 0-1, `pressed_level` 0 or 1, `seed` an
+  integer); `null` removes it. Press windows are physical X/Y mm, edges included, the first listed wins.
+- `n1` presses it as Z falls to the trip point, `needle` as Z rises to it (the see-saw: needle contact raw Z = K - N1
+  contact). Each press trips at its own point, `trip_z` + N(0, `repeat_sd_mm`) from `seed`, and holds it until the
+  tool goes back past it or leaves the window; after a release no new press starts until the head moves toward the
+  switch again (no chatter while it stands still): the release point follows the head as it moves away, so back at the
+  switch the next press trips at its own point. `pressed_level` is the pin's level pressed, the other one released,
+  whatever M42 set (the real polarity: Process's check on the machine).
+- A press deeper than `overtravel_mm` past its point is reported once in `sim_errors` ("PA5 switch overtravel: n1 0.62
+  mm past its trip point (overtravel 0.50 mm)", `line` null), seen at the end of each move (a quick stop's too, and
+  one that ends in a stock kill's coast), at each read, at a Z release (`z_drop`) and at a physical fault (where the
+  head is then, also mid-move), and when it is wired under the head (a new switch wired under a head already past its
+  point reports it once more). At M112 both personalities hold Z and let every stepper go 0.85 s after the kill
+  (minkill(): cli() at 0.6 s, disable_all_steppers() 0.25 s later; stock coasts until the cli(), il-safety's kill
+  stops the motion at once), so a `z_drop` lands then, where the motion ended, whether or not anything reads the
+  state. Not seen: an X/Y move that crosses a window deep and ends outside it. The head is not stopped (no hard stop
+  is modelled).
+- The state's `pa5`: the settings, `level`, `pressed`, `tool`, `trip_z` and `depth_mm` (the deepest of this press),
+  `overtravels`, as of the last observation (from its wiring on): the state request reads nothing. The switch is the
+  machine's: it outlives a power cycle and `clear`.
 
 **Homing (`G28`).**
 - It waits for motion, then homes X, then Y, then Z. Z homes at the safe point (0,0), then moves to Z 31.5. A and B
@@ -214,7 +245,10 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
     does. RESEARCH.md section 7 says "any phase". An M410 in `Z_AFTER` is a plain quick-stop.
 - **il-safety:** below.
 
-**`M112`.** It kills at once (stock: on read) with the steppers off.
+**`M112`.** It kills at once (stock: on read). In both personalities the drivers hold through minkill() and every
+stepper lets go 0.85 s after the kill (`cli()` at 0.6 s, then 0.25 s); a power cycle before then lets them go at the
+power off (a released Z drops once). How the motion ends: "kill" below. The `Homing Failed` kill leaves the motors
+energised.
 
 ## Personalities
 
@@ -227,7 +261,7 @@ G28, M18 and a full planner. A busy line due at the very moment a wait ends come
 | M106 P2/P3 | S as given | any S>0 is 255 |
 | Z steps/mm, B max accel, B current | 40, 10000, 200 mA | 160, 20000, 540 mA |
 | kill | fans unchanged, motion runs 0.6 s more | all four outputs off, planner stopped first |
-| M997 | unknown | reboot to DFU: the port goes away until a power cycle |
+| M997 | unknown | quick-stop, all four outputs off, every stepper let go, `echo:M997: entering STM32 DFU bootloader (0483:df11)`; then it answers nothing more and, 0.1 s later (the firmware's wait for USB to send what was due, that echo with it; counted from when lumen-sim sees the halt, so a late wake still sends it), enters DFU: the port goes away until a power cycle |
 
 ## The simulator line (`--sim-cap`, BR-47)
 
@@ -273,7 +307,7 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 
 | Request | Effect |
 |---|---|
-| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, homing_move_delay_s, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, kill_messages, sim_cap, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
+| `{"cmd": "state"}` | `state` holds: time, personality, boots, halted and halt_reason, logical/native/counts/stepper_counts, physical, head (above), switches, z_drop, surface_z, surfaces, seal_drop, n1_sealed, pa5, homing_move_delay_s, stepper_timeout_s, homed, homing_phase, moving, planner_blocks, ring, fans, fan_history (`t`, `p`, `s`, `source`; the last 1000 changes), led, enabled, soft_endstops, settings, watchdog, kill_messages, sim_cap, faults, lines_read, sim_errors (below), and the transport: link, pts (null while down), host_open, frozen, link_down, time_scale, guard_pid. |
 | `{"cmd": "fault", "fault": "no_ok", "nth": 3}` | No `ok` for the 3rd line read from now; with `"count": 2`, the 3rd and 4th. Use `"match": "<regex>"` instead for every matching line; `"count"` limits the hits. Keys: `nth`, `match`, `count`. Several rules may hit one line; each is used up. A power cycle ends every ok fault: they are the controller's, and the reboot clears them (the physical faults stay). |
 | `{"cmd": "fault", "fault": "delay_ok", "s": 0.5, ...}` | Extra delay before that `ok`; `"random": [lo, hi]` for a seeded random delay. Later output queues behind it, until `clear` or a power cycle. |
 | `{"cmd": "fault", "fault": "dup_ok", ...}` | The `ok` is sent twice. |
@@ -284,7 +318,7 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 | `{"cmd": "fault", "fault": "disconnect", "down_s": 1.0}` | Close the pty master (the host gets EIO) and remove the link, so the port is absent, as an unplugged one. After `down_s`, a new pty behind the link; the controller state is kept. `"down_s": null` stays down until a power cycle, and so does any `down_s` while the board is in DFU (its bootloader shows no serial port). |
 | `{"cmd": "fault", "fault": "frozen", "on": true}` | Stop reading the port (`on` is `true` or `false`, default `true`). The host's writes block once the pty buffer fills. Ends with `clear`, `"on": false` or a power cycle. |
 | `{"cmd": "power_cycle", "link": null, "down_s": 0}` | Close the master, boot state, new pty behind the link, not frozen; output the old board had not sent and pending injections are dropped. The head stays put (a stock kill's last 0.6 s of motion ends at power off). `"link"` publishes it at a new path instead and removes the old link (the board's ttyACM0 becoming ttyACM1; here e.g. ttyLUMEN0 to ttyLUMEN1). `"down_s": 2` keeps the port absent for 2 s first, as while the board resets and USB re-enumerates (the board is reset at once; default 0). The new `link` must be an absolute path; it is checked and its lock taken before the reset, and held through the down time. If the port still cannot be published after the reset (no pty left, the folder gone), the reply is `"ok": true` (the board was reset) with `link_error`, and `link` says where the port is (back at the old path if it could). Ok faults end (above). |
-| `{"cmd": "set", "kill_messages": true, "sim_cap": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000, "homing_move_delay_s": 0.142}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"; `homing_move_delay_s`: "Homing time", default 0; `sim_cap`: "The simulator line"). |
+| `{"cmd": "set", "kill_messages": true, "sim_cap": true, "vacuum": -1600000, "rs485": {"REQHEX": "REPLYHEX"}, "mcp3426": 1234, "surface_z": 5.3, "surfaces": [{"x0": 0, "y0": 0, "x1": 50, "y1": 50, "z": 5.6}], "seal_drop": 329000, "homing_move_delay_s": 0.142, "pa5_switch": {"presses": [...]}}` | Knobs, any subset (`surface_z: null` removes the surface, `surfaces: null` the regions; "Vacuum model"; `pa5_switch`: "The PA5 switch"; `homing_move_delay_s`: "Homing time", default 0; `sim_cap`: "The simulator line"). |
 | `{"cmd": "fault", "fault": "home_offset", "x": 0.5, "y": -0.2}` | The X/Y switches now trigger at these physical positions (mm), so every later home of that axis lands that far off while M114 says 0. Nothing moves until a home. A new value replaces the old one per axis. |
 | `{"cmd": "fault", "fault": "lost_steps", "x": 0.3, "y": 0}` | The head moves by this much now, with no command, also mid-move. M114 and the counts do not change. Calls add up; a home removes it. |
 | `{"cmd": "fault", "fault": "z_shift", "z": 0.1}` | The whole Z frame shifts: the head moves by z now and the Z switch moves with it, so later homes keep the shift. Calls add up. |
@@ -307,7 +341,8 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 - A line the model cannot run (for example `M203 X0` then `G1 X10`, a division by zero) is acked as the board would
   ack it. It is recorded in the state's `sim_errors` (`t`, `line`, `error`; the last 100, kept across power cycles),
   on stderr and as a `#` line in the I/O log (bytes outside ASCII escaped, so line noise cannot break the log).
-  Check `sim_errors` after a test: an entry is a gap in the model, not a board reply.
+  Check `sim_errors` after a test: an entry is a gap in the model or a simulated physical event (a PA5 overtravel), not
+  a board reply.
 - `M92` with a zero value is acked and ignored for that axis (recorded): on the board the axis would stop moving.
 - An error outside any command halts the board with `halt_reason` `sim error: <error>`. The process, the port and the
   control channel stay up, and a power cycle recovers.
