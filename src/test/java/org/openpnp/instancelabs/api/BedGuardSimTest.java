@@ -470,6 +470,36 @@ public class BedGuardSimTest {
     }
 
     /**
+     * While the hooked moves wait for the new needle's measurements, what measures them still runs (review 2 item 7):
+     * the tip picture moves N2 over the bottom camera and stores its photo, which is then the new tip end's evidence;
+     * Home sends G28; STOP answers 200. None is hooked: the gate in a shared pre-check would refuse them all.
+     */
+    @Test
+    public void afterANeedleChangeTheTipPictureHomeAndStopStillRun() throws Exception {
+        start(BedFixture.text());
+        ok("POST", "/api/needle/changed", "{\"why\":\"bed test\"}", UI);
+        // the gate is on: the dry run passes neither shared pre-check, so the gate moved into one fails below, not here
+        JsonObject r = call("POST", "/api/motion/check", "{\"kind\":\"jog\",\"tool\":\"n1\",\"dx\":1}", UI);
+        assertEquals("measurement-needed", r.get("error").getAsString(), "the gate is on: " + body);
+        svc.setTipCamera(new OutputZonesSimTest.TipCam());
+        sim.server.mark();
+        JsonObject pic = ok("POST", "/api/tip-setups/" + svc.mountedKey() + "/picture", "{\"wait\":true}", UI)
+                .getAsJsonObject("result");
+        assertTrue(pic.get("ok").getAsBoolean(), body);
+        assertFalse(motionSent().isEmpty(), "N2 moved to the bottom camera: " + sim.server.sinceMark());
+        JsonObject needle = BedFixture.json().getAsJsonArray("tools").get(1).getAsJsonObject();
+        needle.getAsJsonObject("tipEnd").addProperty("atMs", System.currentTimeMillis());
+        needle.add("measured", new JsonParser().parse("{\"how\":\"bottom camera\",\"by\":\"Process\",\"atMs\":"
+                + System.currentTimeMillis() + ",\"errMm\":0.05,\"evidence\":\"photo:" + pic.getAsJsonObject("photo")
+                        .get("id").getAsLong() + "\"}"));
+        ok("PUT", "/api/bed/tools/needle", needle.toString(), UI);
+        sim.server.mark();
+        ok("POST", "/api/machine/home", "{\"wait\":true}", UI);
+        assertTrue(motionSent().stream().anyMatch(s -> s.startsWith("G28")), "G28 sent: " + sim.server.sinceMark());
+        assertTrue(ok("POST", "/api/stop", "{}", null).get("stopped").getAsBoolean(), body);
+    }
+
+    /**
      * The proof is made on OpenPnP's machine thread right before the first line, as jog and move-to make theirs: a move
      * queued there after the batch's checks is proven from where it leaves the head (review MINOR b).
      */
