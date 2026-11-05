@@ -493,6 +493,7 @@ async function runFirstDots(page, n) {
         !!p2 && p2.fingerprint === fp0, { fp0, fp: p2 && p2.fingerprint, liftMm: p2 && p2.liftMm });
       check('profile: a save that ends while a field shows its error leaves Save locked (never unlocked, not for a frame)',
         busy6.busy && busy6.err === 'Must be 0 to 5 dots.' && !end6.busy && end6.unlocked.length === 0 && end6.save, { busy6, end6 });
+      // dots not counted: a whole number 0 to 5 (BR-85's limits, as the engine refuses them)
       for (const [v, err] of [['6', 'Must be 0 to 5 dots.'], ['-1', 'Must be 0 to 5 dots.'], ['2.5', 'Must be a whole number.'], ['', 'Enter a number.']]) {
         r = await typeIn('pf-skip', v, true);
         check('profile: “' + v + '” dots not counted is refused at the field, as the engine refuses it (Save locked)', r.err === err && r.save, r);
@@ -583,9 +584,21 @@ async function runFirstDots(page, n) {
     await page.fill('#pr-pitchx', '2.5');
     await page.fill('#pr-pitchy', '0');
     await page.fill('#pr-spots', '48');
+    // Save makes its own lock in its last step (the fields clean: nothing left to save), so it stays locked from the press
+    // on: IL.act's end once freed it until the next render (#87's review)
+    await page.evaluate(() => {
+      const b = document.getElementById('btn-pr-save');
+      window.__prFreed = 0;
+      window.__prObs = new MutationObserver(() => { if (!b.disabled) window.__prFreed++; });
+      window.__prObs.observe(b, { attributes: true, attributeFilter: ['disabled'] });
+    });
     await page.click('#btn-pr-save');
     const pr = await waitStatus(page, (s) => s.dispense.purgeRow.defined && s.dispense.purgeRow.x0Mm === 70, 10000);
     check('purge row saved from its card', pr.dispense.purgeRow.spots === 48 && pr.dispense.purgeRow.surfaceProbed, pr.dispense.purgeRow);
+    await page.waitForFunction(() => !document.getElementById('btn-pr-save').hasAttribute('aria-busy'), null, { timeout: 10000 }).catch(() => {});
+    await page.evaluate(() => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res))));   // the render after it
+    const prLock = await page.evaluate(() => { window.__prObs.disconnect(); const b = document.getElementById('btn-pr-save'); return { freed: window.__prFreed, save: b.disabled, title: b.title }; });
+    check('purge row: Save stays locked from the press on (nothing left to save), never freed for a frame at its end', prLock.freed === 0 && prLock.save, prLock);
     // a row that moved while spots were used asks in-page whether the new row is clean
     if (await page.waitForSelector('#dlg-purge-moved', { timeout: 1500 }).then(() => true, () => false)) {
       await page.click('#dlg-purge-moved button:has-text("No, keep the count")');
