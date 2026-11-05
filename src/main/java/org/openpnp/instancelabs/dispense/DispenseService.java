@@ -5133,6 +5133,7 @@ public final class DispenseService {
             throw new IllegalArgumentException("'presses' must be 1..20");
         }
         requireAvailable();
+        Long token = cfg.needleChangedAtMs;
         RunResult r = newRun("height-switch", null, "height switch", 0, 0);
         HeightSwitch.Result res = new HeightSwitch.Result();
         res.tool = tool;
@@ -5145,6 +5146,9 @@ public final class DispenseService {
                 res.inUse = false;
                 res.refused = true;
                 res.why = r.message;
+                if (!java.util.Objects.equals(token, cfg.needleChangedAtMs)) {
+                    res.code = "needle-changed"; // #78: a needle change stopped it (the task's refusal has no code)
+                }
             }
         });
     }

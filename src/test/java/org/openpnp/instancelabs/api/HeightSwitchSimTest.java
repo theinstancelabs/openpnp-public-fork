@@ -959,6 +959,7 @@ public class HeightSwitchSimTest {
             HeightSwitch.Result r = f.get(120, TimeUnit.SECONDS);
             assertFalse(r.accepted && !r.refused, "a measure of the needle that came off: " + r.why);
             assertEquals("the needle was reported changed", r.why, "the change stops the task (WEB_API.md)");
+            assertEquals("needle-changed", r.code, "#78's code: the UI keys on it");
             assertNull(HeightSwitch.needleTrip(svc.getConfig()));
         }
         finally {

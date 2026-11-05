@@ -31,8 +31,8 @@ final class HeightSwitchEndpoints {
     /**
      * POST /api/height-switch/measure {tool: "n1" | "needle", presses? (1..20, 5), zStart?, zFloor? (raw Z)}: waits for
      * the measure and answers its result; a refused, stopped or failed one answers 409 with its reason, its code (the
-     * needle's end from below: needle-end-not-found, needle-end-paste), next and photoId. A tipClean field is ignored:
-     * the engine checks the tip itself.
+     * needle's end from below: needle-end-not-found, needle-end-paste; needle-changed after a needle change), next and
+     * photoId. A tipClean field is ignored: the engine checks the tip itself.
      */
     Object measure(ApiServer.Request r) throws Exception {
         JsonObject b = r.json();

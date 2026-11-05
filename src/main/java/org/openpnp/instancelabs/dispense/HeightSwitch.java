@@ -155,7 +155,10 @@ public final class HeightSwitch {
         /** The engine's: the presses asked for, the home it was measured under, when it ended. */
         public Integer presses;
         public Long homeAtMs, atMs;
-        /** A refusal's code and what it offers (the needle's end from below: needle-end-not-found, needle-end-paste). */
+        /**
+         * A refusal's code and what it offers (the needle's end from below: needle-end-not-found, needle-end-paste;
+         * needle-changed: a needle change stopped the press).
+         */
         public String code, next;
         /** The refusal's picture (a photo id). */
         public Long photoId;
