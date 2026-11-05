@@ -334,6 +334,17 @@ class LinkAndPower(unittest.TestCase):
                 self.assertEqual(b.sim.take_transport_actions(), [{"action": "disconnect", "down_s": None}])
                 b.sim.power_cycle(b.t)
 
+    def test_a_power_cycle_inside_m997_s_wait_for_usb_boots_as_usual(self):
+        """Reset before flashFirmware()'s 0.1 s for USB CDC ends: no DFU, the port stays."""
+        with within(self, 5):
+            b = Bench(personality="il-safety")
+            b.write("M997\n")
+            b.run(0.05)
+            b.sim.power_cycle(b.t)
+            b.run(1.0)
+            self.assertEqual(b.sim.take_transport_actions(), [])
+            self.assertFalse(b.sim.state(b.t)["halted"])
+
 
 class Set(unittest.TestCase):
     def test_set_vacuum_rs485_kill_messages(self):

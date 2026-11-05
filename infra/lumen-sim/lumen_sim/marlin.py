@@ -27,6 +27,7 @@ Z_AFTER_HOMING = 31.5
 XY_PROBE_FEEDRATE = 133.0
 KILL_DELAY_S = 0.6              # minkill(): messages get out, the stepper ISR still runs, then cli()
 STEPPERS_OFF_DELAY_S = 0.25     # minkill(): after cli(), DELAY_US(250000), then disable_all_steppers() (M112)
+DFU_DRAIN_S = 0.1               # il/safety flashFirmware(): 20 x delay(5) for USB CDC to send, then the reset into DFU
 DEFAULT_STEPPER_TIMEOUT_MS = 3600 * 1000  # DEFAULT_STEPPER_TIMEOUT_SEC (Configuration_adv.h)
 DISABLE_IDLE = AXES             # DISABLE_IDLE_X/Y/Z/I/J: an idle timeout releases every axis
 MILLIS_HALF = 2 ** 31           # ELAPSED()/PENDING() compare millis_t as int32_t (core/millis_t.h:32-33)
@@ -1088,8 +1089,14 @@ class Firmware:
         self._emit(report + (" tripped" if self.wd_tripped else ""))
 
     def m997(self, cmd):
-        """il/safety: reboot into the STM32 DFU bootloader; the serial port goes away until a power cycle."""
+        """il/safety's flashFirmware() (dfu_bootloader.cpp): planner.quick_stop(), every output off, every stepper let
+        go, the echo; then it answers nothing more and, DFU_DRAIN_S later (USB CDC sends what was due, the echo with
+        it), resets into the STM32 DFU bootloader: the serial port goes away until a power cycle."""
         self.stepper.freeze(self.now)
+        self._outputs_off("M997")
+        for a in AXES:
+            self.release(a)
+        self._emit("echo:M997: entering STM32 DFU bootloader (0483:df11)")
         self._dead("DFU")
         raise Halted("DFU")
 
