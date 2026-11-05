@@ -336,7 +336,19 @@ class Idle(unittest.TestCase):
             self.assertIn(p, il_deploy.STATUS_FIELDS)
         self.start_fake(fail=["old-status"])
         st = il_deploy.Api(self.lab.port).get("/api/status")[1]
-        self.assertEqual(sorted(il_deploy.status_field_problems(st)), sorted(br44))
+        # and BR-93's machine.linkLost, which came after
+        self.assertEqual(sorted(il_deploy.status_field_problems(st)), sorted(br44 + ["machine.linkLost"]))
+
+    def test_status_fields_of_br93(self):
+        """BR-93's machine.linkLost is read by every idle and health check, and absent counts as no loss (a build
+        before #53): a rename would turn the guard off silently, so the e2e checks it on the real jar."""
+        self.assertIn("machine.linkLost", il_deploy.STATUS_FIELDS)
+        self.start_fake()
+        st = il_deploy.Api(self.lab.port).get("/api/status")[1]
+        self.assertIsNone(st["machine"]["linkLost"])
+        self.assertEqual(il_deploy.status_field_problems(st), [])
+        del st["machine"]["linkLost"]
+        self.assertEqual(il_deploy.status_field_problems(st), ["machine.linkLost"])
 
     def test_status_fields_inside_places_and_surfaces_and_behind_nulls(self):
         """A place or surface without setAtMs is a rename (status_field_problems). What a null 'key?' or an empty map

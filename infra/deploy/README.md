@@ -547,10 +547,10 @@ test_3's two health checks 8 s each).
 - **test_2:** lumen-sim power-cycled, a third build: `run` exits 5 after reading X/Y/Z 0, B 720. Nothing moves
   (no G0/G1/G28), the previous build runs again unchecked, the new build is not marked bad, and the hold is set
   until `resume`. The deploy restarts OpenPnP, so BR-44's reconnect of a kept-alive link plays no part here.
-- **test_3 (BR-44):** `health --no-claim` on that build connects it (boot position: no home; its STOP keeps the link
-  open), lumen-sim is power-cycled again, and a second `health --no-claim` finds Start connecting again ("the
-  kept-alive link to the controller is dead: connecting again", one more connect line, read by the serial step instead
-  of the kept-open fallback) and the reset controller, never homed. Nothing moves.
+- **test_3 (BR-44, BR-93):** `health --no-claim` on that build connects it (boot position: no home; its STOP keeps the
+  link open). lumen-sim is power-cycled again: the kept-open link dies, BR-93 (#53) shows it as `machine.linkLost`, and
+  a second `health --no-claim` is refused (exit 3, not idle) with no Start (no new connect line). Nothing moves. The
+  reconnect itself is the operator's Stop and Start (Backend's PowerCycleSimTest).
 - BR-44's fields on the real build (in `assert_status_fields`): `dispense.state` `running`, `startError` null,
   `machine.homing` false, and the pressure hold's first stamp within `STARTUP_STAMP_S` of `server.startedAtMs`
   (`results.json` keeps the gap, `measured`).

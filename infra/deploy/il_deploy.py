@@ -737,7 +737,7 @@ NAMED_ACTIVITY_FIELDS = (("place '{}' set", "dispense.locations"), ("surface '{}
 # check's status step, the STOP rule). BR-44's (server.startedAtMs, machine.homing, dispense.state, startError) are
 # always there on a build since; on an older one their rules fall back to the earlier ones (a rollback can land there)
 STATE_FIELDS = ("server.version", "server.simulated", "server.startedAtMs", "machine.enabled", "machine.busy",
-                "machine.homing", "run?.running", "pressure.state", "pressure.on", "pressure.lastEvent",
+                "machine.homing", "machine.linkLost", "run?.running", "pressure.state", "pressure.on", "pressure.lastEvent",
                 "pressure.lastEventAtMs", "dispense.state", "dispense.startError", "dispense.running",
                 "dispense.available", "dispense.busy", "padCalibration?.state", "boardImport.reading")
 # Every key path il_deploy reads in /api/status with the dispense engine running. A missing time is skipped (fail open),
