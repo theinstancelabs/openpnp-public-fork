@@ -201,6 +201,10 @@
     const st = f ? stateOf(f) : { state: 'reading', text: '' };
     const rows = f ? stepsOf(f, st) : [];
     IL.keyed(n.steps, JSON.stringify([f && f.file, rows]), () => rows.map((r) => rowEl(f, r)));
+    // as Pad types' Needs: Use the doses found waits for a task, held pressure or an upload being read; a calibration also
+    // for one waiting on its readings
+    IL.gate(document.getElementById('btn-design-use'), PP().idle(IL.S.status));
+    IL.gate(document.getElementById('btn-design-doses'), PP().calIdle(IL.S.status));
     const todo = rows.filter((r) => r.state === 'need' || r.state === 'block').length;
     IL.setText(n.todo, st.state === 'ready' ? 'Ready' : todo ? todo + ' to do' : '');
     n.todo.classList.toggle('design-todo--ok', st.state === 'ready');
@@ -302,8 +306,9 @@
       n.pMake.addEventListener('click', () => { const f = byKey(D.sel); if (f) make(f); });
       n.pNext = el('button', { type: 'button', class: 'btn btn--primary btn--lg btn--block', id: 'btn-design-next' });
       n.pNext.addEventListener('click', () => { if (n.pNextGo) n.pNextGo(); });
+      n.pWhy = el('div', { class: 'reason', id: 'design-rest-why', hidden: true });
       n.pCap = el('div', { class: 'design-cap' });
-      p.foot.append(n.pRefusals, n.pRest, n.pMake, n.pNext, n.pCap);
+      p.foot.append(n.pRefusals, n.pRest, n.pWhy, n.pMake, n.pNext, n.pCap);
     }
     const f = D.sel ? byKey(D.sel) : null;
     const st = f ? stateOf(f) : null;
@@ -330,6 +335,9 @@
     IL.show(n.pMore, !D.sel);
     const canRest = !!st && !ready && (use.length > 0 || cal.length > 0);
     IL.show(n.pRest, canRest);
+    // the visible reason for this and the steps' buttons (they show only when this does), as Needs' #needs-why; while a
+    // pushed panel (the pad calibration's) covers this one, the steps' buttons keep the reason as their title
+    IL.gate(n.pRest, canRest ? (cal.length ? PP().calIdle : PP().idle)(s) : null, n.pWhy);
     IL.show(n.pMake, ready);
     // nothing to run here: the step that comes next, on its own page
     const next = !st || ready || canRest ? null : measure.length ? ['Measure the tip’s dots', () => IL.go('#tip/checks')]
