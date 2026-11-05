@@ -1,0 +1,76 @@
+// java --source 17 src/test/resources/br77/ScrewPhaseFitSeFactorMc.java.txt 0 0.12 2000000 0: SE_FACTOR is "row-x c95"
+import java.util.Arrays;
+import java.util.SplittableRandom;
+
+/** BR-77 check: the factor on trimmedSe that gives 1.96·SE coverage of 0.95 / 0.90, for a half, a row's x, the peak. */
+public class Mc3b {
+    static double var(double[] v) {
+        int n = v.length;
+        double m = 0, s = 0;
+        for (double x : v) m += x;
+        m /= n;
+        for (double x : v) s += (x - m) * (x - m);
+        return n < 2 ? 0 : s / (n - 1);
+    }
+
+    static double se(double[] l) {
+        int n = l.length;
+        double[] w = l.clone();
+        Arrays.sort(w);
+        boolean spread = w[1] < w[n - 2];
+        w[0] = w[1];
+        w[n - 1] = w[n - 2];
+        return (spread ? Math.sqrt(var(w)) : Math.sqrt(var(l))) * Math.sqrt(n) / (n - 2);
+    }
+
+    static double tm(double[] l) {
+        double[] s = l.clone();
+        Arrays.sort(s);
+        double t = 0;
+        for (int i = 1; i < s.length - 1; i++) t += s[i];
+        return t / (s.length - 2);
+    }
+
+    static double gauss(SplittableRandom r) {
+        double u1 = r.nextDouble(), u2 = r.nextDouble();
+        return Math.sqrt(-2 * Math.log(1 - u1)) * Math.cos(2 * Math.PI * u2);
+    }
+
+    static double[] half(SplittableRandom r, double m, double cv, int n) {
+        double[] v = new double[n];
+        for (int i = 0; i < n; i++) v[i] = m * (1 + cv * gauss(r));
+        return v;
+    }
+
+    static double q(double[] v, double p) {
+        double[] s = v.clone();
+        Arrays.sort(s);
+        return s[(int) Math.floor(p * (s.length - 1))];
+    }
+
+    public static void main(String[] args) {
+        long seed = 20261104L;
+        int runs = Integer.parseInt(args[2]);
+        double xt = Double.parseDouble(args[0]), cv = Double.parseDouble(args[1]); seed += Long.parseLong(args[3]);
+        System.out.printf("cv %.2f x_true %.3f, %d runs; factor c with P(|err| <= 1.96 c se) = p%n", cv, xt, runs);
+        System.out.println(" n   bias(1/mean)  half c95  half c90  row-x c95  row-x c90");
+        for (int n = 3; n <= 16; n++) {
+            SplittableRandom r = new SplittableRandom(seed + n);
+            double[] th = new double[runs], tx = new double[runs], tm = new double[runs], s = new double[runs];
+            for (int k = 0; k < runs; k++) {
+                double[] A = half(r, 1 + xt, cv, n), B = half(r, 1 - xt, cv, n);
+                double ta = tm(A), tb = tm(B), sa = se(A), sb = se(B);
+                th[k] = Math.abs(ta - (1 + xt)) / sa / 1.96;
+                double x = (ta - tb) / (ta + tb), xse = Math.hypot(sa, sb) / (ta + tb);
+                tx[k] = Math.abs(x - xt) / xse / 1.96;
+                tm[k] = ta;
+                s[k] = sa;
+            }
+            double m = Arrays.stream(tm).average().getAsDouble(), v = 0;
+            for (double t : tm) v += (t - m) * (t - m);
+            double bias = Math.sqrt(v / (runs - 1)) / Arrays.stream(s).average().getAsDouble();
+            System.out.printf("%2d  %12.3f  %8.3f  %8.3f  %9.3f  %9.3f%n", n, bias, q(th, 0.95), q(th, 0.90), q(tx, 0.95),
+                    q(tx, 0.90));
+        }
+    }
+}

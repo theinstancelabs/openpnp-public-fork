@@ -31,7 +31,7 @@ public final class ScrewPhaseFit {
      * Halves (Process 11-04 15:0x): a dot this many times its half's median left after the trim is a second outlier in
      * that half, and the angle is low (normal scatter is 10-15 % cv, the blobs 1.7-2.9×). It misses some (Monte Carlo,
      * cv 0.10-0.15): a 1.7× second blob in 23-36 % of 8-dot halves, 36-49 % at 5; it cannot fire with 3 dots, and
-     * with 4 only for a second blob above 3× the other dot; normal scatter never fires it (≤ 0.2 %). Kept at 1.5×
+     * with 4 only for a second blob above 3× the other dot; normal scatter rarely fires it (≤ 0.2 %). Kept at 1.5×
      * (Process 11-04 15:2x: 1.4× would give 2-8 % false low per measure).
      */
     static final double OUTLIER_SHARE = 1.5;
@@ -40,7 +40,9 @@ public final class ScrewPhaseFit {
     public static final int MIN_PAIRS = 6;
     /**
      * Halves: a half's error × this by its dots (3-16, the last above) so 1.96 errors hold a row's x 95 % of the time
-     * (Monte Carlo of the formula on normal scatter, seed 20261104, 2·10⁶ rows per count; the bias alone is 1.59 at 4).
+     * (Monte Carlo of the formula on normal scatter, seed 20261104 + n, 2·10⁶ rows per count; the bias alone is 1.59
+     * at 4). Fitted at cv 0.12, no ripple, both halves at one count; unequal halves (dots missed or joined) hold it
+     * 91-95 % of the time. The program: src/test/resources/br77/ScrewPhaseFitSeFactorMc.java.txt.
      */
     static final double[] SE_FACTOR = {0, 0, 0, 0.51, 3.19, 1.66, 1.36, 1.24, 1.18, 1.14, 1.12, 1.10, 1.08, 1.07, 1.07,
             1.06, 1.05};
