@@ -292,10 +292,12 @@ final class ControlEndpoints {
             // and for its floor (over a surface's edge N2 and the tip lie over different surfaces)
             boolean needle = n == n2;
             double[] tip = needle ? svc.needleXY(at.getX(), at.getY()) : new double[] {at.getX(), at.getY()};
-            if (Double.isFinite(low) && at.getZ() < low - 1e-6 && overHeightSwitch(svc, tip[0], tip[1])) {
+            // without a lower safe zone on Z every press down over the switch is refused (fail closed)
+            if ((!Double.isFinite(low) || at.getZ() < low - 1e-6) && overHeightSwitch(svc, tip[0], tip[1])) {
                 throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over the height "
-                        + "switch (%.1f, %.1f), below its safe zone %.2f: only its measure presses it (POST "
-                        + "/api/height-switch/measure)%s", name(svc, n), at.getZ(), tip[0], tip[1], low,
+                        + "switch (%.1f, %.1f), %s: only its measure presses it (POST /api/height-switch/measure)%s",
+                        name(svc, n), at.getZ(), tip[0], tip[1], Double.isFinite(low) ? String.format(Locale.ROOT,
+                                "below its safe zone %.2f", low) : "with no lower safe zone on Z",
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
             double floor = needle ? needleFloor(svc, n, tip[0], tip[1]) : n1Floor(svc, tip[0], tip[1]);

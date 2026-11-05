@@ -284,6 +284,22 @@ public class ControlApiSimTest {
     }
 
     /**
+     * BR-94 follow-up: with no lower safe zone on Z (OpenPnP's axis setting) a press over the height switch is still
+     * refused, not let through to the floor: only its measure presses it.
+     */
+    @Test
+    public void overTheHeightSwitchWithoutASafeZoneOnZNoToolGoesDown() throws Exception {
+        ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"n1\",\"place\":\"height-switch\"}", UI));
+        ((ReferenceControllerAxis) ((AbstractHeadMountable) sim.n1).getAxisZ()).setSafeZoneLowEnabled(false);
+        double z = loc(sim.n1).getZ();
+        Res r = call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-1}", UI);
+        refused(409, "over the height switch", r);
+        assertTrue(r.body.contains("no lower safe zone on Z"), r.toString());
+        assertEquals(z, loc(sim.n1).getZ(), 1e-6, "nothing moved");
+    }
+
+    /**
      * BR-94 review MINOR 6: over the height switch the needle is checked where its tip lands (N2 + the landing + trim,
      * as the measure and I12 aim), not at N2. With an 11 mm landing, N2 11 mm from the place puts the tip on it: a jog
      * down is refused; N2 on the place puts the tip 11 mm away: it may go down to its floor.
