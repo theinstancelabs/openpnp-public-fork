@@ -28,6 +28,8 @@ public class HeightSwitchTest {
         /** The level it reads unpressed (1: pulled up, a normally open switch closes to GND). */
         int idle = 1;
         boolean stuck;
+        /** Once pressed it never lets go. */
+        boolean sticky;
         boolean pullUp;
         double z = 31.5;
         final List<String> lines = new ArrayList<>();
@@ -48,6 +50,7 @@ public class HeightSwitchTest {
             Matcher m = Z.matcher(line);
             if (line.startsWith("G1") && m.find()) {
                 z = Double.parseDouble(m.group(1));
+                stuck |= sticky && pressed();
             }
             if (line.equals("M42 P53 T2")) {
                 pullUp = true;
@@ -225,29 +228,28 @@ public class HeightSwitchTest {
 
     @Test
     public void aSwitchThatSticksIsRefused() throws Exception {
-        FakeSwitch sw = new FakeSwitch(12.0, -1) {
-            @Override
-            boolean pressed() {
-                return stuck || super.pressed();
-            }
-        };
-        HeightSwitch.Io io = new HeightSwitch.Io() {
-            @Override
-            public void send(String line) {
-                sw.send(line);
-                if (line.startsWith("G1") && sw.pressed()) {
-                    sw.stuck = true; // from the first press on it never lets go
-                }
-            }
-
-            @Override
-            public List<String> query(String line) {
-                return sw.query(line);
-            }
-        };
-        HeightSwitch.Result r = HeightSwitch.measure(io, plan("n1", -1, 13.0, 11.0, 5));
+        FakeSwitch sw = new FakeSwitch(12.0, -1);
+        sw.sticky = true;
+        HeightSwitch.Result r = HeightSwitch.measure(sw, plan("n1", -1, 13.0, 11.0, 5));
         assertTrue(r.refused && r.why.contains("still pressed 0.40 mm above") && r.why.contains("sticks"), r.why);
         assertEquals("G1 Z31.500 F600", sw.lines.get(sw.lines.size() - 2), sw.lines.toString());
+    }
+
+    /**
+     * BR-94 follow-up NIT: a start close below travel Z leaves the 0.40 back move no room (it stops at travel Z); a
+     * switch still pressed there is refused in words that say so, not as one still pressed so far above its trip.
+     */
+    @Test
+    public void aSwitchStillPressedAtTravelZSaysSo() throws Exception {
+        for (int down : new int[] {-1, 1}) {
+            double start = 31.5 + down * 0.1;
+            FakeSwitch sw = new FakeSwitch(start + down * 0.1, down);
+            sw.sticky = true;
+            HeightSwitch.Result r = HeightSwitch.measure(sw, plan(down < 0 ? "n1" : "needle", down, start,
+                    start + down * 2.0, 5));
+            assertTrue(r.refused && r.why.contains("the switch still reads pressed at travel Z (Z 31.500")
+                    && r.why.contains("it may stick, or the window lies too close to travel Z"), r.why);
+        }
     }
 
     /**
