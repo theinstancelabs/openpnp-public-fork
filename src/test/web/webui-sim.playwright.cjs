@@ -488,6 +488,73 @@ async function runFirstDots(page, n) {
       await page.click('#btn-pf-save');
       const p4 = await waitStatus(page, (s) => s.dispense.profile.touchOffSkipDots === 0, 10000).then((s) => s.dispense.profile, () => null);
       check('profile: 0 dots not counted is saved again (every dot counts)', !!p4 && p4.fingerprint === fp0, p4 && { fp: p4.fingerprint, skip: p4.touchOffSkipDots });
+      // BR-90: the tip's touch-off ladder (Process sets it; the touch-off opens at it) is the recipe's, three fields after
+      // the dots not counted, saved with them: the engine checks the two together, so a skip the stored ladder does not
+      // fit is refused at the ladder and fixed in the same save; a save that leaves the ladder alone sends none
+      const ladIds = ['pf-lstart', 'pf-lstep', 'pf-lsteps'];
+      const errOf = (id) => page.evaluate((i) => { const m = document.getElementById(i + '-err'); return m.hidden ? '' : m.textContent; }, id);
+      const puts = [];
+      const onPut = (q) => { if (q.method() === 'PUT' && /\/api\/config$/.test(q.url())) puts.push(q.postDataJSON()); };
+      page.on('request', onPut);
+      const saveNow = async () => {
+        puts.length = 0;
+        await page.waitForSelector('#btn-pf-save:enabled', { timeout: 5000 }).catch(() => {});
+        await page.click('#btn-pf-save');
+      };
+      check('profile: the touch-off ladder (start gap, step, steps) follows “Dots not counted after the prime”, blank on the SIM (none set)', await page.evaluate((ids) => {
+        const es = ['pf-skip'].concat(ids).map((i) => document.getElementById(i));
+        return es.every(Boolean) && es.slice(1).every((e) => e.value === '') && es.slice(1).every((e, i) => !!(es[i].compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING));
+      }, ladIds) && (await prof()).touchOffLadder === null, await prof().then((p) => p.touchOffLadder));
+      await page.fill('#pf-lstart', '0.3');
+      await page.waitForFunction(() => !document.getElementById('pf-lstep-err').hidden && document.getElementById('btn-pf-save').disabled, null, { timeout: 5000 }).catch(() => {});
+      const half = { step: await errOf('pf-lstep'), steps: await errOf('pf-lsteps'), save: await page.evaluate(() => document.getElementById('btn-pf-save').disabled) };
+      check('profile: a ladder with only its start gap is refused at the two blank fields (Save locked)', half.step === 'Give all three, or leave all three blank.'
+        && half.steps === half.step && half.save, half);
+      await page.fill('#pf-lstep', '0.05');
+      r = await typeIn('pf-lsteps', '9', false);
+      check('profile: the ladder 0.3 / 0.05 / 9 is taken', r.err === '' && (await errOf('pf-lstart')) === '' && (await errOf('pf-lstep')) === '', r);
+      await waitText(page, 'pf-diff-t', /touch-off steps/, 5000).catch(() => {});
+      const barL = { parts: await textOf(page, 'pf-diff-t'), cons: await textOf(page, 'pf-diff-c') };
+      check('profile: the unsaved bar names the ladder; plans stay current (not part of a dot)', barL.parts
+        === 'touch-off start gap none → 0.300 mm · touch-off step none → 0.050 mm · touch-off steps none → 9' && /plans stay current/.test(barL.cons), barL);
+      await saveNow();
+      const pL = await waitStatus(page, (s) => !!s.dispense.profile.touchOffLadder, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: the ladder is saved with the recipe ({startGapMm 0.3, stepMm 0.05, steps 9} in the status); the fingerprint is the one before',
+        !!pL && JSON.stringify(pL.touchOffLadder) === '{"startGapMm":0.3,"stepMm":0.05,"steps":9}' && pL.fingerprint === fp0 && pL.problems.length === 0,
+        pL && { ladder: pL.touchOffLadder, fp: pL.fingerprint, problems: pL.problems });
+      // 4 not counted at this ladder would put its counted dots at 0.300 − 4 × 0.050 = 0.100 mm: the engine refuses the
+      // skip alone (BR-90) and the form says it at the start gap; a start of 0.350 fits, and both go in one save
+      await page.fill('#pf-skip', '');
+      await page.locator('#pf-skip').pressSequentially('4');
+      await page.waitForFunction(() => !document.getElementById('pf-lstart-err').hidden && document.getElementById('btn-pf-save').disabled, null, { timeout: 5000 }).catch(() => {});
+      const dead = { err: await errOf('pf-lstart'), save: await page.evaluate(() => document.getElementById('btn-pf-save').disabled) };
+      check('profile: 4 dots not counted with the stored ladder from 0.300 mm: refused at its start gap with the minimum, as the engine refuses it (Save locked)',
+        dead.err === 'At least 0.325 mm: the tip’s recipe does not count the first 4 dots after the prime, so they go above 0.125 mm, where the counted dots start.' && dead.save, dead);
+      r = await typeIn('pf-lstart', '0.35', false);
+      check('profile: a start gap of 0.350 mm fits 4 dots not counted', r.err === '', r);
+      await saveNow();
+      const pL2 = await waitStatus(page, (s) => s.dispense.profile.touchOffSkipDots === 4, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: the skip and the ladder go in one save, and the engine takes both (4; 0.35 / 0.05 / 9)', !!pL2 && puts.length === 1
+        && JSON.stringify(pL2.touchOffLadder) === '{"startGapMm":0.35,"stepMm":0.05,"steps":9}' && JSON.stringify(puts[0].profile.touchOffLadder) === JSON.stringify(pL2.touchOffLadder),
+        { ladder: pL2 && pL2.touchOffLadder, skip: pL2 && pL2.touchOffSkipDots, puts });
+      // a save that leaves the ladder alone sends none: one Process stores meanwhile is never overwritten or cleared
+      r = await typeIn('pf-skip', '3', false);
+      await saveNow();
+      const pL3 = await waitStatus(page, (s) => s.dispense.profile.touchOffSkipDots === 3, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: a save that does not touch the ladder sends no ladder, and the engine keeps it', !!pL3 && puts.length === 1 && !('touchOffLadder' in puts[0].profile)
+        && JSON.stringify(pL3.touchOffLadder) === '{"startGapMm":0.35,"stepMm":0.05,"steps":9}', { ladder: pL3 && pL3.touchOffLadder, puts });
+      // all three blank: none (null), said in the bar; with the SIM's 0 not counted again (the touch-off below counts every dot)
+      for (const id of ladIds) await page.fill('#' + id, '');
+      r = await typeIn('pf-skip', '0', false);
+      await waitText(page, 'pf-diff-t', /touch-off steps 9 → none/, 5000).catch(() => {});
+      const barN = await textOf(page, 'pf-diff-t');
+      check('profile: a ladder cleared (all three blank) reads “→ none” in the unsaved bar', barN === 'dots not counted after the prime 3 → 0 · touch-off start gap 0.350 mm → none · '
+        + 'touch-off step 0.050 mm → none · touch-off steps 9 → none', barN);
+      await saveNow();
+      const pL4 = await waitStatus(page, (s) => s.dispense.profile.touchOffLadder === null && s.dispense.profile.touchOffSkipDots === 0, 10000).then((s) => s.dispense.profile, () => null);
+      check('profile: the cleared ladder is saved as null (none set), with 0 not counted', !!pL4 && puts.length === 1 && puts[0].profile.touchOffLadder === null && pL4.fingerprint === fp0,
+        { puts, ladder: pL4 && pL4.touchOffLadder });
+      page.off('request', onPut);
     }
 
     // ---- regulator attestation (§9.4): a psi change expires it for good, also when the psi is set back --------

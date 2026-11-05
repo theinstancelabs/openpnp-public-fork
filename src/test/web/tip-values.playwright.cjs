@@ -13,7 +13,9 @@
  * both), typed values kept; the plan line counts the 2 check dots BR-89 lays after the ladder at the first counted dot's
  * gap; (2c) a touch-off the engine did not apply for its check dots (BR-89's landingProblem) offers no Use, the engine's
  * words instead; (2d) its check dots as rows under the ladder's (Calibrate and Records › Touch-offs), and Records says
- * why it was not applied; none for a touch-off from before BR-89; (3) no JavaScript errors.
+ * why it was not applied; none for a touch-off from before BR-89; (2e) BR-90: a tip whose recipe carries its own ladder
+ * (`profile.touchOffLadder`, Process sets it) opens the touch-off at it, a typed field kept; without one (null) at the
+ * reference gap again; (3) no JavaScript errors.
  * Nothing moves.
  *
  * Env: IL_BASE or IL_API_URL (the UI), PLAYWRIGHT_DIR, OUT_DIR (tip-values-results.json, tip-values.png).
@@ -40,7 +42,7 @@ const today = (h, m) => { const d = new Date(); d.setHours(h, m, 30, 0); return 
 // OWN's padType becomes a live pad type's key once the page has the list (its name shows); FAMILY's matches no type
 const OWN = { massPerPadMg: 1.24, areaMm2: 0.73, mgPerMm2: 1.699, padType: null, source: 'weighed by Process', setAtMs: today(0, 10), fromFamily: false };
 const FAMILY = { massPerPadMg: 1.056, areaMm2: 0.73, mgPerMm2: 1.447, padType: 'no-such-type', source: 'the 0603 bench anchor', setAtMs: null, fromFamily: true };
-const ST = { anchor: undefined, touchOff: null, skip: undefined };
+const ST = { anchor: undefined, touchOff: null, skip: undefined, ladder: undefined };
 function touchOffRow(ref, from, skipped) {
   const analysis = { contactGapMm: 0.05, gapsMm: [0.3, 0.2, 0.1, 0.05, 0], diametersMm: [1.31, 1.33, 1.36, 1.12, 0.6], dotStates: ['ok', 'ok', 'ok', 'ok', 'ok'],
     bracketHighMm: 0.1, bracketLowMm: 0.05 };
@@ -65,6 +67,8 @@ async function stubRoutes(context) {
         body.dispense.profile = Object.assign({}, body.dispense.profile, { touchOffSkipDots: ST.skip });
         if (ST.skip === 'missing') delete body.dispense.profile.touchOffSkipDots;
       }
+      // BR-90: the mounted tip's own touch-off ladder, from its recipe (Process sets it)
+      if (ST.ladder !== undefined && body.dispense) body.dispense.profile = Object.assign({}, body.dispense.profile, { touchOffLadder: ST.ladder });
       return route.fulfill({ response: resp, json: body });
     }
     if (url.pathname === '/api/calibrations' && req.method() === 'GET' && ST.touchOff) {
@@ -219,6 +223,7 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     const stepsField = () => page.evaluate(() => ({ unit: (document.querySelector('#to-steps-wrap .unit') || {}).textContent || null,
       min: document.getElementById('to-steps').getAttribute('min'), err: (document.getElementById('to-steps-err') || {}).hidden ? '' : document.getElementById('to-steps-err').textContent,
       value: document.getElementById('to-steps').value, focused: document.activeElement === document.getElementById('to-steps'), start: document.getElementById('to-start').value,
+      step: document.getElementById('to-step').value,
       startFocused: document.activeElement === document.getElementById('to-start'),
       startErr: (document.getElementById('to-start-err') || {}).hidden ? '' : document.getElementById('to-start-err').textContent,
       plan: (document.getElementById('to-plan') || {}).textContent || '' }));
@@ -327,6 +332,34 @@ const waitRow = (page, re) => page.waitForFunction((src) => {
     await page.waitForFunction(() => document.getElementById('to-start').value === '0.125', null, { timeout: 8000 }).catch(() => null);
     const fSim = await stepsField();
     check('(2b) the SIM\'s own recipe (every dot counted) after the 25G\'s: the start gap opens at 0.125 mm again', from25 === '0.200' && fSim.start === '0.125', { from25, fSim });
+
+    // ---- (2e) BR-90: the touch-off opens at the mounted tip's own ladder (its recipe's touchOffLadder, Process sets it),
+    // not at the reference gap; a typed field stays; with none set (null) it opens at the reference gap again
+    const blur = () => page.evaluate(() => document.activeElement && document.activeElement.blur());
+    await page.fill('#to-steps', '');
+    await blur();
+    ST.skip = 3;
+    ST.ladder = { startGapMm: 0.3, stepMm: 0.05, steps: 9 };
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.300', null, { timeout: 8000 }).catch(() => null);
+    const fL = await stepsField();
+    // 0.300 down to −0.100 in steps of 0.050, then the check dots at its first counted dot's gap: 0.300 − 3 × 0.050
+    check('(2e) the 25G\'s recipe carries its ladder 0.300 / 0.050 / 9: the touch-off opens at it, not at 0.200 / 0.025 / 13; nothing refused; the check dots at 0.150 mm',
+      fL.start === '0.300' && fL.step === '0.050' && fL.value === '9' && fL.err === '' && fL.startErr === ''
+      && /^11 dots( on “[^”]*”)?: 9 at gaps 0\.300, 0\.250, 0\.200, .*[-−]0\.100 mm, then 2 check dots at 0\.150 mm after an empty space · /.test(fL.plan), fL);
+    await page.fill('#to-steps', '10');
+    await blur();
+    ST.ladder = { startGapMm: 0.35, stepMm: 0.05, steps: 9 };
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.350', null, { timeout: 8000 }).catch(() => null);
+    const fL2 = await stepsField();
+    check('(2e) Process changes the ladder to 0.350 / 0.050 / 9: the start follows it, the typed 10 steps stay', fL2.start === '0.350' && fL2.step === '0.050'
+      && fL2.value === '10' && fL2.err === '' && fL2.startErr === '', fL2);
+    ST.ladder = null;
+    await page.waitForFunction(() => document.getElementById('to-start').value === '0.200', null, { timeout: 8000 }).catch(() => null);
+    const fL3 = await stepsField();
+    check('(2e) none set any more (null): the reference gap again (0.125 + 3 × 0.025: 0.200 mm at a step of 0.025), the typed 10 kept', fL3.start === '0.200'
+      && fL3.step === '0.025' && fL3.value === '10' && fL3.err === '' && fL3.startErr === '', fL3);
+    ST.ladder = undefined;
+    ST.skip = undefined;
 
     check('(3) no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 8));
   } catch (e) {
