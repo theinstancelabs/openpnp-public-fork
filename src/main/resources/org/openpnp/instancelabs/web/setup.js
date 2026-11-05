@@ -2144,7 +2144,7 @@
     c.jErr = el('div', { class: 'field__err', id: 'su-json-err', role: 'status' });
     c.jStale = el('div', { class: 'notebox notebox--need su-json-stale', hidden: true });
     c.jDiff = el('div', { id: 'set-json-diff', class: 'su-diff' });
-    c.jReload = btn('Reload and keep my edits', { class: 'btn' }, 'i-refresh');
+    c.jReload = btn('Reload and keep my edits', { id: 'btn-settings-json-reload', class: 'btn' }, 'i-refresh');
     c.jSave = btn('Save changed keys', { id: 'btn-settings-json', class: 'btn' });
     c.jReason = el('span', { class: 'reason su-foot-reason' });
     c.adv = el('details', { class: 'disclose su-adv', id: 'set-advanced' }, el('summary', { text: 'All settings (advanced JSON)' }),
