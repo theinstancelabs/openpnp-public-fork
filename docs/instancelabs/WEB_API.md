@@ -590,8 +590,9 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
 - BR-98 (§3.9): with a bed model in place each press and each move-to is proven against it after the checks above
   (which stay) and before anything moves: one leg for a jog (labelled `jog Z -2`), three for a move-to (`up to safe
   Z`, `X/Y at safe Z`, `down to <tool>'s safe Z`, as OpenPnP drives them); 409 `collision` otherwise. A jog's tool tip
-  may go down to the floor above over the probed surface under it (a measured touchable object holding the tip);
-  every other layer and tool is held to the top + `zMarginMm` + the errors.
+  may go down to the floor above over the probed surface under it (a measured touchable object holding the tip), never
+  deeper than `contactDepthMm` into that object's top in the model; every other layer and tool is held to the top +
+  `zMarginMm` + the errors.
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
   `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
   ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.
@@ -619,7 +620,7 @@ max(r, k2)), rc the least-squares plane of `bed.plane.points` at the tool's own 
 a null knee puts that tip at its lowest end stop, a null K leaves the needle's height unknown (it meets everything
 under it). An object that is not measured (null top; added, moved, removed) blocks its outline at every height. The
 bed is the object `bed` (top 0, no margin). Only a tip layer (`at: tip-end`) is ever exempt (G-code: contact depth;
-a jog: its floor), and only over a measured `touchable` top whose outline holds it.
+a jog: its floor, at most the contact depth), and only over a measured `touchable` top whose outline holds it.
 
 **The needle's tip end** (`tools[moves: needle].tipEnd {dx, dy, setup, atMs}`) is where the mounted needle ends, and
 moves with each needle. In this build nothing rewrites it at a mount: while the engine's last needle change

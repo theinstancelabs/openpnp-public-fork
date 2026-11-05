@@ -126,12 +126,16 @@ public class CollisionCheckTest {
         assertFalse(contact(m, leg("dot", ex, hy, 31.5, ex, hy, r)).clear);
     }
 
-    /** The jog's exemption: the jogged tool's tip down to the jog floor over the probed (touchable) top under it. */
+    /**
+     * The jog's exemption: the jogged tool's tip down to the jog floor over the probed (touchable) top under it, never
+     * deeper into the model's top than contactDepthMm whatever the floor (#66 review MINOR a: a surface map the model
+     * disagrees with must not take N1 3 mm into a blank).
+     */
     @Test
     public void theJogExemptsItsToolsTipDownToTheFloor() throws Exception {
         BedModel m = BedFixture.model();
         double hx = 110 + 24.178, hy = 160 + 63.91, rcTip = BedFixture.rc(110, 160);
-        double floorRaw = 8.3 + rcTip - 0.5; // the jog floor: 0.5 mm below the probed surface
+        double floorRaw = 8.3 + rcTip - 0.2; // the jog floor: 0.2 mm into the blank's top (contactDepthMm 0.25)
         CollisionCheck.Leg down = leg("jog Z -2", hx, hy, floorRaw + 2, hx, hy, floorRaw);
         CollisionCheck.Options o = CollisionCheck.Options.strict(HOME);
         o.jogTool = "n1";
@@ -141,8 +145,17 @@ public class CollisionCheckTest {
         o.jogTool = "needle";
         assertFalse(CollisionCheck.check(m, Arrays.asList(down), o).clear, "another tool's exemption");
         o.jogTool = "n1";
-        o.jogFloorRaw = floorRaw + 0.2; // the leg goes below the floor: not exempt there
+        o.jogFloorRaw = floorRaw + 0.1; // the leg goes below the floor: not exempt there
         assertFalse(CollisionCheck.check(m, Arrays.asList(down), o).clear);
+        // a floor below the model's top - contactDepthMm holds the tip there
+        for (double below : new double[] {0.5, 3.0, 6.0}) {
+            o.jogFloorRaw = 8.3 + rcTip - below;
+            CollisionCheck.Result r = CollisionCheck.check(m, Arrays.asList(leg("jog Z down", hx, hy, o.jogFloorRaw + 1,
+                    hx, hy, o.jogFloorRaw)), o);
+            assertFalse(r.clear, below + " mm into the blank's top");
+            assertEquals("blank-front", r.hit.object.id);
+            assertEquals(below - 0.25, r.hit.mm, 1e-9);
+        }
     }
 
     /** Unmeasured objects block their outline at every height; the first leg with a shortfall is named. */

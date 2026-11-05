@@ -16,7 +16,8 @@ import java.util.List;
  *
  * <p>Exemptions cover a tip layer only, on a measured touchable top whose outline holds the layer at both ends (the
  * start's X/Y error included): raw G-code (the passthrough, which has no semantics) may go {@code contactDepthMm} into
- * it; a jog may take the jogged tool's tip down to the jog floor the route already holds it to.</p>
+ * it; a jog may take the jogged tool's tip down to the jog floor the route already holds it to, at most
+ * {@code contactDepthMm} into that top (a surface map the model disagrees with: #66 review MINOR a).</p>
  */
 public final class CollisionCheck {
     private static final double EPS = 1e-9;
@@ -161,7 +162,9 @@ public final class CollisionCheck {
                                     required = Math.min(required, ob.topZ - m.contactDepthMm);
                                 }
                                 if (jog) {
-                                    required = Math.min(required, floor + l.aboveTipMm);
+                                    // the route's floor, never deeper into the model's top than the contact depth
+                                    required = Math.min(required, Math.max(floor, ob.topZ - m.contactDepthMm)
+                                            + l.aboveTipMm);
                                 }
                             }
                             slack = bottom - required;
