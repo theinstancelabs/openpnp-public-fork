@@ -49,7 +49,16 @@ home endpoint), old-status (a build before BR-44: no machine.homing, server.star
 dispense.startError, and an enable on a kept-alive link that died fails on the dead port), old-stop (a build before
 BR-75: no POST /api/stop/planned, 404), lock-at-planned-stop (someone takes the lock just before the planned stop),
 planned-lines-failed (the planned stop's M107 P3 gets no ok: linesFailed), planned-slow (the first planned stop
-of an enabled machine switches it off but answers 409 refused: its task outlived the API's 20 s wait).
+of an enabled machine switches it off but answers 409 refused: its task outlived the API's 20 s wait),
+link-lost-after-enable (the controller's link is lost right after the enable), link-lost-after-home (right after
+the home), link-lost-at-planned-stop (as the planned stop runs; it still answers 200, as #53's does),
+link-lost-at-enable (as the Start connects: it answers 409 "could not start the machine: ... IO Error ..."),
+link-lost-at-home (just before the home: #53 refuses it), link-lost-during-home (mid-G28: "homing failed: ... IO
+Error ..."), link-lost-after-homed (right after the health check's homed read: the second GET /api/machine that reads
+homed, after the not-busy wait's), link-lost-at-stop (as a STOP runs: a write on a flaky link fails as its lines go out).
+BR-93's machine.linkLost {atMs, why, next} (fake-machine.json "link_lost", null while the link is fine): while set
+connected and homed read false and a home answers 409 refused "MACHINE: <why>: <next>"; a Start clears it (a connect).
+As #53, the planned stop does not look at it (it answers 200 on a lost link).
 BR-75's planned stop: 409 locked while someone holds the lock, 409 refused (nothing sent) while anything works or for
 the first fake-machine.json "planned_refusals" N calls; else the STOP without the screw's motor-off, the link closed
 (keep-alive or not). A STOP of a machine already off sends nothing (it still vents the pressure and ends a run).
@@ -126,6 +135,8 @@ class FakeOpenPnP:
         self.run_active = "run" in self.fail  # the engine run: a STOP ends it (after "run_abort_s")
         self.pressure_state = "on" if "pressure" in self.fail else "off"  # PressureHold: a STOP vents it
         self.planned_refusals = int(machine.get("planned_refusals", 0))
+        self.link_lost = machine.get("link_lost")  # BR-93's machine.linkLost, None while the link is fine
+        self.homed_reads = 0  # GET /api/machine answers that read homed ("link-lost-after-homed")
         log_dir = os.path.join(config_dir, "log")
         os.makedirs(log_dir, exist_ok=True)
         # OpenPnP's tinylog RollingFileWriter (StartupPolicy) starts a new OpenPnP.log at each start
@@ -184,6 +195,9 @@ class FakeOpenPnP:
             out = {"present": True, "enabled": self.enabled, "connected": self.enabled, "homed": self.homed}
             if self.br44:
                 out["homing"] = self.homing or self.run_homing()  # ReferenceMachine.isHoming
+                out["linkLost"] = self.link_lost
+                if self.link_lost:
+                    out.update(connected=False, homed=False)
             out.update({"busy": busy, "zCheck": {"needed": True, "homeAtMs": self.home_at_ms, "places": []},
                         "drivers": [{"name": "GcodeDriver", "class": "GcodeDriver", "connection": "fake"}],
                         "positions": [], "axes": axes})
@@ -296,6 +310,10 @@ class FakeOpenPnP:
             return 409, {"error": "taking-over", "reason": "The user is taking control: wait for it to finish."}
         if "enable" in self.fail:
             return 409, {"error": "refused", "reason": "could not start the machine: fake port not found"}
+        if "link-lost-at-enable" in self.fail:  # the reader ends on an IO error as Start connects (BR-93)
+            self.lose_link()
+            return 409, {"error": "refused", "reason": "could not start the machine: GcodeDriver:ttyACM0 IO Error on "
+                                                       "reading from the controller."}
         with self.lock:
             relink = self.connected and self.link_dead
             if relink and not self.br44:
@@ -303,8 +321,11 @@ class FakeOpenPnP:
                                                            "on reading from the controller"}
             if relink:
                 self.connected = self.link_dead = False  # GcodeDriver.setEnabled: disconnect(), then connect()
-            connect = not self.connected
+            connect = not self.connected or self.link_lost is not None
             self.enabled = self.connected = True
+            self.link_lost = None  # a connect opens the link again
+            if "link-lost-after-enable" in self.fail:
+                self.lose_link()
             if connect and self.connected_at_ms is None:
                 self.connected_at_ms = int(time.time() * 1000)
             if "reset" in self.fail or self.booted:
@@ -332,6 +353,10 @@ class FakeOpenPnP:
         with self.lock:
             if not self.enabled:
                 return 409, {"error": "refused", "reason": "the machine is not started: press Start first"}
+            if "link-lost-at-home" in self.fail:
+                self.lose_link()
+            if self.link_lost:  # BR-93 (ApiContext): every route that moves refuses before anything is tried
+                return 409, {"error": "refused", "reason": f"MACHINE: {self.link_lost['why']}: {self.link_lost['next']}"}
             if self.pressure_state != "off":
                 return 409, {"error": "refused", "reason": "the pressure is being held on from the Dispense tab. "
                                                            "Switch it off first: Pressure off"}
@@ -349,12 +374,17 @@ class FakeOpenPnP:
                     self.g28_until = time.time() + float(self.machine.get("g28_more_s", 3.0))
                     result["error"] = ("homing failed: GcodeDriver:ttyACM0 timeout waiting for response to G28 ; "
                                        "Home all axes")
+                elif "link-lost-during-home" in self.fail:  # the reader ends on an IO error mid-G28 (BR-93)
+                    self.lose_link()
+                    result["error"] = "homing failed: GcodeDriver:ttyACM0 IO Error on reading from the controller."
                 elif "home" in self.fail:
                     result["error"] = "homing failed: fake endstop not reached"
                 else:
                     self.homed, self.booted = True, False
                     self.home_at_ms = int(time.time() * 1000)  # HomeTracker.machineHomed(true)
                     self.journal("POSITION_KNOWN", "the controller's position is known: homed")
+                    if "link-lost-after-home" in self.fail:
+                        self.lose_link()
 
         t = threading.Thread(target=work, daemon=True)
         t.start()
@@ -391,6 +421,8 @@ class FakeOpenPnP:
             c.close()
 
     def stop(self):
+        if "link-lost-at-stop" in self.fail:
+            self.lose_link()
         with self.lock:
             sends = self.enabled  # MachineEndpoints.stop: OpenPnP's Stop (the DISABLE_COMMAND) on a started machine only
             if sends and self.connected:
@@ -429,9 +461,17 @@ class FakeOpenPnP:
             return 200, {"stopped": True, "machineEnabled": self.enabled,
                          "actions": ["OpenPnP Stop"] if sends else ["machine was already stopped"]}
 
+    def lose_link(self):
+        """BR-93: the controller's link is lost unasked (GcodeDriver's reader ended on an IO error)."""
+        self.link_lost = {"atMs": int(time.time() * 1000), "next": "once the board is back on USB: Stop, then "
+                          "Start (or restart il-openpnp), then Home as after a reset",
+                          "why": "the link to the controller was lost at 15:07 (the controller left USB)"}
+
     def planned_stop(self):
         """BR-75 (MachineEndpoints.plannedStop): a guarded write; refused with nothing sent while anything works; else
         OpenPnP's Stop with the DISABLE_COMMAND minus its M18 B (no SCREW_MOTOR_OFF), and the link closed."""
+        if "link-lost-at-planned-stop" in self.fail:
+            self.lose_link()  # and the planned stop answers 200 all the same (#53)
         if "lock-at-planned-stop" in self.fail:
             self.machine["lock"] = {"holder": {"kind": "user", "who": "user", "label": "User",
                                                "what": "using the web UI"}, "takenFrom": None}
@@ -507,7 +547,12 @@ class FakeOpenPnP:
         if method == "GET" and path == "/api/status":
             return 200, self.status()
         if method == "GET" and path == "/api/machine":
-            return 200, self.machine_status()
+            m = self.machine_status()
+            if "link-lost-after-homed" in self.fail and m["homed"]:
+                self.homed_reads += 1
+                if self.homed_reads == 2:  # the not-busy wait's read, then the homed read: lost before the stop
+                    self.lose_link()
+            return 200, m
         if method == "POST" and path == "/api/machine/enable":
             return self.enable()
         if method == "POST" and path == "/api/machine/home":
