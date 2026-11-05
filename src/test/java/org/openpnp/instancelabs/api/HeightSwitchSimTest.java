@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.DriverGcodeChannel;
 import org.openpnp.instancelabs.dispense.HeightSwitch;
 import org.openpnp.instancelabs.dispense.OpenPnpRawMapper;
 import org.openpnp.instancelabs.dispense.SimMachine;
@@ -102,6 +103,20 @@ public class HeightSwitchSimTest {
 
     static Location mm(Location l) {
         return l.convertToUnits(LengthUnit.Millimeters);
+    }
+
+    /**
+     * Review MINOR 9: the simulated PA5 floats until its pull-up is set (the board read a floating 0 after a reset), so
+     * the engine's measures here need the pull-up first, as the unit fake checks.
+     */
+    @Test
+    public void theSimulatedPinFloatsUntilItsPullUpIsSet() throws Exception {
+        DriverGcodeChannel ch = new DriverGcodeChannel(sim.driver);
+        String before = String.join(" ", ch.collectProbe("M43 P5", 5000));
+        assertTrue(before.contains("Input  = 0"), "floating: " + before);
+        ch.sendProbe("M42 P53 T2", 5000);
+        String after = String.join(" ", ch.collectProbe("M43 P5", 5000));
+        assertTrue(after.contains("Input  = 1"), "pulled up, not pressed: " + after);
     }
 
     /** "Down" is read from each tool's mapper: N1 goes down as raw Z falls, the needle (the see-saw) as it rises. */
