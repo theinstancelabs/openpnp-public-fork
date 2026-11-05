@@ -233,6 +233,14 @@ public class DispenseProfileTest {
         }
     }
 
+    /** BR-90: the copies share the recipe's touch-off ladder too (its tip's mounts park and restore it). */
+    @Test
+    public void theTouchOffLadderCannotChangeInPlace() {
+        for (java.lang.reflect.Field f : DispenseProfile.TouchOffLadder.class.getDeclaredFields()) {
+            assertTrue(java.lang.reflect.Modifier.isFinal(f.getModifiers()), f.getName() + " is final");
+        }
+    }
+
     /**
      * BR-82: the pause at the lift height before travel (the plastic 25G recipe's 500 ms), 0 to 5000 ms. At 0 (the
      * default, and older files) both fingerprints stay byte for byte what every dose record and plan stored.
