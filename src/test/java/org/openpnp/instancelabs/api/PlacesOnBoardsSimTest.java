@@ -1,0 +1,322 @@
+package org.openpnp.instancelabs.api;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.File;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.BoardRegistration;
+import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.FlatVacuum;
+import org.openpnp.instancelabs.dispense.SimMachine;
+import org.openpnp.model.Configuration;
+import org.openpnp.model.Package;
+import org.openpnp.model.Part;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+/**
+ * BR-81 on the simulated controller: a paste place that lies on a board on the bed (a registration's board, or an
+ * imported tile's outline) is refused wherever a run uses it, naming the place and the board, before a line is sent;
+ * the readiness (the status's I13) lists each such place; the pressure hold's park is checked the same way; a board
+ * run still pastes its own board.
+ */
+public class PlacesOnBoardsSimTest {
+    SimMachine sim;
+    DispenseService svc;
+    ApiServer api;
+    HttpClient http;
+    int lastStatus;
+    String lastBody;
+
+    @BeforeEach
+    public void before() throws Exception {
+        sim = new SimMachine();
+        // N1 touches 5.5 everywhere, as the places are typed in: a run after a home checks Z with one touch
+        FlatVacuum.install(sim, FlatVacuum.scene(5.5, null, 0));
+        svc = DispenseService.start(Configuration.get());
+        ApiSettings s = new ApiSettings();
+        s.port = 0;
+        api = ApiServer.start(Configuration.get(), s);
+        http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+        // the waste and the needle frame as the bench has them (I4): Prime may run
+        ok("PUT", "/api/locations/waste", "{\"x\":80,\"y\":40,\"z\":5.5}");
+        ok("POST", "/api/needle/anchor", "{\"needleChangedAtMs\":null,\"surfaceZ\":5.5,\"needleContactRawSum\":65.59}");
+        ok("POST", "/api/needle/offset", "{\"needleChangedAtMs\":null,\"offsetMm\":-2.59}");
+    }
+
+    @AfterEach
+    public void after() throws Exception {
+        api.stop();
+        svc.shutdown();
+        sim.close();
+    }
+
+    JsonObject call(String method, String path, String json) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + api.getPort() + path))
+                .timeout(Duration.ofSeconds(120));
+        if (json != null) {
+            b.header("Content-Type", "application/json");
+            b.method(method, HttpRequest.BodyPublishers.ofString(json));
+        }
+        else {
+            b.method(method, HttpRequest.BodyPublishers.noBody());
+        }
+        HttpResponse<String> r = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        lastStatus = r.statusCode();
+        lastBody = r.body();
+        JsonElement e = new JsonParser().parse(r.body());
+        return e.isJsonObject() ? e.getAsJsonObject() : new JsonObject();
+    }
+
+    JsonObject ok(String method, String path, String json) throws Exception {
+        JsonObject o = call(method, path, json);
+        assertTrue(lastStatus >= 200 && lastStatus < 300, lastStatus + " " + lastBody);
+        return o;
+    }
+
+    /** A straight registration of a board of w x h mm whose corner (0, 0) lies at (x, y); its label in the texts. */
+    String register(String name, double x, double y, double w, double h) throws Exception {
+        BoardRegistration reg = new BoardRegistration();
+        reg.id = UUID.randomUUID().toString();
+        reg.boardKey = "file:/br81/" + name;
+        reg.boardName = name;
+        reg.affine = new double[] {1, 0, 0, 1, x, y};
+        reg.boardRectMm = new double[] {0, 0, w, h};
+        reg.atMs = System.currentTimeMillis();
+        svc.updateConfigAtomically(c -> {
+            c.putBoardRegistration(reg);
+            return c;
+        });
+        return "board '" + name + "' (registration " + reg.shortId() + ")";
+    }
+
+    String registrationId(String name) {
+        return svc.getConfig().boardRegistrations.get("file:/br81/" + name).id;
+    }
+
+    JsonObject prime() throws Exception {
+        return call("POST", "/api/prime", "{\"rotationDeg\":360,\"wait\":true}");
+    }
+
+    boolean switchedOn() {
+        return sim.server.sinceMark().stream().anyMatch(l -> l.startsWith("M106"));
+    }
+
+    JsonObject i13() throws Exception {
+        for (JsonElement e : ok("GET", "/api/status", null).getAsJsonArray("interlocks")) {
+            if ("I13".equals(e.getAsJsonObject().get("id").getAsString())) {
+                return e.getAsJsonObject();
+            }
+        }
+        throw new AssertionError("no I13 in the status");
+    }
+
+    @Test
+    public void aWasteOnARegisteredBoardRefusesPrimeNamingTheBoard() throws Exception {
+        String board = register("w.board.xml", 60, 30, 30, 15); // x 60..90, y 30..45: the waste (80, 40) on it
+        sim.server.mark();
+        prime();
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("I13: the waste (80.0, 40.0) lies on " + board + ": set it again off the board "
+                + "(Machine › Places)"), lastBody);
+        assertFalse(switchedOn(), "nothing switched on: " + sim.server.sinceMark());
+
+        // 1 mm outside the margin (2 mm): Prime goes on; 0.5 mm inside it: refused
+        ok("PUT", "/api/locations/waste", "{\"x\":93,\"y\":40,\"z\":5.5}");
+        JsonObject run = prime().getAsJsonObject("result");
+        assertEquals(200, lastStatus, lastBody);
+        assertEquals("OK", run.get("status").getAsString(), run.toString());
+        ok("PUT", "/api/locations/waste", "{\"x\":91.5,\"y\":40,\"z\":5.5}");
+        prime();
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("I13: the waste (91.5, 40.0) lies on " + board), lastBody);
+
+        // the board left the bed: forget its registration, and Prime goes on
+        call("DELETE", "/api/board-registrations/nope", null);
+        assertEquals(404, lastStatus, lastBody);
+        ok("DELETE", "/api/board-registrations/" + registrationId("w.board.xml"), null);
+        assertTrue(svc.getConfig().boardRegistrations.isEmpty());
+        run = prime().getAsJsonObject("result");
+        assertEquals("OK", run.get("status").getAsString(), lastBody);
+    }
+
+    /** The hold's park over the waste on a board is refused the same way, before anything moves or switches on. */
+    @Test
+    public void theHoldsParkOverAWasteOnABoardIsRefused() throws Exception {
+        String board = register("w.board.xml", 60, 30, 30, 15);
+        sim.server.mark();
+        call("POST", "/api/pressure/start", "{\"park\":\"waste\"}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("I12: the park over 'waste' (80.0, 40.0) is on " + board + ": park over another "
+                + "place"), lastBody);
+        assertFalse(switchedOn(), "nothing switched on: " + sim.server.sinceMark());
+    }
+
+    @Test
+    public void theReadinessListsEachPlaceOnABoard() throws Exception {
+        JsonObject ok = i13();
+        assertEquals("ok", ok.get("state").getAsString(), ok.toString());
+        assertEquals(0, ok.getAsJsonArray("outlines").size(), ok.toString());
+
+        String board = register("r.board.xml", 60, 20, 40, 40); // x 60..100, y 20..60
+        ok("PUT", "/api/locations/towel", "{\"x\":150,\"y\":40,\"z\":5.5}");
+        ok("PUT", "/api/locations/coupon1", "{\"x\":120,\"y\":40,\"z\":5.5}"); // its 40 x 30 coupon reaches x 100
+        // spot 3 (101, 20) lies 1 mm from the board's corner, inside the 2 mm margin; spots 1 and 2 lie off it
+        ok("PUT", "/api/config", "{\"purgeRow\":{\"x0Mm\":101,\"y0Mm\":10,\"pitchXMm\":0,\"pitchYMm\":5,\"spots\":8}}");
+        JsonObject w = i13();
+        assertEquals("warning", w.get("state").getAsString(), w.toString());
+        List<String> places = new ArrayList<>();
+        for (JsonElement e : w.getAsJsonArray("places")) {
+            JsonObject p = e.getAsJsonObject();
+            places.add(p.get("place").getAsString() + "/" + p.get("kind").getAsString());
+            assertEquals(board, p.get("board").getAsString(), p.toString());
+        }
+        assertEquals(List.of("waste/place", "purge row/purge-row", "coupon1/coupon"), places, w.toString());
+        assertTrue(w.get("text").getAsString().startsWith("3 paste places lie on a board: the waste (80.0, 40.0) lies on "
+                + board), w.toString());
+        assertTrue(w.toString().contains("the purge row's spot 3 of 8 (101.0, 20.0) lies on " + board + ": set the row "
+                + "again off the board (Machine › Places)"), w.toString());
+        JsonObject outline = w.getAsJsonArray("outlines").get(0).getAsJsonObject();
+        assertEquals(board, outline.get("label").getAsString(), outline.toString());
+        assertEquals("registration", outline.get("kind").getAsString(), outline.toString());
+
+        ok("PUT", "/api/locations/waste", "{\"x\":40,\"y\":40,\"z\":5.5}");
+        ok("PUT", "/api/locations/coupon1", "{\"x\":125,\"y\":40,\"z\":5.5}");
+        ok("PUT", "/api/config", "{\"purgeRow\":{\"x0Mm\":110}}");
+        assertEquals("ok", i13().get("state").getAsString(), i13().toString());
+    }
+
+    /** A tile of three boards, x 60..120 and y 30..60, the boards A, B, C 16 mm wide with 4 mm gaps. */
+    static final String TILE = "{\"label\":\"Nano tile\",\"outline\":[[60,30],[120,30],[120,60],[60,60]],"
+            + "\"boards\":[{\"name\":\"A\",\"outline\":[[62,32],[78,32],[78,58],[62,58]]},"
+            + "{\"name\":\"B\",\"outline\":[[82,32],[98,32],[98,58],[82,58]]},"
+            + "{\"name\":\"C\",\"outline\":[[102,32],[118,32],[118,58],[102,58]]}],"
+            + "\"checkPoints\":[[70,45],[90,45],[110,45]],\"source\":\"PlacesOnBoardsSimTest\"}";
+
+    @Test
+    public void anImportedTileCountsLikeARegistration() throws Exception {
+        ok("PUT", "/api/locations/waste", "{\"x\":80.5,\"y\":40,\"z\":5.5}"); // in the gap between A and B
+        JsonObject put = ok("PUT", "/api/tiles/nano/outline", TILE);
+        assertEquals("Nano tile", put.getAsJsonObject("tile").get("label").getAsString(), put.toString());
+        assertEquals(1, put.getAsJsonArray("placesOnBoards").size(), put.toString());
+        sim.server.mark();
+        prime();
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("I13: the waste (80.5, 40.0) lies on the Nano tile (board B): set it again off "
+                + "the board (Machine › Places)"), lastBody);
+        assertFalse(switchedOn(), "nothing switched on: " + sim.server.sinceMark());
+        assertEquals("tile", i13().getAsJsonArray("outlines").get(0).getAsJsonObject().get("kind").getAsString());
+
+        // the tiles are the import's alone, not a settings save's
+        call("PUT", "/api/config", "{\"tiles\":{}}");
+        assertEquals(400, lastStatus, lastBody);
+
+        ok("DELETE", "/api/tiles/nano", null);
+        call("DELETE", "/api/tiles/nano", null);
+        assertEquals(404, lastStatus, lastBody);
+        JsonObject run = prime().getAsJsonObject("result");
+        assertEquals("OK", run.get("status").getAsString(), lastBody);
+    }
+
+    /** An import that does not hold together is refused whole: nothing is stored. */
+    @Test
+    public void aTileImportThatDoesNotHoldIsRefused() throws Exception {
+        String outside = TILE.replace("[110,45]]", "[130,45]]"); // a check point off the tile: a wrong transform
+        String crossing = TILE.replace("[[60,30],[120,30],[120,60],[60,60]]", "[[60,30],[120,60],[120,30],[60,60]]");
+        String boardOff = TILE.replace("[[102,32],[118,32],[118,58],[102,58]]", "[[202,32],[218,32],[218,58],[202,58]]");
+        for (String body : new String[] {outside, crossing, boardOff}) {
+            assertFalse(body.equals(TILE), body);
+            call("PUT", "/api/tiles/nano/outline", body);
+            assertEquals(400, lastStatus, body + " -> " + lastBody);
+        }
+        assertTrue(svc.getConfig().tiles.isEmpty(), "nothing stored");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Board runs (the harness of ApiServerSimTest)
+    // ------------------------------------------------------------------------------------------
+
+    /** The board's probe points (N1 touches 5.5 there). */
+    static final String BOARD_POINTS = "\"points\":[[98,78,5.5],[130,78,5.5],[98,95,5.5],[130,95,5.5]]";
+
+    /** The blank, its surface and the board's, the purge row on the blank, I11 confirmed, no clean-pad camera. */
+    void setUpBoardRuns() throws Exception {
+        ok("PUT", "/api/locations/blank", "{\"x\":90,\"y\":40,\"z\":5.5}");
+        ok("PUT", "/api/surfaces/blank", "{\"points\":[[60,30,5.5],[200,30,5.5],[60,50,5.5],[200,50,5.5]]}");
+        ok("PUT", "/api/surfaces/board", "{" + BOARD_POINTS + "}");
+        ok("PUT", "/api/config", "{\"vacuumProbe\":{\"vacuumSettleMs\":300,\"readDelayMs\":0},\"purgeRow\":{\"x0Mm\":80,"
+                + "\"y0Mm\":47,\"pitchXMm\":2.5,\"spots\":48},\"cleanPadCheck\":{\"enabled\":false}}");
+        ok("POST", "/api/screw/start-angle", "{}");
+        ok("PUT", "/api/pad-types/chip-0603", "{\"forSetup\":\"ad22tta-b\",\"status\":\"characterized\"}");
+    }
+
+    /** ApiServerSimTest's board: 20 x 10 mm, three 0603 resistors, planned at (100, 80) with its surface tied. */
+    String planTied() throws Exception {
+        Package pkg = new Package("R_0603_1608Metric");
+        Configuration.get().addPackage(pkg);
+        Part part = new Part("R0603-API-TEST");
+        part.setPackage(pkg);
+        Configuration.get().addPart(part);
+        StringBuilder sb = new StringBuilder("<openpnp-board version=\"1.1\" name=\"api-test.board.xml\">\n"
+                + "<dimensions units=\"Millimeters\" x=\"20.0\" y=\"10.0\" z=\"0.0\" rotation=\"0.0\"/>\n<placements>\n");
+        double[][] pos = {{2, 2, 0}, {8, 2, 90}, {14, 6, 0}};
+        for (int i = 0; i < pos.length; i++) {
+            sb.append(String.format(Locale.ROOT, "<placement version=\"1.4\" side=\"Top\" id=\"R%d\" part-id="
+                    + "\"R0603-API-TEST\" type=\"Placement\" enabled=\"true\" rank=\"0\">\n<location units="
+                    + "\"Millimeters\" x=\"%s\" y=\"%s\" z=\"0.0\" rotation=\"%s\"/>\n<error-handling>Default"
+                    + "</error-handling>\n</placement>\n", i + 1, pos[i][0], pos[i][1], pos[i][2]));
+        }
+        sb.append("</placements>\n<fiducials/>\n</openpnp-board>\n");
+        File f = new File(sim.configDir, "api-test.board.xml");
+        Files.write(f.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+        String id = ok("POST", "/api/plan", "{\"source\":\"file\",\"file\":\"" + f.getAbsolutePath().replace("\\",
+                "\\\\") + "\",\"x\":100,\"y\":80,\"z\":5.5,\"rotation\":0}").get("planId").getAsString();
+        ok("PUT", "/api/surfaces/board", "{" + BOARD_POINTS + ",\"planId\":\"" + id + "\"}");
+        return id;
+    }
+
+    @Test
+    public void aPurgeRowCrossingABoardRefusesTheRunBeforeAnyLine() throws Exception {
+        setUpBoardRuns();
+        String board = register("p.board.xml", 150, 44, 10, 8); // x 150..160: the purge spots 29..33 of 48 on it
+        String planId = planTied();
+        sim.server.mark();
+        call("POST", "/api/run", "{\"planId\":\"" + planId + "\",\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("I13: the purge row's spot 29 of 48 (150.0, 47.0) lies on " + board + ": set the "
+                + "row again off the board (Machine › Places)"), lastBody);
+        assertTrue(sim.server.sinceMark().isEmpty(), "no line at all: " + sim.server.sinceMark());
+    }
+
+    /** The board's own planned dots stay allowed on it: the run pastes them, with the purge row off the board. */
+    @Test
+    public void aBoardRunStillPastesItsOwnBoard() throws Exception {
+        setUpBoardRuns();
+        register("api-test.board.xml", 100, 80, 20, 10); // the planned board itself, as Register board records it
+        String planId = planTied();
+        sim.server.mark();
+        JsonObject res = ok("POST", "/api/run", "{\"planId\":\"" + planId + "\",\"wait\":true}")
+                .getAsJsonObject("result");
+        assertEquals("OK", res.get("status").getAsString(), res.toString());
+        assertEquals(6, res.get("dotsDone").getAsInt(), res.toString());
+        assertTrue(switchedOn(), "the valve opened");
+    }
+}

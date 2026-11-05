@@ -222,6 +222,11 @@ public class DispenseConfig {
      * seat"); null when cleared. A registration older than this is never a "same seat".
      */
     public Long newSeatAtMs = null;
+    /**
+     * BR-81: the tiles of boards on the bed, by id, each with its edge in machine X/Y: a paste place on one is refused
+     * ({@link BoardOutlines}). Set only by PUT /api/tiles/{id}/outline.
+     */
+    public Map<String, Tile> tiles = new LinkedHashMap<>();
 
     // --- pad calibration (profile calibration design §5.4) ---------------------------------------
     /** The needle: pad types and dose records name it; its OD sets the same-pad dot pitch. */
@@ -402,6 +407,32 @@ public class DispenseConfig {
     public static class ForbidZone {
         public String name;
         public double x, y, radiusMm;
+    }
+
+    /** BR-81: a tile of boards on the bed ({@link #tiles}), in machine mm. */
+    public static class Tile {
+        /** Names it in the texts: "the Nano tile (board G3)". */
+        public String label;
+        /** Its edge: 3..64 [x, y] points, a polygon that does not cross itself. */
+        public java.util.List<double[]> outline;
+        /** Its boards, each inside the edge: the one nearest a place is named. */
+        public java.util.List<TileBoard> boards = new java.util.ArrayList<>();
+        /** At least 3 measured points on the tile (e.g. its copper dots), each inside the edge: a wrong transform fails. */
+        public java.util.List<double[]> checkPoints;
+        /** Where the outline comes from, as the import gave it. */
+        public String source;
+        public long atMs;
+
+        /** The first reason this tile does not hold together, or null. */
+        public String problem() {
+            return null;
+        }
+    }
+
+    /** A board of a {@link Tile}: its name ("G3") and edge (3..16 points). */
+    public static class TileBoard {
+        public String name;
+        public java.util.List<double[]> outline;
     }
 
     /**

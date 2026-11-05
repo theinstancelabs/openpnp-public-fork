@@ -398,4 +398,47 @@ public class OutputZonesTest {
         c.outputZones.forbid = null;
         assertTrue(c.validate().stream().anyMatch(x -> x.contains("outputZones.forbid")), "no crash: refused");
     }
+
+    /**
+     * BR-81: a board on the bed (a registration's, x 300..320, y 255..280, over the probed board) takes paste only from
+     * its own run's planned dots: any other dot on it, or within the margin, is refused, also inside a cup's circle or
+     * on the purge row; the hold neither opens the valve nor parks over it; the status names it.
+     */
+    @Test
+    public void aBoardOnTheBedTakesPasteOnlyFromItsOwnRunsDots() {
+        DispenseConfig c = config();
+        BoardRegistration r = new BoardRegistration();
+        r.id = "abcd-1";
+        r.boardKey = "file:/b.board.xml";
+        r.boardName = "b.board.xml";
+        r.affine = new double[] {1, 0, 0, 1, 300, 255};
+        r.boardRectMm = new double[] {0, 0, 20, 25};
+        c.putBoardRegistration(r);
+        c.locations.put("cup1", new DispenseConfig.NamedLocation(323, 268, 5)); // 3 mm off; its circle reaches over
+        c.purgeRow.x0Mm = 305.0;
+        c.purgeRow.y0Mm = 256.0;
+        String board = "board 'b.board.xml' (registration abcd…)";
+        Interlocks.Scope plan = new Interlocks.Scope();
+        plan.surfaceName = "board";
+        plan.checkPlanSurface = true;
+        plan.surfaceTargets.add(new double[] {310, 268});
+        OutputZones z = OutputZones.of(c, CAMERA, plan);
+        assertNull(z.lineRefusal("dot 'P1' at line 9", 310.0004, 268), "its own planned dot");
+        assertEquals("dot 'P2' at line 12 puts paste at (312.0, 268.0), on " + board + ", where only the board's own "
+                + "run puts paste: set it again off the board", z.lineRefusal("dot 'P2' at line 12", 312, 268));
+        assertEquals("dot 'shot' at line 4 puts paste at (321.0, 268.0), on " + board + ", where only the board's own "
+                + "run puts paste: set the place 'cup1' again off the board", z.lineRefusal("dot 'shot' at line 4",
+                        321, 268));
+        assertNull(z.lineRefusal("dot 'shot' at line 4", 323, 268), "the cup itself, 3 mm off the board");
+        assertTrue(z.lineRefusal("dot 'purge#1' at line 5", 305, 256).contains("set the purge row again off the "
+                + "board"), z.lineRefusal("dot 'purge#1' at line 5", 305, 256));
+        assertTrue(OutputZones.of(c, CAMERA).lineRefusal("dot 'P1' at line 9", 310, 268).contains("on " + board),
+                "without the plan's scope, its dot is no own dot");
+        assertEquals("the needle (310.0, 268.0) is on " + board + ": park first (or start it with park: 'waste')",
+                z.refusal(310, 268));
+        assertEquals("the park over (305.0, 256.0) is on " + board + ": park over another place",
+                z.parkRefusal(null, 305, 256));
+        assertNull(z.refusal(323, 268), "the hold over the cup, off the board");
+        assertEquals("board: " + board, z.zoneAt(310, 268));
+    }
 }

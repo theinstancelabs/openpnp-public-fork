@@ -83,6 +83,11 @@ public class BoardRegistration {
     public Nominal nominal;
     /** Board mm -> machine mm, in {@link AffineTransform#getMatrix} order m00 m10 m01 m11 m02 m12. */
     public double[] affine;
+    /**
+     * BR-81: the board's outline in board mm {x0, y0, x1, y1} (its size; else the box of its pads and fiducials), so
+     * a paste place on it is refused ({@link BoardOutlines}); null for a record made before it.
+     */
+    public double[] boardRectMm;
     /** affine-3 | affine-lsq-N | similarity-2 */
     public String method;
     public double rotationDeg, scaleX, scaleY, shearDeg, maxResidualMm;
