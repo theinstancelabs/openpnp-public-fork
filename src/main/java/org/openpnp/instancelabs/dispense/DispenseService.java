@@ -215,6 +215,8 @@ public final class DispenseService {
     private volatile BooleanSupplier pressureHoldActive = () -> false;
     /** Set by {@link #abort}: stops a camera-only clean-pad check (it has no executor). */
     private volatile boolean cameraTourAbort;
+    /** BR-94: the height switch's last read; in memory only. */
+    private volatile HeightSwitch.Read lastHeightSwitchRead;
     /**
      * Counts every {@link #abort}: a task queued before a STOP refuses at its start, so a step a job
      * queued in the gap between two steps never pressurises (profile calibration design §7.8).
@@ -5069,6 +5071,38 @@ public final class DispenseService {
             recordHeightSwitch(needle, res);
         }
         s.ok();
+    }
+
+    /**
+     * BR-94: reads the height switch now, its pull-up set first ({@code M42 P53 T2}, {@code M43 P5}); nothing moves.
+     * The last level is kept in memory for the status. The Future never throws for task failures: see {@code why}.
+     */
+    public Future<HeightSwitch.Read> readHeightSwitch() throws Exception {
+        requireAvailable();
+        RunResult r = newRun("height-switch-read", null, "height switch", 0, 0);
+        HeightSwitch.Read res = new HeightSwitch.Read();
+        Task t = new Task(r, "read");
+        cameraTourAbort = false;
+        return submitResult(r, res, () -> t.run(() -> {
+            DispenseConfig c = cfg;
+            Session s = t.start(c);
+            s.exec.sendGated(DispenseExecutor.Scope.PROBE, ControllerCommands.HEIGHT_SWITCH_PULL_UP, c.commandTimeoutMs,
+                    s.r);
+            res.level = HeightSwitch.level(s.exec.queryGated(DispenseExecutor.Scope.PROBE,
+                    ControllerCommands.HEIGHT_SWITCH_READ, c.commandTimeoutMs, s.r));
+            res.atMs = System.currentTimeMillis();
+            lastHeightSwitchRead = res;
+            s.ok();
+        }), () -> {
+            if (r.status != RunResult.Status.OK) {
+                res.why = r.message;
+            }
+        });
+    }
+
+    /** BR-94: the last read of the height switch ({@link #readHeightSwitch}), or null. */
+    public HeightSwitch.Read getLastHeightSwitchRead() {
+        return lastHeightSwitchRead;
     }
 
     /** BR-94: an accepted measure is the tool's trip from now on (the clean-tip word is the only human step). */

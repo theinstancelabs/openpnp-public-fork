@@ -135,6 +135,125 @@ public class HeightSwitchSimTest {
         assertFalse(svc.isBusy());
     }
 
+    JsonObject heightSwitchStatus() throws Exception {
+        return ok("GET", "/api/status", null).getAsJsonObject("dispense").getAsJsonObject("heightSwitch");
+    }
+
+    /**
+     * The route: no place, then N1 with its window; the needle only with the clean-tip word (nothing moves without
+     * it); the status keeps both trips and K_switch, their sum in the same home.
+     */
+    @Test
+    public void n1AndTheNeedleAreMeasuredAndKSwitchIsTheirSum() throws Exception {
+        JsonObject none = heightSwitchStatus();
+        assertTrue(none.get("place").isJsonNull() && none.get("n1").isJsonNull() && none.get("needle").isJsonNull()
+                && none.get("kSwitch").isJsonNull() && none.get("lastRead").isJsonNull(), none.toString());
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21,\"zFloor\":19.5}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("place is not set") && lastBody.contains("/api/locations/height-switch"),
+                lastBody);
+        assertEquals(new ArrayList<String>(), moves(), "nothing moved");
+
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        JsonObject n1 = ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        assertTrue(n1.get("accepted").getAsBoolean(), n1.toString());
+        assertEquals(N1_TRIP, n1.get("tripRawZ").getAsDouble(), 0.025);
+        assertEquals(5, n1.getAsJsonArray("trips").size(), "5 presses by default");
+
+        sim.server.mark();
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("only with a clean tip: paste must never touch it"), lastBody);
+        assertEquals(new ArrayList<String>(), moves(), "nothing moved");
+        JsonObject needle = ok("POST", "/api/height-switch/measure",
+                "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5,\"tipClean\":true}");
+        assertTrue(needle.get("accepted").getAsBoolean(), needle.toString());
+        assertEquals(NEEDLE_TRIP, needle.get("tripRawZ").getAsDouble(), 0.025);
+
+        JsonObject hs = heightSwitchStatus();
+        assertEquals(150, hs.getAsJsonObject("place").get("x").getAsDouble(), 1e-9);
+        double a = hs.getAsJsonObject("n1").get("tripRawZ").getAsDouble();
+        double b = hs.getAsJsonObject("needle").get("tripRawZ").getAsDouble();
+        assertEquals(n1.get("tripRawZ").getAsDouble(), a, 1e-9);
+        assertEquals(needle.get("tripRawZ").getAsDouble(), b, 1e-9);
+        assertEquals(a + b, hs.get("kSwitch").getAsDouble(), 1e-9);
+        assertEquals(N1_TRIP + NEEDLE_TRIP, hs.get("kSwitch").getAsDouble(), 0.05);
+        // engine-stamped: the settings editor cannot change them
+        call("PUT", "/api/config", "{\"heightSwitch\":{\"n1\":null,\"needle\":null}}");
+        assertEquals(400, lastStatus, lastBody);
+        assertTrue(lastBody.contains("/api/height-switch/measure"), lastBody);
+    }
+
+    /** Without zStart and zFloor the window is 1.0 above to 0.5 past the tool's accepted trip of this home. */
+    @Test
+    public void aSecondMeasureStartsFromTheStoredTrip() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\"}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("zStart and zFloor (raw Z) are needed"), lastBody);
+        ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21.4,\"zFloor\":19.6}");
+        double trip = heightSwitchStatus().getAsJsonObject("n1").get("tripRawZ").getAsDouble();
+        sim.server.mark();
+        JsonObject again = ok("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"presses\":3}");
+        assertEquals(3, again.getAsJsonArray("trips").size(), again.toString());
+        assertFalse(again.get("accepted").getAsBoolean(), "3 presses: a mean, not a recorded trip");
+        List<String> z = new ArrayList<>();
+        for (String l : moves()) {
+            if (l.startsWith("G1 Z") && l.endsWith(" F600")) {
+                z.add(l);
+            }
+        }
+        assertEquals("G1 Z31.500 F600", z.get(0), "travel height first: " + z);
+        assertEquals(String.format(java.util.Locale.ROOT, "G1 Z%.3f F600", trip + 1.0), z.get(1), "1.0 above: " + z);
+        assertEquals(trip, heightSwitchStatus().getAsJsonObject("n1").get("tripRawZ").getAsDouble(), 0,
+                "a measure that is not accepted keeps the trip");
+    }
+
+    @Test
+    public void pressedAtTheStartIsRefusedAndTheToolEndsAtTravelHeight() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        sim.server.heightSwitchN1TripZ = 21.5; // higher than the window says
+        call("POST", "/api/height-switch/measure", "{\"tool\":\"n1\",\"zStart\":21,\"zFloor\":19.5}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("already pressed at the start") && lastBody.contains("start higher"), lastBody);
+        assertEquals(31.5, sim.server.position('Z'), 1e-9);
+        assertEquals(31.5, mm(sim.n1.getLocation()).getZ(), 1e-6, "and OpenPnP knows it");
+        assertTrue(heightSwitchStatus().get("n1").isJsonNull());
+    }
+
+    @Test
+    public void aBadToolOrPressesIs400AndTheRoutesAreTheLockHolders() throws Exception {
+        ok("PUT", "/api/locations/height-switch", "{\"x\":150,\"y\":200,\"z\":0}");
+        for (String body : new String[] {"{\"tool\":\"n2\"}", "{}", "{\"tool\":\"n1\",\"presses\":0}",
+                "{\"tool\":\"n1\",\"presses\":21}", "{\"tool\":\"n1\",\"presses\":2.5}"}) {
+            call("POST", "/api/height-switch/measure", body);
+            assertEquals(400, lastStatus, body + " " + lastBody);
+        }
+        assertEquals("guarded", LockEndpoints.kindOf("POST", "/api/height-switch/measure"));
+        assertEquals("guarded", LockEndpoints.kindOf("POST", "/api/height-switch/read"));
+        ok("POST", "/api/lock/acquire", "{\"who\":\"process\",\"what\":\"dots\"}");
+        sim.server.mark();
+        call("POST", "/api/height-switch/read", null);
+        assertEquals(409, lastStatus, lastBody);
+        assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "nothing sent");
+    }
+
+    /** A read sets the pull-up and reads PA5 now; the status keeps it and never sends G-code itself. */
+    @Test
+    public void aReadIsTheLevelNowAndTheStatusKeepsIt() throws Exception {
+        JsonObject r = ok("POST", "/api/height-switch/read", null);
+        assertEquals(1, r.get("level").getAsInt(), r.toString());
+        assertTrue(sim.server.all().containsAll(java.util.Arrays.asList("M42 P53 T2", "M43 P5")));
+        sim.server.heightSwitchIdle = 0;
+        ok("POST", "/api/height-switch/read", null);
+        sim.server.mark();
+        JsonObject last = heightSwitchStatus().getAsJsonObject("lastRead");
+        assertEquals(0, last.get("level").getAsInt(), last.toString());
+        assertTrue(last.get("atMs").getAsLong() > 0);
+        assertEquals(new ArrayList<String>(), sim.server.sinceMark(), "the status sends nothing");
+    }
+
     /** The needle without the clean-tip word: refused before anything is sent (paste must never touch the switch). */
     @Test
     public void theEngineRefusesTheNeedleWithoutACleanTip() throws Exception {

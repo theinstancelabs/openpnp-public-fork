@@ -78,6 +78,13 @@ public final class HeightSwitch {
         public Long homeAtMs, atMs;
     }
 
+    /** A read of the pin with the machine idle: its level and when, or (level null) why there is none. */
+    public static final class Read {
+        public Integer level;
+        public Long atMs;
+        public String why;
+    }
+
     /** −1 when the tool goes down as raw Z falls (N1), +1 as it rises (the needle): its mapper 1 mm lower at (x, y, z). */
     public static int down(RawMapper m, double x, double y, double z) throws Exception {
         return (int) Math.signum(m.toRaw(x, y, z - 1).z - m.toRaw(x, y, z).z);
