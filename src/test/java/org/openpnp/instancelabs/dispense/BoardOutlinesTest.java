@@ -14,7 +14,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * BR-81: the outline of every board on the bed in machine X/Y (each registration's board through its affine, each
- * imported tile), and the paste places that lie on one, within {@code outputZones.marginMm} (2 mm).
+ * imported tile), and the paste places that lie on one, within {@code outputZones.marginMm} (2 mm); a sink (the waste,
+ * the towel, a cup) keeps its circle ({@code placeRadiusMm}, 6 mm) more. I13 refuses the runs that use one.
  */
 public class BoardOutlinesTest {
     /** A registration of a 20 x 10 mm board with this board -> machine affine. */
@@ -166,12 +167,147 @@ public class BoardOutlinesTest {
         }
         assertEquals(Arrays.asList("waste/place", "calibration area/calibration-area", "coupon1/coupon"), got);
         c.purgeRow.y0Mm = 49.0; // 1 mm below the board: each spot from x 102 on (98 is 2.2 mm from its corner)
-        c.locations.put("waste", new DispenseConfig.NamedLocation(95, 55, 5)); // off; its test dot (99, 55) is not
-        c.testDotOffsetXMm = 4;
+        c.locations.put("waste", new DispenseConfig.NamedLocation(91, 55, 5)); // 9 mm off; its test dot (99, 55) is not
+        c.testDotOffsetXMm = 8;
         List<BoardOutlines.Place> l = BoardOutlines.of(c).placesOnBoards();
         assertEquals("waste-test-dot", l.get(0).place);
         assertEquals("test-dot", l.get(0).kind);
         assertEquals("the purge row's spot 4 of 6 (102.0, 49.0) lies on board 'p.board.xml' (registration abcd…): set "
                 + "the row again off the board (Machine › Places)", l.get(1).text);
+    }
+
+    /** A sink keeps its 6 mm circle and the 2 mm margin off a board (Process, 11-04): its pile spreads; the blank does not. */
+    @Test
+    public void aSinkKeepsItsCircleAndTheMarginOffABoard() {
+        DispenseConfig c = with(reg("s.board.xml", 1, 0, 0, 1, 100, 50)); // x 100..120, y 50..60
+        c.locations.put("towel", new DispenseConfig.NamedLocation(125, 55, 5)); // 5 mm off
+        c.locations.put("cup2", new DispenseConfig.NamedLocation(129, 55, 5)); // 9 mm off
+        c.locations.put("blank", new DispenseConfig.NamedLocation(110, 65, 5)); // 5 mm off, no sink
+        List<BoardOutlines.Place> l = BoardOutlines.of(c).placesOnBoards();
+        assertEquals(1, l.size(), l.toString());
+        assertEquals("the place 'towel' (125.0, 55.0) lies within 8.0 mm of board 's.board.xml' (registration abcd…) "
+                + "(its 6.0 mm circle and the 2.0 mm margin): set it again off the board (Machine › Places)", l.get(0).text);
+    }
+
+    /**
+     * A place with its own probed surface takes a dot ladder's or a touch-off's dots (the plan's 'tladder'): a paste
+     * place. The board surface's namesake is the board's own place, never one.
+     */
+    @Test
+    public void aPlaceWithItsOwnSurfaceIsAPastePlaceButNotTheBoardSurfaces() {
+        DispenseConfig c = with(reg("t.board.xml", 1, 0, 0, 1, 100, 50));
+        c.locations.put("tladder", new DispenseConfig.NamedLocation(105, 52, 5));
+        c.surfaces.put("tladder", OutputZonesTest.patch(100, 50, 110, 50, 105, 58));
+        c.locations.put("board", new DispenseConfig.NamedLocation(110, 55, 5));
+        c.surfaces.put("board", OutputZonesTest.patch(100, 50, 120, 50, 110, 60));
+        c.locations.put("park", new DispenseConfig.NamedLocation(112, 55, 31)); // no surface of its own: no paste
+        List<String> got = new ArrayList<>();
+        for (BoardOutlines.Place p : BoardOutlines.of(c).placesOnBoards()) {
+            got.add(p.place + "/" + p.kind);
+        }
+        assertEquals(Arrays.asList("tladder/place"), got);
+    }
+
+    /** An outline that is not a number (an old record's fiducial) refuses every point: it fails closed. */
+    @Test
+    public void aNaNOutlineFailsClosed() {
+        BoardRegistration r = reg("nan.board.xml", 1, 0, 0, 1, 100, 50);
+        r.boardRectMm = null;
+        BoardRegistration.Fid fid = new BoardRegistration.Fid();
+        fid.bx = Double.NaN;
+        fid.by = 2;
+        r.fiducials.add(fid);
+        assertNotNull(BoardOutlines.of(with(r)).on(500, 500, 2));
+    }
+
+    @Test
+    public void aRegistrationsBoardRectIsValidated() {
+        DispenseConfig c = with(reg("v.board.xml", 1, 0, 0, 1, 100, 50));
+        BoardRegistration r = c.boardRegistrations.get("file:/v.board.xml");
+        assertTrue(c.validate().isEmpty(), c.validate().toString());
+        for (double[] bad : new double[][] {{0, 0, Double.NaN, 10}, {5, 0, 1, 10}, {0, 0, 20}}) {
+            r.boardRectMm = bad;
+            assertTrue(c.validate().toString().contains("boardRectMm"), Arrays.toString(bad));
+        }
+        r.boardRectMm = new double[] {0, 0, 0, 10}; // a board of one column of pads: a strip
+        assertTrue(c.validate().isEmpty(), c.validate().toString());
+    }
+
+    /** Register board's outline of a board without its size: the box of its pads' and fiducials' centres. */
+    @Test
+    public void aBoardWithoutItsSizeIsTheBoxOfItsPadsAndFiducials() {
+        BoardFeatures f = new BoardFeatures();
+        assertNull(f.rectMm());
+        BoardFeatures.Pad a = new BoardFeatures.Pad(), b = new BoardFeatures.Pad();
+        a.x = 2;
+        a.y = 3;
+        b.x = 10;
+        b.y = 1;
+        f.pads.add(a);
+        f.pads.add(b);
+        BoardFeatures.Fiducial fd = new BoardFeatures.Fiducial();
+        fd.x = 12;
+        fd.y = 8;
+        f.fiducials.add(fd);
+        assertEquals(Arrays.toString(new double[] {2, 1, 12, 8}), Arrays.toString(f.rectMm()));
+        f.widthMm = 20;
+        f.heightMm = 10;
+        assertEquals(Arrays.toString(new double[] {0, 0, 20, 10}), Arrays.toString(f.rectMm()));
+    }
+
+    static List<String> i13(DispenseConfig c, Interlocks.Scope sc, int purgeDots) {
+        Interlocks.Inputs in = new Interlocks.Inputs();
+        in.cfg = c;
+        in.scope = sc;
+        in.purgeDots = purgeDots;
+        InterlockReport r = new InterlockReport();
+        Interlocks.checkPlacesOnBoards(in, r);
+        List<String> l = new ArrayList<>();
+        for (InterlockReport.Violation v : r.violations) {
+            l.add(v.toString());
+        }
+        return l;
+    }
+
+    /**
+     * I13 refuses the runs that use a place on a board: the calibration area when a dot of the run lies in it (never a
+     * board run's), a coupon the run names, the purge row when it lays purge dots, and a board run's own planned dots
+     * on an outline recorded after its registration (or under a plan without one).
+     */
+    @Test
+    public void i13RefusesTheRunsThatUseAPlaceOnABoard() {
+        BoardRegistration reg = reg("i.board.xml", 1, 0, 0, 1, 100, 50); // x 100..120, y 50..60
+        reg.atMs = 1000;
+        DispenseConfig c = with(reg);
+        c.calibrationArea.x0Mm = 60.0;
+        c.calibrationArea.y0Mm = 40.0;
+        c.calibrationArea.widthMm = 41.0; // its edge x 101, on the board
+        c.calibrationArea.heightMm = 30.0;
+        c.locations.put("coupon1", new DispenseConfig.NamedLocation(140, 55, 5)); // 40 x 30: x 120..160
+        String board = "board 'i.board.xml' (registration abcd…)";
+        Interlocks.Scope blocks = new Interlocks.Scope();
+        blocks.surfaceName = "calib";
+        blocks.surfaceTargets.add(new double[] {70, 45}); // in the area, off the board
+        assertEquals(Arrays.asList("I13: the calibration area (60.0..101.0, 40.0..70.0) lies on " + board + ": move it "
+                + "off the board (Calibrate › Pad calibration)"), i13(c, blocks, 0));
+        Interlocks.Scope weigh = new Interlocks.Scope();
+        weigh.pastePlaces.add("coupon1");
+        assertEquals(Arrays.asList("I13: the coupon place 'coupon1' (140.0, 55.0) lies on " + board + ": set the coupon "
+                + "place again off the board (Machine › Places)"), i13(c, weigh, 0));
+        assertEquals(new ArrayList<String>(), i13(c, new Interlocks.Scope(), 0), "a run that names neither");
+
+        Interlocks.Scope run = new Interlocks.Scope();
+        run.checkPlanSurface = true;
+        run.surfaceTargets.add(new double[] {70, 45}); // in the area: not the area's run
+        run.surfaceTargets.add(new double[] {110, 55}); // on the board
+        run.outlinesUpToMs = 1000L;
+        assertEquals(new ArrayList<String>(), i13(c, run, 0), "its registration knew the board");
+        run.outlinesUpToMs = 999L;
+        assertEquals(Arrays.asList("I13: the plan's dot at (110.0, 55.0) lies on " + board + ", recorded after the "
+                + "plan's board registration (the bed changed since): register the board again (Register board)"),
+                i13(c, run, 0));
+        run.outlinesUpToMs = null;
+        assertEquals(Arrays.asList("I13: the plan's dot at (110.0, 55.0) lies on " + board + ", and the plan has no "
+                + "board registration: register the board (Register board)"), i13(c, run, 0));
     }
 }
