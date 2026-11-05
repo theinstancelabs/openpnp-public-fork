@@ -27,7 +27,8 @@
    *  tip setups (PROFILE_CALIBRATION_DESIGN.md §22.1) the mounted tip, what the other tips keep, where the needle lands
    *  and its trim are set by Setup › Dispenser & tip, Check where it lands and the trim panel. */
   const STAMPED_TOP = new Set(['needleZOffsetMm', 'needleZOffsetSetAtMs', 'needleZOffsetHomeAtMs', 'needleChangedAtMs', 'needleAnchor', 'surfaces',
-    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs']);
+    'schemaVersion', 'boardRegistrations', 'newSeatAtMs', 'tip', 'parkedTips', 'needleLanding', 'needleXyTrim', 'zFrameMovedAtMs', 'doseAnchor',
+    'heightSwitch']);
   const STAMPED_NESTED = new Set(['profile.startAngleSetAtMs', 'profile.startAngleChangedAtMs', 'purgeRow.resetAtMs', 'purgeRow.usedSpots']);
   const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe']);
   /** Maps PUT /api/config replaces whole: the editor diffs them per entry and Save sends the server's map as it is then
@@ -2146,7 +2147,8 @@
       el('div', { class: 'su-col', 'data-refusals': '' },
         el('p', { class: 'su-note', text: 'Every engine setting. Save sends only the keys you changed (one level deep for profile, purgeRow and cleanPadCheck). Keys stamped by the engine are read-only here: '
           + 'needle state, surfaces, schemaVersion, purgeRow.usedSpots and resetAtMs, profile.startAngleSetAtMs; the tip (tip, parkedTips) is set in Setup › Dispenser & tip, '
-          + 'where the needle lands (needleLanding, needleXyTrim) by Check where it lands and the trim panel. The profile is the mounted tip’s recipe. '
+          + 'where the needle lands (needleLanding, needleXyTrim) by Check where it lands and the trim panel, the tip’s dose anchor (doseAnchor) and '
+          + 'the switch’s measures (heightSwitch) by their own steps. The profile is the mounted tip’s recipe. '
           + 'Places (locations) are sent one by one: a place saved elsewhere meanwhile is kept.' }),
         F.json.el, c.jErr, c.jStale, c.jDiff,
         el('div', { class: 'btn-row' }, c.jSave, c.jReload, c.jReason)));
