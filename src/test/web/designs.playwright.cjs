@@ -594,9 +594,11 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     }
 
     // ---- (6b3) Run's Board step waits while Start is under way, as Make a board does (#98's follow-up): Start's chain plans,
-    // finds and pastes its design, so the design select, the position and the buttons that fill it, the pictures, Plan (it
-    // says why), Change board and Plan again are locked; free again after (the chain stood in for by its accessor, as (6b2))
-    if (late) {
+    // finds and pastes its design, so the design select, the position and the buttons that fill it, the re-seat question,
+    // the pictures, Plan (it says why), Change board, Plan again and the plan fix-its are locked (the head's note says
+    // so), and no other board is chosen (an upload's Use this design goes through selectBoard); free again after (the
+    // chain stood in for by its accessor, as (6b2))
+    if (late && rd) {
       await page.evaluate(() => IL.go('#run/board'));
       await page.waitForSelector('#board-select', { state: 'visible', timeout: 15000 }).catch(() => null);
       const read = () => page.evaluate(() => {
@@ -604,6 +606,9 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
         return { select: g('board-select').disabled, x: g('board-x').disabled, plan: g('btn-plan').disabled, change: g('btn-board-change').disabled,
           again: g('btn-plan-again').disabled, thumbs: [...document.querySelectorAll('#board-thumbs button.board-thumb')].map((b) => b.disabled),
           fills: ['btn-board-use-cam', 'btn-board-use-n1z', 'btn-board-use-fid'].map((i) => (g(i).disabled ? g(i).title : 'free')),
+          heads: ['btn-board-change', 'btn-plan-again', 'board-seat-new', 'board-seat-same'].map((i) => (g(i).disabled ? g(i).title : 'free'))
+            .concat(['plan-again', 'plan-unregistered'].map((f) => { const b = IL.fixButton({ fix: f, label: 'test' }); return b.disabled ? b.title : 'free'; })),
+          note: g('run-lock').hidden === false ? g('run-lock').textContent : null,
           why: w && !w.hidden ? w.textContent : null };
       });
       const settle = (locked) => page.waitForFunction((l) => {
@@ -614,11 +619,17 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
       const free0 = await settle(false);
       await page.evaluate(() => { window.__chaining = IL.runFlow.chaining; IL.runFlow.chaining = () => true; IL.render(); });
       const during = await settle(true);
+      // a board chosen while the chain runs (an upload's Use this design calls selectBoard): refused, the design kept
+      during.chose = await page.evaluate((f) => { const was = IL.run.form.sel; IL.run.flow.selectBoard('file:' + f); IL.render();
+        return { kept: IL.run.form.sel === was, toast: (document.getElementById('toast') || {}).textContent || '' }; }, rd.file);
       await page.evaluate(() => { IL.runFlow.chaining = window.__chaining; IL.render(); });
       const free1 = await settle(false);
       check('(6b3) Run\'s Board step while Start is under way: the design select, its position and the buttons that fill it, the pictures, Plan (it says why), Change board and Plan again locked; free again after',
         !free0.select && during.select && during.x && during.thumbs.length > 0 && during.thumbs.every(Boolean) && during.plan && during.why === 'Start is under way'
           && during.fills.every((t) => t === 'Start is under way') && free1.fills.every((t) => t !== 'Start is under way')
+          && during.heads.every((t) => t === 'Start is under way') && free1.heads.every((t) => t !== 'Start is under way')
+          && during.note === 'Change board, Plan again and the board position wait: Start is under way.' && free1.note === null
+          && during.chose.kept && /Start is under way/.test(during.chose.toast)
           && during.change && during.again && !free1.select && !free1.x && free1.thumbs.every((d) => !d) && free1.why === null && !free1.change, { free0, during, free1 });
     }
 
