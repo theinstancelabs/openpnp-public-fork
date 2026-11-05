@@ -718,7 +718,7 @@ public class VacuumProberTest {
     }
 
     /**
-     * A stray FF FF FF reply (-1) in the first mean after the lift lifts that mean ~0.5 M above open air while the line
+     * A stray FF FF FF reply (-1) in the first mean after the lift lifts that mean ~0.4 M above open air while the line
      * still draws: it is a fault read, not let go, or the fine pass would start in the seal and touch 4.725.
      */
     @Test
@@ -733,6 +733,31 @@ public class VacuumProberTest {
         assertEquals(4.75, p.releaseZ, 1e-9);
         assertEquals("contact", p.state);
         assertEquals(4.50, p.z, 1e-9, "the fine pass starts once the line let go");
+    }
+
+    /**
+     * The sensor answers FF FF FF from the re-read on (the contact 4.65, 4 steps under the release height 4.75): a
+     * fault, refused at the first step's timeout, never read as a seal that climbs to 4.725.
+     */
+    @Test
+    public void aFaultFromTheReReadOnIsRefused() throws Exception {
+        Rig rig = new Rig();
+        rig.ch.contact = (a, b) -> 4.66;
+        boolean[] fault = {false};
+        java.util.Map<Double, Integer> visits = new java.util.HashMap<>();
+        rig.ch.byZ = (z, n) -> {
+            int visit = n == 0 ? visits.merge(z, 1, Integer::sum) : visits.get(z);
+            fault[0] |= Math.abs(z - 4.675) < 1e-9 && visit > 1;
+            return fault[0] ? -1 : null;
+        };
+        DispenseService.RunRefusedException e = assertThrows(DispenseService.RunRefusedException.class,
+                () -> rig.prober().probe(Arrays.asList(example()), window(rig, 4.50, 4.50)));
+        assertEquals("PROBE: N1's vacuum read 1550 k above open air for 1.5 s at X 303.81, Y 122.62: the N1 pump is "
+                + "off or the vacuum sensor does not answer. Check N1, then try again", e.getMessage());
+        List<String> l = rig.ch.sent;
+        assertFalse(l.subList(l.lastIndexOf(z(4.675, 300)), l.size()).contains(z(4.7, 300)),
+                "refused at 4.675, no climb");
+        assertEquals(END, rig.ch.sent.subList(rig.ch.sent.size() - 4, rig.ch.sent.size()));
     }
 
     /** A seal that holds above the contact (a blocked tip) is refused after the steps a 1 s lag can hide. */

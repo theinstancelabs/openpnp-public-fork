@@ -700,7 +700,8 @@ public final class VacuumProber {
      * Moves to {@code z} and reads until the mean is less than {@code within} below the baseline (the seal let
      * go there), at most {@link Settings#releaseTimeoutMs}. Above the baseline is let go too: the real line
      * overshoots open air for ~1.5 s after a seal lets go (+20-26 k at 78 of 167 journal touches); more than
-     * {@link Settings#maxOvershootCounts} above it is a fault read (a stray FF FF FF reply), never let go.
+     * {@link Settings#maxOvershootCounts} above it is a fault read (a stray FF FF FF reply), never taken as let
+     * go; still so at the timeout, it is refused (the pump off, the sensor not answering), never read as a seal.
      */
     private boolean released(Point p, Window w, double z, double within) throws Exception {
         moveZ(z, s.zProbeFeedMmMin, w);
@@ -714,6 +715,11 @@ public final class VacuumProber {
                 return true;
             }
             if (s.clock.getAsLong() - t0 >= s.releaseTimeoutMs) {
+                if (m - p.baseline >= s.maxOvershootCounts) {
+                    throw refused(String.format(Locale.ROOT, "PROBE: N1's vacuum read %.0f k above open air for %.1f s "
+                            + "at X %.2f, Y %.2f: the N1 pump is off or the vacuum sensor does not answer. Check N1, "
+                            + "then try again", (m - p.baseline) / 1000, s.releaseTimeoutMs / 1000.0, p.x, p.y));
+                }
                 return false;
             }
         }
