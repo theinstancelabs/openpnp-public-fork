@@ -500,6 +500,8 @@ public class ControlApiSimTest {
         refused(409, "has not found N1 (no nozzle named 'N1' in OpenPnP)", down);
         assertTrue(down.body.contains("name it back in OpenPnP"), down.toString());
         assertEquals(n1, loc(sim.n1).getZ(), 1e-6, "nothing moved");
+        // a press of N1 itself: 503, as for the needle (review MINOR: the doc had it under 409)
+        refused(503, "this machine has no N1", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
     }
 
     /**

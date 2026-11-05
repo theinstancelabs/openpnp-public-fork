@@ -575,22 +575,22 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   safe zone (while the engine has not found both: every nozzle of the head, named as in OpenPnP), and with no lower
   safe zone on Z in OpenPnP at all (no travel height: `Z has no lower safe zone in OpenPnP …`); the camera's `dz`; a Z
   press while the dispense engine is not running (it holds the floors; a configuration load restarts it: one it left
-  mid-press) or has not found N1 or the needle (`the dispense engine has not found the needle (no dispenser nozzle
-  'N9' in the machine): …: name it back in OpenPnP, or set 'nozzle' in the settings`: a nozzle renamed in OpenPnP, or
-  `nozzle` in the settings not matching; it never takes N1 for the needle, `… (the settings' nozzle 'N1' is N1, the
-  probe nozzle) …`, nor one nozzle for both, renamed since it found them: X/Y then checks every nozzle of the head; a
-  press moves both, so neither moves); a Z press that puts EITHER nozzle below its floor at its own X/Y (going up is
-  always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current frame (anchored and
-  touched off since the needle change, and no failed Z check of this home) and where its tip lands checked
-  (`needle.xyChecked`: a needle change keeps the old tip's landing, and a change of N2's head offset makes it 0, 0,
-  until a landing check), not below the surface where its tip lands (N2 + its landing and trim) nor the one under N2
-  (the higher holds) + its offset, nor its I4 floor, without them not below its safe zone, anywhere (409 names which
-  is missing, in the engine's words; with no lower safe zone on Z in OpenPnP not lower at all: `the needle has no
-  floor …`); over the height switch (BR-94: its place's circle of `outputZones.heightSwitchRadiusMm`; the needle where
-  its tip lands) neither tool below its safe zone, whatever its floor, also through the see-saw (only the measure
-  presses it); OpenPnP's soft limits. 404 for an unknown place. 503 for `n1` and `needle` while the engine is not
-  running (`the dispense engine is not running …`: it finds them), and for `needle` while it has not found it (`the
-  dispenser is unavailable: …`).
+  mid-press), or a press of one tool while it has not found the other (`the dispense engine has not found the needle
+  (no dispenser nozzle 'N9' in the machine): …: name it back in OpenPnP, or set 'nozzle' in the settings`: a nozzle
+  renamed in OpenPnP, or `nozzle` in the settings not matching; it never takes N1 for the needle, `… (the settings'
+  nozzle 'N1' is N1, the probe nozzle) …`, nor one nozzle for both, renamed since it found them: X/Y then checks every
+  nozzle of the head; a press moves both, so neither moves); a Z press that puts EITHER nozzle below its floor at its
+  own X/Y (going up is always allowed): N1 at most 0.5 mm below a probed surface under it; the needle, with a current
+  frame (anchored and touched off since the needle change, and no failed Z check of this home) and where its tip lands
+  checked (`needle.xyChecked`: a needle change keeps the old tip's landing, and a change of N2's head offset makes it
+  0, 0, until a landing check), not below the surface where its tip lands (N2 + its landing and trim) nor the one
+  under N2 (the higher holds) + its offset, nor its I4 floor, without them not below its safe zone, anywhere (409
+  names which is missing, in the engine's words; with no lower safe zone on Z in OpenPnP not lower at all: `the needle
+  has no floor …`); over the height switch (BR-94: its place's circle of `outputZones.heightSwitchRadiusMm`; the
+  needle where its tip lands) neither tool below its safe zone, whatever its floor, also through the see-saw (only the
+  measure presses it); OpenPnP's soft limits. 404 for an unknown place. 503 for `n1` and `needle` while the engine is
+  not running (`the dispense engine is not running …`: it finds them), and for either while it has not found that tool
+  (`this machine has no N1`, `the dispenser is unavailable: …`).
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
   `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
   ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.
