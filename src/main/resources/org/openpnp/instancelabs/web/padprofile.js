@@ -2060,13 +2060,16 @@
         const btns = [];
         if (s.kind === 'use') {
           const use = el('button', { type: 'button', class: 'btn btn--sm btn--primary', 'data-group': g.group, 'data-action': 'use' }, 'Use ' + typeLabel(s));
-          use.addEventListener('click', () => IL.act(use, async () => {
-            const r = await IL.api('POST', '/api/package-mappings', { packageId: s.mapping.packageId, padNames: s.mapping.padNames || null, typeKey: s.typeKey });
-            IL.patch(use, { text: 'Uses ' + typeLabel(s), disabled: true });
-            use.dataset.done = '1';
-            if (IL.pcr && IL.pcr.loadPadTypes) IL.pcr.loadPadTypes();
-            return r;
-          }, { ok: p.id + ' uses ' + typeLabel(s) + ' now.' }));
+          use.addEventListener('click', async () => {
+            let done = false;
+            await IL.act(use, async () => {
+              const r = await IL.api('POST', '/api/package-mappings', { packageId: s.mapping.packageId, padNames: s.mapping.padNames || null, typeKey: s.typeKey });
+              done = true;
+              if (IL.pcr && IL.pcr.loadPadTypes) IL.pcr.loadPadTypes();
+              return r;
+            }, { ok: p.id + ' uses ' + typeLabel(s) + ' now.' });
+            if (done) IL.patch(use, { text: 'Uses ' + typeLabel(s), disabled: true });   // after IL.act's end, which frees its button
+          });
           btns.push(use);
         }
         const needs = el('button', { type: 'button', class: 'btn btn--sm', 'data-group': g.group, 'data-action': 'needs' }, 'Needs a profile…');

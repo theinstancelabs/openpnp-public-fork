@@ -2933,10 +2933,12 @@
       IL.refuse(e, { host, what: o.what });
       return undefined;
     } finally {
-      // a button its gate locked meanwhile (IL.gate keeps its title) stays locked until the render frees it
-      if (btn) { btn.disabled = btn.dataset.titleIdle !== undefined; btn.removeAttribute('aria-busy'); }
+      if (btn) btn.removeAttribute('aria-busy');
       IL.pollNow();
-      IL.render();
+      // drawn now, not at the next frame: the gates see what the action left (a lock its last step made too), then the
+      // button stays locked if its gate locks it (IL.gate keeps its title) and is free otherwise
+      if (booted) renderAll();
+      if (btn) btn.disabled = btn.dataset.titleIdle !== undefined;
     }
   };
   /** Shows an error: toast + activity, and the inline refusal box (with fix-its per I-code) in opts.host. */
