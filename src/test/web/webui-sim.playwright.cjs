@@ -123,6 +123,9 @@ async function nav(page, ws) {
     return;
   }
   await page.click('.tabs [role=tab][data-tab=' + ws + ']');
+  // Run opens Run › Start while nothing runs (runflow.js; run-flow.playwright.cjs tests it): these steps are today's
+  // pages, reached as the operator does, by Step by step (not shown while a run runs or the recovery leads)
+  if (ws === 'run') await page.waitForSelector('#rs-step-by-step', { state: 'visible', timeout: 3000 }).then((a) => a.click(), () => null);
 }
 
 /**
