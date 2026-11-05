@@ -74,6 +74,12 @@ final class GcodePassthrough {
      * stale (the next batch is walked from here); null when not known (a line cut short, a quick stop).
      */
     private double[] commanded;
+    /**
+     * OpenPnP's raw X, Y, Z when {@link #commanded} was last walked: another value at the next batch means OpenPnP or a
+     * script moved the head meanwhile, so where it is is not known (review 2 MINOR 2). shortcut: a move that ends back
+     * on the same raw X, Y, Z is not seen; upgrade to the driver's own count of motion lines when stage 2 hooks it.
+     */
+    private double[] openpnpAt;
     private final Object logLock = new Object();
 
     /** One running batch. */
@@ -213,11 +219,15 @@ final class GcodePassthrough {
             return;
         }
         BedGuard.Start s = ctx.bed.start(m);
-        double[] at;
+        double[] now = {s.x, s.y, s.z}, at;
+        boolean moved;
         synchronized (this) {
-            at = !positionStale ? new double[] {s.x, s.y, s.z} : commanded == null ? null : commanded.clone();
+            moved = positionStale && commanded != null && !Arrays.equals(now, openpnpAt);
+            at = !positionStale ? now : commanded == null || moved ? null : commanded.clone();
         }
-        BedGuard.Start unknown = at == null ? s.at(null) : null;
+        BedGuard.Start unknown = moved ? s.unknown("OpenPnP or a script moved the head after the last G-code batch, "
+                + "before where that batch left it was read, so where the head is is not known", "send M400 alone "
+                + "first: OpenPnP then reads where the head is") : at == null ? s.at(null) : null;
         List<CollisionCheck.Leg> legs = new ArrayList<>();
         double[] p = at;
         for (int i = 0; i < lines.size(); i++) {
@@ -245,6 +255,7 @@ final class GcodePassthrough {
         synchronized (this) {
             if (at != null) {
                 commanded = at; // execute follows the batch's moves from here
+                openpnpAt = now;
             }
         }
     }

@@ -524,4 +524,35 @@ public class BedGuardSimTest {
         assertFalse(sim.server.sinceMark().contains("G1 Z60 F600"), "nothing of the batch sent");
         assertEquals(SWITCH_HX, sim.server.position('X'), 1e-3);
     }
+
+    /**
+     * OpenPnP's own move between two batches (its window, a script) while its position is not re-read: where the last
+     * batch left the head is no longer where it is, so the next batch is refused as from an unknown place until an M400
+     * alone re-reads it (review 2 MINOR 2, the re-review's probe: Z 56.5 is clear from (310, 400) and puts the needle
+     * 0.59 mm into the switch's top from where the head really is).
+     */
+    @Test
+    public void anOpenPnpMoveBetweenBatchesLeavesThePlaceUnknown() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        Machine m = Configuration.get().getMachine();
+        m.submit(() -> {
+            sim.n1.moveTo(sim.n1.getLocation().derive(300 - 24.178, 400 - 63.91, null, null));
+            return null;
+        }).get();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X310 Y400 F3000\"]}", token); // no M400: OpenPnP's position stale
+        m.submit(() -> {
+            sim.n1.moveTo(sim.n1.getLocation().derive(SWITCH_HX - 24.178, SWITCH_HY - 63.91, null, null));
+            return null;
+        }).get();
+        sim.server.mark();
+        JsonObject r = call("POST", "/api/gcode", "{\"lines\":[\"G1 Z56.5 F600\"]}", token);
+        assertEquals(List.of(), motionSent(), "nothing sent: " + body);
+        collision(null, r);
+        assertTrue(r.get("why").getAsString().contains("moved the head"), body);
+        assertTrue(r.get("next").getAsString().contains("M400"), body);
+        ok("POST", "/api/gcode", "{\"lines\":[\"M400\"]}", token);
+        collision("height-switch", call("POST", "/api/gcode", "{\"lines\":[\"G1 Z56.5 F600\"]}", token));
+        assertEquals(List.of(), motionSent(), "nothing sent");
+    }
 }
