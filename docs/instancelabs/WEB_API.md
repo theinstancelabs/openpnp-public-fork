@@ -611,8 +611,9 @@ design's rules, the loader (the engine's, as lumen-sim's) refuses a model withou
 one with `moves: needle` (every leg sweeps both tips), each with a `tip-end` layer with `aboveTipMm` 0 (its tip), a
 `contactDepthMm` outside 0 to 1.0, an explicit null anywhere (a key is given a value or left out: an unknown top, knee or
 K is left out), a string that is not exactly the JSON string the rule asks for (never trimmed; a number is not text),
-and an `atMs` that is not a number or is later than now + 1 min (a time is ms since 1970). The bad files, listed for
-lumen-sim to mirror: `BedModelTest.BAD_FILES`.
+an `atMs` that is not a number or is later than now + 1 min (a time is ms since 1970), and a file that is not strict
+JSON (a comment, single quotes or unquoted text). Every bad file, listed for lumen-sim to mirror:
+`BedModelTest.BAD_FILES`.
 **Rollout:** no file: nothing is checked and every route runs as before; a file that fails validation: every hooked
 move answers 409 `collision` naming the problem; a valid file: enforced. Hooked in this build: `POST /api/jog`,
 `POST /api/move-to`, `POST /api/gcode` (G0/G1). Not yet: Home, the engine's programs, the N1 probe, OpenPnP's own
@@ -635,9 +636,10 @@ exempt depth is counted on the model's numbers with no error added: the tip may 
 **After a needle change.** The needle's tip end (`tools[moves: needle].tipEnd {dx, dy, setup, atMs}`, where the
 mounted needle ends) and K (`seesaw.K`, the needle's length against N1's; its record is `seesaw.measured`) move with
 each needle. In this build nothing rewrites them at a mount: while the engine's last needle change
-(`needleChangedAtMs`) is later than `tipEnd.atMs` or `seesaw.measured.atMs` (or either is missing), every hooked move
-and dry run answers 409 `measurement-needed`, naming each in one answer (`the needle's tip end (tools 'needle'.tipEnd)
-and K, the needle's length (seesaw.K, measured as seesaw.measured) are from before the needle change at <time>`; next:
+(`needleChangedAtMs`, stamped later than both, also when a writer's clock stamped them ahead of the engine's) is later
+than `tipEnd.atMs` or `seesaw.measured.atMs` (or either is missing), every hooked move and dry run answers 409
+`measurement-needed`, naming each in one answer (`the needle's tip end (tools 'needle'.tipEnd) and K, the needle's
+length (seesaw.K, measured as seesaw.measured) are from before the needle change at <time>`; next:
 measure each and send it with `PUT /api/bed/tools/needle` (a later `tipEnd.atMs` and a measurement record) and `PUT
 /api/bed/seesaw` (a new `seesaw.measured` record)). Strict on purpose: no model goes on the real machine before BR-94's
 engine end measure, which is not hooked and records both. STOP, Home and the tip picture (`POST
@@ -669,7 +671,8 @@ engine end measure, which is not hooked and records both. STOP, Home and the tip
     same rules as the parts below.
   - `POST /api/bed/objects {name, outline, id?, kind? = movable, role?, marginMm? = 1.0, touchable? = false,
     noPaste? = false, invalidatedBy?}`: state `added`, no top (the key left out, `measured` empty): it blocks its
-    outline at every height (`topZ`, `state` or `measured` in the body: 400). An id taken: 409 `exists`.
+    outline at every height (`topZ`, `state` or `measured` in the body: 400). `name`, `id` and `kind` are kept as sent:
+    a JSON string, never trimmed (a number, null or empty: 400). An id taken: 409 `exists`.
   - `POST /api/bed/objects/{id}/moved {outline?}`: the entry becomes `moved` (it keeps blocking); with an outline a new
     entry `<id>-2` (`added`, no top) there. `.../removed {}`: `removed` (it keeps blocking; the API shows `removed,
     not checked`); on an object a PUT set to removed it is written again, so the removal is on record.
@@ -679,21 +682,22 @@ engine end measure, which is not hooked and records both. STOP, Home and the tip
     picture of that spot (`diff` ≤ the engine's fixed threshold, dispense-config `emptyBedMaxDiff`, Process's number:
     unset, nothing clears; a `threshold` sent is not used, the record keeps the engine's) and N1 lowered to its floor
     at ≥ 3 points inside the outline with no contact. Anything less: 409 `measurement-needed`, it stays removed. Not
-    removed, or its removal not on record (a PUT set it to removed: `.../removed` first): 409 `refused`.
+    removed, or its removal not on record (a PUT set it to removed, also on an object put down again under a cleared
+    id: `.../removed` first): 409 `refused`.
   - `PUT /api/bed/objects/{id}`, `PUT /api/bed/tools/{id}` (a new id adds the tool), `PUT /api/bed/plane {the
     bed.plane block}`, `PUT /api/bed/seesaw {the seesaw block}`: the part as the file holds it.
   - **The rule:** a person's word may add, mark moved or removed, grow an outline or a tool layer, raise a top or a
     layer, lower a layer. What frees space needs a new measurement record where that part keeps it (`how` any words,
     `atMs` later than the stored record's, `evidence` naming journal events `event:<id>` or photos `photo:<id>` that
-    exist, none older than the stored record's `atMs` and no `BED_MODEL` or `MOTION_*` row; after a needle change,
-    for the needle's changed `tipEnd` and any see-saw change, none older than the change either; any `atMs` later than
-    now + 1 min: 400): a lower top, a smaller top error, `touchable` switched on, or an unmeasured object becoming measured
-    (`measured.top`); a smaller outline or margin, or an unmeasured object becoming measured (`measured.xy`); any
-    change of the bed plane or a smaller bed outline (`bed.plane`, which is its own record); any see-saw change
-    (`seesaw.measured`); a smaller, higher, removed or moved tool layer, a changed `tipEnd` (its `atMs` too) or
-    `moves` (`tools[].measured`). A removed object stops blocking only through `/cleared`. A smaller `zMarginMm`, a deeper
-    `contactDepthMm` or a tool leaving the model: not through the API in this build. Otherwise 409
-    `measurement-needed`.
+    exist, none older than the stored record's `atMs` and no `BED_MODEL`, `MOTION_*` or `TIP` row (a needle's change,
+    mount, trims and landings are bookkeeping); after a needle change, for the needle's changed `tipEnd` and any
+    see-saw change, none older than the change either; any `atMs` later than now + 1 min: 400): a lower top, a smaller
+    top error, `touchable` switched on, or an unmeasured object becoming measured (`measured.top`); a smaller outline
+    or margin, or an unmeasured object becoming measured (`measured.xy`); any change of the bed plane or a smaller bed
+    outline (`bed.plane`, which is its own record); any see-saw change (`seesaw.measured`); a smaller, higher, removed
+    or moved tool layer, a changed `tipEnd` (its `atMs` too) or `moves` (`tools[].measured`). A removed object stops
+    blocking only through `/cleared`. A smaller `zMarginMm`, a deeper `contactDepthMm` or a tool leaving the model: not
+    through the API in this build. Otherwise 409 `measurement-needed`.
 
 ## 4. Pressure hold (Dispense tab)
 
@@ -805,18 +809,19 @@ Jargon is explained in tooltips (`title`/`abbr`).
 
 ## 6. Tests
 
-- BR-98 stage 1: `BedModelTest` (6: the loader's rules with one N1, one needle and the contact depth cap, the bad
-  files `BAD_FILES` for lumen-sim to mirror (exact strings, null nowhere, each tip's layer, the times), the see-saw
-  maps U2, the worst case, the tip errors) and `CollisionCheckTest` (7: the sweep U1, the lowest point at a leg's end,
-  the tip-only exemption U3, the jog floor bounded by the model's top, unmeasured objects and the first leg, the
-  everyday moves on the fixture with the G28 corner to the fiducial, U4 5,000 legs < 100 ms), no machine;
-  `BedGuardSimTest` (17) and `BedApiSimTest` (9) on the SIM with the fixture model: jog, move-to and passthrough refused
-  with nothing sent and proven beside the objects, the passthrough's unknown place (a batch cut short, an interrupted
-  move, after an M410, an M410's lost or interrupted ok, OpenPnP's own move between batches), a batch stopped while
-  queued, its proof on the machine thread, a needle tip end or K older than the needle change and what still runs then
-  (the tip picture, Home, STOP), no file, a file that fails validation, the dry run and a stale position (the views
-  too), the reads, the writes and their rules (no holder, two at once, the evidence, the engine's threshold, the times,
-  a removal on record, null nowhere).
+- BR-98 stage 1: `BedModelTest` (5: every bad file in one list, `BAD_FILES`, for lumen-sim to mirror (the model's
+  rules with one N1, one needle and the contact depth cap, exact strings, null nowhere, each tip's layer, the times,
+  strict JSON), the see-saw maps U2, the worst case, the tip errors) and `CollisionCheckTest` (7: the sweep U1, the
+  lowest point at a leg's end, the tip-only exemption U3, the jog floor bounded by the model's top, unmeasured objects
+  and the first leg, the everyday moves on the fixture with the G28 corner to the fiducial, U4 5,000 legs < 100 ms), no
+  machine; `BedGuardSimTest` (18) and `BedApiSimTest` (9) on the SIM with the fixture model: jog, move-to and
+  passthrough refused with nothing sent and proven beside the objects, the passthrough's unknown place (a batch cut
+  short, an interrupted move, after an M410, an M410's lost or interrupted ok, OpenPnP's own move between batches), a
+  batch stopped while queued, its proof on the machine thread, a needle tip end or K older than the needle change (also
+  stamped ahead of the engine's clock) and what still runs then (the tip picture, Home, STOP), no file, a file that
+  fails validation, the dry run and a stale position (the views too), the reads, the writes and their rules (no holder,
+  two at once, the evidence (no tip row), the engine's threshold, the times, a removal on record (an id cleared and put
+  down again too), exact strings, null nowhere).
 
 - `mvn -T1 test -Dtest='ApiServerSimTest,ReviewSafetySimTest,RegistrationSimTest,BoardImportSimTest'` (part of `mvn
   test`): 23 + 11 + 11 + 12 tests on the engine's simulated machine (OpenPnP GcodeDriver over localhost TCP to
