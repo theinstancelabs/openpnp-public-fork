@@ -34,7 +34,7 @@
     'profile.startAngleFeature', 'purgeRow.resetAtMs', 'purgeRow.usedSpots', 'calibrationArea.usedMm', 'calibrationArea.resetAtMs',
     'paste.loadedAtMs']);
   const NESTED = new Set(['profile', 'purgeRow', 'cleanPadCheck', 'fiducialCheck', 'vacuumProbe', 'paste', 'calibrationArea', 'padCalibration',
-    'outputZones']);
+    'outputZones', 'usbCameras']);
   /** Maps PUT /api/config replaces whole: the editor diffs them per entry and Save sends the server's map as it is then
    *  with only the edited entries changed (a place saved meanwhile on the Places card is kept). */
   const BY_ENTRY = new Set(['locations']);
