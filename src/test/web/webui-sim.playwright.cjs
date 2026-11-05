@@ -794,9 +794,13 @@ async function runFirstDots(page, n) {
         // no cup place: the waste is chosen, not the first name (the blank, whose surface 30 whole turns would cover)
         for (const n of ['cup1', 'scale-2']) extra.splice(extra.indexOf(n), 1);
         const shots2 = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
-          return sel && sel.options.length && ![...sel.options].some((o) => o.value === 'cup1') ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value } : null; },
+          return sel && sel.options.length && ![...sel.options].some((o) => o.value === 'cup1') ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value,
+            pre: (document.getElementById('shots-pre') || {}).textContent || '', banner: !document.getElementById('shots-noplace').hidden } : null; },
         null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
         check('Scale shots without a cup place: the waste is chosen, not the first name (the blank)', !!shots2 && shots2.chosen === 'waste', shots2);
+        // a chosen place: no "No cup place yet", and its own row in the list (the re-check's NIT on a7919144f0: a place row never shown passed)
+        check('Scale shots with the waste chosen: no "No cup place yet", the list has the waste\'s place row', !!shots2 && !shots2.banner
+          && /Place “waste”/.test(shots2.pre), shots2 && { banner: shots2.banner, pre: shots2.pre });
         // no sink at all (no cup, waste or towel): nothing is chosen, never the blank or a coupon by default; Run asks for a cup
         // place (the re-check's MINOR on e25fbf864a: the engine takes shots on the blank, 30 whole turns)
         extra.splice(extra.indexOf('towel'), 1);
