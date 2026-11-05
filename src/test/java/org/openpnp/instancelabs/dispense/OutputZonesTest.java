@@ -324,6 +324,26 @@ public class OutputZonesTest {
         assertNull(z.refusal(214, 38));
     }
 
+    /** BR-94: the height switch's place, once set, is a forbidden circle of its own radius, whatever covers it. */
+    @Test
+    public void theHeightSwitchIsForbiddenWhateverCoversIt() {
+        DispenseConfig c = config();
+        assertNull(OutputZones.of(c, CAMERA).refusal(103, 50), "the waste, no switch set");
+        c.locations.put(HeightSwitch.PLACE, new DispenseConfig.NamedLocation(110, 50, 0));
+        OutputZones z = OutputZones.of(c, CAMERA);
+        String why = z.refusal(103, 50);
+        assertNotNull(why);
+        assertTrue(why.contains("over the height switch, where the valve and the screw stay off"), why);
+        assertEquals("forbidden: height switch", z.zoneAt(103, 50));
+        // the waste's circle reaches into the switch's: the overlap stays forbidden, its far side is allowed
+        assertNull(z.refusal(96, 50));
+        why = z.lineRefusal("dot 'P1' at line 9", 103, 50);
+        assertTrue(why != null && why.contains("over the height switch"), why);
+        assertNotNull(z.crossing(90, 40, 130, 60), "a move with the valve on across it");
+        c.outputZones.heightSwitchRadiusMm = 5;
+        assertNull(OutputZones.of(c, CAMERA).refusal(103, 50), "its radius is the setting's");
+    }
+
     @Test
     public void nowhereInParticularIsRefused() {
         OutputZones z = OutputZones.of(config(), CAMERA);
