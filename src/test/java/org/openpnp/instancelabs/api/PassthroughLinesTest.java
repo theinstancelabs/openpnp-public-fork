@@ -156,6 +156,17 @@ public class PassthroughLinesTest {
         refused("M43");
         refused("M42 P53 S255");
         refused("M42 P53 T1");
+        // #50 review: T4 is analog mode and T5 an open-drain output (it can pull PA5 low); no pin at all; a mode that is
+        // no whole number (the line goes out rounded: T0.9999999 as T1, a push-pull output; the firmware truncates
+        // T1.5 to T1); M43's watch mode holds the command queue until an M108, and its toggle test ignores P and drives
+        // every unprotected pin as an output
+        refused("M42 P53 T4");
+        refused("M42 P53 T5");
+        refused("M42 T2");
+        refused("M42 P53 T0.9999999");
+        refused("M42 P53 T1.5");
+        refused("M43 P5 W");
+        refused("M43 P5 T");
         refused("M201 X5000");
         refused("M203 X100");
         refused("G1 E5");
