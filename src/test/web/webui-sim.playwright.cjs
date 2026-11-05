@@ -788,6 +788,65 @@ async function runFirstDots(page, n) {
       await blankRow.locator('input[data-axis=z]').fill('10');
       await blankRow.locator('button[data-action=save]').click();
       await waitStatus(page, (s) => s.dispense.locations.blank && s.dispense.locations.blank.x === 150, 10000);
+      // ---- the places' "Used for" and Scale shots' picker follow #12's paste zones: paste only on the sinks (the waste,
+      // the towel, a cup: "cup" or "scale" as a part of the name), the coupons and the probed blank; every other place is
+      // moves and Z only. Extra places stubbed into the status (nothing is saved); "backup" and "cupboard" are not cups
+      {
+        const coupon = await page.evaluate(() => (((IL.S.config || {}).padCalibration || {}).couponPlaces || ['coupon1'])[0]);
+        const extra = ['backup', 'cup1', 'cupboard', 'scale-2', 'towel', coupon, 'park'];
+        let noWaste = false;
+        await page.route('**/api/status', async (route) => {
+          try {
+            const res = await route.fetch();
+            const body = await res.json();
+            extra.forEach((n, i) => { body.dispense.locations[n] = { x: 200 + 8 * i, y: 200, z: 10 }; });
+            if (noWaste) delete body.dispense.locations[body.dispense.wasteLocationName || 'waste'];
+            await route.fulfill({ response: res, json: body });
+          } catch (e) { /* unrouted while it was being answered */ }
+        });
+        const uses = await page.waitForFunction((names) => { const u = Object.fromEntries([...document.querySelectorAll('tr[data-place]')]
+          .map((tr) => [tr.dataset.place, ((tr.querySelector('td.use') || {}).textContent || '').trim()])); return names.every((n) => u[n]) ? u : null; },
+        extra, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        const wantUse = { waste: 'prime, test dot, pressure on', blank: 'touch-off, dot ladder', cup1: 'scale shots', 'scale-2': 'scale shots',
+          towel: 'drool while pressure is on', [coupon]: 'pad calibration coupon', backup: 'moves and Z only: no paste', cupboard: 'moves and Z only: no paste',
+          park: 'moves and Z only: no paste' };
+        check('places: "Used for" follows the paste zones of #12 (sinks, coupons, the blank; the others moves and Z only)', !!uses
+          && Object.entries(wantUse).every(([n, u]) => uses[n] === u), { uses, wantUse });
+        await page.evaluate(() => IL.go('#calibrate/shots'));
+        const shots = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
+          return sel && [...sel.options].some((o) => o.value === 'cup1') ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value } : null; },
+        null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        // the engine takes shots on the sinks, the blank and the test dot (references) and a coupon (unless reserved), the
+        // zones refuse the others (CalibrationEndpoints shotsRun)
+        check('Scale shots: the places the engine takes shots on (the sinks, the blank, a coupon), a cup chosen; not "backup" or "cupboard"', !!shots
+          && shots.chosen === 'cup1' && JSON.stringify(shots.opts.slice().sort()) === JSON.stringify(['blank', coupon, 'cup1', 'scale-2', 'towel', 'waste'].sort()), shots);
+        // no cup place: the waste is chosen, not the first name (the blank, whose surface 30 whole turns would cover)
+        for (const n of ['cup1', 'scale-2']) extra.splice(extra.indexOf(n), 1);
+        const shots2 = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
+          return sel && sel.options.length && ![...sel.options].some((o) => o.value === 'cup1') ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value,
+            pre: (document.getElementById('shots-pre') || {}).textContent || '', banner: !document.getElementById('shots-noplace').hidden } : null; },
+        null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        check('Scale shots without a cup place: the waste is chosen, not the first name (the blank)', !!shots2 && shots2.chosen === 'waste', shots2);
+        // a chosen place: no "No cup place yet", and its own row in the list (the re-check's NIT on a7919144f0: a place row never shown passed)
+        check('Scale shots with the waste chosen: no "No cup place yet", the list has the waste\'s place row', !!shots2 && !shots2.banner
+          && /Place “waste”/.test(shots2.pre), shots2 && { banner: shots2.banner, pre: shots2.pre });
+        // no sink at all (no cup, waste or towel): nothing is chosen, never the blank or a coupon by default; Run asks for a cup
+        // place (the re-check's MINOR on e25fbf864a: the engine takes shots on the blank, 30 whole turns)
+        extra.splice(extra.indexOf('towel'), 1);
+        noWaste = true;
+        const shots3 = await page.waitForFunction(() => { const sel = document.getElementById('shots-place');
+          return sel && sel.options.length && ![...sel.options].some((o) => o.value === 'waste' || o.value === 'towel')
+            ? { opts: [...sel.options].map((o) => o.value), chosen: sel.value, runOff: document.getElementById('btn-shots-run').disabled,
+              why: (document.getElementById('shots-reason') || {}).textContent || '', pre: (document.getElementById('shots-pre') || {}).textContent || '',
+              banner: !document.getElementById('shots-noplace').hidden } : null; },
+        null, { timeout: 10000 }).then((h) => h.jsonValue(), () => null);
+        check('Scale shots with no sink place: nothing chosen (not the blank or a coupon), Run locked', !!shots3
+          && shots3.opts.includes('blank') && shots3.chosen === '' && shots3.runOff, shots3);
+        // and it says why: no cup place (the banner, Run's reason), with no place of the blank in its list (the re-check's MINOR on 7e8eb5a59d)
+        check('Scale shots with no sink place: "No cup place yet" and Run asks for a cup place; its list names no place (not the blank)', !!shots3
+          && shots3.banner && /cup place/.test(shots3.why) && !/Place “blank”/.test(shots3.pre), shots3 && { why: shots3.why, pre: shots3.pre, banner: shots3.banner });
+        await page.unroute('**/api/status');
+      }
       await nav(page, 'calibrate');
       await page.evaluate(() => IL.go('#calibrate/touch-off'));
       await page.waitForSelector('#to-pitch', { state: 'visible', timeout: 15000 });

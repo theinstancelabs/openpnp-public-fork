@@ -700,6 +700,11 @@
     out.cam = all.find((t) => t.kind === 'camera') || null;
     return out;
   };
+  /** A cup, as the engine reads a place's name (OutputZones.CUP): "cup" or "scale" as a part of it ("cup2", "scale-1"; not "cupboard"). */
+  IL.isCupPlace = (name) => /(^|[-_])(cup|scale)([-_0-9]|$)/i.test(String(name || ''));
+  /** A place where paste may go with nothing under it (OutputZones.isSinkPlace): the waste, the towel or a cup. */
+  IL.isSinkPlace = (name, d) => !!name && (String(name).toLowerCase() === String((d && d.wasteLocationName) || 'waste').toLowerCase()
+    || /^towel$/i.test(name) || IL.isCupPlace(name));
   /** mm from the dispenser needle (N2) to the waste place in X/Y, or null if either is unknown. */
   IL.wasteDistance = function (status) {
     const s = status || S.status;
