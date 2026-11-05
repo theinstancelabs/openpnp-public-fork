@@ -177,7 +177,7 @@
     const why = job ? 'Job boards take their position from OpenPnP'
       : !e ? 'Choose a design from the list first'   // also after "Other board file…": its fiducials come from the list
         : !f ? (e.fiducials ? 'This board has no fiducials: use the camera X/Y on its origin, or type it' : 'The list has no fiducial positions for this design')
-          : IL.lockReason(s, { connected: true, pressureOff: false }) || (!cam ? 'No top camera position' : null);
+          : (IL.runFlow && IL.runFlow.chaining() ? 'Start is under way' : IL.lockReason(s, { connected: true, pressureOff: false })) || (!cam ? 'No top camera position' : null);
     IL.gate(st.fid, why);
     if (!why) IL.setAttr(st.fid, 'title', 'Board origin X/Y from the top camera centred on ' + name + ' (board ' + IL.fmt(f.bx, 2) + ', ' + IL.fmt(f.by, 2)
       + ' mm) and the rotation entered: jog the camera onto ' + name + ' in OpenPnP first');
@@ -219,7 +219,8 @@
         else loadThumb(img);
       }
     }
-    const lock = IL.taskRunning(IL.S.status) ? 'Locked while the ' + ((IL.S.status.run && IL.S.status.run.label) || 'task') + ' runs' : null;
+    const lock = IL.runFlow && IL.runFlow.chaining() ? 'Start is under way'
+      : IL.taskRunning(IL.S.status) ? 'Locked while the ' + ((IL.S.status.run && IL.S.status.run.label) || 'task') + ' runs' : null;
     for (const btn of st.thumbs.querySelectorAll('button.board-thumb')) {
       IL.setAttr(btn, 'aria-pressed', String(btn.dataset.board === sel));
       if (btn.disabled !== !!lock) btn.disabled = !!lock;

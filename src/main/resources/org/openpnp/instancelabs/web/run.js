@@ -377,6 +377,8 @@
     IL.setPlan(p);
     return p;
   }
+  /** A task, or Start under way (its chain plans, finds and pastes its design): the board, its position and its plan stay. */
+  const boardLock = (s, o) => (IL.runFlow && IL.runFlow.chaining() ? 'Start is under way' : IL.lockReason(s, o || { pressureOff: false }));
   /** Plan again with the plan's own board and position (also after "Plan forgotten"). */
   async function planAgain() {
     const src = (plan() && plan().source) || lsJson('il.run.source', null);
@@ -658,8 +660,8 @@
     IL.setAttr(n.title, 'title', title || null);
     IL.keyed(n.meta, mode + '|' + meta.map((m) => m.textContent).join('|'), () => meta);
     IL.show(n.meta, mode !== 'live');
-    // Change board / Plan again: locked while a task runs
-    const lock = IL.lockReason(s, { pressureOff: false });
+    // Change board / Plan again: locked while a task runs or Start is under way
+    const lock = boardLock(s);
     IL.gate(n.change, lock);
     IL.gate(n.again, lock || (!p && !lsJson('il.run.source', null) ? 'Plan a board first' : null));
   }
@@ -1427,7 +1429,7 @@
     }
     // capture buttons name the live value they take
     const pos = IL.positions(s);
-    const capLock = job ? 'Job boards take their position from OpenPnP' : IL.lockReason(s, { connected: true, pressureOff: false });
+    const capLock = job ? 'Job boards take their position from OpenPnP' : boardLock(s, { connected: true, pressureOff: false });
     setBtnLabel($('btn-board-use-cam'), [IL.icon('i-capture'), el('span', {}, 'Use camera X/Y ', el('b', { text: pos.cam ? fmtMmV(pos.cam.x) + ', ' + fmtMmV(pos.cam.y) : '—' }))]);
     setBtnLabel($('btn-board-use-n1z'), [IL.icon('i-capture'), el('span', {}, 'Use live N1 Z ', el('b', { text: pos.n1 ? fmtMmV(pos.n1.z) : '—' }))]);
     IL.gate($('btn-board-use-cam'), capLock || (!pos.cam ? 'No top camera position' : null));
@@ -1436,8 +1438,8 @@
     const why = $('board-capture-why');
     IL.setText(why, !job && capLock ? capLock : '');
     IL.show(why, !job && !!capLock);
-    // Plan: locked while a task runs
-    const lock = IL.lockReason(s, { pressureOff: false }) || (!c ? (R.form.sel === 'other' ? 'Type the board file first' : 'Choose a design first') : null);
+    // Plan: locked while a task runs or Start is under way
+    const lock = boardLock(s) || (!c ? (R.form.sel === 'other' ? 'Type the board file first' : 'Choose a design first') : null);
     IL.gate($('btn-plan'), lock, $('plan-why'));
     IL.setText($('plan-next-hint'), S.newSeatAtMs && !job ? 'then: register the board' : '');
     // under the Board top Z: where a prefill came from, and the window and needle-frame check of the plan shown
@@ -1452,8 +1454,8 @@
       IL.setClass(zn, 'field__h' + (bad ? ' field__h--block' : ''));
       IL.show(zn, !!text);
     }
-    // board select and position fields are locked while a task runs (the reason shows under Plan)
-    const taskLock = IL.lockReason(s, { pressureOff: false });
+    // board select and position fields are locked while a task runs or Start is under way (the reason shows under Plan)
+    const taskLock = boardLock(s);
     for (const id of ['board-select', 'board-x', 'board-y', 'board-z', 'board-rot', 'board-file']) {
       const i = $(id);
       if (i && i.disabled !== !!taskLock) i.disabled = !!taskLock;
