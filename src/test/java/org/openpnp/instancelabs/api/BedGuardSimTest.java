@@ -357,6 +357,72 @@ public class BedGuardSimTest {
     }
 
     /**
+     * An M410 whose ok is lost (a timeout) may have stopped the head short: where it is is not known, so the next batch
+     * with moves is refused until an M400 alone re-reads it (review 2 MINOR 3; before, it was walked from the old
+     * target). The ok is held until the batch has timed out, so nothing waits on a clock.
+     */
+    @Test
+    public void anM410WhoseOkIsLostLeavesThePlaceUnknown() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\",\"M400\"]}", token);
+        CountDownLatch held = new CountDownLatch(1);
+        sim.server.holdOkUntil.put("M410", held);
+        try {
+            call("POST", "/api/gcode", "{\"lines\":[\"G1 X150 Y300 F3000\",\"M410\"],\"timeoutMs\":1000}", token);
+            assertEquals(504, status, body);
+        }
+        finally {
+            held.countDown();
+        }
+        sim.server.mark();
+        JsonObject r = call("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\"],\"timeoutMs\":1000}", token);
+        assertEquals(List.of(), motionSent(), "nothing sent: " + body);
+        collision(null, r);
+        assertTrue(r.get("why").getAsString().contains("cut short"), body);
+    }
+
+    /**
+     * The same for an M410 in flight when the batch is stopped (the route's time bound: the machine stays on): the
+     * next batch with moves is refused (review 2 MINOR 3, the interrupted line).
+     */
+    @Test
+    public void anInterruptedM410LeavesThePlaceUnknown() throws Exception {
+        start(BedFixture.text());
+        String token = acquire();
+        ok("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\",\"M400\"]}", token);
+        CountDownLatch held = new CountDownLatch(1);
+        sim.server.holdOkUntil.put("M410", held);
+        sim.server.mark();
+        CompletableFuture<Integer> batch = CompletableFuture.supplyAsync(() -> {
+            try {
+                call("POST", "/api/gcode", "{\"lines\":[\"G1 X150 Y300 F3000\",\"M410\"]}", token);
+                return status;
+            }
+            catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        try {
+            long t0 = System.currentTimeMillis();
+            while (!sim.server.sinceMark().contains("M410") && System.currentTimeMillis() - t0 < 10000) {
+                Thread.sleep(10);
+            }
+            assertTrue(api.getContext().passthrough.abort("the batch did not end in time"), "the batch runs");
+        }
+        finally {
+            held.countDown();
+        }
+        assertEquals(409, (int) batch.get(), "stopped");
+        assertTrue(Configuration.get().getMachine().isEnabled(), "the machine stays on");
+        sim.server.mark();
+        JsonObject r = call("POST", "/api/gcode", "{\"lines\":[\"G1 X100 Y300 F3000\"]}", token);
+        assertEquals(List.of(), motionSent(), "nothing sent: " + body);
+        collision(null, r);
+        assertTrue(r.get("why").getAsString().contains("cut short"), body);
+    }
+
+    /**
      * A batch stopped with its move in flight (a STOP, a take-over, the route's time bound) leaves where the head went
      * unknown, the machine still on after the time bound: no move until an M400 alone re-reads it (review MAJOR 1).
      */

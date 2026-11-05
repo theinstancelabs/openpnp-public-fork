@@ -372,7 +372,8 @@ final class GcodePassthrough {
                 synchronized (this) {
                     motionPending = motionPending || l.motion; // it may have been queued
                     positionStale = positionStale || l.frame;
-                    commanded = l.motion ? null : commanded;
+                    // an M410 whose ok is lost may still have stopped the head short (review 2 MINOR 3)
+                    commanded = l.motion || "M410".equals(l.text) ? null : commanded;
                 }
                 return new Outcome(why.contains("timeout") ? "controller-timeout" : "controller-error", results,
                         ms(t0), i, l.text, replies, why);
@@ -456,7 +457,7 @@ final class GcodePassthrough {
         synchronized (this) {
             motionPending = motionPending || l.motion;
             positionStale = positionStale || l.frame;
-            commanded = l.motion ? null : commanded;
+            commanded = l.motion || "M410".equals(l.text) ? null : commanded;
         }
         return new Outcome(stop.startsWith("lock-lost") ? "lock-lost" : "stopped", results, ms(t0), i, l.text, replies,
                 stop);
