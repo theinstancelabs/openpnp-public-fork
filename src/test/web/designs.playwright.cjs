@@ -744,12 +744,13 @@ async function uploadDesign(page, fileName, buffer, name, onPreview) {
     for (const u of READS) await page.unroute(u, abort);
     await page.evaluate(() => Promise.all([IL.loadRuns(), IL.loadConfig(), IL.loadEvents()]));
     check('(6f) core\'s loads with no answer (runs, config, events) say what failed, no "Outcome unknown … look at the machine"',
-      loads6.every((t) => noAdvice(t) && /^OpenPnP did not answer \(.*\)\.$/.test(t)), loads6);
+      loads6.every((t) => noAdvice(t) && /^OpenPnP did not answer \(no connection\)\.$/.test(t)), loads6);
     check('(6f) and Records\' runs line says it in those words', noAdvice(rec6) && rec6 === 'Could not load the runs: ' + loads6[0], { rec6, runs: loads6[0] });
-    check('(6f) the root, a read with no answer: IL.errorText says what failed, IL.refuse "Failed: …", neither "Outcome unknown … look at the machine"',
-      noAdvice(root6.getText) && /^OpenPnP did not answer \(.*\)\.$/.test(root6.getText) && noAdvice(root6.getBox) && root6.getBox === 'Failed: ' + root6.getText, root6);
+    // in plain words, not the browser's ("Failed to fetch": "Failed" twice in the box)
+    check('(6f) the root, a read with no answer: IL.errorText says what failed ("no connection", not the browser\'s words), IL.refuse "Failed: …", neither "Outcome unknown … look at the machine"',
+      noAdvice(root6.getText) && /^OpenPnP did not answer \(no connection\)\.$/.test(root6.getText) && noAdvice(root6.getBox) && root6.getBox === 'Failed: ' + root6.getText, root6);
     check('(6f) a write with no answer still says "Outcome unknown: look at the machine." (IL.errorText), IL.refuse "Outcome unknown: … Look at the machine."',
-      /^OpenPnP did not answer \(.*\)\. Outcome unknown: look at the machine\.$/.test(root6.postText) && /^Outcome unknown: OpenPnP did not answer \(.*\)\. Look at the machine\.$/.test(root6.postBox), root6);
+      /^OpenPnP did not answer \(no connection\)\. Outcome unknown: look at the machine\.$/.test(root6.postText) && /^Outcome unknown: OpenPnP did not answer \(no connection\)\. Look at the machine\.$/.test(root6.postBox), root6);
 
     // ---- (7) ----------------------------------------------------------------------------------------------------------
     const allowed = ['POST /api/test-no-answer', 'POST /api/boards/import', 'POST /api/boards/import/save', 'POST /api/boards/import/attach', 'POST /api/pad-profile/apply', 'POST /api/package-mappings',

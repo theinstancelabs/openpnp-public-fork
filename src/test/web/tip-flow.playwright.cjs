@@ -322,7 +322,7 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
     await runChecks(page, 30000);
     const lost5 = Object.assign({ reads: lostReads }, await stepOf(page, 'lands'));
     check('(5) a landing check it lost track of (ten reads with no answer) is not done: "… Outcome unknown: look at the machine."', lost5.reads === 10 && lost5.s !== 'done'
-      && /^OpenPnP did not answer .*\. Outcome unknown: look at the machine\.$/.test(lost5.d || ''), lost5);
+      && /^OpenPnP did not answer \(no connection\)\. Outcome unknown: look at the machine\.$/.test(lost5.d || ''), lost5);
     for (const u of ['**/api/tip-setups/*/picture', '**/api/pad-calibrations', '**/api/pad-calibrations/tf-*']) await page.unroute(u);
     await page.waitForSelector('#btn-tip-checks-start:enabled', { timeout: 10000 }).catch(() => null);
     await page.click('#btn-tip-checks-start');
