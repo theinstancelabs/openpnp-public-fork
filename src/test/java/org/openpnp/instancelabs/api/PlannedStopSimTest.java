@@ -319,6 +319,8 @@ public class PlannedStopSimTest {
         assertFalse(actions.contains("stays powered"), actions);
         assertTrue(actions.contains("the link was lost meanwhile: the screw's motor counts as off"), actions);
         assertTrue(r.getAsJsonArray("linesFailed").size() > 0, a.body());
+        assertFalse(ok("GET", "/api/machine", null).getAsJsonObject("screwMotorOff").get("atMs").isJsonNull(),
+                "the answer agrees with BR-93's record: the motor counts as off");
     }
 
     /**
