@@ -37,14 +37,14 @@ import com.google.gson.JsonObject;
  * <p>Rules (#19 review of BR-49: N1 and the needle share one Z axis, a see-saw): nothing moves unhomed, off, busy
  * (a task, a G-code batch, a pressure hold, a pad calibration) or switching off; one motion request at a time, checked
  * again on OpenPnP's machine thread; one press at most {@value #MAX_XY_MM} mm in X/Y and {@value #MAX_Z_MM} mm in Z;
- * X/Y only with both nozzles at travel height (their safe zones); no Z press without the engine and both its nozzles
- * (it holds the floors); a Z press puts BOTH nozzles where OpenPnP's transforms say and holds each to its floor at its
- * own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed surface under it (it may touch: the by-hand
- * probe), the needle with a current frame and its landing checked not below the surface where its tip lands (N2 + its
- * landing and trim; contact = surface + offset) nor the one under N2, nor its I4 floor, without them not below its
- * safe zone (none on Z: not lower at all); over the height switch (BR-94: the circle around its place; the needle
- * where its tip lands) neither below its safe zone, whatever its floor. Move-to travels at safe Z and ends at the
- * tool's safe Z (both nozzles at travel height). A STOP ends either at once; a move that saw one answers 409.</p>
+ * X/Y only with both nozzles at travel height (their safe zones; none on Z: no X/Y); no Z press without the engine and
+ * both its nozzles (it holds the floors); a Z press puts BOTH nozzles where OpenPnP's transforms say and holds each to
+ * its floor at its own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed surface under it (it may touch:
+ * the by-hand probe), the needle with a current frame and its landing checked not below the surface where its tip lands
+ * (N2 + its landing and trim; contact = surface + offset) nor the one under N2, nor its I4 floor, without them not
+ * below its safe zone (none on Z: not lower at all); over the height switch (BR-94: the circle around its place; the
+ * needle where its tip lands) neither below its safe zone, whatever its floor. Move-to travels at safe Z and ends at
+ * the tool's safe Z (both nozzles at travel height). A STOP ends either at once; a move that saw one answers 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
@@ -248,12 +248,19 @@ final class ControlEndpoints {
         }
     }
 
-    /** X/Y moves only with both nozzles at travel height: nothing is dragged across the bed (#19 review of BR-49). */
+    /**
+     * X/Y moves only with both nozzles at travel height: nothing is dragged across the bed (#19 review of BR-49); with
+     * no lower safe zone on Z there is no travel height, so no X/Y (BR-94 follow-up review, MAJOR 1).
+     */
     private void requireTravelHeight() throws ApiException {
         DispenseService svc = ctx.svcOrNull();
         for (HeadMountable n : nozzles(svc)) {
             double z = mm(n.getLocation()).getZ(), low = safeLow(n);
-            if (Double.isFinite(low) && z < low - 1e-6) {
+            if (!Double.isFinite(low)) {
+                throw ApiException.refused("Z has no lower safe zone in OpenPnP (the Z axis's Safe Zone): X and Y move "
+                        + "only at travel height");
+            }
+            if (z < low - 1e-6) {
                 throw ApiException.refused(String.format(Locale.ROOT, "%s is below its safe zone (Z %.2f, the zone "
                         + "starts at %.2f): raise it first; X and Y move only at travel height", name(svc, n), z, low));
             }

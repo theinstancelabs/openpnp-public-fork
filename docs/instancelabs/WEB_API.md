@@ -572,7 +572,8 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
   height) → `{tool, from: {x, y, z}, to: {x, y, z}, positions}`.
 - Refused (409, the reason in words): not started, unhomed (nothing moves), switching off, busy (OpenPnP, a task, a
   G-code batch, a pressure hold, a pad calibration), another move still running; X/Y while either nozzle is below
-  its safe zone (while the engine has not found both: every nozzle of the head, named as in OpenPnP); the camera's
+  its safe zone (while the engine has not found both: every nozzle of the head, named as in OpenPnP), and with no
+  lower safe zone on Z in OpenPnP at all (no travel height: `Z has no lower safe zone in OpenPnP …`); the camera's
   `dz`; a Z press while the dispense engine is not running (it holds the floors; a configuration load restarts it:
   one it left mid-press) or has not found N1 or the needle (`the dispense engine has not found the needle (no
   dispenser nozzle 'N9' in the machine): …`: a nozzle renamed in OpenPnP, or `nozzle` in the settings not matching;

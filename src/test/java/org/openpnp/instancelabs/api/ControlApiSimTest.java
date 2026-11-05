@@ -259,6 +259,30 @@ public class ControlApiSimTest {
     }
 
     /**
+     * BR-94 follow-up review (MAJOR 1, safety): with no lower safe zone on Z (OpenPnP's axis setting) X/Y skipped the
+     * travel-height rule: N1, 4 mm low beside the height switch, was moved into its circle (the needle with its frame
+     * too). With no travel height no X/Y press goes (OpenPnP refuses a move-to then itself).
+     */
+    @Test
+    public void withoutASafeZoneOnZNoToolMovesInXOrY() throws Exception {
+        needleFrameAndBlank();
+        ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        ReferenceControllerAxis axis = (ReferenceControllerAxis) ((AbstractHeadMountable) sim.n1).getAxisZ();
+        for (String tool : new String[] {"n1", "needle"}) {
+            axis.setSafeZoneLowEnabled(true);
+            ok(call("POST", "/api/move-to", "{\"tool\":\"" + tool + "\",\"x\":115,\"y\":100}", UI));
+            axis.setSafeZoneLowEnabled(false);
+            // 4 mm down 15 mm from the switch: no surface there, outside its circle
+            ok(call("POST", "/api/jog", "{\"tool\":\"" + tool + "\",\"dz\":-2}", UI));
+            ok(call("POST", "/api/jog", "{\"tool\":\"" + tool + "\",\"dz\":-2}", UI));
+            double x = loc(sim.n1).getX();
+            refused(409, "Z has no lower safe zone in OpenPnP (the Z axis's Safe Zone): X and Y move only at travel "
+                    + "height", call("POST", "/api/jog", "{\"tool\":\"" + tool + "\",\"dx\":-10}", UI));
+            assertEquals(x, loc(sim.n1).getX(), 1e-6, tool + ": nothing moved");
+        }
+    }
+
+    /**
      * BR-94: over the height switch (its place's circle) neither tool goes below its safe zone, also through the
      * see-saw, whatever its floor would allow (only the measure presses the switch); up is allowed; below its zone a
      * tool moves no X/Y at all, so never into the circle.
