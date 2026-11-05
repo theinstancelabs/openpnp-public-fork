@@ -284,8 +284,15 @@ public class HeightSwitchTest {
         assertEquals(Integer.valueOf(0), HeightSwitch.level(Arrays.asList(
                 "PIN: PA5  (A9)   M42 P53          <unused/unknown>                       Input  = 0", "ok")));
         assertEquals(Integer.valueOf(1), HeightSwitch.level(Arrays.asList("PIN: PA5 M42 P53 Input = 1", "ok")));
-        assertEquals(Integer.valueOf(1), HeightSwitch.level(Arrays.asList("PIN: PA5 M42 P53 Analog in = 4000")));
-        assertEquals(Integer.valueOf(0), HeightSwitch.level(Arrays.asList("PIN: PA5 M42 P53 Analog in = 12")));
+        // the PA5 source check (11-04): an input with its pull-up reads "Input = 0|1"; "Analog in" means the pin left
+        // input mode (no pull-up), "Output" that something drives it, "protected" that the firmware won't read it: no
+        // level to trust in any of them
+        assertThrows(IllegalStateException.class, () -> HeightSwitch.level(Arrays.asList(
+                "PIN: PA5 M42 P53 Analog in = 4000")), "analog mode");
+        assertThrows(IllegalStateException.class, () -> HeightSwitch.level(Arrays.asList(
+                "PIN: PA5  (A9)   M42 P53          <unused/unknown>                       Output = 1")), "an output");
+        assertThrows(IllegalStateException.class, () -> HeightSwitch.level(Arrays.asList(
+                "PIN: PA5  (A9)   M42 P53          <unused/unknown>  protected  Input  = 1")), "protected");
         assertThrows(IllegalStateException.class, () -> HeightSwitch.level(Arrays.asList("PIN: PC0 Input = 1")),
                 "a reply that names another pin");
         assertThrows(IllegalStateException.class, () -> HeightSwitch.level(Arrays.asList("ok")));

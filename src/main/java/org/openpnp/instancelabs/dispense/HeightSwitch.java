@@ -40,7 +40,7 @@ public final class HeightSwitch {
     public static final int MIN_ACCEPTED = 5;
     public static final double MAX_RANGE_MM = 0.05;
     private static final Pattern INPUT = Pattern.compile("Input\\s*=\\s*(\\d+|HIGH|LOW)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern ANALOG = Pattern.compile("Analog in\\s*=\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern NOT_AN_INPUT = Pattern.compile("Analog in|Output|protected", Pattern.CASE_INSENSITIVE);
 
     private HeightSwitch() {
     }
@@ -216,22 +216,23 @@ public final class HeightSwitch {
     }
 
     /**
-     * PA5's level in an M43 reply: 1 high, 0 low (a digital "Input = 0/1", or an analog "Analog in = N" of 12 bits).
-     * Throws when the reply names no PA5 or no level.
+     * PA5's level in an M43 reply: 1 high, 0 low, from its "Input = 0|1". Throws when the reply names no PA5 or no
+     * input level: "Analog in" (the pin left input mode, so no pull-up), "Output" (something drives it) and
+     * "protected" (the firmware will not read it) give no level to trust (the PA5 source check, 11-04).
      */
     public static Integer level(List<String> reply) {
         String t = String.join(" ", reply);
         if (!t.contains("PA5")) {
             throw new IllegalStateException("the M43 reply does not name PA5: " + abbreviate(t));
         }
+        Matcher bad = NOT_AN_INPUT.matcher(t);
+        if (bad.find()) {
+            throw new IllegalStateException("PA5 is not a readable input (" + bad.group() + "): " + abbreviate(t));
+        }
         Matcher m = INPUT.matcher(t);
         if (m.find()) {
             String v = m.group(1).toUpperCase(Locale.ROOT);
             return "LOW".equals(v) || "0".equals(v) ? 0 : 1;
-        }
-        m = ANALOG.matcher(t);
-        if (m.find()) {
-            return Integer.parseInt(m.group(1)) > 2048 ? 1 : 0;
         }
         throw new IllegalStateException("no pin level in the M43 reply: " + abbreviate(t));
     }
