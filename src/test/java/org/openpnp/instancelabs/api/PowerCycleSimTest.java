@@ -1619,6 +1619,85 @@ public class PowerCycleSimTest {
     }
 
     /**
+     * BR-97 review 3 (MAJOR, the review's probe): a home there whose G28 runs but that ends unhomed leaves OpenPnP's
+     * homed state as it was, yet Z is 31.5 in the frame G28 set: the lines walked from the old Z stop before the first
+     * (sent, "G1 Z1" would be a 30.5 mm move).
+     */
+    @Test
+    public void aHomeThatEndsUnhomedBetweenTheChecksAndTheSendStopsTheBatch() throws Exception {
+        powerCycle();
+        lockForProcess();
+        org.openpnp.spi.base.AbstractHead head = (org.openpnp.spi.base.AbstractHead) sim.machine.getDefaultHead();
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            try {
+                sim.machine.execute(() -> {
+                    svc.getControllerReset().homeStarted();
+                    head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod
+                            .ResetToFiducialLocation);
+                    try {
+                        sim.machine.home();
+                    }
+                    catch (Exception e) {
+                        // the visual homing fails: the home ends unhomed after its G28
+                    }
+                    finally {
+                        head.setVisualHomingMethod(org.openpnp.spi.base.AbstractHead.VisualHomingMethod.None);
+                    }
+                    return null;
+                });
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", level("w", 1));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.machine.isHomed(), "the home ended unhomed");
+        assertTrue(String.valueOf(sim.server.sinceMark()).contains("G28"), "its G28 ran: " + sim.server.sinceMark());
+        assertFalse(sim.server.sinceMark().contains("G1 Z1 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(31.5, sim.server.position('Z'), 1e-9);
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z moved after the lines were checked"), lastBody);
+    }
+
+    /**
+     * BR-97 review 3: a power cycle there (OpenPnP Stop, the controller boots at Z 0, Start) leaves the machine on and
+     * unhomed as before: the lines walked from Z 3 stop before the first (sent, "G1 Z4" would be a 4 mm move).
+     */
+    @Test
+    public void aResetBetweenTheChecksAndTheSendStopsTheBatch() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, 3);
+        GcodePassthrough.submitHook = () -> {
+            GcodePassthrough.submitHook = null;
+            try {
+                powerCycle();
+            }
+            catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            sim.server.mark();
+            call("POST", "/api/gcode", level("w", 4));
+        }
+        finally {
+            GcodePassthrough.submitHook = null;
+        }
+        assertFalse(sim.server.sinceMark().contains("G1 Z4 F300"), "nothing of the batch: " + sim.server.sinceMark());
+        assertEquals(0, sim.server.position('Z'), 1e-9, "the boot Z");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("Z moved after the lines were checked"), lastBody);
+    }
+
+    /**
      * BR-97 review: without the engine nothing journals a levelling call (Z_LEVEL) or keeps the reset on record: the
      * call is refused (409) and nothing is sent.
      */
