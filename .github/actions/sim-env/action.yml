@@ -88,13 +88,16 @@ runs:
         echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/pw-browsers" >> "$GITHUB_ENV"
         export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/pw-browsers"
         npm install --prefix "$PW" --no-audit --no-fund "playwright@$PLAYWRIGHT_VERSION" >/dev/null
-        # --with-deps runs apt-get, which hung on a stalled Ubuntu mirror for a leg's whole 100 min (run 42078968125):
-        # each try is cut after 10 min (with apt-get under it: timeout signals its process group), 3 tries
+        # The system packages' apt-get hung on a stalled Ubuntu mirror for a leg's whole 100 min (run 42078968125): each
+        # half is cut after 5 min, 3 tries. The cut of install-deps runs inside sudo: as root, it stops apt-get, which a
+        # timeout outside sudo cannot signal (sudo with no pty passes a TERM to its direct child only).
+        cap="${PW_INSTALL_TIMEOUT_S:-300}" pw="$PW/node_modules/.bin/playwright"
         for try in 1 2 3; do
-          timeout -k 30 "${PW_INSTALL_TIMEOUT_S:-600}" "$PW/node_modules/.bin/playwright" install --with-deps chromium \
-            && break
-          [ "$try" -lt 3 ] || { echo "::error::playwright install --with-deps failed or stalled 3 times"; exit 1; }
-          echo "::warning::playwright install --with-deps failed or stalled (try $try of 3): trying again"
+          sudo env "PATH=$PATH" timeout -k 30 "$cap" "$pw" install-deps chromium \
+            && timeout -k 30 "$cap" "$pw" install chromium && break
+          [ "$try" -lt 3 ] || { echo "::error::playwright install-deps or install failed or stalled 3 times"; exit 1; }
+          echo "::warning::playwright install-deps or install failed or stalled (try $try of 3): trying again"
+          sudo dpkg --configure -a || true  # a cut inside dpkg leaves "dpkg was interrupted"
         done
 
     - name: Fonts like the lab computer (system-ui and sans-serif = Noto Sans)
@@ -103,7 +106,7 @@ runs:
       if: inputs.playwright == 'true'
       shell: bash
       run: |
-        sudo apt-get install -y -q fonts-noto-core fonts-dejavu-core >/dev/null
+        sudo timeout -k 30 300 apt-get install -y -q fonts-noto-core fonts-dejavu-core >/dev/null  # a stalled mirror
         mkdir -p ~/.config/fontconfig
         cat > ~/.config/fontconfig/fonts.conf <<'EOF'
         <?xml version="1.0"?>
