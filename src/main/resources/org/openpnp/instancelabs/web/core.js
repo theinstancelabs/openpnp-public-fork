@@ -465,11 +465,12 @@
 
   // ================================================================================== API
   class ApiError extends Error {
-    constructor(status, data, fallback) {
+    constructor(status, data, fallback, method) {
       super((data && (data.reason || data.message)) || fallback);
       this.status = status;
       this.data = data;
       this.code = data && data.error;
+      this.method = method || null;   // 'GET': a read, which changed nothing on the machine
     }
   }
   IL.ApiError = ApiError;
@@ -494,18 +495,19 @@
     } catch (e) {
       const timeout = ctl.signal.aborted;
       throw new ApiError(0, { error: timeout ? 'timeout' : 'network' },
-        timeout ? 'No answer from OpenPnP within ' + Math.round(ms / 100) / 10 + ' s.' : 'OpenPnP did not answer (' + e.message + ').');
+        timeout ? 'No answer from OpenPnP within ' + Math.round(ms / 100) / 10 + ' s.' : 'OpenPnP did not answer (' + e.message + ').', method);
     } finally {
       clearTimeout(timer);
     }
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-    if (!r.ok) throw new ApiError(r.status, data, r.status + ' ' + r.statusText);
+    if (!r.ok) throw new ApiError(r.status, data, r.status + ' ' + r.statusText, method);
     return data;
   };
   /** One line for an error: the reason, the interlock violations joined, or "outcome unknown" without an answer. */
   IL.errorText = function (e) {
     if (!e) return '';
+    if (e.method === 'GET') return IL.readErrorText(e);   // every read's failure, wherever it is shown
     if (e.status === 0) return e.message + ' Outcome unknown: look at the machine.';
     let msg = e.message || String(e);
     const il = e.data && e.data.interlocks;
@@ -2939,7 +2941,7 @@
   /** Shows an error: toast + activity, and the inline refusal box (with fix-its per I-code) in opts.host. */
   IL.refuse = function (e, opts) {
     const o = opts || {};
-    const unknown = e && e.status === 0;
+    const unknown = e && e.status === 0 && e.method !== 'GET';
     const head = unknown ? 'Outcome unknown' : e && e.status === 409 ? 'Refused' : e && e.status === 400 ? 'Not accepted' : 'Failed';
     // "Outcome unknown" once: the head says it, the line says what happened and what to do
     const line = unknown ? e.message + ' Look at the machine.' : IL.errorText(e);
