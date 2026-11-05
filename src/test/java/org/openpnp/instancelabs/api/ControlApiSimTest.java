@@ -247,6 +247,31 @@ public class ControlApiSimTest {
         }
     }
 
+    /**
+     * BR-94: over the height switch (its place's circle) neither tool goes below its safe zone, also through the
+     * see-saw, whatever its floor would allow (only the measure presses the switch); up is allowed; below its zone a
+     * tool moves no X/Y at all, so never into the circle.
+     */
+    @Test
+    public void overTheHeightSwitchNeitherToolGoesBelowItsSafeZone() throws Exception {
+        needleFrameAndBlank(); // the needle's floor is its frame's then (1.81), far below its safe zone
+        ok(call("PUT", "/api/locations/height-switch", "{\"x\":100,\"y\":100,\"z\":0}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"n1\",\"place\":\"height-switch\"}", UI));
+        double z = loc(sim.n1).getZ();
+        refused(409, "over the height switch", call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":-1}", UI));
+        Res seeSaw = call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":1}", UI);
+        refused(409, "over the height switch", seeSaw);
+        assertTrue(seeSaw.body.contains("N1 at Z") && seeSaw.body.contains("share one Z"), seeSaw.toString());
+        assertEquals(z, loc(sim.n1).getZ(), 1e-6, "nothing moved");
+        ok(call("POST", "/api/jog", "{\"tool\":\"n1\",\"dz\":1}", UI));
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"place\":\"height-switch\"}", UI));
+        refused(409, "over the height switch", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-1}", UI));
+        // 30 mm away the needle goes below its zone to its frame's floor as before, and then moves no X/Y
+        ok(call("POST", "/api/move-to", "{\"tool\":\"needle\",\"x\":130,\"y\":100}", UI));
+        ok(call("POST", "/api/jog", "{\"tool\":\"needle\",\"dz\":-2}", UI));
+        refused(409, "travel height", call("POST", "/api/jog", "{\"tool\":\"needle\",\"dx\":-10}", UI));
+    }
+
     /** #19 review of BR-49, MINOR 7: a real unhomed state (STOP, then Start), not a faked flag. */
     @Test
     public void afterAStopAndStartNothingMovesUntilHomed() throws Exception {

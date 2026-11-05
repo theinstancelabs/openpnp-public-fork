@@ -13,6 +13,7 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
+import org.openpnp.instancelabs.dispense.HeightSwitch;
 import org.openpnp.instancelabs.dispense.SurfacePlane;
 import org.openpnp.model.AxesLocation;
 import org.openpnp.model.LengthUnit;
@@ -39,9 +40,9 @@ import com.google.gson.JsonObject;
  * X/Y only with both nozzles at travel height (their safe zones); a Z press puts BOTH nozzles where OpenPnP's
  * transforms say and holds each to its floor at its own X/Y: N1 at most {@value #N1_BELOW_SURFACE_MM} mm below a probed
  * surface under it (it may touch: the by-hand probe), the needle with a current frame not below the surface under it
- * (contact = surface + offset) nor its I4 floor, without one not below its safe zone. Move-to travels at safe Z and
- * ends at the tool's safe Z (both nozzles at travel height). A STOP ends either at once; a move that saw one answers
- * 409.</p>
+ * (contact = surface + offset) nor its I4 floor, without one not below its safe zone; over the height switch (BR-94:
+ * the circle around its place) neither below its safe zone, whatever its floor. Move-to travels at safe Z and ends at
+ * the tool's safe Z (both nozzles at travel height). A STOP ends either at once; a move that saw one answers 409.</p>
  */
 final class ControlEndpoints {
     static final double MAX_XY_MM = 10;
@@ -263,6 +264,13 @@ final class ControlEndpoints {
             if (at.getZ() >= mm(n.getLocation()).getZ() - 1e-9) {
                 continue; // going up (or not moving): always allowed, also out of a spot below a floor that rose
             }
+            double low = safeLow(n);
+            if (Double.isFinite(low) && at.getZ() < low - 1e-6 && overHeightSwitch(at.getX(), at.getY())) {
+                throw ApiException.refused(String.format(Locale.ROOT, "that would put %s at Z %.2f over the height "
+                        + "switch (%.1f, %.1f), below its safe zone %.2f: only its measure presses it (POST "
+                        + "/api/height-switch/measure)%s", name(n), at.getZ(), at.getX(), at.getY(), low,
+                        n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
+            }
             boolean needle = isNeedle(n);
             double floor = needle ? needleFloor(n, at.getX(), at.getY()) : n1Floor(at.getX(), at.getY());
             if (Double.isFinite(floor) && at.getZ() < floor - 1e-9) {
@@ -272,6 +280,14 @@ final class ControlEndpoints {
                         n == hm ? "" : ": N1 and the needle share one Z (raising one lowers the other)"));
             }
         }
+    }
+
+    /** BR-94: (x, y) lies in the height switch's circle (its place, once set). */
+    private boolean overHeightSwitch(double x, double y) {
+        DispenseService svc = ctx.svcOrNull();
+        DispenseConfig c = svc == null ? null : svc.getConfig();
+        DispenseConfig.NamedLocation p = c == null ? null : c.location(HeightSwitch.PLACE);
+        return p != null && Math.hypot(x - p.x, y - p.y) <= c.outputZones.heightSwitchRadiusMm;
     }
 
     /** N1 at most 0.5 mm below a probed surface under it (it may touch: the by-hand probe); NaN: none known there. */
