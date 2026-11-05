@@ -271,7 +271,7 @@
         b.addEventListener('click', () => choose(x, b));
         return b;
       });
-      const note = R.boardsErr ? [el('p', { class: 'reason reason--need rf-note', text: 'Could not read the list again (' + R.boardsErr + '): these are the designs from before.' })] : [];
+      const note = R.boardsErr ? [el('p', { class: 'reason reason--need rf-note', text: 'Could not read the designs again, so these are the ones from before. ' + R.boardsErr })] : [];
       return note.concat(cards, el('a', { class: 'design design--new', id: 'rs-new-design', href: '#designs' }, IL.icon('i-plus'), 'New design'));
     });
     // Load side 1
