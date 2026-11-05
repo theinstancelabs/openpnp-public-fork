@@ -242,6 +242,8 @@ public class DispenseConfig {
     public CalibrationArea calibrationArea = new CalibrationArea();
     /** Limits and sizes of the pad calibration. */
     public PadCalibrationSettings padCalibration = new PadCalibrationSettings();
+    /** BR-102: the two USB cameras the engine serves beside OpenPnP's top and bottom (the UI's 2×2 view). */
+    public UsbCameraSettings usbCameras = new UsbCameraSettings();
 
     public static final String HOME_WHEN_NEEDED = "whenNeeded";
     public static final String HOME_ALWAYS = "always";
@@ -474,6 +476,37 @@ public class DispenseConfig {
         public int readDelayMs = 70;
         /** Proven bare spots per board file name: 3..9 [bx, by] pairs in board mm (replace the computed ones). */
         public Map<String, java.util.List<double[]>> boardSpots = new LinkedHashMap<>();
+    }
+
+    /**
+     * BR-102: {@code machine} (the front view of the whole machine) and {@code gauge} (the regulator close-up); a
+     * camera left null is not listed (no defaults). The API checks each device's rules ({@code UsbCameras.refusal}).
+     */
+    public static class UsbCameraSettings {
+        public UsbCamera machine;
+        public UsbCamera gauge;
+        /** A camera is released this long after its last frame request (bench tools and previews open it then). */
+        public int idleReleaseMs = 30_000;
+        /** How long a frame request waits for its frame ({@code after=}, a USB camera opening) before 504. */
+        public int frameWaitMs = 5_000;
+
+        /** The camera {@code id} names ("machine" or "gauge"), or null. */
+        public UsbCamera get(String id) {
+            return "machine".equals(id) ? machine : "gauge".equals(id) ? gauge : null;
+        }
+    }
+
+    /** One USB camera: its device and the mode it is opened in. */
+    public static class UsbCamera {
+        /** {@code /dev/v4l/by-id/…} (a /dev/videoN renumbers), or in a simulated session {@code file:} a JPEG. */
+        public String device;
+        /** MJPG only: the cameras share USB hub 3-1 with top and bottom, and YUYV at these sizes overloads it. */
+        public String fourcc = "MJPG";
+        public int width, height;
+
+        public String mode() {
+            return fourcc + " " + width + "x" + height;
+        }
     }
 
     public static class NamedLocation {
@@ -965,6 +998,13 @@ public class DispenseConfig {
         }
         if (pasteThicknessMm <= 0 || pasteDensityMgMm3 <= 0) {
             p.add("paste thickness and density must be > 0");
+        }
+        if (usbCameras == null) {
+            p.add("usbCameras must be an object");
+        }
+        else if (!(usbCameras.idleReleaseMs >= 5_000 && usbCameras.idleReleaseMs <= 600_000
+                && usbCameras.frameWaitMs >= 500 && usbCameras.frameWaitMs <= 30_000)) {
+            p.add("usbCameras: idleReleaseMs 5000..600000 and frameWaitMs 500..30000");
         }
         validateRegistration(p);
         validatePadCalibration(p);

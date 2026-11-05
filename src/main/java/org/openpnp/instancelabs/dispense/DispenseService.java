@@ -1239,6 +1239,11 @@ public final class DispenseService {
         return cfg.tip.key;
     }
 
+    /** BR-102: the USB cameras' settings, without copying the configuration (read per frame request). */
+    public DispenseConfig.UsbCameraSettings usbCameras() {
+        return cfg.usbCameras;
+    }
+
     /**
      * Validates, saves to dispense-config.json and applies a new configuration. A changed start
      * angle or needle XY trim is stamped with the time it was set (calibration values). A
