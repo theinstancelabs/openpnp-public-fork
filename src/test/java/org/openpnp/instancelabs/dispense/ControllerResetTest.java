@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -768,13 +769,14 @@ public class ControllerResetTest {
         now = 3000;
         restarted.homed();
         assertEquals(7.0, restarted.levelReference(7), 1e-9, "a home: taken afresh");
-        assertEquals(9.0, run(false, false).levelReference(9), 1e-9, "homed since the reset: no boot Z after a restart");
+        assertEquals(7.0, run(false, false).levelReference(9), 1e-9, "homed since the reset: no boot Z after a "
+                + "restart, the Z taken since is on record");
     }
 
     /**
      * BR-97 x BR-93: a lost link keeps the levelling reference and the reconnect decides: a powered controller keeps
-     * it, the boot position read sets Marlin's boot Z 0, an unread reconnect (a possible reset) takes it afresh. Not
-     * checked here, a known gap filed under BR-97: after a restart the loss's row clears it, as an unread connect's does.
+     * it, the boot position read sets Marlin's boot Z 0, an unread reconnect (a possible reset) takes it afresh. The
+     * reference kept is on record after the loss's row (BR-97 follow-up), so a restart keeps it too.
      */
     @Test
     public void aLostLinkKeepsTheLevellingReferenceUntilTheReconnectDecides() {
@@ -783,6 +785,8 @@ public class ControllerResetTest {
         now = 1000;
         r.linkLost(1000, "the link ended");
         assertEquals(20.0, r.levelReference(5), 1e-9, "a lost link moves no frame by itself");
+        r.flush(); // the journal thread's write
+        assertEquals(20.0, run(false, false).levelReference(5), 1e-9, "after a restart too");
         now = 1500;
         r.connected(reply("X:0.0000 Y:0.0000 Z:5.0000 A:720.0000 B:720.0000 Count X:0 Y:0 Z:0"), 'B', null);
         assertEquals(20.0, r.levelReference(5), 1e-9, "a powered controller: kept");
@@ -790,10 +794,70 @@ public class ControllerResetTest {
         r.linkLost(2000, "the link ended");
         r.connected(reply(BOOT), 'B', null);
         assertEquals(0.0, r.levelReference(5), 1e-9, "a reset the reconnect detects: Marlin's boot Z 0");
+        assertEquals(0.0, run(false, false).levelReference(5), 1e-9, "after a restart too: the reset followed the "
+                + "loss");
         now = 3000;
         r.linkLost(3000, "the link ended");
         r.connected(null, 'B', "timeout");
         assertEquals(12.0, r.levelReference(12), 1e-9, "an unread reconnect: a possible reset, taken afresh");
+    }
+
+    /**
+     * BR-97 follow-up: a levelling reference on record (LEVEL_REF: taken afresh, or kept by a lost link) is read back
+     * at a restart unless a row that ends one follows it in the journal: a reset (then Marlin's boot Z 0), a possible
+     * reset (an unread connect, a lost link), a home's start or a home (then taken afresh). The journal's order
+     * decides, also in one ms: a lost link writes its LEVEL_REF right after its POSITION_UNREAD row, in that row's ms.
+     */
+    @Test
+    public void aLevellingReferenceOnRecordOutlivesARestartUntilARowEndsIt() {
+        ControllerReset.Event ref = new ControllerReset.Event(ControllerReset.EVENT_LEVEL_REF, 2000,
+                "levelling reference Z 20.0000 (a test)");
+        for (String code : new String[] {ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
+                ControllerReset.EVENT_HOME_STARTED, ControllerReset.EVENT_KNOWN}) {
+            double ended = ControllerReset.EVENT_RESET.equals(code) ? 0 : 12; // else taken afresh: the call's Z 12
+            assertEquals(20.0, replay(row(code, 1000), ref).levelReference(12), 1e-9, "after " + code);
+            assertEquals(20.0, replay(row(code, 2000), ref).levelReference(12), 1e-9, "after " + code + ", one ms");
+            assertEquals(ended, replay(ref, row(code, 2000)).levelReference(12), 1e-9, "before " + code + ", one ms");
+            assertEquals(ended, replay(ref, row(code, 3000)).levelReference(12), 1e-9, "before " + code);
+        }
+        assertEquals(20.0, replay(ref).levelReference(12), 1e-9, "nothing ended it");
+        // a message whose Z cannot be read counts as no reference: the next levelling call takes it afresh
+        assertEquals(12.0, replay(row(ControllerReset.EVENT_UNREAD, 1000), new ControllerReset.Event(
+                ControllerReset.EVENT_LEVEL_REF, 2000, "levelling reference Z twenty (a test)")).levelReference(12),
+                1e-9);
+    }
+
+    /** An engine that starts on this journal (the newest row of each code, oldest first). */
+    ControllerReset replay(ControllerReset.Event... history) {
+        return new ControllerReset(() -> now, false, false, Arrays.asList(history), journal::add);
+    }
+
+    static ControllerReset.Event row(String code, long atMs) {
+        return new ControllerReset.Event(code, atMs, "a test");
+    }
+
+    /**
+     * BR-97 follow-up: a reference taken afresh goes on record first: when its row cannot be written the call fails and
+     * the reference is not taken (the next call writes it). A home whose start is not on record (OpenPnP's own Home
+     * button) ends one on record too.
+     */
+    @Test
+    public void aLevellingReferenceIsTakenOnlyOnRecord() {
+        boolean[] full = {true};
+        ControllerReset r = new ControllerReset(() -> now, false, false, null, e -> {
+            if (full[0] && ControllerReset.EVENT_LEVEL_REF.equals(e.code)) {
+                throw new IllegalStateException("disk full");
+            }
+            journal.add(e);
+        });
+        now = 1000;
+        assertThrows(IllegalStateException.class, () -> r.levelReference(20));
+        full[0] = false;
+        assertEquals(5.0, r.levelReference(5), 1e-9, "not taken: the next call takes it");
+        assertEquals(5.0, run(false, false).levelReference(9), 1e-9, "on record");
+        now = 2000;
+        r.homed(); // OpenPnP's own Home button: no home's start on record, the position known all along
+        assertEquals(9.0, run(false, false).levelReference(9), 1e-9, "that home ended it, on record too");
     }
 
     /**

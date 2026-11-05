@@ -65,8 +65,9 @@ import java.util.regex.Pattern;
  * measures it turns it; {@link #whyNoAngle}): the angle shown before it, one click away, would otherwise clear I11.</p>
  *
  * <p>BR-97: the see-saw's levelling before a home stays within 32 mm of where the position became unknown
- * ({@link #levelReference}): Marlin's boot Z 0 after a detected reset, also after a restart (it is on record, and so
- * is a home's start, which ends it: {@link #EVENT_HOME_STARTED}).</p>
+ * ({@link #levelReference}): Marlin's boot Z 0 after a detected reset, else the first levelling call's Z. Both
+ * outlive a restart: the reset and the reference taken are on record ({@link #EVENT_LEVEL_REF}), and so is a home's
+ * start, which ends it ({@link #EVENT_HOME_STARTED}).</p>
  * <p>BR-93: a link to the controller lost unasked (the board left USB, a read or a write failed) may have been a reset
  * too (a board that leaves USB has often lost power): {@link #linkLost} makes the position unknown and dates the screw
  * count and the motor's switch-off, as an unread connect and a switch-off do, until the attested home.</p>
@@ -120,11 +121,17 @@ public final class ControllerReset {
     public static final String EVENT_FRAME_MOVED = "Z_FRAME_MOVED";
     /** BR-97: a home started: its G28 may have moved the controller's frame, even if the home ended unhomed. */
     public static final String EVENT_HOME_STARTED = "HOME_STARTED";
+    /**
+     * BR-97: the levelling reference taken afresh, or kept by a lost link (in its POSITION_UNREAD row's ms, after it):
+     * "levelling reference Z 31.5000 (why)".
+     */
+    public static final String EVENT_LEVEL_REF = "LEVEL_REF";
     /** BR-93: the way back after a lost link (the refusals while it is lost). */
     public static final String LINK_LOST_REMEDY = "once the board is back on USB: Stop, then Start (or restart "
             + "il-openpnp), then Home as after a reset";
     private static final double TOL = 1e-3;
     private static final Pattern WORD = Pattern.compile("(?:^|\\s)([A-Z]):(-?\\d+(?:\\.\\d+)?)");
+    private static final Pattern LEVEL_REF_Z = Pattern.compile("^levelling reference Z (-?\\d+\\.\\d+) \\(");
 
     /** One journaled change: its code (EVENT_*), when, and the reason in plain words. */
     public static final class Event {
@@ -172,8 +179,9 @@ public final class ControllerReset {
     /** The last home that ended an unknown position on someone's word: {by, evidence, atMs}; null: none here. */
     private Map<String, Object> lastAttestation;
     /**
-     * BR-97: the levelling's reference ({@link #levelReference}): 0 after a detected reset (also read back after a
-     * restart); null: the next levelling call's Z. A Stop and Start keeps it, and so does a lost link (BR-93).
+     * BR-97: the levelling's reference ({@link #levelReference}): 0 after a detected reset, else the Z the first
+     * levelling call took (both read back after a restart); null: the next levelling call's Z. A Stop and Start keeps
+     * it, and so does a lost link (BR-93).
      */
     private Double levelRefZ;
     /** BR-93: the last lost link put on record (the driver's time of it), or null. */
@@ -259,6 +267,11 @@ public final class ControllerReset {
             }
             else if (EVENT_HOME_STARTED.equals(e.code)) {
                 levelRefZ = null;
+            }
+            else if (EVENT_LEVEL_REF.equals(e.code)) {
+                // the journal's order decides, as for the rows that end one (a lost link writes it after its UNREAD
+                // row); a Z that cannot be read counts as none: the next levelling call takes it afresh
+                levelRefZ = parseLevelRef(e.message);
             }
         }
         watchdogTripAt(tripAt, tripEndedAt);
@@ -406,6 +419,10 @@ public final class ControllerReset {
         resetUnhomed = true; // and its home may move the Z frame
         watchdogTripAtMs = null; // maybe a reset: a trip reported now is a new one
         record(EVENT_UNREAD, atMs, unknownWhy);
+        if (ref != null) {
+            // after its UNREAD row, which ends a reference read back: a restart keeps this one too
+            record(EVENT_LEVEL_REF, atMs, levelRefText(ref, "kept at the lost link: the reconnect decides"));
+        }
         Event off = new Event(EVENT_MOTOR_OFF, atMs, offText(atMs, "the link to the controller was lost: a reset "
                 + "switches it off"));
         switchedOff(off);
@@ -626,7 +643,12 @@ public final class ControllerReset {
             }
             if (journal != null) {
                 for (Event e : l) {
-                    journal.accept(e);
+                    try {
+                        journal.accept(e);
+                    }
+                    catch (IllegalStateException failed) {
+                        // a lost link's LEVEL_REF (the journal logged it): no call to refuse here; the next rows go on
+                    }
                 }
             }
         }
@@ -680,6 +702,10 @@ public final class ControllerReset {
                     lastAttestation.put("atMs", now);
                 }
             }
+            else if (levelRefZ != null) {
+                // BR-97: a home whose start is not on record (OpenPnP's own Home button) ends the reference on record
+                record(EVENT_KNOWN, now, "homed: the see-saw's levelling reference ends");
+            }
             positionKnown = true;
             unknownWhy = null;
             levelRefZ = null;
@@ -700,13 +726,43 @@ public final class ControllerReset {
     /**
      * BR-97: the Z (the controller's frame) the see-saw's levelling before a home stays within 32 mm of: where the
      * position became unknown. Marlin's boot Z 0 after a detected reset; else {@code zNow}, taken at the first levelling
-     * call since a possible reset, a home's start or a home (a lost link keeps it: the reconnect decides).
+     * call since a possible reset, a home's start or a home (a lost link keeps it: the reconnect decides). One taken is
+     * on record before it counts: when the journal throws, this throws (the call must send nothing) and none is taken.
      */
-    public synchronized double levelReference(double zNow) {
-        if (levelRefZ == null) {
-            levelRefZ = zNow;
+    public double levelReference(double zNow) {
+        Event e;
+        synchronized (this) {
+            if (levelRefZ != null) {
+                return levelRefZ;
+            }
+            levelRefZ = zNow; // at once: a link lost meanwhile keeps it on record too
+            long now = clock.getAsLong();
+            e = new Event(EVENT_LEVEL_REF, now, levelRefText(zNow, "taken at " + ZCheck.clock(now) + " by the first "
+                    + "levelling call since a possible reset, a home's start or a home"));
         }
-        return levelRefZ;
+        try {
+            writeNow(e);
+        }
+        catch (RuntimeException failed) {
+            synchronized (this) {
+                if (levelRefZ != null && levelRefZ == zNow) {
+                    levelRefZ = null; // not on record: the next call takes it again
+                }
+            }
+            throw failed;
+        }
+        return zNow;
+    }
+
+    /** "levelling reference Z 31.5000 (why)": the replay reads the Z back ({@link #parseLevelRef}). */
+    private static String levelRefText(double z, String why) {
+        return String.format(Locale.ROOT, "levelling reference Z %.4f (%s)", z, why);
+    }
+
+    /** The Z of a {@link #EVENT_LEVEL_REF} row's message, or null when it cannot be read. */
+    private static Double parseLevelRef(String message) {
+        Matcher m = LEVEL_REF_Z.matcher(message == null ? "" : message);
+        return m.find() ? Double.valueOf(m.group(1)) : null;
     }
 
     /**
@@ -717,16 +773,20 @@ public final class ControllerReset {
      */
     public void homeStarted() {
         long now = clock.getAsLong();
-        Event e = new Event(EVENT_HOME_STARTED, now, "a home started at " + ZCheck.clock(now) + ": its G28 may move the "
-                + "controller's Z frame, so the see-saw's levelling takes its reference afresh");
+        writeNow(new Event(EVENT_HOME_STARTED, now, "a home started at " + ZCheck.clock(now) + ": its G28 may move "
+                + "the controller's Z frame, so the see-saw's levelling takes its reference afresh"));
+        synchronized (this) {
+            levelRefZ = null;
+        }
+    }
+
+    /** Writes {@code e} now, after the rows before it; when the journal throws, so does this. */
+    private void writeNow(Event e) {
         writeOut(); // the rows before it first, in order
         synchronized (writeLock) {
             if (journal != null) {
                 journal.accept(e);
             }
-        }
-        synchronized (this) {
-            levelRefZ = null;
         }
     }
 

@@ -559,7 +559,10 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   where the position became unknown: Marlin's boot Z 0 after a reset the engine detected (on record, so also after an
   OpenPnP restart), else the Z of the first levelling call since a possible reset (a connect whose position was not
   read), the start of a home through the API or the engine (its G28 may move the frame even if the home ends unhomed;
-  an `events` row `HOME_STARTED`, so also after an OpenPnP restart) or a home; a Stop and Start keeps it (OpenPnP's
+  an `events` row `HOME_STARTED`, so also after an OpenPnP restart) or a home; that Z is on record before the call
+  goes on (an `events` row `LEVEL_REF`, `levelling reference Z 31.5000 (…)`; a write that fails answers 409, nothing
+  sent), so an OpenPnP restart keeps it too; a Stop and Start keeps it, and so does a lost link (its own `LEVEL_REF`
+  row; the reconnect decides: a reset it detects sets the boot Z 0, an unread connect takes it afresh) (OpenPnP's
   own Home button is not seen starting: one that ends unhomed keeps it too); such a call needs `what` (400 without it)
   and the dispense engine (409 without it: nothing would journal it), and is an `events` row `Z_LEVEL` before a line
   goes out (the holder's label, as a reset home's attestation names it, the lines, `what`; a write that fails answers
