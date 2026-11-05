@@ -398,6 +398,8 @@ public final class PhotoStore {
         try {
             m = Imgcodecs.imdecode(buf, reduced | Imgcodecs.IMREAD_IGNORE_ORIENTATION);
             if (m.empty()) {
+                // imdecode fails without an exception: logged here, as decode's catch logs the ImageIO path (BR-105)
+                Logger.warn("photos: OpenCV could not decode a {} × {} px JPEG", size[0], size[1]);
                 throw notAnImage();
             }
             return OpenCvUtils.toBufferedImage(m);
