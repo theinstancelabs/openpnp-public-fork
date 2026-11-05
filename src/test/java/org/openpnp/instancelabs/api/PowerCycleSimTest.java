@@ -358,6 +358,23 @@ public class PowerCycleSimTest {
         assertTrue(lastBody.contains("measure"), lastBody);
     }
 
+    /**
+     * BR-97 x BR-93: a link lost in the middle of a levelling walk moves no frame by itself, so the reference stays (here
+     * the boot Z) and the reconnect decides (a reset it detects sets the boot Z). Taken afresh at the reconnect, it would
+     * allow another 32 mm past the see-saw's travel.
+     */
+    @Test
+    public void aLinkLostMidWalkKeepsTheLevellingReference() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, -20);
+        sim.server.dropLink();
+        awaitLinkLost();
+        reconnect(); // the board is back on USB, not reset: Stop, then Start
+        walk(-20, -32);
+        refusedLevel(level("w", -33), "32 mm");
+    }
+
     /** BR-93: the lost link is on record: after an OpenPnP restart the position is still unknown until that home. */
     @Test
     public void aLostLinkOutlivesAnOpenPnpRestart() throws Exception {

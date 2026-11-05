@@ -173,7 +173,7 @@ public final class ControllerReset {
     private Map<String, Object> lastAttestation;
     /**
      * BR-97: the levelling's reference ({@link #levelReference}): 0 after a detected reset (also read back after a
-     * restart); null: the next levelling call's Z. A Stop and Start keeps it.
+     * restart); null: the next levelling call's Z. A Stop and Start keeps it, and so does a lost link (BR-93).
      */
     private Double levelRefZ;
     /** BR-93: the last lost link put on record (the driver's time of it), or null. */
@@ -400,7 +400,9 @@ public final class ControllerReset {
         }
         linkLostAtMs = atMs;
         idleCheck(clock.getAsLong()); // an idle switch-off before it goes on record first
+        Double ref = levelRefZ;
         unknown(why + ", so the controller may have been reset", atMs);
+        levelRefZ = ref; // BR-97: a lost link moves no frame by itself; the reconnect decides (a detected reset: boot Z)
         resetUnhomed = true; // and its home may move the Z frame
         watchdogTripAtMs = null; // maybe a reset: a trip reported now is a new one
         record(EVENT_UNREAD, atMs, unknownWhy);

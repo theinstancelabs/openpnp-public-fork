@@ -772,6 +772,31 @@ public class ControllerResetTest {
     }
 
     /**
+     * BR-97 x BR-93: a lost link keeps the levelling reference and the reconnect decides: a powered controller keeps
+     * it, the boot position read sets Marlin's boot Z 0, an unread reconnect (a possible reset) takes it afresh. After
+     * a restart the loss's row clears it, as an unread connect's does.
+     */
+    @Test
+    public void aLostLinkKeepsTheLevellingReferenceUntilTheReconnectDecides() {
+        ControllerReset r = run(false, false);
+        assertEquals(20.0, r.levelReference(20), 1e-9);
+        now = 1000;
+        r.linkLost(1000, "the link ended");
+        assertEquals(20.0, r.levelReference(5), 1e-9, "a lost link moves no frame by itself");
+        now = 1500;
+        r.connected(reply("X:0.0000 Y:0.0000 Z:5.0000 A:720.0000 B:720.0000 Count X:0 Y:0 Z:0"), 'B', null);
+        assertEquals(20.0, r.levelReference(5), 1e-9, "a powered controller: kept");
+        now = 2000;
+        r.linkLost(2000, "the link ended");
+        r.connected(reply(BOOT), 'B', null);
+        assertEquals(0.0, r.levelReference(5), 1e-9, "a reset the reconnect detects: Marlin's boot Z 0");
+        now = 3000;
+        r.linkLost(3000, "the link ended");
+        r.connected(null, 'B', "timeout");
+        assertEquals(12.0, r.levelReference(12), 1e-9, "an unread reconnect: a possible reset, taken afresh");
+    }
+
+    /**
      * The home after a detected reset moves the Z frame (K by twice the shift): it says so once, also when the reset was
      * homed only after an engine restart; an ordinary home does not. A connect whose position was not read may have been
      * a reset (I11 counts it so): its home moves the frame too (#11 review 11-04, the conservative side).
