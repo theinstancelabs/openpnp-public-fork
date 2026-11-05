@@ -268,6 +268,14 @@ public class TipSetupValuesSimTest {
             return java.util.Collections.singletonList(new org.openpnp.instancelabs.vision.Dot(at[0], at[1], d,
                     Math.PI * d * d / 4, 0.9));
         }
+
+        /** The frame's own dot at every spot (only its own is read): the nearest-dot default drops a NaN centroid. */
+        @Override
+        public java.util.List<org.openpnp.instancelabs.vision.SpotDot> inspectSpots(Frame before, Frame after,
+                java.util.List<double[]> spotsMm, double cutMm, double radiusMm) {
+            return java.util.Collections.nCopies(spotsMm.size(), org.openpnp.instancelabs.vision.SpotDot.dot(inspect(
+                    before, after).get(0)));
+        }
     }
 
     /**
@@ -335,6 +343,38 @@ public class TipSetupValuesSimTest {
                 "the 2nd check dot's area is off by 32 % from the reference pair's"), tall.toString());
         assertTrue(TipSim.str(tall.getAsJsonObject("run"), "message").contains("not applied: the 2nd check dot's area"),
                 tall.toString());
+    }
+
+    /**
+     * BR-89 review: a 2nd check dot whose centroid or area is no number fails closed and is kept as not applied: the
+     * analysis holds null there (the record's JSON refuses NaN: the run ended in ERROR with nothing kept).
+     */
+    @Test
+    public void aCheckDotThatIsNoNumberIsKeptNotApplied() throws Exception {
+        layingWith(3);
+        LandingCamera cam = new LandingCamera();
+        t.svc.setDotImager(cam);
+        String body = "{\"startGapMm\":0.2,\"stepMm\":0.025,\"steps\":13,\"apply\":true,\"wait\":true}";
+        cam.check2 = new double[] {Double.NaN, 0};
+        JsonObject a = laid(body).getAsJsonObject("result").getAsJsonObject("analysis");
+        assertTrue(TipSim.str(a, "landingProblem").startsWith("the 2nd check dot landed "), a.toString());
+        assertTrue(a.get("landingShiftMm").isJsonNull(), a.toString());
+        assertTrue(a.getAsJsonArray("checkDots").get(1).getAsJsonObject().get("dxMm").isJsonNull(), a.toString());
+        assertEquals("dot-ladder-touch-off (not applied: " + TipSim.str(a, "landingProblem") + ")", lastMethod());
+        cam.check2 = new double[] {0, 0};
+        cam.check2Scale = Double.NaN; // its diameter and area
+        a = laid(body).getAsJsonObject("result").getAsJsonObject("analysis");
+        assertEquals("the 2nd check dot's area cannot be compared with the reference pair's: look at the tip from "
+                + "below and run the touch-off again", TipSim.str(a, "landingProblem"));
+        assertTrue(a.getAsJsonArray("checkDots").get(1).getAsJsonObject().get("areaMm2").isJsonNull(), a.toString());
+        assertTrue(a.get("checkAreaOffPct").isJsonNull(), a.toString());
+        assertEquals("dot-ladder-touch-off (not applied: " + TipSim.str(a, "landingProblem") + ")", lastMethod());
+    }
+
+    /** The newest touch-off record's method. */
+    String lastMethod() throws Exception {
+        return String.valueOf(t.svc.getDb().query("SELECT method FROM needle_touchoff ORDER BY id DESC LIMIT 1").get(0)
+                .get("method"));
     }
 
     private static final java.util.regex.Pattern Z = java.util.regex.Pattern.compile("\\bZ(-?\\d+(?:\\.\\d+)?)");

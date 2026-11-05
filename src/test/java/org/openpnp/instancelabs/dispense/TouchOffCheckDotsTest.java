@@ -155,6 +155,14 @@ public class TouchOffCheckDotsTest {
         assertNull(a.landingsMm[12], "no dot at the floor: no landing");
         assertNull(a.areasMm2[12]);
         assertEquals(Math.PI * 1.2 * 1.2 / 4, a.checkDots.get(0).areaMm2, 1e-12);
+        // a centroid or area that is no number is kept as null: the record's JSON refuses NaN
+        List<SpotDot> l = seen(new double[] {0, 0.01}, null);
+        l.set(12, SpotDot.dot(new Dot(Double.NaN, 0, 1.8, Double.NaN, 0.9)));
+        NeedleTouchOff.Analysis nan = analyzed(l);
+        assertNull(nan.landingsMm[12]);
+        assertNull(nan.areasMm2[12]);
+        assertNull(nan.squashedShiftMm, "the deepest dot's shift is no number");
+        new com.google.gson.Gson().toJson(nan);
     }
 
     @Test

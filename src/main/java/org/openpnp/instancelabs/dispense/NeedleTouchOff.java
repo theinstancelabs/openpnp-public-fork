@@ -169,8 +169,9 @@ public final class NeedleTouchOff {
         for (int i = 0; i < n && i < seen.size(); i++) {
             Dot d = seen.get(i).state == SpotDot.State.DOT ? seen.get(i).dot : null;
             if (d != null) {
-                a.landingsMm[i] = new double[] {d.xMm, d.yMm};
-                a.areasMm2[i] = d.areaMm2;
+                a.landingsMm[i] = Double.isFinite(d.xMm) && Double.isFinite(d.yMm) ? new double[] {d.xMm, d.yMm}
+                        : null;
+                a.areasMm2[i] = finite(d.areaMm2);
             }
         }
         for (int i = n; i < seen.size(); i++) {
@@ -178,17 +179,17 @@ public final class NeedleTouchOff {
             CheckDot d = new CheckDot();
             d.state = s.state == SpotDot.State.DOT ? "dot" : s.state == SpotDot.State.UNMEASURED ? "unmeasured" : "none";
             if (s.dot != null) {
-                d.diameterMm = s.dot.diameterMm;
-                d.dxMm = s.dot.xMm;
-                d.dyMm = s.dot.yMm;
-                d.areaMm2 = s.dot.areaMm2;
+                d.diameterMm = finite(s.dot.diameterMm);
+                d.dxMm = finite(s.dot.xMm);
+                d.dyMm = finite(s.dot.yMm);
+                d.areaMm2 = finite(s.dot.areaMm2);
             }
             a.checkDots.add(d);
         }
         double[] ref = n > skip + 1 ? landing(seen.get(skip), seen.get(skip + 1)) : null;
         for (int i = n - 1; ref != null && i >= skip + 2; i--) {
             if (seen.get(i).state == SpotDot.State.DOT) {
-                a.squashedShiftMm = shift(seen.get(i), ref);
+                a.squashedShiftMm = finite(shift(seen.get(i), ref));
                 break;
             }
         }
@@ -202,11 +203,12 @@ public final class NeedleTouchOff {
         if (ref == null) {
             return; // no reference pair to compare with: the analysis found no contact either
         }
-        a.landingShiftMm = shift(second, ref);
-        if (!(a.landingShiftMm <= LANDING_SHIFT_MAX_MM + 1e-9)) { // a NaN centroid fails closed
+        double shiftMm = shift(second, ref);
+        a.landingShiftMm = finite(shiftMm);
+        if (!(shiftMm <= LANDING_SHIFT_MAX_MM + 1e-9)) { // a NaN centroid fails closed
             a.landingProblem = String.format(Locale.ROOT, "the 2nd check dot landed %.3f mm from where the first two "
                     + "counted dots landed (at most %s mm): the tip may have moved; look at it from below and run the "
-                    + "touch-off again", a.landingShiftMm, DispenseProfile.plain(LANDING_SHIFT_MAX_MM));
+                    + "touch-off again", shiftMm, DispenseProfile.plain(LANDING_SHIFT_MAX_MM));
             return;
         }
         if (!a.found()) {
@@ -219,7 +221,7 @@ public final class NeedleTouchOff {
                     + "from below and run the touch-off again";
             return;
         }
-        a.checkAreaOffPct = off * 100;
+        a.checkAreaOffPct = finite(off * 100);
         if (off > CHECK_AREA_MAX_OFF + 1e-9) {
             a.landingProblem = String.format(Locale.ROOT, "the 2nd check dot's area is off by %.0f %% from the reference "
                     + "pair's (%.3f vs %.3f mm², at most %.0f %%): the needle's height may have changed; look at the tip "
@@ -236,6 +238,11 @@ public final class NeedleTouchOff {
 
     private static double shift(SpotDot s, double[] ref) {
         return Math.hypot(s.dot.xMm - ref[0], s.dot.yMm - ref[1]);
+    }
+
+    /** The value, or null when it is no number: the record's JSON refuses NaN, and the problem text says why. */
+    private static Double finite(double v) {
+        return Double.isFinite(v) ? v : null;
     }
 
     public static double[] gaps(Request req) {
