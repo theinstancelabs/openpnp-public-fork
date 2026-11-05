@@ -14,13 +14,15 @@ import org.pmw.tinylog.Logger;
  * The automatic N1 vacuum contact probe of one or more points: the bench method (tools/probe.py) with
  * two corrections measured in the bench log. At each spot N1 goes to travel Z, over the spot, down to
  * the approach height; pump and valve on, settle, an open-air baseline (5 reads); coarse 0.25 mm steps
- * until the 3-read mean falls below baseline - max(40000, 15 % of |baseline|). Then, unlike the bench:
- * back to the last open coarse step until the seal lets go (the bench's fine pass started right after
- * the seal and reported contact up to 0.3 mm high, 29 of 156 passes at their first step; one step
- * higher when that step itself holds a partial seal), and a fine pass of 0.025 mm steps below it whose
- * contact needs two sealed steps in a row (partial seals reach the threshold's size). A fine miss re-probes once from the start; the coarse contact is never
- * accepted. Every point ends with the bench's lift and vent: {@code G1 Z<travel> F600, M400, M107 P1,
- * M107 P0}, also after a refusal or an error inside it; only a STOP sends nothing but the I1 shutdown.
+ * until the 3-read mean falls 40000 below the baseline: N1's first touch, probe.py's ONSET (BR-100: the
+ * 15 % seal used before came 0.025-0.175 mm lower on the real machine, as the sprung tip's seal builds).
+ * Then, unlike the bench: back to the last open coarse step until the seal lets go (the bench's fine
+ * pass started right after the seal and reported contact up to 0.3 mm high, 29 of 156 passes at their
+ * first step; one step higher when that step itself still draws), and a fine pass of 0.025 mm steps
+ * below it whose contact is the first of two sealed steps in a row. A fine miss re-probes once from
+ * the start; the coarse contact is never accepted. Every point ends with the bench's lift and vent:
+ * {@code G1 Z<travel> F600, M400, M107 P1, M107 P0}, also after a refusal or an error inside it; only a
+ * STOP sends nothing but the I1 shutdown.
  *
  * <p>Every line goes through {@link Io} (the executor's probe gate: the probe allowlist and the abort
  * flag). Contact Z is the N1 Z of the contact step: N1's OpenPnP Z is its raw Z (z1). X/Y move only at
@@ -107,8 +109,8 @@ public final class VacuumProber {
         public int xyFeedMmMin = 6000;
         public int baselineReads = 5;
         public int stepReads = 3;
+        /** N1's first touch: a 3-read mean this far below open air (probe.py's ONSET; BR-100: not its 15 % seal). */
         public int minDropCounts = 40000;
-        public double dropFraction = 0.15;
         public long releaseTimeoutMs = 1500;
         public int maxSpreadCounts = 15000;
         public int maxDeltaFirstCounts = 50000;
@@ -587,7 +589,7 @@ public final class VacuumProber {
             firstBaseline = base;
         }
         p.baseline = base;
-        p.drop = Math.max(s.minDropCounts, s.dropFraction * Math.abs(base));
+        p.drop = s.minDropCounts;
         p.threshold = base - p.drop;
     }
 
@@ -620,15 +622,10 @@ public final class VacuumProber {
      * {@link Settings#releaseTimeoutMs}), then the fine pass below it: the first step whose mean and the
      * next step's mean are both sealed. Null when the fine pass finds no such pair.
      *
-     * <p>The last "open" coarse step often reads a partial seal already: in 101 of 155 bench probes
-     * (runs/serial.log) its mean was more than drop / 2 below the baseline (median 169 k counts against
-     * a ~230 k threshold), and it never comes back to the baseline there. So when it does not let go
-     * within the wait, N1 waits once more one coarse step higher, and the fine pass starts below that
-     * step; only a seal that holds there too is refused. The fine pass may then find the contact at or
-     * above the last open coarse step: that step's partial seal was the surface. Real N1 seals build up
-     * over Z and time (real machine 2026-10-29, board 3: open at 5.40, 1.78 M at 5.375, sealed at
-     * 5.325 / 5.30 on the fine pass, while the quick coarse reads at 5.25 stayed just above the
-     * threshold), so a contact above that step is the surface, not drift.</p>
+     * <p>The last open coarse step can read a near touch (up to 34 k below open air on the real machine,
+     * 20 k or more at 10 of 161 points) and then never comes back within drop / 2 there. So when it does
+     * not let go within the wait, N1 waits once more one coarse step higher, and the fine pass starts
+     * below that step; only a seal that holds there too is refused.</p>
      */
     private Double releaseAndFine(Point p, Window w, double zc) throws Exception {
         double zo = p.lastOpenZ;
