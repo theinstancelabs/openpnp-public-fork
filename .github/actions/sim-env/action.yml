@@ -97,7 +97,7 @@ runs:
             && timeout -k 30 "$cap" "$pw" install chromium && break
           [ "$try" -lt 3 ] || { echo "::error::playwright install-deps or install failed or stalled 3 times"; exit 1; }
           echo "::warning::playwright install-deps or install failed or stalled (try $try of 3): trying again"
-          sudo dpkg --configure -a || true  # a cut inside dpkg leaves "dpkg was interrupted"
+          sudo timeout -k 30 "$cap" dpkg --configure -a || true  # a cut inside dpkg leaves "dpkg was interrupted"
         done
 
     - name: Fonts like the lab computer (system-ui and sans-serif = Noto Sans)

@@ -23,6 +23,7 @@ ACTION = os.path.join(REPO, ".github", "actions", "sim-env", "action.yml")
 
 FAKE_SUDO = r"""#!/bin/bash
 [ "$1" = -- ] && shift
+export FAKE_ROOT=1
 setsid "$@" &
 child=$!
 trap 'kill -TERM "$child" 2>/dev/null' TERM
@@ -30,21 +31,25 @@ wait "$child"; s=$?
 while [ "$s" -gt 128 ] && kill -0 "$child" 2>/dev/null; do wait "$child"; s=$?; done
 exit "$s"
 """
-# One entry of $PLAN per apt-get run (hang | fail | ok); a hang leaves apt-get's stand-in running.
-FAKE_APT = r"""n=$(( $(cat "$CALLS" | grep -c deps) ))
+# One entry of $PLAN per apt-get run, of $BROWSER_PLAN per browser download (hang | fail | ok, default ok); a hang
+# leaves its stand-in running.
+FAKE_APT = r"""n=$(grep -c "$WHAT" "$CALLS")
 case $(echo "$PLAN" | cut -d, -f$n) in
   hang) sleep 1000 >/dev/null 2>&1 & echo $! >> "$CHILDREN"; wait ;;
   ok) exit 0 ;;
+  "") exit 0 ;;
   *) exit 1 ;;
 esac
 """
-# Playwright runs apt-get itself as root (install-deps under sudo), through sudo otherwise (--with-deps).
+# Playwright runs apt-get itself as root, through sudo otherwise (as playwright-core does).
 FAKE_PLAYWRIGHT = r"""#!/bin/bash
 echo "$*" >> "$CALLS"
 case "$*" in
-  "install-deps chromium") exec bash "$FAKE_APT" ;;
-  "install --with-deps chromium") sudo -- bash "$FAKE_APT" && exit 0; exit 1 ;;
-  "install chromium") exit 0 ;;
+  "install-deps chromium"|"install --with-deps chromium")
+    export WHAT=deps
+    [ "${FAKE_ROOT:-}" = 1 ] && exec bash "$FAKE_APT"
+    exec sudo -- bash "$FAKE_APT" ;;
+  "install chromium") WHAT="install chromium" PLAN="${BROWSER_PLAN:-}" exec bash "$FAKE_APT" ;;
 esac
 exit 9
 """
@@ -82,7 +87,7 @@ def alive(pid):
 
 
 class PlaywrightStepTest(unittest.TestCase):
-    def run_step(self, plan):
+    def run_step(self, plan, browser_plan=""):
         tmp = tempfile.mkdtemp(prefix="il-sim-env-pw-")
         self.addCleanup(shutil.rmtree, tmp, True)
         bin_ = os.path.join(tmp, "bin")
@@ -100,8 +105,10 @@ class PlaywrightStepTest(unittest.TestCase):
         open(self.calls, "w").close()
         env = dict(os.environ, PATH=bin_ + os.pathsep + os.environ["PATH"], RUNNER_TEMP=os.path.join(tmp, "runner"),
                    GITHUB_ENV=github_env, PLAYWRIGHT_VERSION="1.64.1", FAKE_PLAYWRIGHT=os.path.join(tmp, "playwright"),
-                   FAKE_APT=os.path.join(tmp, "apt.sh"), PLAN=plan, CALLS=self.calls, CHILDREN=self.children,
+                   FAKE_APT=os.path.join(tmp, "apt.sh"), PLAN=plan, BROWSER_PLAN=browser_plan, CALLS=self.calls,
+                   CHILDREN=self.children,
                    PW_INSTALL_TIMEOUT_S="1")
+        self.addCleanup(self.kill_children)
         t0 = time.monotonic()
         p = subprocess.Popen(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", script], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
@@ -113,7 +120,6 @@ class PlaywrightStepTest(unittest.TestCase):
         self.elapsed = time.monotonic() - t0
         with open(github_env) as f:
             self.github_env = f.read()
-        self.addCleanup(self.kill_children)
         return p.returncode, out
 
     def tries(self):
@@ -147,6 +153,13 @@ class PlaywrightStepTest(unittest.TestCase):
         self.assertIn("::warning::", out)
         self.assertLess(self.elapsed, 20)
         self.assertEqual(self.left_running(), [], "the stalled apt-get still runs (it holds apt's lock)")
+
+    def test_a_stalled_browser_download_is_cut_and_tried_again(self):
+        rc, out = self.run_step("ok,ok", browser_plan="hang,ok")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.tries().count("install chromium"), 2)
+        self.assertLess(self.elapsed, 20)
+        self.assertEqual(self.left_running(), [])
 
     def test_a_failed_try_is_tried_again(self):
         rc, out = self.run_step("fail,fail,ok")
