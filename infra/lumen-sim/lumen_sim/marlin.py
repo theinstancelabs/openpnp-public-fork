@@ -154,6 +154,7 @@ class Firmware:
         self.position = [lround(f32(self.cur[i] * self.steps[i])) for i in range(5)]  # planner.position
         self.stepper = Stepper(self.position, machine.physical, self.steps, machine.switches)
         self.stepper.on_move = self.pa5  # each move's end: a press, an overtravel
+        self.pa5_pull = 0  # PA5's input mode (M42 P53 T): what it reads with nothing wired
         self.homed = [False, False, False]
         self.enabled = {a: False for a in AXES}
         # M18/M84 S: stepper_inactive_time (0 = never), previous_move_ms, already_shutdown_steppers
@@ -562,6 +563,7 @@ class Firmware:
         """stepper.disable_axis(): the driver lets go. A released Z moves by the machine's z_drop."""
         if axis == "Z" and self.enabled["Z"]:
             self.machine.release_z()
+            self.pa5()  # a drop under or off the switch
         self.enabled[axis] = False
 
     # ------------------------------------------------------------------ positions
@@ -672,7 +674,7 @@ class Firmware:
 
     @property
     def M(self):
-        return {17: self.m17, 18: self.m18, 84: self.m18, 42: _noop, 43: self.m43, 92: self.m92, 105: self.m105,
+        return {17: self.m17, 18: self.m18, 84: self.m18, 42: self.m42, 43: self.m43, 92: self.m92, 105: self.m105,
                 106: self.m106, 107: self.m107, 108: _noop, 110: _noop, 111: _noop, 112: self.m112,
                 113: self.m113, 114: self.m114, 115: self.m115, 119: self.m119, 122: _noop, 150: self.m150,
                 201: self.m201, 203: self.m203, 204: self.m204, 205: self.m205, 206: _noop, 211: self.m211,
@@ -826,6 +828,12 @@ class Firmware:
         for a in axes or AXES:
             self.release(a)
 
+    def m42(self, cmd):
+        """M42 P53 T<mode>: PA5's input mode, which sets what it reads with nothing wired (T2 pull-up 1; T3 pull-down
+        and T0 floating 0, as read 11-02). Other M42 forms only ack."""
+        if cmd.val("P") == 53 and cmd.val("T") in (0, 2, 3):
+            self.pa5_pull = 1 if cmd.val("T") == 2 else 0
+
     def m43(self, cmd):
         """M43 P5: the PA5 pin's line as the board prints it, read where the head is now (M43 waits for no move)."""
         # shortcut: PA5 alone (the switch, 11-04); M43 without P or another pin prints nothing: add a pin's line here
@@ -838,7 +846,7 @@ class Firmware:
         level (0 with nothing wired, as the board read 11-02); an overtravel goes to the model's errors."""
         sw = self.machine.pa5
         if sw is None:
-            return 0
+            return self.pa5_pull
         x, y, z = (self.machine.physical if at is None else self.stepper.realtime_physical(at))[:3]
         level, overtravel = sw.observe(x, y, z)
         if overtravel:

@@ -277,6 +277,7 @@ class Simulator:
             m.switches[2] += v["z"]
         else:                        # z_drop: how far the head moves each time the Z driver lets go
             m.z_drop = v["z"]
+        self.fw.pa5()  # the head moved under the switch (or off it)
         # a homing move running toward a switch now ends where that switch triggers, and the firmware's wait with it
         self.fw.stepper.recheck_endstops(t)
         self.fw.wake(t)
@@ -330,12 +331,14 @@ class Simulator:
         repeat_sd_mm (0), pressed_level (1), seed (0)}; null removes it."""
         if raw is None:
             return None
-        if not isinstance(raw, dict) or not set(raw) <= set(PA5_KEYS) or not raw.get("presses"):
+        if not isinstance(raw, dict) or not set(raw) <= set(PA5_KEYS) or not isinstance(raw.get("presses"), list) \
+                or not raw["presses"]:
             raise ValueError("pa5_switch takes presses (a non-empty list) and %s, not %r" % (", ".join(PA5_KEYS[1:]),
                                                                                           raw))
         presses = []
-        for r in raw["presses"] if isinstance(raw["presses"], list) else [None]:
-            if not isinstance(r, dict) or set(r) != set(PA5_PRESS) or r["tool"] not in PA5_TOOLS:
+        for r in raw["presses"]:
+            if not isinstance(r, dict) or set(r) != set(PA5_PRESS) or not isinstance(r["tool"], str) \
+                    or r["tool"] not in PA5_TOOLS:
                 raise ValueError("a PA5 press takes tool (%s), x0, y0, x1, y1 and trip_z (mm), not %r"
                                  % (" or ".join(PA5_TOOLS), r))
             v = dict({k: mm(r[k], k) for k in PA5_PRESS[1:]}, tool=r["tool"])
@@ -343,8 +346,8 @@ class Simulator:
                 raise ValueError("a PA5 press needs x0 <= x1 and y0 <= y1, not %r" % (r,))
             presses.append({k: v[k] for k in PA5_PRESS})
         spec = {k: mm(raw[k], k) for k in ("overtravel_mm", "repeat_sd_mm") if k in raw}
-        if any(v < 0 for v in spec.values()):
-            raise ValueError("overtravel_mm and repeat_sd_mm must be >= 0, not %r" % (spec,))
+        if not (0 <= spec.get("overtravel_mm", 0) <= 10 and 0 <= spec.get("repeat_sd_mm", 0) <= 1):
+            raise ValueError("overtravel_mm must be 0-10 and repeat_sd_mm 0-1 (mm), not %r" % (spec,))
         for k, ok in (("pressed_level", (0, 1)), ("seed", None)):
             if k in raw:
                 v = raw[k]
@@ -395,7 +398,7 @@ class Simulator:
             "seal_drop": self.machine.seal_drop,
             "homing_move_delay_s": self.machine.homing_move_delay_s,
             "n1_sealed": self.machine.n1_sealed(fw),
-            "pa5": None if self.machine.pa5 is None else self.machine.pa5.describe(fw.pa5(t)),
+            "pa5": None if self.machine.pa5 is None else self.machine.pa5.describe(),
             "stepper_timeout_s": fw.stepper_timeout_ms / 1000.0,
             "homed": {"X": fw.homed[0], "Y": fw.homed[1], "Z": fw.homed[2]},
             "homing_phase": fw.homing_phase,

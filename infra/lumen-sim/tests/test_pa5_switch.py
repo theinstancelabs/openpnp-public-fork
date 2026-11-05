@@ -152,6 +152,93 @@ class Pa5Switch(unittest.TestCase):
         to(b, 200, 50, 52.6)
         self.assertEqual(errors(b), ["PA5 switch overtravel: needle 0.60 mm past its trip point (overtravel 0.50 mm)"])
 
+    def test_a_one_step_back_off_releases_it(self):
+        """The route steps down until it reads pressed, then one step up: released, and it stays released while the head
+        stands still (a new press needs a move toward the switch), whatever each press's own trip point."""
+        for seed in range(40):
+            with self.subTest(seed=seed):
+                b = switch(homed(), repeat_sd_mm=0.01, seed=seed)
+                to(b, 100, 50, 12.2)
+                z = 12.2
+                while level(b) == 0:
+                    z = round(z - 0.025, 3)
+                    to(b, z=z)
+                to(b, z=round(z + 0.025, 3))
+                self.assertEqual([level(b), level(b)], [0, 0])
+
+    def test_a_new_press_needs_a_move_toward_the_switch(self):
+        b = switch(homed(), repeat_sd_mm=0.01, seed=1)
+        to(b, 100, 50, 11.9)
+        to(b, z=12.3)
+        self.assertEqual(level(b), 0)
+        to(b, z=11.9)
+        self.assertEqual(level(b), 1)
+
+    def test_the_read_sees_the_head_mid_move(self):
+        b = switch(homed())
+        to(b, 100, 50, 13)
+        b.send("G1 Z11.5 F6")  # 0.1 mm/s
+        b.run(12.0)            # 1.2 mm down: past the trip, the move not ended
+        self.assertEqual(b.send("M43 P5").lines, [PA5_LINE % 1, "ok"])
+
+    def test_leaving_the_window_releases_it(self):
+        b = switch(homed())
+        to(b, 100, 50, 11.9)
+        to(b, x=95)
+        self.assertEqual(level(b), 0)
+        self.assertFalse(pa5(b)["pressed"])
+
+    def test_a_move_deep_and_back_is_caught_at_the_moves_end(self):
+        """No read anywhere: the stepper's end of each move sees the press (the state request is no read)."""
+        b = switch(homed())
+        b.send("G1 X100 Y50 F3000")
+        b.send("G1 Z5 F3000")
+        b.send("G1 Z31 F3000")
+        b.send("M400")
+        self.assertEqual(errors(b), ["PA5 switch overtravel: n1 7.00 mm past its trip point (overtravel 0.50 mm)"])
+
+    def test_the_state_request_is_no_read(self):
+        """A state poll mid-move changes nothing: no press, no overtravel, no noise draw."""
+        def run(polls):
+            b = switch(homed(), repeat_sd_mm=0.01, seed=3)
+            to(b, 95, 50, 5)
+            b.send("G1 X105 F600")  # across N1's window at Z 5, ending outside it
+            for _ in range(polls):
+                b.run(0.3)
+                pa5(b)
+            b.send("M400")
+            trips = []
+            for _ in range(3):
+                to(b, 100, 50, 13)
+                to(b, z=11.9)
+                trips.append(pa5(b)["trip_z"])
+            return trips, errors(b)
+        self.assertEqual(run(0), run(5))
+
+    def test_a_z_drop_onto_the_switch_is_seen(self):
+        b = switch(homed())
+        to(b, 100, 50, 11.8)
+        self.assertEqual(b.sim.control({"cmd": "fault", "fault": "z_drop", "z": -0.4}, b.t)["ok"], True)
+        b.send("M18 Z")
+        self.assertEqual(errors(b), ["PA5 switch overtravel: n1 0.60 mm past its trip point (overtravel 0.50 mm)"])
+
+    def test_a_z_shift_onto_the_switch_is_seen(self):
+        b = switch(homed())
+        to(b, 100, 50, 11.9)
+        self.assertEqual(b.sim.control({"cmd": "fault", "fault": "z_shift", "z": -0.6}, b.t)["ok"], True)
+        self.assertEqual(errors(b), ["PA5 switch overtravel: n1 0.70 mm past its trip point (overtravel 0.50 mm)"])
+
+    def test_the_pull_without_a_switch(self):
+        """M42 P53 T2 (input pull-up) before the reads, as the route does: nothing wired reads 1; T3 pulls down, T0
+        floats (0, as read 11-02); a power cycle resets the pin."""
+        b = homed()
+        for mode, expect in (("T2", 1), ("T3", 0), ("T0", 0), ("T2", 1)):
+            b.send("M42 P53 " + mode)
+            self.assertEqual(level(b), expect, mode)
+        self.assertTrue(b.sim.control({"cmd": "power_cycle"}, b.t)["ok"])
+        b.run(2.0)
+        self.assertEqual(level(b), 0)
+
     def test_it_outlives_a_power_cycle_and_can_be_removed(self):
         b = switch(homed())
         self.assertTrue(b.sim.control({"cmd": "power_cycle"}, b.t)["ok"])
@@ -172,7 +259,9 @@ class Pa5Switch(unittest.TestCase):
         for bad in ({"presses": [dict(N1, tool="n2")]}, {"presses": [{"tool": "n1", "trip_z": 12}]},
                     {"presses": [dict(N1, x0=102.0)]}, {"presses": [dict(N1, trip_z="12")]},
                     {"overtravel_mm": -0.1}, {"repeat_sd_mm": float("nan")}, {"pressed_level": 2},
-                    {"seed": 1.5}, {"presses": [dict(N1, extra=1)]}, {"overtravels": 3}):
+                    {"seed": 1.5}, {"presses": [dict(N1, extra=1)]}, {"overtravels": 3},
+                    {"presses": [dict(N1, tool=["n1"])]}, {"presses": {"tool": "n1"}}, {"repeat_sd_mm": 2.0},
+                    {"overtravel_mm": 11.0}):
             with self.subTest(bad):
                 spec = dict({"presses": [N1], "overtravel_mm": 0.5, "repeat_sd_mm": 0.0, "pressed_level": 1,
                              "seed": 0}, **bad)

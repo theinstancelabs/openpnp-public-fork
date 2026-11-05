@@ -25,25 +25,38 @@ class Pa5Switch:
         self.rng = random.Random(seed)
         self.offset = self.rng.gauss(0.0, self.sd)  # the next press's trip point, from its window's trip_z
         self.press = None  # {"tool", "trip", "depth", "reported"} while pressed
+        self.released = None  # (tool, z) of the last release: no new press until the head moves toward it past z
+        self.level = 1 - pressed_level  # the last observation's
         self.overtravels = 0
 
     def observe(self, x, y, z):
         """The head at physical x, y, z: the pin's level, and an overtravel message the first time a press goes
         deeper than the overtravel (else None)."""
+        level, message = self._observe(x, y, z)
+        self.level = level
+        return level, message
+
+    def _observe(self, x, y, z):
         region = next((r for r in self.presses if r["x0"] <= x <= r["x1"] and r["y0"] <= y <= r["y1"]), None)
+        if region is None or (self.released and self.released[0] != region["tool"]):
+            self.released = None  # off the window: the next press starts afresh
         if self.press is not None and (region is None or region["tool"] != self.press["tool"]):
-            self._release()
+            self._release(None)
         p = self.press
         if region is None:
             return 1 - self.pressed_level, None
+        way = PA5_TOOLS[region["tool"]]
+        if p is None and self.released and (z - self.released[1]) * way <= 1e-9:
+            return 1 - self.pressed_level, None  # not moved toward the switch since its release: no chatter
         trip = p["trip"] if p is not None else region["trip_z"] + self.offset
-        depth = (z - trip) * PA5_TOOLS[region["tool"]]
+        depth = (z - trip) * way
         if depth < -1e-9:
             if p is not None:
-                self._release()
+                self._release((region["tool"], z))
             return 1 - self.pressed_level, None
         if p is None:
             p = self.press = {"tool": region["tool"], "trip": trip, "depth": 0.0, "reported": False}
+            self.released = None
         p["depth"] = max(p["depth"], depth)
         if p["depth"] <= self.overtravel + 1e-9 or p["reported"]:
             return self.pressed_level, None
@@ -52,14 +65,16 @@ class Pa5Switch:
         return self.pressed_level, "PA5 switch overtravel: %s %.2f mm past its trip point (overtravel %.2f mm)" % (
             p["tool"], p["depth"], self.overtravel)
 
-    def _release(self):
-        """The tool is off the switch: the next press draws its own trip point."""
-        self.press, self.offset = None, self.rng.gauss(0.0, self.sd)
+    def _release(self, at):
+        """The tool is off the switch (at: (tool, z) where it backed off, None: it left the window): the next press
+        draws its own trip point."""
+        self.press, self.released, self.offset = None, at, self.rng.gauss(0.0, self.sd)
 
-    def describe(self, level):
+    def describe(self):
+        """As of the last observation (a move's end or a read): describing it reads nothing."""
         p, r = self.press, lambda v: round(v, 6) + 0.0  # noqa: E731  (+ 0.0: no -0.0)
         return {"presses": [dict(q) for q in self.presses], "overtravel_mm": self.overtravel,
-                "repeat_sd_mm": self.sd, "pressed_level": self.pressed_level, "seed": self.seed, "level": level,
+                "repeat_sd_mm": self.sd, "pressed_level": self.pressed_level, "seed": self.seed, "level": self.level,
                 "pressed": p is not None, "tool": p and p["tool"], "trip_z": p and r(p["trip"]),
                 "depth_mm": p and r(p["depth"]), "overtravels": self.overtravels}
 

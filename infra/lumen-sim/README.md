@@ -182,20 +182,24 @@ press it to measure the needle's Z directly. `M43 P5` answers the real board's l
 `PIN: PA5  (A9)   M42 P53          <unused/unknown>                       Input  = 0` (runs/serial.log, 11-02). It reads
 the pin where the head is when the line runs (no wait for moves: send `M400` first). Other pins and a bare `M43` print
 nothing.
-- Without a switch it reads 0, as the board did with nothing wired. `set {"pa5_switch": {"presses": [{"tool": "n1",
+- Without a switch it reads what the pin's input mode gives (`M42 P53 T2` pull-up: 1; `T3` pull-down or `T0`
+  floating: 0, as the board read 11-02; a power cycle resets it to that). `set {"pa5_switch": {"presses": [{"tool": "n1",
   "x0": .., "y0": .., "x1": .., "y1": .., "trip_z": 12.0}, {"tool": "needle", ..., "trip_z": 52.0}], "overtravel_mm":
   0.5, "repeat_sd_mm": 0.003, "pressed_level": 1, "seed": 0}}` wires one (all but `presses` optional, these are the
   defaults but `repeat_sd_mm`, 0); `null` removes it. Press windows are physical X/Y mm, edges included, the first
   listed wins.
 - `n1` presses it as Z falls to the trip point, `needle` as Z rises to it (the see-saw: needle contact raw Z = K - N1
   contact). Each press trips at its own point, `trip_z` + N(0, `repeat_sd_mm`) from `seed`, and holds it until the tool
-  goes back past it or leaves the window. No chatter, no release differential. `pressed_level` is the pin's level
-  pressed (the real polarity: Process's check on the machine).
+  goes back past it or leaves the window; after a release no new press starts until the head moves toward the
+  switch past the release point (no chatter while it stands still). `pressed_level` is the pin's level pressed, the
+  other one released, whatever M42 set (the real polarity: Process's check on the machine).
 - A press deeper than `overtravel_mm` past its point is reported once in `sim_errors` ("PA5 switch overtravel: n1 0.62
-  mm past its trip point (overtravel 0.50 mm)"), seen at the end of each move (a quick stop's too) and at each read.
-  The head is not stopped (no hard stop is modelled).
+  mm past its trip point (overtravel 0.50 mm)", `line` null), seen at the end of each move (a quick stop's too), at
+  each read, at a Z release (`z_drop`) and at a physical fault. Not seen: an X/Y move that crosses a window deep and
+  ends outside it. The head is not stopped (no hard stop is modelled).
 - The state's `pa5`: the settings, `level`, `pressed`, `tool`, `trip_z` and `depth_mm` (the deepest of this press),
-  `overtravels`. The switch is the machine's: it outlives a power cycle and `clear`.
+  `overtravels`, as of the last observation: the state request reads nothing. The switch is the machine's: it
+  outlives a power cycle and `clear`.
 
 **Homing (`G28`).**
 - It waits for motion, then homes X, then Y, then Z. Z homes at the safe point (0,0), then moves to Z 31.5. A and B
@@ -327,7 +331,8 @@ outlive a power cycle and are not listed in `faults`. All values are signed mm a
 - A line the model cannot run (for example `M203 X0` then `G1 X10`, a division by zero) is acked as the board would
   ack it. It is recorded in the state's `sim_errors` (`t`, `line`, `error`; the last 100, kept across power cycles),
   on stderr and as a `#` line in the I/O log (bytes outside ASCII escaped, so line noise cannot break the log).
-  Check `sim_errors` after a test: an entry is a gap in the model, not a board reply.
+  Check `sim_errors` after a test: an entry is a gap in the model or a simulated physical event (a PA5 overtravel), not
+  a board reply.
 - `M92` with a zero value is acked and ignored for that axis (recorded): on the board the axis would stop moving.
 - An error outside any command halts the board with `halt_reason` `sim error: <error>`. The process, the port and the
   control channel stay up, and a power cycle recovers.
