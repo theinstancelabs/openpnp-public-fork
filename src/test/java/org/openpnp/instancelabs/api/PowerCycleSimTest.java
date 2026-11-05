@@ -1448,6 +1448,27 @@ public class PowerCycleSimTest {
         svc = DispenseService.start(Configuration.get());
     }
 
+    /**
+     * BR-97 re-review (MINOR): every levelling call is journaled before it is sent: a journal write that fails (here a
+     * trigger aborts the Z_LEVEL insert, as a full disk would) answers 409 and sends nothing.
+     */
+    @Test
+    public void aLevellingCallWhoseJournalWriteFailsSendsNothing() throws Exception {
+        powerCycle();
+        lockForProcess();
+        try (java.sql.Connection c = java.sql.DriverManager.getConnection(svc.getDb().getUrl());
+                java.sql.Statement st = c.createStatement()) {
+            st.execute("CREATE TRIGGER z_level_fails BEFORE INSERT ON events WHEN NEW.code = 'Z_LEVEL' BEGIN SELECT "
+                    + "RAISE(ABORT, 'disk full'); END");
+        }
+        sim.server.mark();
+        call("POST", "/api/gcode", level("w", 1));
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("journal") && lastBody.contains("disk full"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "nothing sent");
+        assertEquals(0.0, sim.server.position('Z'), 1e-9);
+    }
+
     /** BR-97: a levelling move counts for BR-02's idle clock: it keeps the screw's motor on, as any move does. */
     @Test
     public void aLevellingMoveKeepsTheScrewMotorOn() throws Exception {

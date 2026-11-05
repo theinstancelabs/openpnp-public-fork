@@ -5,6 +5,7 @@ import java.io.FileOutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -208,7 +209,7 @@ final class GcodePassthrough {
      * BR-97: the batch's Z moves while not homed, walked from the controller's Z (read first: M400, M114) by
      * {@link PassthroughLines#level}, within 32 mm of where the position became unknown
      * (the engine's {@code ControllerReset#levelReference}): a refused one sends nothing, else the call is journaled
-     * (events {@code Z_LEVEL}: the holder, the lines, the reason).
+     * first (events {@code Z_LEVEL}: the holder, the lines, the reason); a failed write sends nothing either (409).
      */
     private void checkLevelling(Machine m, GcodeDriver d, DispenseService svc, List<String> raw,
             List<PassthroughLines.Line> lines, MachineLock.Holder holder, String what) throws ApiException {
@@ -236,8 +237,14 @@ final class GcodePassthrough {
                 sent.append(sent.length() == 0 ? "" : "; ").append(l.text);
             }
         }
-        svc.getDb().event(null, "INFO", "Z_LEVEL", "Z levelling while not homed, by " + (holder == null ? "?"
-                : holder.name()) + " (" + what + "): " + sent);
+        try {
+            svc.getDb().insertEvent(null, "INFO", "Z_LEVEL", "Z levelling while not homed, by " + (holder == null ? "?"
+                    : holder.name()) + " (" + what + "): " + sent, System.currentTimeMillis());
+        }
+        catch (SQLException e) {
+            throw ApiException.refused("the levelling call could not be journaled (events Z_LEVEL: " + e.getMessage()
+                    + "), so nothing was sent: every Z move while not homed goes on record first");
+        }
     }
 
     /** The controller axis Z's coordinate as OpenPnP knows it (raw mm): the controller's own once re-read. */

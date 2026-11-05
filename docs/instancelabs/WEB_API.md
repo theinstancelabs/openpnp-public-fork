@@ -561,16 +561,16 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   read), the start of a home through the API or the engine (its G28 may move the frame even if the home ends unhomed;
   an `events` row `HOME_STARTED`, so also after an OpenPnP restart) or a home; a Stop and Start keeps it (OpenPnP's
   own Home button is not seen starting: one that ends unhomed keeps it too); such a call needs `what` (400 without it)
-  and the dispense engine (409 without it: nothing would journal it), and is an `events` row `Z_LEVEL` (the holder's
-  label, as a reset home's attestation names it, the lines, `what`); on that line any other axis is refused, and in
-  that call `M410` (it may end a move short, so the next line would travel further: send it in a call of its own; the
-  STOP is `POST /api/stop`); pump P2 / valve P3 only full on; `M906 B` ≤ 670; `G4` ≤ 60 s; the bed's height switch on
-  PA5 only (the HACK header's pin 3): `M42 [I] P53 T0|T2|T3` (an input mode; `T2` its pull-up) and `M43 [I] P5` (its
-  read: M43 numbers the pin by the firmware's pin table, so not 53; send `M400` first, as M43 does not wait for
-  moves); refused with the route to use: `G28` (`POST /api/machine/home`), `G92` on X/Y/Z, bare `M18`/`M84`, `G91`,
-  `M92`, EEPROM, `M112`/`M999`/`M997`, `M990`, anything else. After moves OpenPnP's coordinates are re-read (M114)
-  once the head is at rest, else before the next guarded write, a release or a take-over. Log:
-  `<config>/instancelabs/gcode-passthrough.log`.
+  and the dispense engine (409 without it: nothing would journal it), and is an `events` row `Z_LEVEL` before a line
+  goes out (the holder's label, as a reset home's attestation names it, the lines, `what`; a write that fails answers
+  409, nothing sent); on that line any other axis is refused, and in that call `M410` (it may end a move short, so the
+  next line would travel further: send it in a call of its own; the STOP is `POST /api/stop`); pump P2 / valve P3 only
+  full on; `M906 B` ≤ 670; `G4` ≤ 60 s; the bed's height switch on PA5 only (the HACK header's pin 3):
+  `M42 [I] P53 T0|T2|T3` (an input mode; `T2` its pull-up) and `M43 [I] P5` (its read: M43 numbers the pin by the
+  firmware's pin table, so not 53; send `M400` first, as M43 does not wait for moves); refused with the route to use:
+  `G28` (`POST /api/machine/home`), `G92` on X/Y/Z, bare `M18`/`M84`, `G91`, `M92`, EEPROM, `M112`/`M999`/`M997`,
+  `M990`, anything else. After moves OpenPnP's coordinates are re-read (M114) once the head is at rest, else before
+  the next guarded write, a release or a take-over. Log: `<config>/instancelabs/gcode-passthrough.log`.
 
 ### 3.8 Jog, move-to and the cameras (BR-49, BR-53)
 
