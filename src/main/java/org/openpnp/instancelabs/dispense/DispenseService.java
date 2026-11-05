@@ -5128,8 +5128,9 @@ public final class DispenseService {
         p.approachMm = c.needleEndMeasure.approachMm; // both tools press the one point, from the same side
         double x = place.x, y = place.y;
         if (needle) {
-            // its end from below, right before the press in this task: nothing else runs between them; N1's frames only
-            // where the window needs K by parallax (review Risk 3: not from a K_switch of another home)
+            // its end from below, right before the press in this task: nothing else runs between them; N1's frames
+            // except for a window from a K_switch of another home or of the place before (review Risk 3: no K by
+            // parallax there)
             boolean n1Frames = !"kSwitch".equals(HeightSwitch.needleWindow(c, null, home, p.down).from);
             NeedleEndMeasure.Result er = new NeedleEndMeasure.Result();
             try {

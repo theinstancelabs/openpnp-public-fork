@@ -236,7 +236,7 @@ public class NeedleEndMeasureTest {
 
     /**
      * No end and no mark: the brightest noise in the window is some 6 times its sd, under check (a)'s 10 (Process 11-05
-     * 04:3x: real ends 15-45 times), so the first frame is refused.
+     * 04:3x; Process's 25G ends read 11.7-18.9 times through the ±3 mm search), so the first frame is refused.
      */
     @Test
     public void noEndIsTheEndNotFound() throws Exception {

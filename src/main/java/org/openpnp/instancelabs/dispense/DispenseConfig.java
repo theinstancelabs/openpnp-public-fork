@@ -475,7 +475,8 @@ public class DispenseConfig {
                 152.319));
         /**
          * Check (a): the end's top-hat peak at least this many times the sd of the rest of its window (Process 11-05
-         * 04:3x: real ends 15-45 times, noise about 6).
+         * 04:3x; noise about 6). Process's 25G ends read 11.7-18.9 times through the ±3 mm search (p34's frames
+         * 11.7-14.9, np1.py's 15.1-18.9), the 15-45 quoted before being np1.py's own 220 px first window.
          */
         public double minPeakToSd = 10;
         /** Check (b): the frames' rms distance from the step fit at most (px). */
