@@ -710,7 +710,7 @@ final class PadCalibrationJob {
      * time for nothing.
      */
     static final int MIN_PAIRS = ScrewPhaseFit.MIN_PAIRS;
-    /** Process 11-04 22:1x: 12 pairs rule a ripple in or out up to a half-turn cv ≈ 0.11 (8: ≈ 0.09, 16: ≈ 0.127). */
+    /** Process 11-04 22:1x: 12 pairs decide ≥ 90 % of measures up to a half-turn cv ≈ 0.11, 8 only to ≈ 0.08. */
     static final int DEFAULT_PAIRS = 12;
 
     private static int count(Integer v, int dflt, int min, int max, String name) throws ApiException {
