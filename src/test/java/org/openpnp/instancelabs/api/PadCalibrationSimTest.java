@@ -924,6 +924,46 @@ public class PadCalibrationSimTest {
         assertTrue(landing(ok(get("/api/pad-calibrations/" + str(asked, "id")))).get("saved").getAsBoolean());
     }
 
+    /**
+     * BR-103 (Process 11-05 02:4x): a tip with no landing of its own, whose end was measured from below, is checked
+     * around where that end says it lands (the 25G: the end predicted its dot within 0.14 mm). The check searches ±2 mm
+     * there, in a band grown by the expected Y shift, so it fits an area that the ±6 mm search does not.
+     */
+    @Test
+    public void aLandingExpectedFromTheEndFromBelowIsSearchedTwoMillimetresAroundIt() throws Exception {
+        start(sc -> byTip(sc, K25, 1.6, 0.6, 2.4, -1.3));
+        mount25();
+        ok(call("PUT", "/api/config", "{\"calibrationArea\":{\"x0Mm\":290,\"y0Mm\":240,\"widthMm\":40,"
+                + "\"heightMm\":15}}"));
+        regulatorAtMs = System.currentTimeMillis();
+        JsonObject pv = ok(get("/api/pad-calibrations/preview?measure=landing"));
+        assertTrue(str(pv.getAsJsonObject("landing"), "problem").startsWith("Searching ±6 mm needs 20 mm"),
+                pv.toString());
+        String expected = "\"expectedLanding\":{\"dxMm\":2.35,\"dyMm\":-1.25,\"evidence\":\"np1 OFF_true 23:44\"}";
+        // contradictory or malformed: refused before anything moves
+        assertEquals(400, call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\",\"wide\":true," + expected
+                + "," + attest() + "}").status);
+        assertEquals(400, call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\",\"expectedLanding\":"
+                + "{\"dxMm\":2.35,\"dyMm\":-1.25}," + attest() + "}").status, "no evidence");
+        assertEquals(400, call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\",\"expectedLanding\":"
+                + "{\"dxMm\":12,\"dyMm\":0,\"evidence\":\"x\"}," + attest() + "}").status, "beyond ±9 mm");
+        JsonObject started = ok(call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\"," + expected + ","
+                + attest() + ",\"wait\":true}"));
+        JsonObject job = started.getAsJsonObject("result");
+        assertEquals("done", str(job, "state"), job.toString());
+        JsonObject l = landing(job);
+        assertEquals(2, l.get("searchMm").getAsDouble(), 0, l.toString());
+        assertTrue(l.get("saved").getAsBoolean(), l.toString());
+        assertEquals(2.4, l.get("dxMm").getAsDouble(), 0.08, l.toString());
+        assertEquals(-1.3, l.get("dyMm").getAsDouble(), 0.08, l.toString());
+        assertEquals(2.4, svc.getConfig().needleLanding.dxMm, 0.08);
+        // with a landing of its own the check already searches ±2 mm around it: an expectation is refused
+        wipeBlank();
+        Res own = call("POST", "/api/pad-calibrations", "{\"measure\":\"landing\"," + expected + "," + attest() + "}");
+        assertEquals(409, own.status, own.toString());
+        assertTrue(str(own.json(), "reason").contains("a landing of its own"), own.toString());
+    }
+
     @Test
     public void aLandingCheckThatFoundNothingCannotBeSaved() throws Exception {
         // a new 22G that lands 8 mm off: beyond the ±6 mm a bent tip without its bend recorded is searched
