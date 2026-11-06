@@ -88,6 +88,12 @@ public class BoardRegistration {
      * a paste place on it is refused ({@link BoardOutlines}); null for a record made before it.
      */
     public double[] boardRectMm;
+    /**
+     * BR-81's own order of board outlines (not the wall clock of {@link #atMs} and {@link #lastCheckedAtMs}): when this
+     * record and its last same-seat check were stored, each later than every outline and check stored before
+     * ({@link DispenseConfig#outlineStampMs}), also after the clock was set back; null for a record from before.
+     */
+    public Long outlineAtMs, outlineCheckedAtMs;
     /** affine-3 | affine-lsq-N | similarity-2 */
     public String method;
     public double rotationDeg, scaleX, scaleY, shearDeg, maxResidualMm;
@@ -209,6 +215,17 @@ public class BoardRegistration {
             }
         }
         return worst;
+    }
+
+    /** BR-81: this record's outline in the order of outlines (a record from before it: its atMs). */
+    public long outlineOrder() {
+        return outlineAtMs != null ? outlineAtMs : atMs;
+    }
+
+    /** BR-81: its last check in that order (never checked: its outline's): the outlines its plans' dots may lie on. */
+    public long checkOrder() {
+        Long checked = outlineCheckedAtMs != null ? outlineCheckedAtMs : lastCheckedAtMs;
+        return checked == null ? outlineOrder() : Math.max(outlineOrder(), checked);
     }
 
     /** "3f2a…": the first 4 characters of the id, as the texts show it. */

@@ -135,10 +135,10 @@ public class DispensePlan {
     /** BR-81: the id of the board registration the plan was made with, or null (its dots' outlines, I13 and I12). */
     public String registrationId;
     /**
-     * BR-81: the board's key as registrations key it ({@code file:<path>}, {@code job:<id>}): a plan made without a
-     * registration lays its dots on that board's stored registration alone.
+     * BR-81, a plan made without a registration: the id of its board's stored record when that record applied to the
+     * board at the plan's seat (the test "auto" uses), the one outline its dots may lie on; null: none.
      */
-    public String boardKey;
+    public String ownRegistrationId;
     /**
      * The board location's Z when planned (the board file seat's z or the job board's Z), null for a
      * plan without a board location: the frame reference of the board surface (I4) and of the needle
@@ -197,7 +197,7 @@ public class DispensePlan {
         sub.boardToMachine = boardToMachine == null ? null : boardToMachine.clone();
         sub.boardFile = boardFile;
         sub.registrationId = registrationId;
-        sub.boardKey = boardKey;
+        sub.ownRegistrationId = ownRegistrationId;
         sub.boardWidthMm = boardWidthMm;
         sub.boardHeightMm = boardHeightMm;
         sub.boardTransformStatus = boardTransformStatus;

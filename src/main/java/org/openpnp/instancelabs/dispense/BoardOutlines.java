@@ -43,18 +43,20 @@ public final class BoardOutlines {
 
     private static final class Outline {
         final String label, kind, id;
-        final long atMs;
+        /** When it was recorded (the wall clock, for the status), and its place in the order of outlines. */
+        final long atMs, order;
         final boolean fromFiducials;
         final List<double[]> edge;
         /** A tile's boards by name, to name the nearest; none for a registration. */
         final Map<String, List<double[]>> boards;
 
-        Outline(String label, String kind, String id, long atMs, boolean fromFiducials, List<double[]> edge,
+        Outline(String label, String kind, String id, long atMs, long order, boolean fromFiducials, List<double[]> edge,
                 Map<String, List<double[]>> boards) {
             this.label = label;
             this.kind = kind;
             this.id = id;
             this.atMs = atMs;
+            this.order = order;
             this.fromFiducials = fromFiducials;
             this.edge = edge;
             this.boards = boards;
@@ -98,7 +100,8 @@ public final class BoardOutlines {
                 edge.add(m);
             }
             o.outlines.add(new Outline("board '" + r.boardName + "' (registration " + r.shortId() + ")",
-                    "registration", r.id, r.atMs, r.boardRectMm == null, edge, Collections.emptyMap()));
+                    "registration", r.id, r.atMs, r.outlineOrder(), r.boardRectMm == null, edge,
+                    Collections.emptyMap()));
         }
         for (Map.Entry<String, DispenseConfig.Tile> e : c.tiles.entrySet()) {
             DispenseConfig.Tile t = e.getValue();
@@ -109,7 +112,8 @@ public final class BoardOutlines {
             for (DispenseConfig.TileBoard b : t.boards) {
                 boards.put(b.name, b.outline);
             }
-            o.outlines.add(new Outline("the " + t.label, "tile", e.getKey(), t.atMs, false, t.outline, boards));
+            o.outlines.add(new Outline("the " + t.label, "tile", e.getKey(), t.atMs, t.outlineOrder(), false,
+                    t.outline, boards));
         }
         return o;
     }
@@ -142,8 +146,8 @@ public final class BoardOutlines {
     }
 
     /**
-     * As above, among the outlines recorded after {@code afterMs} only (null: all of them) but the registration
-     * {@code exceptId} (a plan's own board; null: none).
+     * As above, among the outlines after {@code afterMs} in the order of outlines only (null: all of them) but the
+     * registration {@code exceptId} (a plan's own board; null: none).
      */
     public String on(double x, double y, double margin, Long afterMs, String exceptId) {
         return on(Collections.singletonList(new double[] {x, y}), margin, afterMs, exceptId);
@@ -157,7 +161,7 @@ public final class BoardOutlines {
     private String on(List<double[]> shape, double margin, Long afterMs, String exceptId) {
         for (Outline o : outlines) {
             boolean except = exceptId != null && "registration".equals(o.kind) && exceptId.equals(o.id);
-            if (!except && (afterMs == null || o.atMs > afterMs) && !(distance(o.edge, shape) > margin)) {
+            if (!except && (afterMs == null || o.order > afterMs) && !(distance(o.edge, shape) > margin)) {
                 return o.name(shape);
             }
         }

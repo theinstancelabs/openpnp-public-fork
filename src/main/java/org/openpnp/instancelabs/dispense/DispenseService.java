@@ -3139,14 +3139,14 @@ public final class DispenseService {
             sc.surfaceTargets.add(new double[] {d.xMm, d.yMm});
         }
         sc.checkPlanSurface = true;
-        // BR-81: the outlines its dots may lie on: those its registration knew at its last check; without one, its own
-        // board's stored registration alone; none once its registration is gone
+        // BR-81: the outlines its dots may lie on: those its registration knew at its last check; without one, the
+        // record that applied to its board at its seat, while it is stored; none once its registration is gone
         BoardRegistration reg = c.boardRegistrationById(plan.registrationId);
         if (reg != null) {
-            sc.outlinesUpToMs = reg.lastCheckedAtMs == null ? reg.atMs : Math.max(reg.atMs, reg.lastCheckedAtMs);
+            sc.outlinesUpToMs = reg.checkOrder();
         }
         else if (plan.registrationId == null) {
-            BoardRegistration own = plan.boardKey == null ? null : c.boardRegistrations.get(plan.boardKey);
+            BoardRegistration own = c.boardRegistrationById(plan.ownRegistrationId);
             sc.ownOutlineId = own == null ? null : own.id;
         }
         else {
@@ -6473,14 +6473,14 @@ public final class DispenseService {
 
     private synchronized void storeRegistration(BoardRegistration reg, boolean check, String runId) throws IOException {
         DispenseConfig c = cfg.copy();
-        // BR-81: never older than an outline or a check stored, also after the clock was set back (a tile is "newer"
-        // than a registration by these stamps): the record's stamp, or its same-seat check's
+        // BR-81: in the order of outlines, after every outline and check stored, also after the clock was set back (a
+        // tile is "newer" than a registration by it); atMs and lastCheckedAtMs stay on the wall clock ("New seat")
         long at = c.outlineStampMs(System.currentTimeMillis());
         if (check) {
-            reg.lastCheckedAtMs = at;
+            reg.outlineCheckedAtMs = at;
         }
         else {
-            reg.atMs = at;
+            reg.outlineAtMs = at;
         }
         c.putBoardRegistration(reg);
         updateConfig(c);

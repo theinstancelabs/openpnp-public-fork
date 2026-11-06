@@ -373,4 +373,23 @@ public class BoardOutlinesTest {
         sc = DispenseService.boardScope(c, plan);
         assertTrue(sc.registrationGone && sc.ownOutlineId == null && sc.outlinesUpToMs == null, "gone: none");
     }
+
+    /** Outlines are ordered by BR-81's own stamps, not by atMs (the wall clock, which may have been set back). */
+    @Test
+    public void outlinesAreOrderedByTheirOwnStampNotTheWallClock() {
+        BoardRegistration r = reg("o.board.xml", 1, 0, 0, 1, 100, 50); // x 100..120, y 50..60
+        r.atMs = 1000;
+        r.outlineAtMs = 5000L;
+        DispenseConfig c = with(r);
+        DispenseConfig.Tile t = tile(); // x 60..120, y 30..60
+        t.atMs = 1000;
+        t.outlineAtMs = 6000L;
+        c.tiles.put("nano", t);
+        BoardOutlines b = BoardOutlines.of(c);
+        assertEquals("board 'o.board.xml' (registration abcd…)", b.on(110, 55, 2, 4000L, null),
+                "the registration, ordered after 4000 though its atMs is not");
+        assertEquals("the Nano tile (board C)", b.on(110, 55, 2, 5500L, null), "the tile alone after 5500");
+        assertNull(b.on(110, 55, 2, 6000L, null), "nothing after 6000");
+        assertEquals(1000L, b.view().get(0).get("atMs"), "the status shows the wall clock");
+    }
 }

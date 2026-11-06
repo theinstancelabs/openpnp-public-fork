@@ -422,6 +422,13 @@ public class DispenseConfig {
         /** Where the outline comes from, as the import gave it. */
         public String source;
         public long atMs;
+        /** Its place in BR-81's order of outlines ({@link DispenseConfig#outlineStampMs}); null: its atMs. */
+        public Long outlineAtMs;
+
+        /** Its outline in the order of outlines. */
+        public long outlineOrder() {
+            return outlineAtMs != null ? outlineAtMs : atMs;
+        }
 
         /** The first reason this tile does not hold together, or null. */
         public String problem() {
@@ -748,18 +755,16 @@ public class DispenseConfig {
     }
 
     /**
-     * BR-81: the stamp of a new board outline (a registration, a tile) or of a registration's check: now, but later
-     * than every outline and check stored, also after the clock was set back (an outline is "newer" by these stamps).
+     * BR-81: the order stamp of a new board outline (a registration, a tile) or of a registration's check: now, but
+     * later than every outline and check stored, also after the clock was set back (an outline is "newer" by it).
      */
     public long outlineStampMs(long now) {
         long s = now;
         for (BoardRegistration r : boardRegistrations.values()) {
-            if (r != null) {
-                s = Math.max(s, Math.max(r.atMs, r.lastCheckedAtMs == null ? r.atMs : r.lastCheckedAtMs) + 1);
-            }
+            s = r == null ? s : Math.max(s, r.checkOrder() + 1);
         }
         for (Tile t : tiles.values()) {
-            s = t == null ? s : Math.max(s, t.atMs + 1);
+            s = t == null ? s : Math.max(s, t.outlineOrder() + 1);
         }
         return s;
     }

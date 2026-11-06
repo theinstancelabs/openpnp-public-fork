@@ -207,12 +207,15 @@ the DELETE routes of §3.2). A board run's planned dots are no paste place: I13 
 outline its plan does not cover. A plan made with a registration (`source.registrationId`) covers the outlines recorded
 up to that registration's last check (`I13: the plan's dot at (x, y) lies on the Nano tile, recorded after the plan's
 board registration (the bed changed since): register the board again (Register board)`); a plan made without one
-(`registration: "none"`, the UI's "Plan without fiducial correction") covers its own board's stored registration alone,
-never a tile or another board (`…, and the plan has no board registration: register the board (Register board)`); a plan
-whose registration is gone covers none (`…, and the plan's board registration is gone (registered again or forgotten):
-plan the board again`). Outline stamps never go back: a tile import, a new registration and a same-seat check are stamped
-at the later of now and 1 ms after every outline and check stored, so a clock set back cannot make a tile older than a
-registration. A run uses a place it names (Prime the waste, a ladder its
+(`registration: "none"`, the UI's "Plan without fiducial correction", and an "auto" plan with no applicable record alike)
+covers its board's stored record alone, and only when that record applies to the board at the plan's seat (the test
+"auto" uses: a second copy of the board file elsewhere covers none), never a tile or another board (`…, and the plan has
+no board registration: register the board (Register board)`); a plan whose registration is gone covers none (`…, and the
+plan's board registration is gone (registered again or forgotten): plan the board again`). The order of outlines is
+BR-81's own and never goes back: a tile import, a new registration and a same-seat check get `outlineAtMs` (a
+registration's check: `outlineCheckedAtMs`) at the later of now and 1 ms after every outline and check stored, so a clock
+set back cannot make a tile older than a registration; `atMs` and `lastCheckedAtMs` stay on the wall clock ("New seat"
+compares them). A run uses a place it names (Prime the waste, a ladder its
 place, a weigh step its coupon place, Test dot its spot), the purge row when it lays purge dots, and the calibration area
 when one of its dots lies in it.
 
@@ -267,7 +270,9 @@ same seat kept its surface and the plan already carries both. Registrations are 
 (`boardRegistrations`, the latest per board key `file:<path>` or `job:<id>`, at most 20) and logged as `REG` events.
 BR-81: each carries `boardRectMm` `[x0, y0, x1, y1]`, the board's outline in board mm (`[0, 0, width, height]` from its
 dimensions, else the box of its pads and fiducials), stamped by every Register board (a same seat too); its outline on
-the bed is that box through `affine`. A record made before has none (null): its fiducials' box stands for it.
+the bed is that box through `affine`. A record made before has none (null): its fiducials' box stands for it. It also
+carries `outlineAtMs` and `outlineCheckedAtMs`, its place in the order of outlines (§3.1 I13; null for a record from
+before: `atMs` and `lastCheckedAtMs` stand in), and a tile `outlineAtMs`.
 
 ### 3.3 Board upload, drawings and the plan's board (`BOARD_IMPORT_DESIGN.md` §3.2, §4)
 

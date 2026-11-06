@@ -992,7 +992,7 @@ final class DispenseEndpoints {
             BoardLocation bl = findJobBoard(id);
             src = Views.map("source", "job", "boardLocationId", id);
             reg = registrationFor(svc, regMode, src, bl);
-            plan = svc.planBoard(bl, reg);
+            plan = planBoard(svc, bl, reg, src);
             artRef(plan, bl);
         }
         else if ("file".equals(source)) {
@@ -1013,14 +1013,13 @@ final class DispenseEndpoints {
             src = Views.map("source", "file", "file", f.getAbsolutePath(), "x", x, "y", y, "z", z, "rotation", rot);
             BoardLocation bl = baseBoardLocation(src);
             reg = registrationFor(svc, regMode, src, bl);
-            plan = svc.planBoard(bl, reg);
+            plan = planBoard(svc, bl, reg, src);
             artRef(plan, bl);
         }
         else {
             throw ApiException.badRequest("'source' must be 'job' or 'file'");
         }
         src.put("registrationId", reg == null ? null : reg.id);
-        plan.boardKey = boardKey(src);
         PlanStore.Entry e = new PlanStore.Entry(plan, src);
         e.registrationRecord = reg;
         estimate(svc, e);
@@ -1067,6 +1066,20 @@ final class DispenseEndpoints {
      * key when it still applies to the board and its nominal seat, "none", or a registration id (409
      * when it is gone or does not apply).
      */
+    /**
+     * Plans the board at its nominal seat through {@code reg} (null: none): POST /api/plan, Register board's plan again
+     * and {@link PlanAgain}. BR-81: a plan made without a registration may lay its dots on its board's stored record
+     * alone, and only when that record applies to the board at this seat (the test "auto" uses): a second copy of the
+     * board file elsewhere gets no outline of its own.
+     */
+    DispensePlan planBoard(DispenseService svc, BoardLocation nominal, BoardRegistration reg, Map<String, Object> src)
+            throws Exception {
+        DispensePlan plan = svc.planBoard(nominal, reg);
+        BoardRegistration own = reg != null ? null : registrationFor(svc, "auto", src, nominal);
+        plan.ownRegistrationId = own == null ? null : own.id;
+        return plan;
+    }
+
     BoardRegistration registrationFor(DispenseService svc, String mode, Map<String, Object> src, BoardLocation nominal)
             throws ApiException {
         if ("none".equals(mode)) {

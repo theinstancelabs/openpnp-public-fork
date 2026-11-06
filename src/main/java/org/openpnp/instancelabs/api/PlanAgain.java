@@ -25,7 +25,7 @@ final class PlanAgain {
         BoardLocation bl = dispense.baseBoardLocation(src);
         String regId = (String) src.get("registrationId");
         BoardRegistration reg = regId == null ? null : dispense.registrationFor(svc, regId, src, bl);
-        DispensePlan plan = svc.planBoard(bl, reg);
+        DispensePlan plan = dispense.planBoard(svc, bl, reg, src);
         dispense.artRef(plan, bl);
         PlanStore.Entry next = new PlanStore.Entry(plan, src);
         next.registrationRecord = reg;

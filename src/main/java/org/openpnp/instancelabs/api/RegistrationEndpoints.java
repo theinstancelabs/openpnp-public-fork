@@ -179,8 +179,7 @@ final class RegistrationEndpoints {
         Map<String, Object> src = new LinkedHashMap<>(e.source);
         src.put("registrationId", regId);
         BoardLocation bl = dispense.baseBoardLocation(src);
-        DispensePlan plan = svc.planBoard(bl, reg);
-        plan.boardKey = DispenseEndpoints.boardKey(src);
+        DispensePlan plan = dispense.planBoard(svc, bl, reg, src);
         dispense.artRef(plan, bl);
         PlanStore.Entry next = new PlanStore.Entry(plan, src);
         next.registrationRecord = reg;
@@ -529,7 +528,8 @@ final class RegistrationEndpoints {
             throw ApiException.badRequest("the tile " + why);
         }
         DispenseConfig c = svc.updateConfigAtomically(live -> {
-            t.atMs = live.outlineStampMs(System.currentTimeMillis()); // after every stored outline: a clock set back
+            t.atMs = System.currentTimeMillis();
+            t.outlineAtMs = live.outlineStampMs(t.atMs); // after every stored outline, also after a clock set back
             live.tiles.put(r.group(1), t);
             return live;
         });
