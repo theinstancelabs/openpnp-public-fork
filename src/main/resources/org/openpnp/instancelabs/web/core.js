@@ -3269,10 +3269,10 @@
     const was = st && before && before.kind !== 'user' && isNum(before.sinceMs) ? ', since ' + IL.fmtTime(before.sinceMs - S.skewMs) : '';
     const work = st ? st.label + "'s work (" + (st.what || 'no task named') + was + ')' : '';
     const done = st && st.actions && st.actions.length ? ': ' + st.actions.join(', ') : '';
-    const back = st ? ' ' + st.label + ' cannot use it until you give it back.' : '';
+    const back = st ? ' ' + st.label + ' cannot use it until you give it back (click In control).' : '';
     let sub;
     if (unconfirmed) sub = 'The stop of ' + (work || 'the machine') + ' was NOT confirmed: STOP is being sent again. Look at the machine; switch it off at its power switch if it still moves.';
-    else if (!st) sub = 'Nobody had it. Agents cannot use it until you give it back (In control › Give back).';
+    else if (!st) sub = 'Nobody had it. Agents cannot use it until you give it back (click In control).';
     // idle with the machine off (after a deploy, a STOP): nothing was on to switch off (the engine's "the machine was off")
     else if (st.mode === 'outputs-off' && st.machineOff) sub = st.label + ' was idle and the machine was already off: nothing needed switching off. Connect, then Home before moving it.' + back;
     else if (st.mode === 'outputs-off') sub = st.label + ' was idle. Its outputs are off' + done + '. ' + takenMachineText(st, m) + back;
@@ -3295,6 +3295,21 @@
     S.lockTakenAt = 0;
     return r;
   };
+  /** While the user holds the machine a click on In control asks this at once (the user 11-05 20:1x): one confirm. */
+  function askGiveBack() {
+    let give;
+    const h = IL.dialog.open({
+      id: 'dlg-give-back', size: 'sm', eyebrow: 'In control', title: 'Give the machine back to the agents?',
+      body: [el('p', { class: 'dlg-p', text: 'An agent may take it and move it right after: keep your hands clear of the machine.' }),
+        el('div', { 'data-refusals': '', id: 'dlg-give-back-refusals' })],
+      foot: [el('span', { class: 'spacer' }),
+        el('button', { type: 'button', class: 'btn', text: 'Keep it', onclick: () => h.close('cancel') }),
+        give = el('button', { type: 'button', class: 'btn btn--primary', text: 'Give back' })],
+      initialFocus: null,
+    });
+    give.addEventListener('click', () => IL.act(give, async () => { const r = await IL.giveBack(); h.close('given'); return r; },
+      { ok: 'Given back: nobody has the machine. An agent may take it now.', refusalIn: $('dlg-give-back-refusals') }));
+  }
   /** The lock's changes of hands this page did not cause itself: a line in the activity log, and a toast. */
   IL.on('status', (s, prev) => {
     const a = IL.lockOf(s), b = IL.lockOf(prev);
@@ -3303,7 +3318,7 @@
     if ((ah && ah.kind) === (bh && bh.kind) && (ah && ah.who) === (bh && bh.who) && (ah && ah.sinceMs) === (bh && bh.sinceMs)) return;
     if (!ah) S.lockTakenAt = 0;
     const justTook = S.lockTakenAt && Date.now() - S.lockTakenAt < 5000;   // Take control's own band says it
-    if (a.mine && !bh) { if (!justTook) IL.toast('The machine is yours now (your first move). Agents wait until you give it back: In control › Give back.', 'ok'); }
+    if (a.mine && !bh) { if (!justTook) IL.toast('The machine is yours now (your first move). Agents wait until you give it back: click In control.', 'ok'); }
     else if (a.mine && b.agent) { if (!justTook) IL.toast('You took control from ' + IL.holderName(bh) + ' (another window).', 'ok'); }
     else if (a.agent) IL.log(IL.holderName(ah) + ' took the machine' + (ah.what ? ': ' + ah.what : '') + '.', 'need');   // its band says so
     else if (!ah && b.mine) IL.log('Given back: nobody has the machine.', 'info');
@@ -3837,7 +3852,9 @@
   // ================================================================================== frame wiring + boot
   function wireFrame() {
     // (STOP clicks are wired when core.js loads, next to F9)
-    // strip cells open their panel views; the verdict cell opens Run
+    // strip cells open their panel views; the verdict cell opens Run; In control asks to give the machine back while the
+    // user holds it (registered first: it stops the panel's own handler)
+    $('cell-lock').addEventListener('click', (ev) => { if (IL.lockOf(S.status).mine) { ev.stopImmediatePropagation(); askGiveBack(); } });
     for (const c of document.querySelectorAll('[data-open-view]')) c.addEventListener('click', () => IL.openView(c.dataset.openView));
     $('pill-engine').addEventListener('click', () => {
       const s = S.status;
