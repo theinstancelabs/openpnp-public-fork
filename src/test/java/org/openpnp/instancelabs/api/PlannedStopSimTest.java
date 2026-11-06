@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.beans.PropertyChangeListener;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -463,19 +464,17 @@ public class PlannedStopSimTest {
     }
 
     /**
-     * Re-review M-1: a disable listener that throws stops OpenPnP's Stop before its drivers: the machine still reads
-     * started, the link is open, nothing of the planned stop went out. The answer says so, not "stopped": the deployer
-     * would quit OpenPnP, and the quit's disable sends the whole DISABLE_COMMAND, M18 B included.
+     * Re-review M-1: a Stop that throws before its drivers (here a "homed" property listener, as the GUI's binding; since
+     * BR-106 a machine listener's exception no longer does): the machine still reads started, the link is open, nothing
+     * of the planned stop went out. The answer says so, not "stopped": the deployer would quit OpenPnP, and the quit's
+     * disable sends the whole DISABLE_COMMAND, M18 B included.
      */
     @Test
     public void aPlannedStopWhoseSwitchOffFailedSaysSo() throws Exception {
-        MachineListener throwing = new MachineListener.Adapter() {
-            @Override
-            public void machineAboutToBeDisabled(Machine machine, String reason) {
-                throw new IllegalStateException("a disable listener that throws");
-            }
+        PropertyChangeListener throwing = e -> {
+            throw new IllegalStateException("a homed listener that throws");
         };
-        sim.machine.addListener(throwing);
+        sim.machine.addPropertyChangeListener("homed", throwing);
         try {
             sim.server.mark();
             JsonObject r = call("POST", "/api/stop/planned", null);
@@ -488,7 +487,7 @@ public class PlannedStopSimTest {
             assertFalse(sim.server.sinceMark().contains("M410"), sim.server.sinceMark().toString());
         }
         finally {
-            sim.machine.removeListener(throwing);
+            sim.machine.removePropertyChangeListener("homed", throwing);
         }
     }
 

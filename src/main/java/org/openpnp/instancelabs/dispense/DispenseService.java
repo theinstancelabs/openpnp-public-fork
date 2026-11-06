@@ -2566,18 +2566,19 @@ public final class DispenseService {
     static final long DROPPED_AFTER_MS = 1000;
 
     /**
-     * Ends an engine task OpenPnP dropped, and returns whether it did (rc1 review). OpenPnP removes every task queued
-     * behind one of its own that throws (its Home or jog meeting a limit), without running or cancelling it, so the
-     * task's finish() never ran and every engine endpoint then answered "a dispense task is already running … press
-     * STOP" until OpenPnP restarted, STOP included. A task still not begun while the machine thread has been idle past
-     * {@link #DROPPED_AFTER_MS} will never run: it ends ERROR here, and if it ran after all it would end at once.
+     * Ends an engine task OpenPnP dropped, and returns whether it did (rc1 review). OpenPnP drops every task queued
+     * behind one of its own that throws (its Home or jog meeting a limit): it removed them without running or
+     * cancelling them (BR-106: it cancels them now), so the task's finish() never ran and every engine endpoint then
+     * answered "a dispense task is already running … press STOP" until OpenPnP restarted, STOP included. A task ended
+     * (cancelled) before its body began, or still not begun while the machine thread has been idle past
+     * {@link #DROPPED_AFTER_MS}, will never run: it ends ERROR here, and if it ran after all it would end at once.
      * Called by STOP, and by the API before it refuses a request as busy.
      */
     public boolean releaseDroppedTask() {
         Queued q = queued;
         Machine m = configuration.getMachine();
-        if (q == null || !busy.get() || q.future == null || q.future.isDone() || m == null || m.isBusy()
-                || System.currentTimeMillis() - q.atMs < DROPPED_AFTER_MS || !q.began.compareAndSet(false, true)) {
+        if (q == null || !busy.get() || q.future == null || (!q.future.isDone() && (m == null || m.isBusy()
+                || System.currentTimeMillis() - q.atMs < DROPPED_AFTER_MS)) || !q.began.compareAndSet(false, true)) {
             return false;
         }
         q.run.status = RunResult.Status.ERROR;

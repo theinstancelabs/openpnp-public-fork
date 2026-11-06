@@ -14,6 +14,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -483,64 +484,60 @@ public abstract class AbstractMachine extends AbstractModelObject implements Mac
         }
     }
 
-    public void fireMachineHeadActivity(Head head) {
+    /**
+     * Instance Labs (BR-106): calls every listener, also past one that throws (logged): a listener's bug no longer
+     * ends a Stop before its drivers, nor fails the task whose busy notice it heard. An Error still propagates.
+     */
+    private void fire(Consumer<MachineListener> event) {
         for (MachineListener listener : listenersNow()) {
-            listener.machineHeadActivity(this, head);
+            try {
+                event.accept(listener);
+            }
+            catch (RuntimeException e) {
+                Logger.error(e, "Machine listener {} failed; the others still hear the event",
+                        listener.getClass().getName());
+            }
         }
+    }
+
+    public void fireMachineHeadActivity(Head head) {
+        fire(listener -> listener.machineHeadActivity(this, head));
     }
 
     public void fireMachineTargetedUserAction(HeadMountable hm, boolean jogging) {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineTargetedUserAction(this, hm, jogging);
-        }
+        fire(listener -> listener.machineTargetedUserAction(this, hm, jogging));
     }
 
     public void fireMachineActuatorActivity(Actuator actuator) {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineActuatorActivity(this, actuator);
-        }
+        fire(listener -> listener.machineActuatorActivity(this, actuator));
     }
 
     public void fireMachineEnabled() {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineEnabled(this);
-        }
+        fire(listener -> listener.machineEnabled(this));
     }
 
     public void fireMachineEnableFailed(String reason) {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineEnableFailed(this, reason);
-        }
+        fire(listener -> listener.machineEnableFailed(this, reason));
     }
 
     public void fireMachineAboutToBeDisabled(String reason) {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineAboutToBeDisabled(this, reason);
-        }
+        fire(listener -> listener.machineAboutToBeDisabled(this, reason));
     }
 
     public void fireMachineDisabled(String reason) {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineDisabled(this, reason);
-        }
+        fire(listener -> listener.machineDisabled(this, reason));
     }
 
     public void fireMachineDisableFailed(String reason) {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineDisableFailed(this, reason);
-        }
+        fire(listener -> listener.machineDisableFailed(this, reason));
     }
 
     public void fireMachineHomed(boolean isHomed) {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineHomed(this, isHomed);
-        }
+        fire(listener -> listener.machineHomed(this, isHomed));
     }
 
     public void fireMachineBusy(boolean busy) {
-        for (MachineListener listener : listenersNow()) {
-            listener.machineBusy(this, busy);
-        }
+        fire(listener -> listener.machineBusy(this, busy));
     }
 
     @Override
@@ -565,6 +562,16 @@ public abstract class AbstractMachine extends AbstractModelObject implements Mac
 
     private synchronized boolean isQueueEmpty() {
         return executor == null || executor.isShutdown() || executor.getQueue().isEmpty();
+    }
+
+    /**
+     * Instance Labs (BR-106): a task dropped unrun ends cancelled, so whoever waits for it (an untimed execute(), a
+     * Stop's pump off) learns at once instead of never.
+     */
+    private static void cancelDropped(Runnable task) {
+        if (task instanceof Future) {
+            ((Future<?>) task).cancel(false);
+        }
     }
 
     @Override
@@ -637,6 +644,7 @@ public abstract class AbstractMachine extends AbstractModelObject implements Mac
                                 // After finishing up, there will still be a call to executor.shutdownNow() (see further below).
                                 for (Runnable runnable : new ArrayList<>(executor.getQueue())) {
                                     executor.remove(runnable);
+                                    cancelDropped(runnable);
                                 }
                             }
                         }
@@ -661,8 +669,9 @@ public abstract class AbstractMachine extends AbstractModelObject implements Mac
                 }
                 finally {
                     // If no more tasks are scheduled notify listeners that
-                    // the machine is no longer busy
-                    if (isQueueEmpty()) {
+                    // the machine is no longer busy. Instance Labs (BR-106): also after a failure, as its
+                    // shutdownNow() below cancels any task queued meanwhile.
+                    if (exception != null || isQueueEmpty()) {
                         Logger.trace("Machine entering idle state.");
                         fireMachineBusy(false);
                         // Note, this also unlocks drivers (idle).
@@ -671,7 +680,7 @@ public abstract class AbstractMachine extends AbstractModelObject implements Mac
                     if (exception != null) {
                         synchronized (this) {
                             if (executor != null) {
-                                executor.shutdownNow();
+                                executor.shutdownNow().forEach(AbstractMachine::cancelDropped);
                             }
                         }
                     }
