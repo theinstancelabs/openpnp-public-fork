@@ -67,8 +67,9 @@ final class SwitchOff extends MachineListener.Adapter {
     }
 
     /**
-     * The web STOP's switch-off runs, or one announced reads started still. A listener that throws inside OpenPnP's
-     * fire loop can leave {@code announced} set: once the machine reads off it no longer counts.
+     * The web STOP's switch-off runs, or one announced reads started still. A Stop that ends before machineDisabled
+     * (a listener's Error, which OpenPnP's fire loop lets through) can leave {@code announced} set: once the machine
+     * reads off it no longer counts.
      */
     synchronized boolean inProgress() {
         return byStop > 0 || (announced && listened != null && listened.isEnabled());

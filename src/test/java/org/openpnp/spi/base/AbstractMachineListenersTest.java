@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.DisableFailsGcodeDriver;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.spi.Machine;
@@ -171,8 +172,9 @@ public class AbstractMachineListenersTest {
 
     /**
      * BR-106: a "homed" property listener that throws (the GUI's binding runs on the Stop's thread) ended the Stop at
-     * its setHomed(false), before its drivers. They switch off whatever the steps before them throw; the Stop still
-     * throws it, after them.
+     * its setHomed(false), before its drivers and its machineAboutToBeDisabled listeners (the engine's abort, the
+     * hold's vent, the pump and the VAC actuators off). The drivers switch off whatever the steps before them throw,
+     * those listeners still hear the Stop, and the Stop still throws it, after them.
      */
     @Test
     public void aStopSwitchesOffPastAHomedPropertyListenerThatThrows() throws Exception {
@@ -180,16 +182,26 @@ public class AbstractMachineListenersTest {
         PropertyChangeListener bug = e -> {
             throw new IllegalStateException("test: a homed property listener's bug");
         };
+        CountDownLatch aboutToBeDisabled = new CountDownLatch(1);
+        MachineListener heard = new MachineListener.Adapter() {
+            @Override
+            public void machineAboutToBeDisabled(Machine machine, String reason) {
+                aboutToBeDisabled.countDown();
+            }
+        };
         try {
             sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, "M410");
             long disables = sim.driver.getDisableCommandsSent();
+            sim.machine.addListener(heard);
             sim.machine.addPropertyChangeListener("homed", bug);
             assertThrows(IllegalStateException.class, () -> sim.machine.setEnabled(false), "the Stop reports it");
             assertFalse(sim.machine.isEnabled());
             assertEquals(disables + 1, sim.driver.getDisableCommandsSent(), "the Stop's lines went out");
+            assertEquals(0, aboutToBeDisabled.getCount(), "its machineAboutToBeDisabled listeners heard it");
         }
         finally {
             sim.machine.removePropertyChangeListener("homed", bug);
+            sim.machine.removeListener(heard);
             sim.close();
         }
     }
@@ -217,6 +229,37 @@ public class AbstractMachineListenersTest {
         }
         finally {
             sim.machine.removeListener(error);
+            sim.close();
+        }
+    }
+
+    /**
+     * BR-106 review: an Error from a driver's own disable skipped the drivers after it, the machine's switch to
+     * disabled and both disable events: the machine read started, the web STOP's switch-off stayed announced, and
+     * Start waited and refused. The other drivers go on now, the machine ends disabled, its listeners hear
+     * machineDisableFailed, and the Error propagates.
+     */
+    @Test
+    public void aDriversErrorStillEndsTheMachineDisabled() throws Exception {
+        SimMachine sim = new SimMachine(true, DisableFailsGcodeDriver.class);
+        DisableFailsGcodeDriver driver = (DisableFailsGcodeDriver) sim.driver;
+        CountDownLatch failed = new CountDownLatch(1);
+        MachineListener heard = new MachineListener.Adapter() {
+            @Override
+            public void machineDisableFailed(Machine machine, String reason) {
+                failed.countDown();
+            }
+        };
+        try {
+            sim.machine.addListener(heard);
+            driver.disableFails = new StackOverflowError("test: the driver's Error");
+            assertThrows(StackOverflowError.class, () -> sim.machine.setEnabled(false), "the Error propagates");
+            assertFalse(sim.machine.isEnabled());
+            assertEquals(0, failed.getCount(), "its listeners heard machineDisableFailed");
+        }
+        finally {
+            driver.disableFails = null;
+            sim.machine.removeListener(heard);
             sim.close();
         }
     }

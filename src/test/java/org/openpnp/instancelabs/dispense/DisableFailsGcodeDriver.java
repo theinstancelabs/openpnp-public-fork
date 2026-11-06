@@ -7,13 +7,17 @@ import org.openpnp.machine.reference.driver.GcodeDriver;
  * its link stays open. GcodeDriver's own disable never fails so (each line is sent on its own, the link closes).
  */
 public class DisableFailsGcodeDriver extends GcodeDriver {
-    public volatile Exception disableFails;
+    /** What its disable throws: an Exception or an Error. */
+    public volatile Throwable disableFails;
 
     @Override
     public void setEnabled(boolean enabled) throws Exception {
-        Exception e = disableFails;
-        if (!enabled && e != null) {
-            throw e;
+        Throwable t = disableFails;
+        if (!enabled && t instanceof Error) {
+            throw (Error) t;
+        }
+        if (!enabled && t != null) {
+            throw (Exception) t;
         }
         super.setEnabled(enabled);
     }

@@ -10,7 +10,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -144,41 +143,51 @@ final class MachineEndpoints {
         if (m.isEnabled()) {
             Runnable task = () -> ctx.switchOff.stop(m);
             String sends = sendsDisableCommand(svc) ? "sends the driver's DISABLE_COMMAND" : SCREW_LINK_CLOSED;
-            AtomicBoolean dropped = new AtomicBoolean();
+            AtomicBoolean neverRan = new AtomicBoolean();
             if (m.isBusy()) {
                 // As OpenPnP's own Stop button: bypass the busy machine thread (emergency path).
                 emergencyStop(task);
                 actions.add("OpenPnP Stop (emergency path: the machine thread was busy); " + sends);
             }
             else {
-                Future<Object> queued = m.submit(() -> {
-                    task.run();
-                    return null;
-                }, null, true);
-                actions.add("OpenPnP Stop; " + sends);
-                // BR-106: OpenPnP drops (cancels) it if a task of its own queued ahead of it fails, also after the
-                // answer: then the emergency path
-                emergencyStop(() -> {
-                    try {
-                        queued.get();
-                    }
-                    catch (CancellationException e) {
-                        dropped.set(true);
-                        Logger.warn("web STOP: OpenPnP dropped its task (a task queued ahead of it failed): the "
-                                + "emergency path");
+                AtomicBoolean began = new AtomicBoolean();
+                try {
+                    Future<Object> queued = m.submit(() -> {
+                        began.set(true);
                         task.run();
-                    }
-                    catch (Exception e) {
-                        // it ran (SwitchOff logs a disable that failed)
-                    }
-                });
+                        return null;
+                    }, null, true);
+                    actions.add("OpenPnP Stop; " + sends);
+                    // BR-106: a task that never began (OpenPnP dropped it behind a task of its own that failed, or a
+                    // busy listener's Error failed it) takes the emergency path, also after the answer
+                    emergencyStop(() -> {
+                        try {
+                            queued.get();
+                        }
+                        catch (Exception e) {
+                            // whether it began tells (SwitchOff logs a disable that failed)
+                        }
+                        if (!began.get()) {
+                            neverRan.set(true);
+                            Logger.warn("web STOP: OpenPnP's Stop task never ran: the emergency path");
+                            task.run();
+                        }
+                    });
+                }
+                catch (RuntimeException e) {
+                    // BR-106: RejectedExecutionException, OpenPnP's executor shut down between its check and this
+                    // submit
+                    emergencyStop(task);
+                    actions.add("OpenPnP Stop (emergency path: OpenPnP refused to queue it: " + e.getMessage() + "); "
+                            + sends);
+                }
             }
             while (m.isEnabled() && System.currentTimeMillis() < answerBy) {
                 sleep(20);
             }
-            if (dropped.get()) {
-                actions.add("OpenPnP dropped that task (a task of its own queued ahead of it failed): OpenPnP Stop "
-                        + "on the emergency path");
+            if (neverRan.get()) {
+                actions.add("the Stop's task never ran (OpenPnP dropped it behind a task of its own that failed, or "
+                        + "it failed before it began): OpenPnP Stop on the emergency path");
             }
             if (m.isEnabled()) {
                 actions.add("OpenPnP is still switching the machine off (a dwell or move must end first)");
@@ -277,8 +286,9 @@ final class MachineEndpoints {
                     return null;
                 }
                 if (m.isEnabled() || svc.screwDriverConnected()) {
-                    // a disable listener that threw ends OpenPnP's Stop before its drivers (SwitchOff logs it): a 200
-                    // would let the deployer quit OpenPnP, and the quit's disable sends the whole DISABLE_COMMAND
+                    // a driver whose disable failed before it closed the screw's link (SwitchOff logs it; since BR-106
+                    // nothing before the drivers ends OpenPnP's Stop): a 200 would let the deployer quit OpenPnP, and
+                    // the quit's disable sends the whole DISABLE_COMMAND
                     return new IllegalStateException("OpenPnP's Stop did not switch the machine off (" + (m.isEnabled()
                             ? "it still reads started" : "the screw's controller link is still open")
                             + "; see the OpenPnP log)");
@@ -502,7 +512,8 @@ final class MachineEndpoints {
             throw ApiException.refused("homing failed: " + rootMessage(e));
         }
         catch (TimeoutException e) {
-            // OpenPnP dropped the home (a task of its own ahead of it failed), or it never ended: nothing homed
+            // still queued behind other machine work, or it never ended: nothing homed (a home OpenPnP dropped ends at
+            // once, its CancellationException answered by ApiServer, BR-106)
             throw ApiException.refused("the home did not start or did not end within 5 min: nothing homed; press Home "
                     + "again");
         }

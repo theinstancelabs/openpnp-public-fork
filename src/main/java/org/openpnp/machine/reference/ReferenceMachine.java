@@ -265,10 +265,15 @@ public class ReferenceMachine extends AbstractMachine {
         }
         else {
             try {
-                // remove homed-flag if machine is disabled
-                getMotionPlanner().unhome();
-                this.setHomed(false);
-                fireMachineAboutToBeDisabled("User requested stop.");
+                try {
+                    // remove homed-flag if machine is disabled
+                    getMotionPlanner().unhome();
+                    this.setHomed(false);
+                }
+                finally {
+                    // Instance Labs (BR-106): heard also past a "homed" property listener that threw
+                    fireMachineAboutToBeDisabled("User requested stop.");
+                }
             }
             catch (RuntimeException | Error t) {
                 // Instance Labs (BR-106): the drivers switch off whatever threw here (a "homed" property listener, a
@@ -288,6 +293,7 @@ public class ReferenceMachine extends AbstractMachine {
     private void disableDrivers() throws Exception {
         // In a multi-driver machine, we must try to disable all drivers even if one throws.
         Exception e = null;
+        Error error = null;
         List<Driver> enabledDrivers = new ArrayList<>();
         enabledDrivers.addAll(getDrivers());
         // We want reverse disabling order.
@@ -300,8 +306,17 @@ public class ReferenceMachine extends AbstractMachine {
                 Logger.warn(e1);
                 e = e1;
             }
+            catch (Error e1) {
+                // Instance Labs (BR-106): the next drivers still switch off; thrown after them, ahead of any exception
+                Logger.error(e1);
+                error = e1;
+            }
         }
         this.enabled = false;
+        if (error != null) {
+            fireMachineDisableFailed(error.getMessage());
+            throw error;
+        }
         if (e != null) {
             fireMachineDisableFailed(e.getMessage());
             throw e;

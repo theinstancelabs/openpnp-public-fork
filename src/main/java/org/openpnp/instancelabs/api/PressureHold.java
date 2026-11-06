@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -184,6 +185,12 @@ final class PressureHold implements DispenseListener {
         String refused;
         try {
             refused = f.get(timeout, TimeUnit.MILLISECONDS);
+        }
+        catch (CancellationException e) {
+            // BR-106: STARTING for good otherwise (every engine route and the planned stop refused until Pressure off)
+            markOff(gen, "OpenPnP dropped the pressure start (a task queued ahead of it failed): nothing was "
+                    + "switched on");
+            throw e;
         }
         catch (TimeoutException e) {
             Map<String, Object> s = snapshot();

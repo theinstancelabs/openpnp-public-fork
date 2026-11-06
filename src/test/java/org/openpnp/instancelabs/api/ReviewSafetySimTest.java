@@ -17,8 +17,10 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -29,6 +31,8 @@ import org.openpnp.instancelabs.dispense.DriverGcodeChannel;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
+import org.openpnp.spi.Machine;
+import org.openpnp.spi.MachineListener;
 import org.openpnp.spi.base.AbstractMachine;
 
 import com.google.gson.JsonObject;
@@ -113,6 +117,14 @@ public class ReviewSafetySimTest {
                 Thread.currentThread().interrupt();
             }
         });
+        machineExecutor(pool);
+        return sim.machine.submit(() -> {
+            throw new Exception("test: a task of OpenPnP's own fails (its Home meets a limit)");
+        });
+    }
+
+    /** OpenPnP's machine thread replaced by {@code pool} (null: a new one at the next task); the old one ends. */
+    void machineExecutor(ThreadPoolExecutor pool) throws Exception {
         Field executor = AbstractMachine.class.getDeclaredField("executor");
         executor.setAccessible(true);
         ExecutorService was = (ExecutorService) executor.get(sim.machine);
@@ -120,9 +132,6 @@ public class ReviewSafetySimTest {
             was.shutdown();
         }
         executor.set(sim.machine, pool);
-        return sim.machine.submit(() -> {
-            throw new Exception("test: a task of OpenPnP's own fails (its Home meets a limit)");
-        });
     }
 
     /**
@@ -137,10 +146,87 @@ public class ReviewSafetySimTest {
         Future<Object> failing = aFailingTaskAhead(1);
         JsonObject r = ok("POST", "/api/stop", null);
         assertFalse(r.get("machineEnabled").getAsBoolean(), r.toString());
-        assertTrue(r.get("actions").toString().contains("OpenPnP dropped that task"), r.toString());
+        assertTrue(r.get("actions").toString().contains("the Stop's task never ran"), r.toString());
         assertFalse(sim.machine.isEnabled());
         assertEquals(disables + 1, sim.driver.getDisableCommandsSent(), "the Stop's lines went out");
         assertThrows(ExecutionException.class, () -> failing.get(10, TimeUnit.SECONDS));
+    }
+
+    /**
+     * BR-106 review: the web STOP's queued task failed before its body when a machineBusy(true) listener threw an
+     * Error (fire* lets Errors through): nothing switched off, the machine stayed started. A task that never began
+     * takes the emergency path as a dropped one does.
+     */
+    @Test
+    public void aWebStopWhoseTaskFailedBeforeItBeganStillSwitchesOff() throws Exception {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, "M410");
+        long disables = sim.driver.getDisableCommandsSent();
+        AtomicBoolean armed = new AtomicBoolean(true);
+        MachineListener error = new MachineListener.Adapter() {
+            @Override
+            public void machineBusy(Machine machine, boolean busy) {
+                if (busy && armed.compareAndSet(true, false)) {
+                    throw new StackOverflowError("test: a busy listener's Error, on the Stop's task");
+                }
+            }
+        };
+        sim.machine.addListener(error);
+        try {
+            JsonObject r = ok("POST", "/api/stop", null);
+            assertFalse(armed.get(), "the Stop's task met the Error");
+            assertFalse(r.get("machineEnabled").getAsBoolean(), r.toString());
+            assertTrue(r.get("actions").toString().contains("the Stop's task never ran"), r.toString());
+            assertEquals(disables + 1, sim.driver.getDisableCommandsSent(), "the Stop's lines went out");
+        }
+        finally {
+            sim.machine.removeListener(error);
+        }
+    }
+
+    /**
+     * BR-106 review: OpenPnP refused to queue the web STOP's task (RejectedExecutionException: its executor shut down
+     * by a failing task between its check and the submit). The route answered 500 and nothing switched off. It takes
+     * the emergency path now.
+     */
+    @Test
+    public void aWebStopOpenPnpRefusedToQueueStillSwitchesOff() throws Exception {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, "M410");
+        long disables = sim.driver.getDisableCommandsSent();
+        machineExecutor(new ThreadPoolExecutor(1, 1, 1, TimeUnit.SECONDS, new LinkedBlockingQueue<>()) {
+            @Override
+            public void execute(Runnable command) {
+                throw new RejectedExecutionException("test: shut down between OpenPnP's check and the submit");
+            }
+        });
+        try {
+            JsonObject r = ok("POST", "/api/stop", null);
+            assertFalse(r.get("machineEnabled").getAsBoolean(), r.toString());
+            assertTrue(r.get("actions").toString().contains("OpenPnP refused to queue it"), r.toString());
+            assertEquals(disables + 1, sim.driver.getDisableCommandsSent(), "the Stop's lines went out");
+        }
+        finally {
+            machineExecutor(null);
+        }
+    }
+
+    /**
+     * BR-106 review: Pressure on whose machine task OpenPnP dropped answered the dropped-task 409 but stayed
+     * STARTING: a retry was refused as already starting, and the engine routes and the planned stop refused until
+     * Pressure off or STOP. It ends off, nothing switched on.
+     */
+    @Test
+    public void aPressureStartOpenPnpDroppedEndsOff() throws Exception {
+        Future<Object> failing = aFailingTaskAhead(1);
+        try {
+            JsonObject r = call("POST", "/api/pressure/start", null);
+            assertEquals(409, lastStatus, r.toString());
+            assertTrue(r.toString().contains("OpenPnP dropped this task"), r.toString());
+            assertThrows(ExecutionException.class, () -> failing.get(10, TimeUnit.SECONDS));
+            assertEquals("off", pressure().get("state").getAsString());
+        }
+        finally {
+            call("POST", "/api/pressure/stop", null);
+        }
     }
 
     /**
