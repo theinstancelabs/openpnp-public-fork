@@ -212,7 +212,6 @@ public final class NeedleEndMeasure {
         return String.format(Locale.ROOT, "G1 X%.3f Y%.3f F%d", x, y, feed);
     }
 
-    /** One tool at its {@code i}-th height: the moves, the six frames, their analysis and checks. */
     /**
      * Check (a) on one frame: the end's top-hat peak at least {@code minPeak} and at least {@code minPeakToSd} times
      * its window's sd (Process 11-05 18:xx: a faint, defocused spot passes the ratio alone).
@@ -221,6 +220,7 @@ public final class NeedleEndMeasure {
         return peak >= s.minPeak && ratio >= s.minPeakToSd;
     }
 
+    /** One tool at its {@code i}-th height: the moves, the six frames, their analysis and checks. */
     private static Look look(Io io, Plan p, Result r, boolean needle, int i, int[] done, int planned)
             throws Exception {
         DispenseConfig.NeedleEndSettings s = p.s;
