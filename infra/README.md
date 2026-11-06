@@ -16,7 +16,8 @@ directory only holds what runs them and ships them. Python here is standard libr
 Runs on every pull request, in the merge queue (`merge_group`), on pushes to `il/integration`, and by hand
 (workflow_dispatch). `il/integration` takes changes only through the merge queue (ruleset "il/integration: merge
 queue"): `gh pr merge <n> --merge` queues a PR, the queue runs the full gate on it on top of what is ahead, then merges.
-A PR's own run is the fast gate: ui-e2e and acceptance are skipped unless the PR has the label `full-ci`.
+A PR's own run is the fast gate: build, infra and maven. deploy-e2e, controller-e2e, ui-e2e, ui-boardview and acceptance
+run in the queue only, whatever the PR's labels (INF-21, 11-05: a PR's full runs were 42% of the day's runner minutes).
 The queue fast-forwards `il/integration` to the very commit its `merge_group` run gated, so the push run of that
 commit skips each test job the queue run passed (job `queued`, by job id) and only builds, gates and releases: the
 release comes minutes after the merge, not an hour. A job the queue run skipped or did not pass runs on the push.
@@ -28,11 +29,11 @@ release comes minutes after the merge, not an hour. A job the queue run skipped 
 | infra | `python3 -m unittest discover -s infra/<x>/tests -t infra/<x>` for every component here | 1 min |
 | maven | `mvn test`: unit tests and the simulated-machine integration tests (in-JVM GcodeServer, `*SimTest`) | 13 min |
 | controller-e2e | `infra/lumen-sim/e2e`: OpenPnP on lumen-sim's pty: home, STOP in G28, the 30-turn prime timeout | 6 min |
-| ui-e2e | `src/test/web/run-webui-sim-test.sh` in parallel legs, each a fresh SIM session (`ci/webui_shards.py`): main (webui-sim, board-import, pad-profile, tip-setups, tip-flow) and rest (every other script in `ALL_SCRIPTS`); skipped on a PR without `full-ci` | ~55 / ~10 min |
+| ui-e2e | `src/test/web/run-webui-sim-test.sh` in parallel legs, each a fresh SIM session (`ci/webui_shards.py`): main (webui-sim, board-import, pad-profile, tip-setups, tip-flow) and rest (every other script in `ALL_SCRIPTS`); skipped on every PR (the queue runs it) | ~55 / ~10 min |
 | ui-boardview | `src/test/web/run-boardview-test.sh` | 5 min |
 | deploy-e2e | `infra/deploy/e2e/test_deploy_openpnp.py`: il_deploy with the build's jar on lumen-sim (deploy, deploy over a running OpenPnP, rollback, a power-cycled controller) | 3 min |
 | acceptance ×4 + 1 | `src/test/sim/il_sim_acceptance.py`, sharded on GcodeServer, plus `load` on lumen-sim's pty (`--controller-sim-cap`, BR-43/47); `ci/acceptance.py` fails the job unless every check passed (the script itself always exits 0) | 15 min each |
-| gate | the one required status check: every job above succeeded (on a PR without `full-ci`, ui-e2e and acceptance may be skipped; on a push, exactly the test jobs `queued` names), and no job of the run failed or was cancelled (the run's job list, since `needs` can miss a matrix leg cancelled before pickup). In the queue it then uploads its `needs` as `gate-needs` for the push (a failed upload never fails it) | seconds |
+| gate | the one required status check: every job above succeeded (on a PR, the five slow jobs are skipped; on a push, exactly the test jobs `queued` names), and no job of the run failed or was cancelled (the run's job list, since `needs` can miss a matrix leg cancelled before pickup). In the queue it then uploads its `needs` as `gate-needs` for the push (a failed upload never fails it) | seconds |
 | release | push to `il/integration` only, after `gate`: a prerelease `il-build-<run>-<sha7>` with the build (`ci/make_release.py`), its tarball attested first (`actions/attest-build-provenance`; the deployer verifies it with `gh attestation verify`), then published by `ci/publish_release.py`: a release already at the tag passes only as this run's own (a re-run), checked with the deployer's policy; anything else there fails the run (tests in `deploy/tests/`) | 1 min |
 | prune-artifacts | after a green release: deletes every `openpnp-build` artifact of a run that succeeded or was cancelled, but this run's own (`ci/prune_artifacts.py`); a run still going or one that failed keeps its build (`gh run rerun --failed` reuses it); every upload expires after a day; a cancelled run, or one more than a day old, is re-run whole (`gh run rerun <id>`); a failed prune never turns the run red | < 1 min |
 

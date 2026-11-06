@@ -1,8 +1,9 @@
 name: CI
 
 # The gate for the integration branch (il/integration) and every PR (INF-01, owner: Infra role). One required check,
-# "gate": in the merge queue (merge_group) and on pushes, green only if every job below passed; on a PR without the
-# label full-ci, the UI end-to-end and SIM acceptance jobs are skipped (the fast gate) and run in the queue. A green
+# "gate": in the merge queue (merge_group) and on pushes, green only if every job below passed; on a PR the slow jobs
+# (the deploy, controller, UI end-to-end and SIM acceptance jobs) are skipped (the fast gate) and run in the queue
+# only (INF-21: a PR's full runs were 42% of 11-05's 34.7k runner-min, the queue ran them again). A green
 # push to il/integration also publishes a versioned build as a GitHub prerelease, which the lab computer's deployer
 # installs when the machine is idle (INF-02, infra/deploy/). The queue fast-forwards il/integration to the very commit
 # its merge_group run gated, so that push skips each test job the queue run passed (job queued) and builds, gates and
@@ -10,11 +11,11 @@ name: CI
 # What runs where: infra/README.md.
 
 on:
-  # A PR runs the fast gate (the UI end-to-end and SIM acceptance jobs only with the label full-ci); the merge queue
-  # (merge_group) runs the full gate, and the push to il/integration every test job its queue run did not pass.
-  # Releases come from the push run only.
+  # A PR runs the fast gate (build, infra, maven); the merge queue (merge_group) runs the full gate, and the push to
+  # il/integration every test job its queue run did not pass. Releases come from the push run only. No `labeled`:
+  # a label changes nothing, so it must start no second run (INF-21).
   pull_request:
-    types: [opened, synchronize, reopened, labeled]  # labeled: adding full-ci runs the slow jobs
+    types: [opened, synchronize, reopened]
   merge_group:
     types: [checks_requested]
   push:
@@ -154,7 +155,7 @@ jobs:
   deploy-e2e:
     name: Deploy dry run (real OpenPnP + lumen-sim, deploy and rollback)
     needs: [build, queued]
-    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'deploy-e2e') }}
+    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'deploy-e2e') && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -190,7 +191,7 @@ jobs:
   controller-e2e:
     name: Simulated controller behind OpenPnP (home, STOP in G28, long prime)
     needs: [build, queued]
-    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'controller-e2e') }}
+    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'controller-e2e') && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -224,8 +225,7 @@ jobs:
     name: UI end-to-end (${{ matrix.title }})
     needs: [build, queued]
     if: >-
-      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-e2e') && (github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-e2e') && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     strategy:
@@ -266,7 +266,7 @@ jobs:
   ui-boardview:
     name: UI end-to-end (boardview)
     needs: [build, queued]
-    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-boardview') }}
+    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-boardview') && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -295,8 +295,7 @@ jobs:
     name: SIM acceptance (${{ matrix.shard }}${{ matrix.controller == 'pty' && ', on lumen-sim' || '' }})
     needs: [build, queued]
     if: >-
-      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'acceptance') && (github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'acceptance') && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -356,13 +355,12 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           EVENT: ${{ github.event_name }}
-          FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
-          if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then
-            # the fast gate: the slow jobs run in the merge queue (label a PR full-ci to run them here too)
-            echo "$NEEDS" | jq -e 'length > 0 and all(to_entries[]; .value.result == "success" or
-              ((.key == "ui-e2e" or .key == "acceptance") and .value.result == "skipped"))' >/dev/null
+          if [ "$EVENT" = pull_request ]; then
+            # the fast gate: the slow jobs run in the merge queue only (INF-21)
+            echo "$NEEDS" | jq -e 'length > 0 and all(to_entries[]; .value.result == "success" or ((.key | IN("deploy-e2e",
+              "controller-e2e", "ui-e2e", "ui-boardview", "acceptance")) and .value.result == "skipped"))' >/dev/null
           elif [ "$EVENT" = push ]; then
             # a test job this commit's queue run passed is skipped here (job queued); every other job must pass
             echo "$NEEDS" | jq -e '(.queued.outputs.passed // "[]" | fromjson) as $passed | length > 0

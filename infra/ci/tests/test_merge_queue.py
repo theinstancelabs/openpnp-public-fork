@@ -1,5 +1,6 @@
 """ci.yml for a merge queue: a fast gate on pull requests, the full gate in the queue (merge_group); a push of a commit
-the queue gated skips each test job that commit's queue run passed.
+the queue gated skips each test job that commit's queue run passed. INF-21 (11-05, the user: "we shouldn't be spending
+this much"): the slow jobs run in the queue only, whatever a PR's labels (34.7k runner-min on 11-05, 42% PR full-ci).
 
 Run from the repo root: python3 -m unittest discover -s infra/ci/tests -t infra/ci
 """
@@ -9,7 +10,7 @@ import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 CI = os.path.join(REPO, ".github", "workflows", "ci.yml")
-SLOW = ("ui-e2e", "acceptance")  # skipped on a PR without the full-ci label; always run in the queue and on pushes
+SLOW = ("deploy-e2e", "controller-e2e", "ui-e2e", "ui-boardview", "acceptance")  # skipped on every PR; in the queue and on pushes
 TESTS = ("infra", "maven", "deploy-e2e", "controller-e2e", "ui-e2e", "ui-boardview", "acceptance")  # the test jobs
 SHA = "5ddcd936ff4077e06b3edd8293a3bc8f5b3052f7"
 
@@ -28,9 +29,10 @@ class MergeQueue(unittest.TestCase):
         self.assertIn("merge_group:", on)
         self.assertIn("checks_requested", on)
 
-    def test_labelling_a_pr_full_ci_runs_it_again(self):
+    def test_a_label_runs_nothing_again(self):
+        """No `labeled` type: adding a label (full-ci included) changes nothing, so it starts no second run."""
         on = re.search(r"\non:\n(.*?)\n\S", self.ci, re.S).group(1)
-        self.assertRegex(on, r"pull_request:\n    types: \[opened, synchronize, reopened, labeled\]")
+        self.assertRegex(on, r"pull_request:\n    types: \[opened, synchronize, reopened\]")
 
     def test_queue_runs_never_cancel_each_other(self):
         """Only a PR's own runs share a group (a newer push cancels the older run); every other run has its own."""
@@ -45,12 +47,15 @@ class MergeQueue(unittest.TestCase):
                "github.event.pull_request.labels.*.name": list(labels)}
         return cond is None or ci_wiring.condition(cond, ctx)
 
-    def test_the_slow_jobs_skip_only_on_a_pull_request_without_full_ci(self):
+    def test_the_slow_jobs_skip_on_every_pull_request(self):
         for name in SLOW:
             self.assertFalse(self.runs(name, "pull_request"), name)
-            self.assertTrue(self.runs(name, "pull_request", labels=["full-ci"]), name)
+            self.assertFalse(self.runs(name, "pull_request", labels=["full-ci"]), name)  # the label changes nothing
             for event in ("merge_group", "push", "workflow_dispatch"):
                 self.assertTrue(self.runs(name, event), (name, event))
+        for name in set(TESTS) - set(SLOW):  # infra, maven: the PR's own fast gate
+            self.assertTrue(self.runs(name, "pull_request"), name)
+        self.assertNotIn("full-ci", self.ci)
 
     def test_a_push_skips_a_test_job_only_if_the_commits_queue_run_passed_that_job(self):
         js = ci_wiring.jobs(self.ci)
@@ -61,8 +66,9 @@ class MergeQueue(unittest.TestCase):
             self.assertFalse(self.runs(name, "push", passed=[name]), name)
             self.assertTrue(self.runs(name, "push", passed=[t for t in TESTS if t != name]), name)
             self.assertTrue(self.runs(name, "push"), name)
-            for event in ("pull_request", "merge_group", "workflow_dispatch"):  # queued answers [] there
-                self.assertTrue(self.runs(name, event, labels=["full-ci"]), (name, event))
+            for event in ("merge_group", "workflow_dispatch"):  # queued answers [] there
+                self.assertTrue(self.runs(name, event), (name, event))
+            self.assertEqual(self.runs(name, "pull_request"), name not in SLOW, name)
 
     def test_the_queued_job_may_read_the_queue_runs_and_is_bounded(self):
         block = ci_wiring.jobs(self.ci)["queued"]
@@ -119,9 +125,9 @@ class MergeQueue(unittest.TestCase):
         g = job(self.ci, "gate")
         self.assertIn("if: always()", g)
         self.assertIn("EVENT: ${{ github.event_name }}", g)
-        self.assertIn("FULL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}", g)
+        self.assertNotIn("FULL", g)
         for name in SLOW:
-            self.assertIn('.key == "%s"' % name, g)
+            self.assertIn('"%s"' % name, g)
         # in the queue and on pushes every job must pass: the full gate
         self.assertIn('all(.[]; .result == "success")', g)
 
@@ -165,11 +171,11 @@ class GateBehaviour(unittest.TestCase):
             self.ci = f.read()
         self.needs = ci_wiring.jobs(self.ci)["gate"]
 
-    def verdict(self, results, event, full=False, passed=()):
+    def verdict(self, results, event, passed=()):
         needs = {k: {"result": v, "outputs": {}} for k, v in results.items()}
         if "queued" in needs:
             needs["queued"]["outputs"] = {"passed": json.dumps(list(passed))}
-        env = dict(os.environ, NEEDS=json.dumps(needs), EVENT=event, FULL="true" if full else "false")
+        env = dict(os.environ, NEEDS=json.dumps(needs), EVENT=event)
         return subprocess.run(["bash", "-e", "-c", gate_step(self.ci, "Every job passed")], env=env,
                               capture_output=True, text=True).returncode == 0
 
@@ -181,10 +187,11 @@ class GateBehaviour(unittest.TestCase):
         names = {n.strip() for n in re.search(r"needs: \[([^\]]*)\]", self.needs).group(1).split(",")}
         self.assertEqual(names, set(ci_wiring.jobs(self.ci)) - {"gate", "release", "prune-artifacts"})
 
-    def test_the_fast_gate_only_on_an_unlabelled_pr_and_only_for_the_slow_jobs(self):
+    def test_the_fast_gate_on_every_pr_and_only_for_the_slow_jobs(self):
         fast = self.all_jobs(**{s: "skipped" for s in SLOW})
         self.assertTrue(self.verdict(fast, "pull_request"))
-        self.assertFalse(self.verdict(fast, "pull_request", full=True))
+        for name in set(TESTS) - set(SLOW):
+            self.assertFalse(self.verdict(self.all_jobs(**{name: "skipped"}), "pull_request"), name)
         for event in ("merge_group", "push", "workflow_dispatch"):
             self.assertFalse(self.verdict(fast, event), event)
             self.assertTrue(self.verdict(self.all_jobs(), event), event)
@@ -211,7 +218,7 @@ class GateBehaviour(unittest.TestCase):
         self.assertFalse(self.verdict(self.all_jobs(**dict(skipped, build="skipped")), "push", passed=everything))
         for event in ("merge_group", "workflow_dispatch"):  # only a push may skip
             self.assertFalse(self.verdict(self.all_jobs(**skipped), event, passed=everything), event)
-        self.assertFalse(self.verdict(self.all_jobs(**skipped), "pull_request", full=True, passed=everything))
+        self.assertFalse(self.verdict(self.all_jobs(**skipped), "pull_request", passed=everything))
         self.assertFalse(self.verdict(self.all_jobs(infra="skipped"), "pull_request", passed=everything))
 
     def run_jobs_check(self, jobs):
