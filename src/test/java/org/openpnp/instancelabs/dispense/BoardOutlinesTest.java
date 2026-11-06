@@ -339,4 +339,31 @@ public class BoardOutlinesTest {
         assertEquals(12001, c.outlineStampMs(1000), "a tile's stamp counts too");
         assertEquals(20000, c.outlineStampMs(20000), "the clock past them all: now");
     }
+
+    /**
+     * Which outlines a board run's planned dots may lie on, from its plan: a plan made with a registration, those up to
+     * its last check; one made without, its own board's stored registration (by its key) alone; one whose registration
+     * is gone, none.
+     */
+    @Test
+    public void aBoardRunsScopeCarriesTheOutlinesItsPlanCovers() {
+        BoardRegistration reg = reg("k.board.xml", 1, 0, 0, 1, 100, 50);
+        reg.atMs = 1000;
+        reg.lastCheckedAtMs = 3000L;
+        DispenseConfig c = with(reg);
+        DispensePlan plan = new DispensePlan();
+        plan.registrationId = reg.id;
+        Interlocks.Scope sc = DispenseService.boardScope(c, plan);
+        assertEquals(Long.valueOf(3000), sc.outlinesUpToMs, "its registration's last check");
+        plan.registrationId = null;
+        plan.boardKey = reg.boardKey;
+        sc = DispenseService.boardScope(c, plan);
+        assertNull(sc.outlinesUpToMs);
+        assertEquals(reg.id, sc.ownOutlineId, "its own board's registration");
+        plan.boardKey = "file:/another.board.xml";
+        assertNull(DispenseService.boardScope(c, plan).ownOutlineId, "another board's: none");
+        plan.registrationId = "gone";
+        sc = DispenseService.boardScope(c, plan);
+        assertTrue(sc.registrationGone && sc.ownOutlineId == null && sc.outlinesUpToMs == null, "gone: none");
+    }
 }

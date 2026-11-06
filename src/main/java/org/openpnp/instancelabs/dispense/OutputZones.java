@@ -25,11 +25,12 @@ import java.util.regex.Pattern;
  * opens the valve only over a sink: the waste, the towel, a cup, the purge row, the calibration area or a
  * coupon (never over a board or another surface: #12's final review). BR-81: within {@code marginMm} of a board on
  * the bed ({@link BoardOutlines}: a registration's, an imported tile) paste goes only as a board run's planned dots,
- * and only on the outlines recorded up to its registration's last check ({@link Interlocks.Scope#outlinesUpToMs}: a
- * newer outline means the bed changed; a plan without a registration has none), whatever place covers it. The hold
- * keeps its drool's circle ({@code placeRadiusMm}) and the margin off every board, its park too. The refusals say what
- * to do in their context: the hold where the needle is ({@link #refusal}), its park ({@link #parkRefusal}), a
- * program's line ({@link #lineRefusal}) and move ({@link #crossing}).
+ * whatever place covers it, and only on the outlines its plan's registration covers ({@link Interlocks.Scope}: those
+ * recorded up to its last check, a newer one means the bed changed; for a plan made without a registration its own
+ * board's stored registration alone; none once its registration is gone). The hold keeps its drool's circle
+ * ({@code placeRadiusMm}) and the margin off every board, its park too. The refusals say what to do in their context:
+ * the hold where the needle is ({@link #refusal}), its park ({@link #parkRefusal}), a program's line
+ * ({@link #lineRefusal}) and move ({@link #crossing}).
  */
 public final class OutputZones {
     /** A circle, a box or a probed surface, in machine X/Y (mm). */
@@ -129,6 +130,7 @@ public final class OutputZones {
     private double boardMarginMm, holdMarginMm;
     private final List<double[]> ownDots = new ArrayList<>();
     private Long ownUpToMs;
+    private String ownOutlineId, ownRefusal;
     private DispenseConfig.NamedLocation waste;
     /** A board run's own dot: within this of a planned target (mm; the G-code's rounding is far below it). */
     static final double OWN_DOT_MM = 0.5;
@@ -161,6 +163,8 @@ public final class OutputZones {
         if (scope != null && scope.checkPlanSurface) {
             z.ownDots.addAll(scope.surfaceTargets);
             z.ownUpToMs = scope.outlinesUpToMs;
+            z.ownOutlineId = scope.ownOutlineId;
+            z.ownRefusal = scope.outlineRefusal();
         }
         if (bottomCameraXY != null) {
             z.forbid.add(Zone.circle(BOTTOM_CAMERA, "the " + BOTTOM_CAMERA, false, bottomCameraXY[0],
@@ -273,10 +277,15 @@ public final class OutputZones {
         if (why == null) {
             return null;
         }
-        boolean wasteNear = waste != null && boards.on(waste.x, waste.y, holdMarginMm) != null;
-        return String.format(Locale.ROOT, "the needle (%.1f, %.1f) is %s: park first", x, y, why) + (wasteNear
-                ? String.format(Locale.ROOT, ", over a place off the boards (the waste too lies within %.1f mm of one)",
-                        holdMarginMm) : " (or start it with park: 'waste')");
+        String near = wasteNearABoard();
+        return String.format(Locale.ROOT, "the needle (%.1f, %.1f) is %s: park first", x, y, why) + (near == null
+                ? " (or start it with park: 'waste')" : ", over a place off the boards (" + near + ")");
+    }
+
+    /** BR-81: "the waste too lies within 8.0 mm of one" when the hold may not park over the waste, else null. */
+    public String wasteNearABoard() {
+        return waste != null && boards.on(waste.x, waste.y, holdMarginMm) != null ? String.format(Locale.ROOT,
+                "the waste too lies within %.1f mm of one", holdMarginMm) : null;
     }
 
     /** The hold's park over {@code place} (null: over a point) at (x, y): null when allowed; else why not. */
@@ -376,10 +385,8 @@ public final class OutputZones {
         }
         for (double[] d : ownDots) {
             if (Math.hypot(x - d[0], y - d[1]) <= OWN_DOT_MM) {
-                String newer = boards.on(x, y, boardMarginMm, ownUpToMs);
-                return newer == null ? null : "on " + newer + (ownUpToMs == null ? ", and this board run has no "
-                        + "board registration: register the board" : ", recorded after this board run's registration "
-                                + "(the bed changed since): register the board again");
+                String other = boards.on(x, y, boardMarginMm, ownUpToMs, ownOutlineId);
+                return other == null ? null : "on " + other + ", " + ownRefusal;
             }
         }
         Zone a = first(allow, x, y);

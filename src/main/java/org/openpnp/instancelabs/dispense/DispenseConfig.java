@@ -747,6 +747,23 @@ public class DispenseConfig {
         boardRegistrations.put(reg.boardKey, reg);
     }
 
+    /**
+     * BR-81: the stamp of a new board outline (a registration, a tile) or of a registration's check: now, but later
+     * than every outline and check stored, also after the clock was set back (an outline is "newer" by these stamps).
+     */
+    public long outlineStampMs(long now) {
+        long s = now;
+        for (BoardRegistration r : boardRegistrations.values()) {
+            if (r != null) {
+                s = Math.max(s, Math.max(r.atMs, r.lastCheckedAtMs == null ? r.atMs : r.lastCheckedAtMs) + 1);
+            }
+        }
+        for (Tile t : tiles.values()) {
+            s = t == null ? s : Math.max(s, t.atMs + 1);
+        }
+        return s;
+    }
+
     /** The registration stored with this id, or null. */
     public BoardRegistration boardRegistrationById(String id) {
         if (id == null || boardRegistrations == null) {

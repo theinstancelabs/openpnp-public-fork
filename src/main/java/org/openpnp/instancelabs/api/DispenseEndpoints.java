@@ -1020,6 +1020,7 @@ final class DispenseEndpoints {
             throw ApiException.badRequest("'source' must be 'job' or 'file'");
         }
         src.put("registrationId", reg == null ? null : reg.id);
+        plan.boardKey = boardKey(src);
         PlanStore.Entry e = new PlanStore.Entry(plan, src);
         e.registrationRecord = reg;
         estimate(svc, e);

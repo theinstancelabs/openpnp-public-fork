@@ -147,11 +147,25 @@ public final class Interlocks {
         /** BR-81: more places the run puts paste at, for I13 alone (a weigh coupon, the test dot's spot). */
         public final List<String> pastePlaces = new java.util.ArrayList<>();
         /**
-         * BR-81, a board run ({@link #checkPlanSurface}): its planned dots may lie on the board outlines recorded up to
-         * this time, its registration's last check (an outline recorded after it: the bed changed); null: the plan has
-         * no registration, and every outline refuses them.
+         * BR-81, a board run ({@link #checkPlanSurface}): the board outlines its planned dots may lie on. A plan made
+         * with a registration: those recorded up to its last check, this time (an outline recorded after it: the bed
+         * changed); a plan made without one: its own board's stored registration alone ({@link #ownOutlineId}); a
+         * plan whose registration is gone ({@link #registrationGone}): none.
          */
         public Long outlinesUpToMs;
+        /** BR-81: the one outline a plan made without a registration may lay its dots on (its id), or null: none. */
+        public String ownOutlineId;
+        /** BR-81: the plan was made with a registration that is stored no more (registered again, or forgotten). */
+        public boolean registrationGone;
+
+        /** BR-81: why a planned dot may not lie on an outline its plan does not cover (I13's and I12's text). */
+        public String outlineRefusal() {
+            return outlinesUpToMs != null ? "recorded after the plan's board registration (the bed changed since): "
+                    + "register the board again (Register board)"
+                    : registrationGone ? "and the plan's board registration is gone (registered again or forgotten): "
+                            + "plan the board again"
+                            : "and the plan has no board registration: register the board (Register board)";
+        }
 
         public static Scope noNeedle() {
             Scope s = new Scope();
@@ -507,12 +521,10 @@ public final class Interlocks {
                 : new DispenseConfig.OutputZoneSettings().marginMm;
         for (int i = 0; sc.checkPlanSurface && i < sc.surfaceTargets.size(); i++) {
             double[] d = sc.surfaceTargets.get(i);
-            String b = boards.on(d[0], d[1], margin, sc.outlinesUpToMs);
+            String b = boards.on(d[0], d[1], margin, sc.outlinesUpToMs, sc.ownOutlineId);
             if (b != null) {
                 r.add("I13", String.format(Locale.ROOT, "the plan's dot at (%.1f, %.1f) lies on %s, %s", d[0], d[1], b,
-                        sc.outlinesUpToMs == null ? "and the plan has no board registration: register the board "
-                                + "(Register board)" : "recorded after the plan's board registration (the bed changed "
-                                        + "since): register the board again (Register board)"));
+                        sc.outlineRefusal()));
                 break;
             }
         }

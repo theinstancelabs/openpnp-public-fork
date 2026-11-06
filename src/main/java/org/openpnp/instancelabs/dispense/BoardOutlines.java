@@ -138,22 +138,26 @@ public final class BoardOutlines {
 
     /** The board (x, y) lies on or within {@code margin} of: its name ("the Nano tile (board G3)"), or null. */
     public String on(double x, double y, double margin) {
-        return on(x, y, margin, null);
+        return on(x, y, margin, null, null);
     }
 
-    /** As above, among the outlines recorded after {@code afterMs} only (null: all of them). */
-    public String on(double x, double y, double margin, Long afterMs) {
-        return on(Collections.singletonList(new double[] {x, y}), margin, afterMs);
+    /**
+     * As above, among the outlines recorded after {@code afterMs} only (null: all of them) but the registration
+     * {@code exceptId} (a plan's own board; null: none).
+     */
+    public String on(double x, double y, double margin, Long afterMs, String exceptId) {
+        return on(Collections.singletonList(new double[] {x, y}), margin, afterMs, exceptId);
     }
 
     /** The board the box overlaps or comes within {@code margin} of (the calibration area, a coupon), or null. */
     public String on(double x0, double y0, double x1, double y1, double margin) {
-        return on(box(x0, y0, x1, y1), margin, null);
+        return on(box(x0, y0, x1, y1), margin, null, null);
     }
 
-    private String on(List<double[]> shape, double margin, Long afterMs) {
+    private String on(List<double[]> shape, double margin, Long afterMs, String exceptId) {
         for (Outline o : outlines) {
-            if ((afterMs == null || o.atMs > afterMs) && !(distance(o.edge, shape) > margin)) {
+            boolean except = exceptId != null && "registration".equals(o.kind) && exceptId.equals(o.id);
+            if (!except && (afterMs == null || o.atMs > afterMs) && !(distance(o.edge, shape) > margin)) {
                 return o.name(shape);
             }
         }

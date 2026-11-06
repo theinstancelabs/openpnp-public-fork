@@ -3139,10 +3139,19 @@ public final class DispenseService {
             sc.surfaceTargets.add(new double[] {d.xMm, d.yMm});
         }
         sc.checkPlanSurface = true;
-        // BR-81: its dots may lie on the outlines its registration knew at its last check
+        // BR-81: the outlines its dots may lie on: those its registration knew at its last check; without one, its own
+        // board's stored registration alone; none once its registration is gone
         BoardRegistration reg = c.boardRegistrationById(plan.registrationId);
-        sc.outlinesUpToMs = reg == null ? null : reg.lastCheckedAtMs == null ? reg.atMs
-                : Math.max(reg.atMs, reg.lastCheckedAtMs);
+        if (reg != null) {
+            sc.outlinesUpToMs = reg.lastCheckedAtMs == null ? reg.atMs : Math.max(reg.atMs, reg.lastCheckedAtMs);
+        }
+        else if (plan.registrationId == null) {
+            BoardRegistration own = plan.boardKey == null ? null : c.boardRegistrations.get(plan.boardKey);
+            sc.ownOutlineId = own == null ? null : own.id;
+        }
+        else {
+            sc.registrationGone = true;
+        }
         DispenseConfig.PurgeRow row = c.purgeRow;
         int purge = DoseBlocks.purgeSpotsNeeded(plan, c);
         if (purge > 0 && row.isDefined()) {
@@ -4713,7 +4722,7 @@ public final class DispenseService {
         if (aborted.getAsBoolean()) {
             throw new DispenseExecutor.AbortedException(abortReason(s.exec, "stopped during the fiducial check"));
         }
-        storeRegistration(reg, r.runId);
+        storeRegistration(reg, "same".equals(res.seat), r.runId);
         res.registrationId = reg.id;
         res.registrationStored = true;
         try {
@@ -6462,8 +6471,17 @@ public final class DispenseService {
         return c.newSeatAtMs;
     }
 
-    private synchronized void storeRegistration(BoardRegistration reg, String runId) throws IOException {
+    private synchronized void storeRegistration(BoardRegistration reg, boolean check, String runId) throws IOException {
         DispenseConfig c = cfg.copy();
+        // BR-81: never older than an outline or a check stored, also after the clock was set back (a tile is "newer"
+        // than a registration by these stamps): the record's stamp, or its same-seat check's
+        long at = c.outlineStampMs(System.currentTimeMillis());
+        if (check) {
+            reg.lastCheckedAtMs = at;
+        }
+        else {
+            reg.atMs = at;
+        }
         c.putBoardRegistration(reg);
         updateConfig(c);
         db.event(runId, "INFO", "REG", new Gson().toJson(reg));

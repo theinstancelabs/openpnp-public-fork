@@ -107,7 +107,9 @@ final class PressureHold implements DispenseListener {
      */
     static String zoneRefusal(DispenseService svc, Options o, double[] at) {
         if (at == null) {
-            return "the needle's position is unknown: start it with park: 'waste'";
+            String near = svc.outputZones().wasteNearABoard(); // BR-81: no park over a waste on or near a board
+            return "the needle's position is unknown: start it with " + (near == null ? "park: 'waste'"
+                    : "a park over a place off the boards (" + near + ")");
         }
         OutputZones zones = svc.outputZones();
         return o.park != null ? zones.parkRefusal(o.parkPlace, at[0], at[1]) : zones.refusal(at[0], at[1]);

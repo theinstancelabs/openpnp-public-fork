@@ -180,6 +180,7 @@ final class RegistrationEndpoints {
         src.put("registrationId", regId);
         BoardLocation bl = dispense.baseBoardLocation(src);
         DispensePlan plan = svc.planBoard(bl, reg);
+        plan.boardKey = DispenseEndpoints.boardKey(src);
         dispense.artRef(plan, bl);
         PlanStore.Entry next = new PlanStore.Entry(plan, src);
         next.registrationRecord = reg;
@@ -527,8 +528,8 @@ final class RegistrationEndpoints {
         if (why != null) {
             throw ApiException.badRequest("the tile " + why);
         }
-        t.atMs = System.currentTimeMillis();
         DispenseConfig c = svc.updateConfigAtomically(live -> {
+            t.atMs = live.outlineStampMs(System.currentTimeMillis()); // after every stored outline: a clock set back
             live.tiles.put(r.group(1), t);
             return live;
         });
