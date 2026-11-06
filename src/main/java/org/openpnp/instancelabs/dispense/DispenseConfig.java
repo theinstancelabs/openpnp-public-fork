@@ -474,11 +474,18 @@ public class DispenseConfig {
         public java.util.List<Double> centrePxCameraXy = new java.util.ArrayList<>(java.util.Arrays.asList(217.129,
                 152.319));
         /**
-         * Check (a): the end's top-hat peak at least this many times the sd of the rest of its window (Process 11-05
-         * 04:3x; noise about 6). Process's 25G ends read 11.7-18.9 times through the ±3 mm search (p34's frames
-         * 11.7-14.9, np1.py's 15.1-18.9), the 15-45 quoted before being np1.py's own 220 px first window.
+         * Check (a): the end's top-hat peak at least this many times the sd of the rest of its window, and at least
+         * {@link #minPeak}. Process 11-05 18:xx (runs/p38/bin/peaksd_check.py: EndFromBelow.spot on the bottom frames
+         * on record): clean ends at night 15.1-18.4 (peak 126-149), a capped end 10.7 (peak 93), daylight with the ring
+         * on 10.1-11.4 (peak 65-83), N1 or nothing in view 4.7-6.2.
          */
-        public double minPeakToSd = 10;
+        public double minPeakToSd = 8;
+        /**
+         * Check (a): the end's top-hat peak at least this (Process 11-05 18:xx, peaksd_check.py): a defocused end at
+         * travel Z (p32/a1_tip_z31.5) read 13.1 times its sd with a peak of only 16, so the ratio alone passed it.
+         * Travel-Z frames peak at 16-27; the weakest end on record, 65 (10.1 times), passes both.
+         */
+        public double minPeak = 40;
         /** Check (b): the frames' rms distance from the step fit at most (px). */
         public double maxResidualPx = 1.0;
         /** Check (c): the first and last centre frames at most this far apart (px). */
@@ -540,9 +547,9 @@ public class DispenseConfig {
                 p.add("needleEndMeasure.centrePxCameraXy must be [x, y] (mm): the bottom camera's location centrePx was "
                         + "fitted at");
             }
-            if (!(minPeakToSd > 0 && maxResidualPx > 0 && maxDriftPx > 0 && maxKSpreadMm > 0
-                    && maxFromNominalMm > 0)) {
-                p.add("needleEndMeasure: the checks' limits must be above 0");
+            if (!java.util.stream.DoubleStream.of(minPeak, minPeakToSd, maxResidualPx, maxDriftPx, maxKSpreadMm,
+                    maxFromNominalMm).allMatch(v -> v > 0 && v < Double.POSITIVE_INFINITY)) {
+                p.add("needleEndMeasure: the checks' limits must be above 0 and finite");
             }
             if (!(maxKFromSwitchMm > 0 && maxKFromSwitchMm <= HeightSwitch.K_WINDOW_MM)) {
                 p.add("needleEndMeasure.maxKFromSwitchMm must be above 0 and at most " + HeightSwitch.K_WINDOW_MM

@@ -134,7 +134,7 @@ public class EndFromBelowTest {
         assertEquals(15.517, h.pxPerMm, 0.005);
         assertEquals(0.150, h.residualPx, 0.005);
         assertEquals(0.149, h.driftPx, 0.005);
-        assertTrue(h.peakToSd >= 10, "check (a) at its default: " + h.peakToSd);
+        assertTrue(h.peakToSd >= 10, "check (a), np1's frames (15.1-18.9 times): " + h.peakToSd);
         assertTrue(r.clean.ok, r.clean.why);
         assertEquals(140, r.clean.peak, 0.5);
         assertEquals(0.160, r.clean.spread, 0.003);

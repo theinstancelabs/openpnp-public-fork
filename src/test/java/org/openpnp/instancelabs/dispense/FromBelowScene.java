@@ -39,6 +39,8 @@ public class FromBelowScene {
     /** The end creeps by this much per frame (px, along x): a loose tip. */
     public double creepPx;
     public double noise = 3;
+    /** The needle's light, scaled: a dim or defocused end (Process's p32 end at travel Z read a top-hat peak of 16). */
+    public double endGain = 1;
     private final double[] table = new double[512 * 512];
     private final Random rnd;
     private int frames;
@@ -108,9 +110,10 @@ public class FromBelowScene {
             double ex = bcx + s * (x + e[0] - camX) + t, ey = bcy - s * (y + e[1] - camY);
             double focus = 1 + 0.12 * Math.abs(z - zRef);
             // the red end's own glow, ~0.8 mm across, lavender (R/G ~0.85)
-            disc(px, ex, ey, 0.4 * s, 110, 130, 150);
-            blob(px, ex, ey, 1.4 * focus, 140, 140, 140);
-            blob(px, ex + 1.5 * s, ey + 0.4 * s, 0.6 * s, 90, 90, 90); // the hub's glint
+            double gain = endGain;
+            disc(px, ex, ey, 0.4 * s, 110 * gain, 130 * gain, 150 * gain);
+            blob(px, ex, ey, 1.4 * focus, 140 * gain, 140 * gain, 140 * gain);
+            blob(px, ex + 1.5 * s, ey + 0.4 * s, 0.6 * s, 90 * gain, 90 * gain, 90 * gain); // the hub's glint
             if (paste) {
                 disc(px, ex + 0.65 * s, ey, 0.325 * s, 200, 200, 200, true);
             }

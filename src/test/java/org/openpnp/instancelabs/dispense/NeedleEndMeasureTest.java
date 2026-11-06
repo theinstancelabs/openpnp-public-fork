@@ -235,8 +235,8 @@ public class NeedleEndMeasureTest {
     }
 
     /**
-     * No end and no mark: the brightest noise in the window is some 6 times its sd, under check (a)'s 10 (Process 11-05
-     * 04:3x; Process's 25G ends read 11.7-18.9 times through the ±3 mm search), so the first frame is refused.
+     * No end and no mark: the brightest noise in the window is some 6 times its sd, under check (a)'s 8 and its peak under
+     * its 40 (Process 11-05 18:xx: N1 or nothing in view read 4.7-6.2), so the first frame is refused, naming both.
      */
     @Test
     public void noEndIsTheEndNotFound() throws Exception {
@@ -246,7 +246,53 @@ public class NeedleEndMeasureTest {
         NeedleEndMeasure.Result r = NeedleEndMeasure.measure(cam, plan(sc, sc.endDx, sc.endDy));
         refused(r, NeedleEndMeasure.NOT_FOUND, "the end was not found (light or focus): the needle at raw Z 36.000, "
                 + "frame 1 of 6", cam);
-        assertTrue(r.why.contains("(at least 10.0)"), r.why);
+        assertTrue(r.why.contains("(at least 40)") && r.why.contains("(at least 8.0)"), r.why);
+    }
+
+    /**
+     * Process 11-05 18:xx (peaksd_check.py on the bottom frames on record): a defocused end at travel Z
+     * (p32/a1_tip_z31.5) read 13.1 times its window's sd with a top-hat peak of only 16, so the ratio alone passed it. A
+     * faint end in a quiet frame passes the ratio; under minPeak it is the end not found, at its first frame.
+     */
+    @Test
+    public void aFaintEndIsTheEndNotFoundThoughItsRatioPasses() throws Exception {
+        FromBelowScene sc = new FromBelowScene(1);
+        sc.endGain = 0.1;
+        sc.noise = 0.5;
+        Camera cam = new Camera(sc);
+        NeedleEndMeasure.Result r = NeedleEndMeasure.measure(cam, plan(sc, sc.endDx, sc.endDy));
+        refused(r, NeedleEndMeasure.NOT_FOUND, "the end was not found (light or focus): the needle at raw Z 36.000, "
+                + "frame 1 of 6: its top-hat peak", cam);
+        Matcher m = Pattern.compile("peak (\\d+) \\(at least 40\\) is (\\d+\\.\\d) times").matcher(r.why);
+        assertTrue(m.find(), r.why);
+        assertTrue(Integer.parseInt(m.group(1)) < 40 && Double.parseDouble(m.group(2)) >= 8, "faint, its ratio passing: "
+                + r.why);
+    }
+
+    /** Check (a)'s two floors at their defaults (Process 11-05 18:xx): each one reached passes, just under fails. */
+    @Test
+    public void checkAsFloorsHoldAtTheirDefaults() {
+        DispenseConfig.NeedleEndSettings s = new DispenseConfig.NeedleEndSettings();
+        assertTrue(NeedleEndMeasure.brightEnough(40, 8, s));
+        assertFalse(NeedleEndMeasure.brightEnough(Math.nextDown(40.0), 1000, s), "under the peak's floor");
+        assertFalse(NeedleEndMeasure.brightEnough(1000, Math.nextDown(8.0), s), "under the ratio's floor");
+    }
+
+    /** minPeak is validated with the other limits: above 0 and finite. */
+    @Test
+    public void minPeakIsAboveZeroAndFinite() {
+        DispenseConfig.NeedleEndSettings s = new DispenseConfig.NeedleEndSettings();
+        for (double bad : new double[] {0, -1, Double.NaN, Double.POSITIVE_INFINITY}) {
+            s.minPeak = bad;
+            List<String> p = new ArrayList<>();
+            s.validate(p);
+            assertTrue(p.stream().anyMatch(x -> x.contains("the checks' limits must be above 0 and finite")),
+                    bad + ": " + p);
+        }
+        s.minPeak = 40;
+        List<String> p = new ArrayList<>();
+        s.validate(p);
+        assertEquals(new ArrayList<String>(), p);
     }
 
     /**

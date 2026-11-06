@@ -213,6 +213,14 @@ public final class NeedleEndMeasure {
     }
 
     /** One tool at its {@code i}-th height: the moves, the six frames, their analysis and checks. */
+    /**
+     * Check (a) on one frame: the end's top-hat peak at least {@code minPeak} and at least {@code minPeakToSd} times
+     * its window's sd (Process 11-05 18:xx: a faint, defocused spot passes the ratio alone).
+     */
+    static boolean brightEnough(double peak, double ratio, DispenseConfig.NeedleEndSettings s) {
+        return peak >= s.minPeak && ratio >= s.minPeakToSd;
+    }
+
     private static Look look(Io io, Plan p, Result r, boolean needle, int i, int[] done, int planned)
             throws Exception {
         DispenseConfig.NeedleEndSettings s = p.s;
@@ -261,7 +269,7 @@ public final class NeedleEndMeasure {
                 EndFromBelow.Spot sk = k == 0 ? s0 : EndFromBelow.spot(f[k], s0.x, s0.y, s.followPx, s.kernelPx);
                 double ratio = sk.backgroundSd > 0 ? sk.peak / sk.backgroundSd : sk.peak > 0
                         ? Double.POSITIVE_INFINITY : 0;
-                if (!(sk.peak > 0 && ratio >= s.minPeakToSd)) {
+                if (!brightEnough(sk.peak, ratio, s)) {
                     boolean follow = k > 0;
                     BufferedImage pic = draw(f[k], g -> {
                         circle(g, Color.YELLOW, bcx, bcy, searchPx);
@@ -271,8 +279,8 @@ public final class NeedleEndMeasure {
                         cross(g, Color.RED, sk.x, sk.y);
                     });
                     throw new Refused(r, NOT_FOUND, String.format(Locale.ROOT, "%s, frame %d of %d: its top-hat peak "
-                            + "%.0f is %.1f times its window's sd (at least %.1f)", at, k + 1, STEPS.length, sk.peak,
-                            ratio, s.minPeakToSd), pic,
+                            + "%.0f (at least %.0f) is %.1f times its window's sd (at least %.1f)", at, k + 1,
+                            STEPS.length, sk.peak, s.minPeak, ratio, s.minPeakToSd), pic,
                             "The end not found: " + at + ", frame " + (k + 1) + " (the search region drawn)", mmPerPx);
                 }
                 l.minPeakToSd = Math.min(l.minPeakToSd, ratio);

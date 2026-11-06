@@ -654,7 +654,7 @@ OpenPnP's units per pixel) in a height's first frame and `followPx` around that 
 + M⁻¹ (spot − `centrePx`), absolute from the head (the top camera, offset 0, 0). K by parallax = the needle's raw Z + N1's
 where both tips are the same distance from the camera (1/k linear in raw Z for each tool). **Checks, in order, each
 refusing with the frame it failed in and the region searched drawn (`photoId`):** (a) every frame's top-hat peak at
-least `minPeakToSd` times its window's sd; (b) the frames' rms distance from the fit at most `maxResidualPx`, and each
+least `minPeak` and at least `minPeakToSd` times its window's sd; (b) the frames' rms distance from the fit at most `maxResidualPx`, and each
 step moved the spot by more than that (a mark on the camera does not); (c) the first and last centre frames at most
 `maxDriftPx` apart; (e) the end at most `maxFromNominalMm` from the nominal; then, on the measure's last frame (the
 needle at `cleanRawZ` over B, read at that height's scale), **the clean check** (`tipclean.py`, all needed, in order): `light` (the ring's glow at the frame's left and right
@@ -721,8 +721,8 @@ and marked for review.
 (parallax_fit.py; a step moves a tip up to 18 px per mm at the nearest heights allowed, so `needleStepMm` × 18 must stay
 under `followPx` and `n1StepMm` × 18 under `n1SearchPx`), `centrePx` [957.5, 534.8] (Process's BC (957.5, 544.2) of the
 raw frame in OpenPnP's frame, which the bottom camera's flip-x turns over its x-axis), `centrePxCameraXy` [217.129,
-152.319] (the bottom camera's location in OpenPnP that `centrePx` was fitted at), `minPeakToSd` 10 (Process 11-05:
-noise about 6; Process's 25G ends read 11.7-18.9 times through the ±3 mm search), `maxResidualPx` 1.0, `maxDriftPx` 1.0, `maxKSpreadMm` 0.35, `maxFromNominalMm`
+152.319] (the bottom camera's location in OpenPnP that `centrePx` was fitted at), `minPeakToSd` 8 and `minPeak` 40 (Process 11-05
+18:xx, `peaksd_check.py` on the bottom frames on record: clean ends at night 15.1-18.4 times their window's sd with a top-hat peak of 126-149, a capped end 10.7 (93), daylight with the ring on 10.1-11.4 (65-83), N1 or nothing in view 4.7-6.2; a defocused end at travel Z read 13.1 with a peak of 16, which the ratio alone passed), `maxResidualPx` 1.0, `maxDriftPx` 1.0, `maxKSpreadMm` 0.35, `maxFromNominalMm`
 2.0 (the follow-up's checks), `maxKFromSwitchMm` 0.5 (the press in the home of its own trip; at most 1.0, the window from K), `cleanRawZ` 40.4 (one of
 `needleRawZ`), `clean` {tip setup key: limits}: per tip kind, only the 25G plastic taper's (`plastic-25g-taper`:
 `rimMin` 60, `rimRgLow` 0.20, `rimRgHigh` 0.45, `peakMin` 60, `kLow` 14.0, `kHigh` 16.3, `spreadMax` 0.35, `redMin`
