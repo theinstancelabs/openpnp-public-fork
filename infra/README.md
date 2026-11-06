@@ -19,6 +19,14 @@ queue"): `gh pr merge <n> --merge` queues a PR, the queue runs the full gate on 
 A PR's own run is the fast gate: build, infra and maven. deploy-e2e, controller-e2e, ui-e2e, ui-boardview and acceptance
 run in the queue (and on a push or by hand), never on a PR, whatever its labels (INF-21, 11-05: a PR's full runs were
 42% of the day's runner minutes).
+In the queue a slow job is skipped when no file the PR itself changes can reach it (INF-21 c, job `queued`: `skip`;
+every file, both names of a rename): docs (`docs/**`; `*.md` but in `infra/fixtures/`, the SIM gates' input) and the web
+UI's own files (`src/main/resources/org/openpnp/instancelabs/web/**`, `src/test/web/*.playwright.cjs`,
+`src/test/web/fixtures/**`) skip acceptance, deploy-e2e and controller-e2e (they use the API and the Swing UI, never the
+web files); docs, the Java tests (`src/test/java/**`) and lumen-sim (`infra/lumen-sim/**`) skip ui-e2e and ui-boardview
+(they run the jar on GcodeServer with boards from `src/test/resources`, so engine code and test resources run
+everything). Any other file runs every job; build, infra and maven always run. It reads the PR's own files, not the
+group's: the PRs ahead ran their jobs in their own groups.
 The queue fast-forwards `il/integration` to the very commit its `merge_group` run gated, so the push run of that
 commit skips each test job the queue run passed (job `queued`, by job id) and only builds, gates and releases: the
 release comes minutes after the merge, not an hour. A job the queue run skipped or did not pass runs on the push.
@@ -26,7 +34,7 @@ release comes minutes after the merge, not an hour. A job the queue run skipped 
 | Job | What | About |
 |---|---|---|
 | build | `mvn -DskipTests package` (checkstyle runs at validate); the jar + lib become the artifact every later job tests | 3 min |
-| queued | on a push to `il/integration`: the test jobs this commit's `merge_group` run passed (its gate's `gate-needs` artifact: the gate's `needs` by job id), read once that run's gate job has passed (GitHub can mark the run itself completed minutes later). Every test job below runs unless its id is in that list; anything unexpected (an API error, no such run, no artifact) answers `[]` | seconds |
+| queued | on a push to `il/integration`: the test jobs this commit's `merge_group` run passed (its gate's `gate-needs` artifact: the gate's `needs` by job id), read once that run's gate job has passed (GitHub can mark the run itself completed minutes later). Every test job below runs unless its id is in that list; a slow job that run skipped by its PR's files counts as passed; anything unexpected (an API error, no such run, no artifact) answers `[]`. In the queue: `skip`, the slow jobs the PR's own files cannot reach (above; the PR's files from the API; another ref, an API error, no files or the API's 3000-file cap answer `[]`) | seconds |
 | infra | `python3 -m unittest discover -s infra/<x>/tests -t infra/<x>` for every component here | 1 min |
 | maven | `mvn test`: unit tests and the simulated-machine integration tests (in-JVM GcodeServer, `*SimTest`) | 13 min |
 | controller-e2e | `infra/lumen-sim/e2e`: OpenPnP on lumen-sim's pty: home, STOP in G28, the 30-turn prime timeout | 6 min |
@@ -34,7 +42,7 @@ release comes minutes after the merge, not an hour. A job the queue run skipped 
 | ui-boardview | `src/test/web/run-boardview-test.sh` | 5 min |
 | deploy-e2e | `infra/deploy/e2e/test_deploy_openpnp.py`: il_deploy with the build's jar on lumen-sim (deploy, deploy over a running OpenPnP, rollback, a power-cycled controller) | 3 min |
 | acceptance ×4 + 1 | `src/test/sim/il_sim_acceptance.py`, sharded on GcodeServer, plus `load` on lumen-sim's pty (`--controller-sim-cap`, BR-43/47); `ci/acceptance.py` fails the job unless every check passed (the script itself always exits 0) | 15 min each |
-| gate | the one required status check: every job above succeeded (on a PR, the five slow jobs are skipped; on a push, exactly the test jobs `queued` names), and no job of the run failed or was cancelled (the run's job list, since `needs` can miss a matrix leg cancelled before pickup). In the queue it then uploads its `needs` as `gate-needs` for the push (a failed upload never fails it) | seconds |
+| gate | the one required status check: every job above succeeded (on a PR, the five slow jobs are skipped; in the queue, exactly the slow jobs `queued`'s `skip` names; on a push, exactly the test jobs `queued` names), and no job of the run failed or was cancelled (the run's job list, since `needs` can miss a matrix leg cancelled before pickup). In the queue it then uploads its `needs` as `gate-needs` for the push (a failed upload never fails it) | seconds |
 | release | push to `il/integration` only, after `gate`: a prerelease `il-build-<run>-<sha7>` with the build (`ci/make_release.py`), its tarball attested first (`actions/attest-build-provenance`; the deployer verifies it with `gh attestation verify`), then published by `ci/publish_release.py`: a release already at the tag passes only as this run's own (a re-run), checked with the deployer's policy; anything else there fails the run (tests in `deploy/tests/`) | 1 min |
 | prune-artifacts | after a green release: deletes every `openpnp-build` artifact of a run that succeeded or was cancelled, but this run's own (`ci/prune_artifacts.py`); a run still going or one that failed keeps its build (`gh run rerun --failed` reuses it); every upload expires after a day; a cancelled run, or one more than a day old, is re-run whole (`gh run rerun <id>`); a failed prune never turns the run red | < 1 min |
 

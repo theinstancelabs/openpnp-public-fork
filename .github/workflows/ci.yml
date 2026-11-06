@@ -4,16 +4,18 @@ name: CI
 # "gate": in the merge queue (merge_group) and on pushes, green only if every job below passed; on a PR the slow jobs
 # (the deploy, controller, UI end-to-end and SIM acceptance jobs) are skipped (the fast gate): they run in the queue
 # (and on a push or by hand), never on a PR (INF-21: a PR's full runs were 42% of 11-05's 34.7k runner-min, the queue
-# ran them again). A green push to il/integration also publishes a versioned build as a GitHub prerelease, which the lab
+# ran them again); in the queue a slow job no file of the PR itself can reach is skipped too (INF-21 c, job queued:
+# skip). A green push to il/integration also publishes a versioned build as a GitHub prerelease, which the lab
 # computer's deployer installs when the machine is idle (INF-02, infra/deploy/). The queue fast-forwards il/integration
 # to the very commit its merge_group run gated, so that push skips each test job the queue run passed (job queued) and
 # builds, gates and releases in minutes.
 # What runs where: infra/README.md.
 
 on:
-  # A PR runs the fast gate (build, infra, maven); the merge queue (merge_group) runs the full gate, and the push to
-  # il/integration every test job its queue run did not pass. Releases come from the push run only. No `labeled`:
-  # a label changes nothing, so it must start no second run (INF-21).
+  # A PR runs the fast gate (build, infra, maven); the merge queue (merge_group) runs the full gate but the slow jobs
+  # the PR's own files cannot reach, and the push to il/integration every test job its queue run did not pass.
+  # Releases come from the push run only. No `labeled`: a label changes nothing, so it must start no second run
+  # (INF-21).
   pull_request:
     types: [opened, synchronize, reopened]
   merge_group:
@@ -64,15 +66,18 @@ jobs:
     # Which test jobs this commit's merge_group run passed, by job id (its gate's gate-needs artifact): a push skips
     # those. Only a push to il/integration asks; anything unexpected (an API error, no such run, no artifact) answers
     # [] and every test job runs here. Every test job needs it, so if this job itself fails (a lost runner), they are
-    # skipped and the gate is red, as for a failed build.
+    # skipped and the gate is red, as for a failed build. In the queue it also names the slow jobs the PR's own files
+    # cannot reach (skip, INF-21 c).
     name: Passed in the merge queue
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
       actions: read  # the commit's merge_group runs and their artifacts
+      pull-requests: read  # a queued PR's files
     outputs:
       passed: ${{ steps.find.outputs.passed }}
+      skip: ${{ steps.paths.outputs.skip }}
     steps:
       - name: The test jobs this commit's queue run passed
         id: find
@@ -96,12 +101,44 @@ jobs:
                     and .[0].conclusion == "success"' jobs.json > /dev/null &&
                 timeout 120 gh run download "$run" -R "$GITHUB_REPOSITORY" -n gate-needs -D gate-needs
             then
-              # a job counts only if it passed there: one skipped there (a partial run) runs here
-              passed=$(jq -ce 'if type == "object" then [to_entries[] | select(.value.result == "success") | .key]
-                  | sort else [] end' gate-needs/needs.json) || passed='[]'
+              # a job counts only if it passed there, or is a slow job its PR's own files could not reach (that run's
+              # skip): one skipped there for any other reason (a partial run) runs here
+              passed=$(jq -ce 'if type == "object" then [(to_entries[] | select(.value.result == "success") | .key),
+                  (.queued.outputs.skip // "[]" | fromjson | arrays | .[] | strings | select(IN("deploy-e2e",
+                  "controller-e2e", "ui-e2e", "ui-boardview", "acceptance")))] | unique else [] end' \
+                  gate-needs/needs.json) || passed='[]'
             fi
           fi
           echo "passed=$passed" | tee -a "$GITHUB_OUTPUT"
+      - name: The slow jobs this PR's own files cannot reach (merge queue)
+        # INF-21 (c): a slow job is skipped only when EVERY file the PR changes (both names of a rename) is on a list
+        # that cannot reach it. Docs (docs/; *.md but in infra/fixtures, the SIM gates' input) and the web UI's own
+        # files (served as they are) cannot reach SIM acceptance, the deploy or the controller e2e (they use the API
+        # and the Swing UI); docs, the Java tests and lumen-sim cannot reach the UI e2e jobs (they run the jar on
+        # GcodeServer, with boards from src/test/resources). The PR's own files, not the group's: the PRs ahead ran
+        # their jobs in their own groups. Anything unexpected (another ref, an API error, no files, the API's
+        # 3000-file cap) answers [] and every job runs.
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          skip='[]'
+          queue='^refs/heads/gh-readonly-queue/il/integration/pr-([0-9]+)-[0-9a-f]{40}$'
+          if [ "$EVENT" = merge_group ] && [[ $GITHUB_REF =~ $queue ]] &&
+              timeout 20 gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/${BASH_REMATCH[1]}/files?per_page=100" \
+                > files.json; then
+            skip=$(jq -cs 'def docs: test("^docs/") or (test("\\.md$") and (test("^infra/fixtures/") | not));
+                def web: test("^src/main/resources/org/openpnp/instancelabs/web/") or test("^src/test/web/fixtures/")
+                  or test("^src/test/web/[^/]+\\.playwright\\.cjs$");
+                def tests: test("^src/test/java/") or test("^infra/lumen-sim/");
+                [.[][]] as $files | [$files[] | .filename, (.previous_filename // empty)] as $paths
+                | if ($files | length) == 0 or ($files | length) >= 3000 then []
+                  else (if all($paths[]; docs or web) then ["acceptance", "controller-e2e", "deploy-e2e"] else [] end)
+                    + (if all($paths[]; docs or tests) then ["ui-boardview", "ui-e2e"] else [] end) end' files.json) ||
+              skip='[]'
+          fi
+          echo "skip=$skip" | tee -a "$GITHUB_OUTPUT"
 
   infra:
     name: Infra self-tests (CI helpers, deploy, lumen-sim)
@@ -155,7 +192,9 @@ jobs:
   deploy-e2e:
     name: Deploy dry run (real OpenPnP + lumen-sim, deploy and rollback)
     needs: [build, queued]
-    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'deploy-e2e') && github.event_name != 'pull_request' }}
+    if: >-
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'deploy-e2e') && github.event_name != 'pull_request' &&
+      !contains(fromJSON(needs.queued.outputs.skip), 'deploy-e2e') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -191,7 +230,9 @@ jobs:
   controller-e2e:
     name: Simulated controller behind OpenPnP (home, STOP in G28, long prime)
     needs: [build, queued]
-    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'controller-e2e') && github.event_name != 'pull_request' }}
+    if: >-
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'controller-e2e') && github.event_name != 'pull_request' &&
+      !contains(fromJSON(needs.queued.outputs.skip), 'controller-e2e') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -225,7 +266,8 @@ jobs:
     name: UI end-to-end (${{ matrix.title }})
     needs: [build, queued]
     if: >-
-      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-e2e') && github.event_name != 'pull_request' }}
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-e2e') && github.event_name != 'pull_request' &&
+      !contains(fromJSON(needs.queued.outputs.skip), 'ui-e2e') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 100
     strategy:
@@ -266,7 +308,9 @@ jobs:
   ui-boardview:
     name: UI end-to-end (boardview)
     needs: [build, queued]
-    if: ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-boardview') && github.event_name != 'pull_request' }}
+    if: >-
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'ui-boardview') && github.event_name != 'pull_request' &&
+      !contains(fromJSON(needs.queued.outputs.skip), 'ui-boardview') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -295,7 +339,8 @@ jobs:
     name: SIM acceptance (${{ matrix.shard }}${{ matrix.controller == 'pty' && ', on lumen-sim' || '' }})
     needs: [build, queued]
     if: >-
-      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'acceptance') && github.event_name != 'pull_request' }}
+      ${{ !contains(fromJSON(needs.queued.outputs.passed), 'acceptance') && github.event_name != 'pull_request' &&
+      !contains(fromJSON(needs.queued.outputs.skip), 'acceptance') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -366,6 +411,11 @@ jobs:
             echo "$NEEDS" | jq -e '(.queued.outputs.passed // "[]" | fromjson) as $passed | length > 0
               and .queued.result == "success" and .build.result == "success" and all(to_entries[];
               .value.result == "success" or (.value.result == "skipped" and (.key | IN($passed[]))))' >/dev/null
+          elif [ "$EVENT" = merge_group ]; then
+            # a slow job the PR's own files cannot reach is skipped (job queued: skip, INF-21 c); every other must pass
+            echo "$NEEDS" | jq -e '(.queued.outputs.skip // "[]" | fromjson) as $skip | length > 0 and all(to_entries[];
+              .value.result == "success" or (.value.result == "skipped" and (.key | IN($skip[])) and (.key |
+              IN("deploy-e2e", "controller-e2e", "ui-e2e", "ui-boardview", "acceptance"))))' >/dev/null
           else
             echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' >/dev/null
           fi
