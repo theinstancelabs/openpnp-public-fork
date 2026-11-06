@@ -2,12 +2,12 @@ name: CI
 
 # The gate for the integration branch (il/integration) and every PR (INF-01, owner: Infra role). One required check,
 # "gate": in the merge queue (merge_group) and on pushes, green only if every job below passed; on a PR the slow jobs
-# (the deploy, controller, UI end-to-end and SIM acceptance jobs) are skipped (the fast gate) and run in the queue
-# only (INF-21: a PR's full runs were 42% of 11-05's 34.7k runner-min, the queue ran them again). A green
-# push to il/integration also publishes a versioned build as a GitHub prerelease, which the lab computer's deployer
-# installs when the machine is idle (INF-02, infra/deploy/). The queue fast-forwards il/integration to the very commit
-# its merge_group run gated, so that push skips each test job the queue run passed (job queued) and builds, gates and
-# releases in minutes.
+# (the deploy, controller, UI end-to-end and SIM acceptance jobs) are skipped (the fast gate): they run in the queue
+# (and on a push or by hand), never on a PR (INF-21: a PR's full runs were 42% of 11-05's 34.7k runner-min, the queue
+# ran them again). A green push to il/integration also publishes a versioned build as a GitHub prerelease, which the lab
+# computer's deployer installs when the machine is idle (INF-02, infra/deploy/). The queue fast-forwards il/integration
+# to the very commit its merge_group run gated, so that push skips each test job the queue run passed (job queued) and
+# builds, gates and releases in minutes.
 # What runs where: infra/README.md.
 
 on:
@@ -358,7 +358,7 @@ jobs:
         run: |
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
           if [ "$EVENT" = pull_request ]; then
-            # the fast gate: the slow jobs run in the merge queue only (INF-21)
+            # the fast gate: the slow jobs never run on a PR, the merge queue runs them (INF-21)
             echo "$NEEDS" | jq -e 'length > 0 and all(to_entries[]; .value.result == "success" or ((.key | IN("deploy-e2e",
               "controller-e2e", "ui-e2e", "ui-boardview", "acceptance")) and .value.result == "skipped"))' >/dev/null
           elif [ "$EVENT" = push ]; then

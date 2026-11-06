@@ -57,6 +57,14 @@ class MergeQueue(unittest.TestCase):
             self.assertTrue(self.runs(name, "pull_request"), name)
         self.assertNotIn("full-ci", self.ci)
 
+    def test_a_slow_jobs_condition_reads_only_the_event_and_queued(self):
+        """No opt-in through a label or any other PR field (the evaluator reads an unknown field as empty, so only this
+        catches one): a slow job's if: names the event and queued's answer, nothing else."""
+        for name in SLOW:
+            cond = re.sub(r"'(?:[^']|'')*'", "''", ci_wiring.job_value(ci_wiring.jobs(self.ci)[name], "if"))
+            names = set(re.findall(r"(?<![\w.])([A-Za-z_][\w-]*(?:\.(?:[A-Za-z_][\w-]*|\*))+)(?!\s*\()", cond))
+            self.assertEqual(names, {"github.event_name", "needs.queued.outputs.passed"}, name)
+
     def test_a_push_skips_a_test_job_only_if_the_commits_queue_run_passed_that_job(self):
         js = ci_wiring.jobs(self.ci)
         self.assertEqual(set(TESTS), set(js) - {"build", "queued", "gate", "release", "prune-artifacts"})  # a new job must decide too
@@ -206,7 +214,7 @@ class GateBehaviour(unittest.TestCase):
         everything = list(TESTS) + ["build", "queued"]
         self.assertTrue(self.verdict(self.all_jobs(**skipped), "push", passed=everything))
         self.assertTrue(self.verdict(self.all_jobs(**skipped), "push", passed=TESTS))
-        # a partial queue run (say, a label-dependent workflow ran no UI end-to-end or SIM acceptance): those must pass
+        # a partial queue run (an older workflow, or a job skipped there: no UI e2e, no SIM acceptance): those must pass
         partial = [t for t in TESTS if t not in SLOW]
         self.assertFalse(self.verdict(self.all_jobs(**skipped), "push", passed=partial))
         self.assertTrue(self.verdict(self.all_jobs(**{t: "skipped" for t in partial}), "push", passed=partial))
@@ -341,7 +349,8 @@ class QueueVerdict(unittest.TestCase):
                          sorted(("queued", "build") + TESTS))
 
     def test_a_job_the_queue_run_did_not_run_runs_on_the_push(self):
-        """A partial or label-dependent queue run (here: no UI end-to-end, no SIM acceptance): those jobs run here."""
+        """A partial queue run (an older workflow, or a job skipped there: no UI end-to-end, no SIM acceptance): those
+        jobs run here."""
         needs = dict(self.NEEDS, **{s: {"result": "skipped", "outputs": {}} for s in SLOW})
         self.assertEqual(self.passed([self.queue_run()], needs)[0],
                          sorted(n for n in ("queued", "build") + TESTS if n not in SLOW))
