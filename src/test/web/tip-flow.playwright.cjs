@@ -11,7 +11,8 @@
  * status comes before the tips builds its panel; no JavaScript errors, no native dialogs (Designs' upload and Make a
  * board: designs.playwright.cjs). Answers the SIM does not give on demand come from Playwright routes:
  * a task running or the pressure switching (Park and It's on wait, the hands-on steps hide), a picture stopped or
- * still running and a landing check that saved nothing or asks a question (nothing more moves; the step says why),
+ * still running, a landing check that saved nothing or asks a question (nothing more moves; the step says why) and
+ * one whose job the page lost track of ("Outcome unknown: look at the machine"),
  * no boards at all. Runs after tip-setups.playwright.cjs in the same session (the tips it set up). Nothing here runs
  * a real machine.
  *
@@ -312,6 +313,16 @@ const stepOf = (page, k) => page.evaluate((key) => { const l = document.querySel
     check('(5) a landing check that asks whether the tip is on is not done; Answer it opens that job\'s view with Save it', !!q5.lands && q5.lands.s !== 'done'
       && !!q5.answer && q5.view.view === 'pad-cal' && /job=tf-question/.test(q5.view.hash) && q5.view.save, q5);
     await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
+    // a landing check whose job the page lost track of (ten reads in a row with no answer) may still be laying dots: the
+    // step says its outcome is unknown and to look at the machine (a read's own failure never does, #68's follow-up)
+    jobNow = { id: 'tf-lost' };
+    await page.unroute('**/api/pad-calibrations/tf-*');
+    let lostReads = 0;
+    await page.route('**/api/pad-calibrations/tf-*', (r) => { if (/\/tf-lost$/.test(new URL(r.request().url()).pathname)) lostReads++; return r.abort('failed'); });
+    await runChecks(page, 30000);
+    const lost5 = Object.assign({ reads: lostReads }, await stepOf(page, 'lands'));
+    check('(5) a landing check it lost track of (ten reads with no answer) is not done: "… Outcome unknown: look at the machine."', lost5.reads === 10 && lost5.s !== 'done'
+      && /^OpenPnP did not answer .*\. Outcome unknown: look at the machine\.$/.test(lost5.d || ''), lost5);
     for (const u of ['**/api/tip-setups/*/picture', '**/api/pad-calibrations', '**/api/pad-calibrations/tf-*']) await page.unroute(u);
     await page.waitForSelector('#btn-tip-checks-start:enabled', { timeout: 10000 }).catch(() => null);
     await page.click('#btn-tip-checks-start');

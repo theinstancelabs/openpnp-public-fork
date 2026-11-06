@@ -26,7 +26,7 @@ import org.openpnp.model.Location;
 
 /**
  * The simulated N1 vacuum sensor on a fake clock: the reply format, the I2C state, settling, seals,
- * partial seals, the slow release, leaks, edges, tip states, per-spot seal drops and scene reloads.
+ * the first touch and the seal building below it, the slow release, leaks, edges, tip states, per-spot seal drops and scene reloads.
  */
 public class SimVacuumTest {
     static final Pattern DATA = Pattern.compile("data:([0-9A-F]{2}) ([0-9A-F]{2}) ([0-9A-F]{2})");
@@ -155,24 +155,40 @@ public class SimVacuumTest {
         assertEquals(-1_550_000, settled, 0.01 * 1_550_000);
     }
 
+    /** INF-15, the real record (11-05 00:34:48 PROBE, run b252aad9): 55 k at the first touching step, 25 k per 0.025 mm. */
     @Test
-    public void sealsAtContactWithAPartialBandAbove() {
+    public void firstTouchAtTheContactThenTheSealBuildsBelowIt() {
         SimScene s = scene();
         s.boardSurface = new SimScene.Plane(5.43, -0.004, 0.006);
         SimVacuum v = vacuum(s);
         double[] h = head(s, 20, 30);
         double contact = s.boardContactZ(20, 30);
         vacuumOn(v, h, 8);
+        assertEquals(-1_550_000, read(v, h, contact + 0.001), "open air down to the contact");
+        assertEquals(-1_550_000 - 55_000, read(v, h, contact), "the first touch at the contact Z");
+        assertEquals(-1_550_000 - 80_000, read(v, h, contact - 0.025), 1.0, "25 k more per 0.025 mm");
+        assertEquals(-1_550_000 - 155_000, read(v, h, contact - 0.1), 1.0);
+        assertEquals(-1_550_000 - 300_000, read(v, h, contact - 0.25), "the spot's seal drop at most");
+        assertEquals(-1_550_000 - 300_000, read(v, h, contact - 0.5));
+        // The engine's touch (BR-100: 40 k below open air) on any 0.025 mm grid: the first step at or below the contact.
+        for (double phase = 0; phase < 0.025; phase += 0.004) {
+            double z = contact + 0.1 + phase;
+            while (read(v, h, z) > -1_550_000 - 40_000) {
+                z -= 0.025;
+            }
+            assertTrue(z <= contact && z > contact - 0.025, "touch at " + z + " for the contact " + contact);
+        }
+        // An old scene's partialBandMm: half the first touch that far above the contact, never a touch.
+        s.vacuum.partialBandMm = 0.03;
+        assertEquals(-1_550_000 - 27_500, read(v, h, contact + 0.029));
         assertEquals(-1_550_000, read(v, h, contact + 0.031));
-        assertEquals(-1_550_000 - 150_000, read(v, h, contact + 0.029), "partial seal: half the drop");
-        assertEquals(-1_550_000 - 300_000, read(v, h, contact), "sealed at contact");
-        assertEquals(-1_550_000 - 300_000, read(v, h, contact - 0.5), "sealed below");
+        assertEquals(-1_550_000 - 55_000, read(v, h, contact));
         // The surface is the scene's tilted plane, through the true seat.
         double[] far = head(s, 70, 70);
         double contactFar = s.boardContactZ(70, 70);
         assertNotEquals(contact, contactFar, 0.02);
         assertEquals(-1_550_000, read(v, far, contactFar + 0.04));
-        assertEquals(-1_850_000, read(v, far, contactFar - 0.001));
+        assertEquals(-1_850_000, read(v, far, contactFar - 0.3));
     }
 
     @Test
@@ -186,12 +202,12 @@ public class SimVacuumTest {
         at(0);
         vacuumOn(v, h, contact + 0.25);
         at(1.0);
-        assertNull(v.onLine("G1 Z" + (contact - 0.05) + " F300", h[0], h[1], contact - 0.05));
+        assertNull(v.onLine("G1 Z" + (contact - 0.3) + " F300", h[0], h[1], contact - 0.3));
         at(1.07);
-        long sealed = read(v, h, contact - 0.05);
+        long sealed = read(v, h, contact - 0.3);
         assertEquals(-1_550_000 - 300_000 * (1 - Math.exp(-0.07 / 0.03)), sealed, 2.0);
         at(2.0);
-        assertEquals(-1_850_000, read(v, h, contact - 0.05), 1.0);
+        assertEquals(-1_850_000, read(v, h, contact - 0.3), 1.0);
         // Lift back to the last open coarse step: 0.37 s later the seal has not let go by the
         // prober's rule (|mean - baseline| < drop/2, drop = 0.15 * |baseline|).
         assertNull(v.onLine("G1 Z" + (contact + 0.20) + " F300", h[0], h[1], contact + 0.20));
@@ -214,15 +230,16 @@ public class SimVacuumTest {
         at(0);
         vacuumOn(v, h, contact + 0.25);
         at(1.0);
-        // "M400" received while the 0.25 mm step down is planned to end 0.1 s later.
-        assertNull(v.onLine("M400", h[0], h[1], contact, 0.1));
+        // "M400" received while the 0.5 mm step down (to 0.25 mm below the contact) is planned to end 0.1 s later.
+        double z = contact - 0.25;
+        assertNull(v.onLine("M400", h[0], h[1], z, 0.1));
         at(1.05);
-        assertNull(v.onLine("M260 A112 B1 S1", h[0], h[1], contact, 0.05));
-        assertNull(v.onLine("M260 A109 B6 S1", h[0], h[1], contact, 0.05));
-        assertEquals(-1_550_000, parse(v.onLine("M261 A109 B3 S1", h[0], h[1], contact, 0.05)), "still moving");
+        assertNull(v.onLine("M260 A112 B1 S1", h[0], h[1], z, 0.05));
+        assertNull(v.onLine("M260 A109 B6 S1", h[0], h[1], z, 0.05));
+        assertEquals(-1_550_000, parse(v.onLine("M261 A109 B3 S1", h[0], h[1], z, 0.05)), "still moving");
         // The prober reads 70 ms after M400 returned (at 1.1 s).
         at(1.17);
-        long first = read(v, h, contact);
+        long first = read(v, h, z);
         assertEquals(-1_550_000 - 300_000 * (1 - Math.exp(-0.07 / 0.03)), first, 2.0);
     }
 
@@ -236,7 +253,7 @@ public class SimVacuumTest {
         vacuumOn(v, h, 8);
         assertEquals(-1_550_000 - 15_000, read(v, h, contact - 0.3));
         double[] away = head(s, 8, 10);
-        assertEquals(-1_850_000, read(v, away, s.boardContactZ(8, 10) - 0.01), "2 mm away it seals");
+        assertEquals(-1_850_000, read(v, away, s.boardContactZ(8, 10) - 0.25), "2 mm away it seals");
     }
 
     @Test
@@ -249,7 +266,7 @@ public class SimVacuumTest {
         assertEquals(-1_550_000 - 15_000, read(v, edge, contact - 0.05));
         assertEquals(-1_550_000 - 15_000, read(v, edge, 2.0), "below the bed too: still the edge");
         double[] inside = head(s, 0.5, 37.5);
-        assertEquals(-1_850_000, read(v, inside, s.boardContactZ(0.5, 37.5) - 0.01));
+        assertEquals(-1_850_000, read(v, inside, s.boardContactZ(0.5, 37.5) - 0.25));
     }
 
     @Test
@@ -261,10 +278,10 @@ public class SimVacuumTest {
         assertEquals(5.62 - 0.0012 * 20, blankZ, 1e-12, "z0 at the blank rectangle's first corner");
         vacuumOn(v, onBlank, 8);
         assertEquals(-1_550_000, read(v, onBlank, blankZ + 0.05));
-        assertEquals(-1_850_000, read(v, onBlank, blankZ - 0.01));
+        assertEquals(-1_850_000, read(v, onBlank, blankZ - 0.25));
         double[] bed = {100 - s.n1OffsetX, 100 - s.n1OffsetY};
         assertEquals(-1_550_000, read(v, bed, 3.0), "off the board: no contact above the bed");
-        assertEquals(-1_850_000, read(v, bed, 2.5));
+        assertEquals(-1_850_000, read(v, bed, 2.25));
     }
 
     @Test
@@ -281,9 +298,9 @@ public class SimVacuumTest {
         assertEquals(-2_100_000, read(v, h, 8));
         s.vacuum.tip = "part";
         assertEquals(-1_650_000, read(v, h, 8), "a held part: 100 k below open air");
-        assertEquals(-1_950_000, read(v, h, contact + 0.44), "the part seals 0.45 mm high");
+        assertEquals(-1_950_000, read(v, h, contact + 0.2), "the part seals 0.45 mm high (pressed 0.25)");
         s.vacuum.tip = "normal";
-        assertEquals(-1_550_000, read(v, h, contact + 0.44));
+        assertEquals(-1_550_000, read(v, h, contact + 0.2));
     }
 
     @Test
@@ -312,7 +329,7 @@ public class SimVacuumTest {
         SimVacuum v = vacuum(s);
         double[] h = head(s, 5, 5);
         vacuumOn(v, h, 8);
-        assertEquals(-1_550_000 - drops.get(0), read(v, h, s.boardContactZ(5, 5) - 0.01), 1.0);
+        assertEquals(-1_550_000 - drops.get(0), read(v, h, s.boardContactZ(5, 5) - 0.4), 1.0);
     }
 
     @Test
@@ -354,7 +371,7 @@ public class SimVacuumTest {
         double[] h = head(first, 37, 37);
         vacuumOn(v, h, 8);
         double c0 = first.boardContactZ(37, 37);
-        assertEquals(-1_850_000, read(v, h, c0 - 0.01));
+        assertEquals(-1_850_000, read(v, h, c0 - 0.25));
         // The board is lowered by 0.5 mm in the running session.
         write(f, 4.50);
         nowMs[0] += 100;
@@ -362,7 +379,7 @@ public class SimVacuumTest {
         nowMs[0] += 200;
         SimScene second = src.get();
         assertEquals(4.50, second.boardSurface.z0, 0);
-        assertEquals(-1_550_000, read(v, h, c0 - 0.01), "no contact any more at the old height");
+        assertEquals(-1_550_000, read(v, h, c0 - 0.25), "no contact any more at the old height");
         // A file that does not parse keeps the last good scene; a deleted one turns the simulator off.
         Files.write(f.toPath(), "{".getBytes(StandardCharsets.UTF_8));
         nowMs[0] += 300;
@@ -384,12 +401,12 @@ public class SimVacuumTest {
         SimVacuum v = new SimVacuum(src, () -> nowNs[0]);
         double[] h = head(src.get(), 37, 37);
         vacuumOn(v, h, 8);
-        assertEquals(-1_550_000, read(v, h, 4.99), "board not loaded yet: no outline, no seal");
+        assertEquals(-1_550_000, read(v, h, 4.75), "board not loaded yet: no outline, no seal");
         Board b = new Board();
         b.setDimensions(new Location(LengthUnit.Millimeters, 75, 75, 0, 0));
         loaded[0] = b;
         nowMs[0] += 300;
-        assertEquals(-1_850_000, read(v, h, 4.99), "loaded after the first read: its outline is used");
+        assertEquals(-1_850_000, read(v, h, 4.75), "loaded after the first read: its outline is used");
         assertEquals(75, src.get().boardWidthMm, 0);
     }
 
@@ -406,10 +423,10 @@ public class SimVacuumTest {
         double[] h = head(s, 37, 37);
         double contact = s.boardContactZ(37, 37);
         vacuumOn(v, h, 8);
-        assertEquals(-1_550_000, read(v, h, contact - 0.01), "no such board in the configuration: no outline");
+        assertEquals(-1_550_000, read(v, h, contact - 0.25), "no such board in the configuration: no outline");
         Board b = Configuration.get().getBoard(new File(dir, "toy.board.xml"));
         b.setDimensions(new Location(LengthUnit.Millimeters, 75, 75, 0, 0));
-        assertEquals(-1_850_000, read(v, h, contact - 0.01));
+        assertEquals(-1_850_000, read(v, h, contact - 0.25));
         assertEquals(75, s.boardHeightMm, 0);
     }
 

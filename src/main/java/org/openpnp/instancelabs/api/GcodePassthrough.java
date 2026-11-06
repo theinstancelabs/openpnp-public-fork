@@ -286,16 +286,23 @@ final class GcodePassthrough {
     /**
      * BR-97: the batch's Z moves while not homed, walked from the controller's Z (read first: M400, M114) by
      * {@link PassthroughLines#level}, within 32 mm of where the position became unknown
-     * (the engine's {@code ControllerReset#levelReference}): a refused one sends nothing, else the call is journaled
-     * first (events {@code Z_LEVEL}: the holder, the lines, the reason); a failed write sends nothing either (409).
-     * Returns the Z the lines were walked from.
+     * (the engine's {@code ControllerReset#levelReference}, on record: a reference it cannot write sends nothing, 409):
+     * a refused one sends nothing, else the call is journaled first (events {@code Z_LEVEL}: the holder, the lines, the
+     * reason); a failed write sends nothing either (409). Returns the Z the lines were walked from.
      */
     private double checkLevelling(Machine m, GcodeDriver d, DispenseService svc, List<String> raw,
             List<PassthroughLines.Line> lines, MachineLock.Holder holder, String what) throws ApiException {
         resyncNow(m, d); // never OpenPnP's belief: a connect whose read got no answer leaves it as it was (review)
         double z = zNow(m, d);
         double first = z;
-        double ref = svc.getControllerReset().levelReference(z);
+        double ref;
+        try {
+            ref = svc.getControllerReset().levelReference(z);
+        }
+        catch (IllegalStateException e) {
+            throw ApiException.refused(e.getMessage() + ", so nothing was sent: the 32 mm count goes on record first, "
+                    + "to outlive an OpenPnP restart");
+        }
         StringBuilder sent = new StringBuilder();
         for (int i = 0; i < lines.size(); i++) {
             PassthroughLines.Line l = lines.get(i);

@@ -204,6 +204,9 @@ public class HeightSwitchSimTest {
         assertTrue(n1.get("accepted").getAsBoolean(), n1.toString());
         assertEquals(N1_TRIP, n1.get("tripRawZ").getAsDouble(), 0.025);
         assertEquals(5, n1.getAsJsonArray("trips").size(), "5 presses by default");
+        assertEquals(5, n1.getAsJsonArray("releases").size(), n1.toString());
+        // the SIM's switch lets go where it trips (no differential): released at the first 0.25 mm lift
+        assertEquals(0.25, n1.get("differentialMm").getAsDouble(), 1e-9, n1.toString());
 
         sim.server.mark();
         call("POST", "/api/height-switch/measure", "{\"tool\":\"needle\",\"zStart\":42,\"zFloor\":43.5}");
@@ -221,6 +224,10 @@ public class HeightSwitchSimTest {
         double b = hs.getAsJsonObject("needle").get("tripRawZ").getAsDouble();
         assertEquals(n1.get("tripRawZ").getAsDouble(), a, 1e-9);
         assertEquals(needle.get("tripRawZ").getAsDouble(), b, 1e-9);
+        assertEquals(n1.get("releases"), hs.getAsJsonObject("n1").get("releases"), hs.toString());
+        assertEquals(0.25, hs.getAsJsonObject("n1").get("differentialMm").getAsDouble(), 1e-9, hs.toString());
+        assertEquals(needle.get("releases"), hs.getAsJsonObject("needle").get("releases"), hs.toString());
+        assertEquals(0.25, hs.getAsJsonObject("needle").get("differentialMm").getAsDouble(), 1e-9, hs.toString());
         assertEquals(a + b, hs.get("kSwitch").getAsDouble(), 1e-9);
         assertEquals(N1_TRIP + NEEDLE_TRIP, hs.get("kSwitch").getAsDouble(), 0.05);
         // engine-stamped: the settings editor cannot change them
