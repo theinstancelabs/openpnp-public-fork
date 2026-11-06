@@ -532,7 +532,7 @@ public class RegistrationSimTest {
         assertNotEquals(p1Id, changed.get("newPlanId").getAsString(), "planned again on the new surface");
     }
 
-    /** BR-81: a tile stored far from everything, ordered at {@code outlineAtMs} (as if the clock was set back since). */
+    /** BR-81: a tile far from everything, imported while the clock read {@code outlineAtMs} (set back since). */
     void storeFarTile(long outlineAtMs) throws Exception {
         svc.updateConfigAtomically(c -> {
             org.openpnp.instancelabs.dispense.DispenseConfig.Tile t = new org.openpnp.instancelabs.dispense.DispenseConfig
@@ -542,7 +542,7 @@ public class RegistrationSimTest {
                     new double[] {420, 320}, new double[] {400, 320});
             t.checkPoints = java.util.Arrays.asList(new double[] {405, 305}, new double[] {410, 310},
                     new double[] {415, 315});
-            t.atMs = System.currentTimeMillis();
+            t.atMs = outlineAtMs;
             t.outlineAtMs = outlineAtMs;
             c.tiles.put("far", t);
             return c;
