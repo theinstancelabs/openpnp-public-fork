@@ -5,7 +5,9 @@
  * (1) nobody has it; (2) an agent acquires and sends a line: the strip, the band and the locks name it; (3) Take control
  * from an idle agent: its outputs off, the machine still started and homed; (4) from a working agent (a 20 s dwell in
  * flight): stopped the way STOP does, the machine off, the agent's batch and its next call answer lock-lost; (5) Give
- * back; (6) an agent that takes the machine between two polls: the page's write answers 409 locked and the refusal
+ * back: while the user holds it, a click on In control asks at once ("Give the machine back to the agents?", hands
+ * clear; Keep it keeps it, Give back gives it back: one confirm, no panel; the user 11-05 20:1x); while nobody holds it
+ * the click opens In control's panel as before; (6) an agent that takes the machine between two polls: the page's write answers 409 locked and the refusal
  * offers Take control; (7) while nobody has it, the user's first move makes it theirs; every request carries
  * X-IL-Client: ui; no JavaScript errors, no native dialogs. Nothing here runs a real machine.
  *
@@ -165,15 +167,38 @@ const bandText = (page, key) => page.evaluate((k) => { const b = document.queryS
     await page.screenshot({ path: path.join(OUT, 'lock-real-taken.png') });
     await page.click('#msg-area [data-msg="lock"] .msg__act button');
 
-    // ---- (5) Give back -----------------------------------------------------------------------------------------------------
+    // ---- (5) Give back: a click on In control while the user holds it asks at once (the user 11-05 20:1x: "i should just be
+    // able to click on The control header on the top and it should prompt me if i want to give it back") ------------------
+    const giveDlg = () => page.evaluate(() => { const d = document.getElementById('dlg-give-back');
+      return d ? { title: (d.querySelector('h2') || {}).textContent || '', text: d.textContent.replace(/\s+/g, ' ').trim(),
+        btns: Array.from(d.querySelectorAll('.dialog__foot button')).map((b) => b.textContent.trim()) } : null; });
+    const view = () => page.evaluate(() => (document.getElementById('panel') || {}).dataset.view || null);
+    const view5 = await view();
     await page.click('#cell-lock');
-    await page.waitForSelector('#pv-lock-act button[data-k="release"]', { state: 'attached', timeout: 5000 });
-    await page.click('#pv-lock-act button[data-k="release"]');
-    await sleep(450);
-    await page.click('#pv-lock-act button[data-k="release"]');
+    await page.waitForSelector('#dlg-give-back', { timeout: 5000 }).catch(() => null);
+    const ask5 = await giveDlg();
+    check('(5) a click on In control while the user holds it asks at once: "Give the machine back to the agents?", hands clear, Keep it / Give back, no panel',
+      !!ask5 && ask5.title === 'Give the machine back to the agents?' && /hands clear/i.test(ask5.text)
+        && JSON.stringify(ask5.btns) === JSON.stringify(['Keep it', 'Give back']) && (await view()) === view5, { ask5, view5, view: await view() });
+    await page.click('#dlg-give-back .dialog__foot button:has-text("Keep it")');
+    await page.waitForSelector('#dlg-give-back', { state: 'detached', timeout: 5000 }).catch(() => null);
+    st = (await api('GET', '/api/lock')).data || {};
+    const kept5 = { dlg: await giveDlg(), cell: (await cellText(page)).v };
+    check('(5) Keep it: the prompt closes, the machine is still the user\'s', !kept5.dlg && !!st.holder && st.holder.kind === 'user' && /^You/.test(kept5.cell), { st, kept5 });
+    await page.click('#cell-lock');
+    await page.waitForSelector('#dlg-give-back', { timeout: 5000 }).catch(() => null);
+    await page.click('#dlg-give-back .dialog__foot button:has-text("Give back")');
     await waitCell(page, /^Nobody/);
     st = (await api('GET', '/api/lock')).data || {};
-    check('(5) Give back (two presses): nobody holds it', !st.holder && /^Nobody/.test((await cellText(page)).v), st);
+    const after5 = { cell: (await cellText(page)).v, dlg: await giveDlg(), toast: await page.evaluate(() => document.getElementById('toast').title) };
+    check('(5) Give back (one confirm): nobody holds it, the bar reads Nobody, "Given back" said, the prompt closed', !st.holder && /^Nobody/.test(after5.cell)
+      && /^Given back: nobody has the machine/.test(after5.toast) && !after5.dlg, { st, after5 });
+    // while nobody holds it, In control opens its panel as before (no prompt)
+    await page.click('#cell-lock');
+    await page.waitForFunction(() => (document.getElementById('panel') || {}).dataset.view === 'lock', null, { timeout: 5000 }).catch(() => null);
+    const nobody5 = { view: await view(), dlg: await giveDlg() };
+    check('(5b) while nobody holds it, a click on In control opens its panel, no prompt', nobody5.view === 'lock' && !nobody5.dlg, nobody5);
+    await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
 
     // ---- (6) an agent takes it between two polls: the page's write is refused, Take control in the refusal ----------------
     await page.evaluate(() => IL.openView('machine', { keep: true }));
