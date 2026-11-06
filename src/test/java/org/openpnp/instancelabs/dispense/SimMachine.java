@@ -2,8 +2,8 @@ package org.openpnp.instancelabs.dispense;
 
 import java.io.File;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 
 import org.openpnp.machine.reference.ReferenceMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
@@ -29,10 +29,16 @@ public final class SimMachine implements AutoCloseable {
      *        connect (the dispense service's I11 connect time) before {@link #enableAndHome()}
      */
     public SimMachine(boolean enable) throws Exception {
+        this(enable, GcodeDriver.class);
+    }
+
+    /** @param driverClass the driver's class: GcodeDriver, or a test double of it ({@link DisableFailsGcodeDriver}) */
+    public SimMachine(boolean enable, Class<? extends GcodeDriver> driverClass) throws Exception {
         server = new RecordingGcodeServer();
         configDir = java.nio.file.Files.createTempDirectory("dispense-sim").toFile();
         try (InputStream in = SimMachine.class.getResourceAsStream("/config/DispenseSimMachine/machine.xml")) {
-            Files.copy(in, new File(configDir, "machine.xml").toPath(), StandardCopyOption.REPLACE_EXISTING);
+            Files.writeString(new File(configDir, "machine.xml").toPath(), new String(in.readAllBytes(),
+                    StandardCharsets.UTF_8).replace(GcodeDriver.class.getName() + "\"", driverClass.getName() + "\""));
         }
         Configuration.initialize(configDir);
         Configuration.get().load();

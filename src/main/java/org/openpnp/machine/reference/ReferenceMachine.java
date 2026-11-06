@@ -264,32 +264,49 @@ public class ReferenceMachine extends AbstractMachine {
             fireMachineEnabled();
         }
         else {
-            // remove homed-flag if machine is disabled
-            getMotionPlanner().unhome();
-            this.setHomed(false);
-            fireMachineAboutToBeDisabled("User requested stop.");
-            // In a multi-driver machine, we must try to disable all drivers even if one throws.
-            Exception e = null;
-            List<Driver> enabledDrivers = new ArrayList<>();
-            enabledDrivers.addAll(getDrivers());
-            // We want reverse disabling order.
-            Collections.reverse(enabledDrivers);
-            for (Driver driver : enabledDrivers) {
+            try {
+                // remove homed-flag if machine is disabled
+                getMotionPlanner().unhome();
+                this.setHomed(false);
+                fireMachineAboutToBeDisabled("User requested stop.");
+            }
+            catch (RuntimeException | Error t) {
+                // Instance Labs (BR-106): the drivers switch off whatever threw here (a "homed" property listener, a
+                // listener's Error); it still propagates, after them.
                 try {
-                    driver.setEnabled(false);
+                    disableDrivers();
                 }
-                catch (Exception e1) {
-                    Logger.warn(e1);
-                    e = e1;
+                catch (Exception e) {
+                    t.addSuppressed(e);
                 }
+                throw t;
             }
-            this.enabled = false;
-            if (e != null) {
-                fireMachineDisableFailed(e.getMessage());
-                throw e;
-            }
-            fireMachineDisabled("User requested stop.");
+            disableDrivers();
         }
+    }
+
+    private void disableDrivers() throws Exception {
+        // In a multi-driver machine, we must try to disable all drivers even if one throws.
+        Exception e = null;
+        List<Driver> enabledDrivers = new ArrayList<>();
+        enabledDrivers.addAll(getDrivers());
+        // We want reverse disabling order.
+        Collections.reverse(enabledDrivers);
+        for (Driver driver : enabledDrivers) {
+            try {
+                driver.setEnabled(false);
+            }
+            catch (Exception e1) {
+                Logger.warn(e1);
+                e = e1;
+            }
+        }
+        this.enabled = false;
+        if (e != null) {
+            fireMachineDisableFailed(e.getMessage());
+            throw e;
+        }
+        fireMachineDisabled("User requested stop.");
     }
 
     @Override

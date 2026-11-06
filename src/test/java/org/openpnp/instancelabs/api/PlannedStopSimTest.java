@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.beans.PropertyChangeListener;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -25,6 +24,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.ControllerReset;
+import org.openpnp.instancelabs.dispense.DisableFailsGcodeDriver;
 import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DoseBlocksRequest;
@@ -68,7 +68,7 @@ public class PlannedStopSimTest {
 
     @BeforeEach
     public void before() throws Exception {
-        sim = new SimMachine(false);
+        sim = new SimMachine(false, DisableFailsGcodeDriver.class);
         svc = DispenseService.start(Configuration.get());
         sim.enableAndHome(); // the service sees this connect
         // the live machine's DISABLE_COMMAND: its last line switches the screw's motor off
@@ -464,30 +464,28 @@ public class PlannedStopSimTest {
     }
 
     /**
-     * Re-review M-1: a Stop that throws before its drivers (here a "homed" property listener, as the GUI's binding; since
-     * BR-106 a machine listener's exception no longer does): the machine still reads started, the link is open, nothing
-     * of the planned stop went out. The answer says so, not "stopped": the deployer would quit OpenPnP, and the quit's
-     * disable sends the whole DISABLE_COMMAND, M18 B included.
+     * Re-review M-1: OpenPnP's Stop left the screw's link open, nothing of the planned stop went out. The answer says
+     * so, not "stopped": the deployer would quit OpenPnP, and the quit's disable sends the whole DISABLE_COMMAND, M18 B
+     * included. Here the screw's driver fails its disable before closing the link (a test double: GcodeDriver's own
+     * never does). Since BR-106 nothing before the drivers keeps the Stop from them, and the machine reads stopped.
      */
     @Test
     public void aPlannedStopWhoseSwitchOffFailedSaysSo() throws Exception {
-        PropertyChangeListener throwing = e -> {
-            throw new IllegalStateException("a homed listener that throws");
-        };
-        sim.machine.addPropertyChangeListener("homed", throwing);
+        DisableFailsGcodeDriver screw = (DisableFailsGcodeDriver) sim.driver;
+        screw.disableFails = new Exception("test: the screw's driver fails its disable");
         try {
             sim.server.mark();
             JsonObject r = call("POST", "/api/stop/planned", null);
             assertEquals(409, lastStatus, lastBody);
             String reason = r.get("reason").getAsString();
-            assertTrue(reason.startsWith("No planned stop: OpenPnP's Stop did not switch the machine off")
-                    && reason.endsWith("The real STOP is POST /api/stop"), reason);
-            assertTrue(sim.machine.isEnabled());
+            assertTrue(reason.startsWith("No planned stop: OpenPnP's Stop did not switch the machine off (the screw's "
+                    + "controller link is still open") && reason.endsWith("The real STOP is POST /api/stop"), reason);
+            assertFalse(sim.machine.isEnabled());
             assertTrue(sim.driver.isConnected());
             assertFalse(sim.server.sinceMark().contains("M410"), sim.server.sinceMark().toString());
         }
         finally {
-            sim.machine.removePropertyChangeListener("homed", throwing);
+            screw.disableFails = null;
         }
     }
 

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.beans.PropertyChangeListener;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -166,6 +167,58 @@ public class AbstractMachineListenersTest {
     @Test
     public void aStopEndsPastDisabledListenersThatThrow() throws Exception {
         stopPastListenersThatThrow("disabled");
+    }
+
+    /**
+     * BR-106: a "homed" property listener that throws (the GUI's binding runs on the Stop's thread) ended the Stop at
+     * its setHomed(false), before its drivers. They switch off whatever the steps before them throw; the Stop still
+     * throws it, after them.
+     */
+    @Test
+    public void aStopSwitchesOffPastAHomedPropertyListenerThatThrows() throws Exception {
+        SimMachine sim = new SimMachine();
+        PropertyChangeListener bug = e -> {
+            throw new IllegalStateException("test: a homed property listener's bug");
+        };
+        try {
+            sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, "M410");
+            long disables = sim.driver.getDisableCommandsSent();
+            sim.machine.addPropertyChangeListener("homed", bug);
+            assertThrows(IllegalStateException.class, () -> sim.machine.setEnabled(false), "the Stop reports it");
+            assertFalse(sim.machine.isEnabled());
+            assertEquals(disables + 1, sim.driver.getDisableCommandsSent(), "the Stop's lines went out");
+        }
+        finally {
+            sim.machine.removePropertyChangeListener("homed", bug);
+            sim.close();
+        }
+    }
+
+    /**
+     * BR-106: a listener's Error (an OOM, a StackOverflowError) is not swallowed, and it ended the Stop before its
+     * drivers. They switch off first now; the Error propagates after them.
+     */
+    @Test
+    public void aStopSwitchesOffBeforeAListenersErrorPropagates() throws Exception {
+        SimMachine sim = new SimMachine();
+        MachineListener error = new MachineListener.Adapter() {
+            @Override
+            public void machineAboutToBeDisabled(Machine machine, String reason) {
+                throw new StackOverflowError("test: a listener's Error");
+            }
+        };
+        try {
+            sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, "M410");
+            long disables = sim.driver.getDisableCommandsSent();
+            sim.machine.addListener(error);
+            assertThrows(StackOverflowError.class, () -> sim.machine.setEnabled(false), "the Error propagates");
+            assertFalse(sim.machine.isEnabled());
+            assertEquals(disables + 1, sim.driver.getDisableCommandsSent(), "the Stop's lines went out first");
+        }
+        finally {
+            sim.machine.removeListener(error);
+            sim.close();
+        }
     }
 
     /**

@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -143,22 +144,41 @@ final class MachineEndpoints {
         if (m.isEnabled()) {
             Runnable task = () -> ctx.switchOff.stop(m);
             String sends = sendsDisableCommand(svc) ? "sends the driver's DISABLE_COMMAND" : SCREW_LINK_CLOSED;
+            AtomicBoolean dropped = new AtomicBoolean();
             if (m.isBusy()) {
                 // As OpenPnP's own Stop button: bypass the busy machine thread (emergency path).
-                Thread t = new Thread(task, "il-api-stop");
-                t.setDaemon(true);
-                t.start();
+                emergencyStop(task);
                 actions.add("OpenPnP Stop (emergency path: the machine thread was busy); " + sends);
             }
             else {
-                m.submit(() -> {
+                Future<Object> queued = m.submit(() -> {
                     task.run();
                     return null;
                 }, null, true);
                 actions.add("OpenPnP Stop; " + sends);
+                // BR-106: OpenPnP drops (cancels) it if a task of its own queued ahead of it fails, also after the
+                // answer: then the emergency path
+                emergencyStop(() -> {
+                    try {
+                        queued.get();
+                    }
+                    catch (CancellationException e) {
+                        dropped.set(true);
+                        Logger.warn("web STOP: OpenPnP dropped its task (a task queued ahead of it failed): the "
+                                + "emergency path");
+                        task.run();
+                    }
+                    catch (Exception e) {
+                        // it ran (SwitchOff logs a disable that failed)
+                    }
+                });
             }
             while (m.isEnabled() && System.currentTimeMillis() < answerBy) {
                 sleep(20);
+            }
+            if (dropped.get()) {
+                actions.add("OpenPnP dropped that task (a task of its own queued ahead of it failed): OpenPnP Stop "
+                        + "on the emergency path");
             }
             if (m.isEnabled()) {
                 actions.add("OpenPnP is still switching the machine off (a dwell or move must end first)");
@@ -171,6 +191,13 @@ final class MachineEndpoints {
             }
         }
         return Views.map("stopped", true, "machineEnabled", m.isEnabled(), "actions", actions);
+    }
+
+    /** OpenPnP's Stop on a thread of its own, as OpenPnP's Stop button does while the machine thread is busy. */
+    private static void emergencyStop(Runnable task) {
+        Thread t = new Thread(task, "il-api-stop");
+        t.setDaemon(true);
+        t.start();
     }
 
     private static void sleep(long ms) {

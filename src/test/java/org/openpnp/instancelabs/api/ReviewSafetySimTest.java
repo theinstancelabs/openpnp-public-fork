@@ -2,14 +2,23 @@ package org.openpnp.instancelabs.api;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +29,7 @@ import org.openpnp.instancelabs.dispense.DriverGcodeChannel;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.machine.reference.driver.GcodeDriver;
 import org.openpnp.model.Configuration;
+import org.openpnp.spi.base.AbstractMachine;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -77,6 +87,75 @@ public class ReviewSafetySimTest {
 
     JsonObject pressure() throws Exception {
         return ok("GET", "/api/status", null).getAsJsonObject("pressure");
+    }
+
+    /**
+     * BR-106: a task of OpenPnP's own that fails, queued while OpenPnP reads idle: its machine thread is held outside
+     * any task (as before a queued task begins) until {@code behind} more tasks are queued behind it. It then fails
+     * and OpenPnP drops them.
+     */
+    Future<Object> aFailingTaskAhead(int behind) throws Exception {
+        CountDownLatch queued = new CountDownLatch(1 + behind);
+        LinkedBlockingQueue<Runnable> counted = new LinkedBlockingQueue<Runnable>() {
+            @Override
+            public boolean offer(Runnable task) {
+                boolean in = super.offer(task);
+                queued.countDown();
+                return in;
+            }
+        };
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(1, 1, 1, TimeUnit.SECONDS, counted);
+        pool.execute(() -> {
+            try {
+                queued.await(30, TimeUnit.SECONDS);
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        Field executor = AbstractMachine.class.getDeclaredField("executor");
+        executor.setAccessible(true);
+        ExecutorService was = (ExecutorService) executor.get(sim.machine);
+        if (was != null) {
+            was.shutdown();
+        }
+        executor.set(sim.machine, pool);
+        return sim.machine.submit(() -> {
+            throw new Exception("test: a task of OpenPnP's own fails (its Home meets a limit)");
+        });
+    }
+
+    /**
+     * BR-106: the web STOP with OpenPnP idle queues its switch-off on the machine thread. A task of OpenPnP's own
+     * queued just ahead of it (not begun, so OpenPnP read idle) failed and dropped it: the machine stayed started.
+     * The STOP sees its task dropped and switches off on the emergency path.
+     */
+    @Test
+    public void aWebStopDroppedBehindAFailingTaskStillSwitchesOff() throws Exception {
+        sim.driver.setCommand(null, GcodeDriver.CommandType.DISABLE_COMMAND, "M410");
+        long disables = sim.driver.getDisableCommandsSent();
+        Future<Object> failing = aFailingTaskAhead(1);
+        JsonObject r = ok("POST", "/api/stop", null);
+        assertFalse(r.get("machineEnabled").getAsBoolean(), r.toString());
+        assertTrue(r.get("actions").toString().contains("OpenPnP dropped that task"), r.toString());
+        assertFalse(sim.machine.isEnabled());
+        assertEquals(disables + 1, sim.driver.getDisableCommandsSent(), "the Stop's lines went out");
+        assertThrows(ExecutionException.class, () -> failing.get(10, TimeUnit.SECONDS));
+    }
+
+    /**
+     * BR-106: a web home queued behind a task of OpenPnP's own that fails is dropped: OpenPnP cancels it, which
+     * answered 409 with no reason. The answer says what happened.
+     */
+    @Test
+    public void aWebHomeOpenPnpDroppedSaysSo() throws Exception {
+        Future<Object> failing = aFailingTaskAhead(1);
+        JsonObject r = call("POST", "/api/machine/home", "{\"wait\":true}");
+        assertEquals(409, lastStatus, r.toString());
+        assertTrue(r.toString().contains("OpenPnP dropped this task because a task queued ahead of it failed: nothing "
+                + "was done; try again"), r.toString());
+        assertThrows(ExecutionException.class, () -> failing.get(10, TimeUnit.SECONDS));
+        assertTrue(sim.machine.isEnabled(), "nothing was done");
     }
 
     /** Leaves an unconsumed controller error in the driver (an Error: reply to an OpenPnP M114). */

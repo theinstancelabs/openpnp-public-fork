@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -428,6 +429,14 @@ public final class ApiServer {
             status = 400;
             body.put("error", "bad-request");
             body.put("reason", t.getMessage());
+        }
+        else if (t instanceof CancellationException) {
+            // BR-106: OpenPnP cancels every task queued behind one of its own that fails (an IllegalStateException
+            // without a message): a move, home, Start, planned stop or G-code batch that waited for one
+            status = 409;
+            body.put("error", "refused");
+            body.put("reason", "OpenPnP dropped this task because a task queued ahead of it failed: nothing was done; "
+                    + "try again");
         }
         else if (t instanceof IllegalStateException) {
             // The engine reports "busy", "unavailable", "location not set" this way.
