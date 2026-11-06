@@ -101,10 +101,10 @@ public class GcodeServerVacuumHookTest {
         server = new GcodeServer();
         server.setDriver(sim.driver);
         // The default sealTauS (0.03 s) with the bench's read 70 ms after M400: the seal formed when Z arrived,
-        // and not while Z was still on its way down (Z 8 -> 5.3 at 3 mm/s: 0.9 s).
+        // and not while Z was still on its way down (Z 8 -> 5.15 at 3 mm/s: 0.95 s; 0.28 mm pressed: the full seal).
         List<List<String>> r = talk(server, "G92 X30 Y70 Z10", "M204 S2000", "M106", "M106 P1 S180", READ[0], READ[1],
-                READ[2], "G1 Z5.3 F600", "M400", "sleep 70", READ[0], READ[1], READ[2], "G1 Z8 F600", "M400", READ[0],
-                READ[1], READ[2], "M114", "M261 A109 B1 S2", "G1 Z5.3 F180", READ[0], "sleep 200", READ[2], "M400",
+                READ[2], "G1 Z5.15 F600", "M400", "sleep 70", READ[0], READ[1], READ[2], "G1 Z8 F600", "M400", READ[0],
+                READ[1], READ[2], "M114", "M261 A109 B1 S2", "G1 Z5.15 F180", READ[0], "sleep 200", READ[2], "M400",
                 "sleep 70", READ[2], "M107 P1", "M107", READ[2]);
         // M106 and the M260 writes are parsed as before: plain ok.
         for (int i : new int[] {2, 3, 4, 5}) {
@@ -113,11 +113,11 @@ public class GcodeServerVacuumHookTest {
         assertEquals(List.of("echo:i2c-reply: from:109 bytes:3 data:E8 59 50", "ok"), r.get(6), "open air -1,550,000");
         long pressed = SimVacuumTest.parse(r.get(11).get(0));
         assertTrue(pressed < -1_550_000 - 0.85 * 300_000 && pressed >= -1_850_000,
-                "N1 at Z 5.3 is pressed on the board: " + pressed);
+                "N1 at Z 5.15 is pressed on the board: " + pressed);
         assertEquals(-1_550_000, SimVacuumTest.parse(r.get(16).get(0)), "lifted to Z 8: open again");
         assertTrue(r.get(17).get(0).contains("Z:8.0000"), "the motion is simulated as before: " + r.get(17));
         assertEquals(List.of("ok"), r.get(18), "OpenPnP's own VAC1 read is not modelled");
-        assertEquals(-1_550_000, SimVacuumTest.parse(r.get(21).get(0)), "0.2 s into the 0.9 s move down: open");
+        assertEquals(-1_550_000, SimVacuumTest.parse(r.get(21).get(0)), "0.2 s into the 0.95 s move down: open");
         assertTrue(SimVacuumTest.parse(r.get(23).get(0)) < -1_550_000 - 0.85 * 300_000, "arrived 70 ms ago");
         assertEquals(0, SimVacuumTest.parse(r.get(26).get(0)), "vacuum off");
     }

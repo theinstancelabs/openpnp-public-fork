@@ -410,6 +410,25 @@ public class PowerCycleSimTest {
         refusedLevel(level("w", -33), "32 mm");
     }
 
+    /**
+     * BR-97 follow-up: the reference a lost link keeps is on record (LEVEL_REF, written after the loss's
+     * POSITION_UNREAD row), so an OpenPnP restart after the Stop and Start still counts from the reference before the
+     * loss.
+     */
+    @Test
+    public void aLinkLostMidWalkKeepsTheLevellingReferenceAcrossAnOpenPnpRestart() throws Exception {
+        powerCycle();
+        lockForProcess();
+        walk(0, -20);
+        sim.server.dropLink();
+        awaitLinkLost();
+        reconnect(); // the board is back on USB, not reset: Stop, then Start
+        restartOpenPnpAndTheApi();
+        lockForProcess();
+        walk(-20, -32);
+        refusedLevel(level("w", -33), "32 mm");
+    }
+
     /** BR-93: the lost link is on record: after an OpenPnP restart the position is still unknown until that home. */
     @Test
     public void aLostLinkOutlivesAnOpenPnpRestart() throws Exception {
@@ -1568,6 +1587,46 @@ public class PowerCycleSimTest {
         lockForProcess();
         walk(31.5, -0.5);
         refusedLevel(level("w", -1), "32 mm");
+    }
+
+    /**
+     * BR-97 follow-up (the review's probe): a reference taken afresh (here Z 31.5, where that home left Z) is on record
+     * (LEVEL_REF), so an OpenPnP restart mid-walk keeps it: Z -1 is 32.5 mm from where the walk began, not 1.5 mm from
+     * where the restart found Z.
+     */
+    @Test
+    public void anOpenPnpRestartMidWalkKeepsAReferenceTakenAfresh() throws Exception {
+        powerCycle();
+        lockForProcess();
+        attestedHomeThatEndsUnhomed();
+        walk(31.5, 0.5);
+        restartOpenPnpAndTheApi();
+        lockForProcess();
+        walk(0.5, -0.5);
+        refusedLevel(level("w", -1), "32 mm");
+    }
+
+    /**
+     * BR-97 follow-up: a reference taken afresh goes on record before the call goes on: a write that fails (here a
+     * trigger aborts the LEVEL_REF insert, as a full disk would) answers 409 and sends nothing.
+     */
+    @Test
+    public void aLevellingCallWhoseReferenceCannotBeJournaledSendsNothing() throws Exception {
+        powerCycle();
+        lockForProcess();
+        attestedHomeThatEndsUnhomed(); // the next levelling call takes the reference afresh
+        try (java.sql.Connection c = java.sql.DriverManager.getConnection(svc.getDb().getUrl());
+                java.sql.Statement st = c.createStatement()) {
+            st.execute("CREATE TRIGGER level_ref_fails BEFORE INSERT ON events WHEN NEW.code = 'LEVEL_REF' BEGIN "
+                    + "SELECT RAISE(ABORT, 'disk full'); END");
+        }
+        sim.server.mark();
+        call("POST", "/api/gcode", level("w", 30.5));
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("journal") && lastBody.contains("disk full"), lastBody);
+        assertEquals(new ArrayList<String>(), motionAndOutputs(), "nothing sent");
+        assertEquals(31.5, sim.server.position('Z'), 1e-9);
+        assertEquals(0, events("Z_LEVEL").size(), "no levelling call went on record");
     }
 
     /** An attested home whose G28 runs (Z 31.5) but that ends unhomed: its visual homing fails. */

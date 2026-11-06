@@ -39,6 +39,9 @@ public final class SurfacePlane {
         this.fingerprint = fingerprint;
     }
 
+    /** A surface point's coordinates are within this (mm): any machine's reach, far below an overflow. */
+    static final double MAX_MM = 10_000;
+
     /**
      * Fits the plane. Needs at least 3 points that span an area (not all on one line, hull area
      * at least 1 mm^2).
@@ -53,6 +56,11 @@ public final class SurfacePlane {
         for (DispenseConfig.SurfacePoint p : pts) {
             if (!Double.isFinite(p.x) || !Double.isFinite(p.y) || !Double.isFinite(p.z)) {
                 throw new IllegalArgumentException("surface point with a missing coordinate");
+            }
+            // far outside any machine: the sums below would overflow into a NaN plane, or a flat one at the mean
+            if (Math.abs(p.x) > MAX_MM || Math.abs(p.y) > MAX_MM || Math.abs(p.z) > MAX_MM) {
+                throw new IllegalArgumentException(String.format(Locale.ROOT, "surface point (%s, %s, %s) is out of "
+                        + "range: machine coordinates are within ±%.0f mm", p.x, p.y, p.z, MAX_MM));
             }
             mx += p.x;
             my += p.y;
@@ -73,7 +81,7 @@ public final class SurfacePlane {
         List<double[]> hull = convexHull(pts);
         double area = Math.abs(polygonArea(hull));
         double det = sxx * syy - sxy * sxy;
-        if (hull.size() < 3 || area < 1.0 || det <= 1e-9) {
+        if (hull.size() < 3 || area < 1.0 || !(det > 1e-9)) { // a NaN det is refused too
             throw new IllegalArgumentException(String.format(Locale.ROOT,
                     "the surface points lie (almost) on one line (area %.2f mm^2): probe at least 3 corners", area));
         }
@@ -105,6 +113,9 @@ public final class SurfacePlane {
 
     /** Distance of (x, y) outside the convex hull of the points; 0 inside or on it. */
     public double distanceOutside(double x, double y) {
+        if (!(Math.abs(x) <= MAX_MM && Math.abs(y) <= MAX_MM)) {
+            return Double.POSITIVE_INFINITY; // beyond any machine, or NaN: each edge's cross is NaN, never "outside"
+        }
         boolean inside = true;
         double best = Double.MAX_VALUE;
         for (int i = 0; i < hull.size(); i++) {

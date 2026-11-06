@@ -2022,7 +2022,7 @@
       if (user) IL.toast('Camera: ' + e.message, 'need');
     } finally {
       CAM.inFlight = false;
-      if (user) { c.bSnap.disabled = false; c.bSnap.removeAttribute('aria-busy'); }
+      if (user) { c.bSnap.disabled = c.bSnap.dataset.titleIdle !== undefined; c.bSnap.removeAttribute('aria-busy'); }   // its gate's lock stays (as IL.act)
     }
   }
   function camSchedule() {

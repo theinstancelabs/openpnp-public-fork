@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -12,6 +13,10 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import org.junit.jupiter.api.Test;
 
@@ -893,13 +898,15 @@ public class ControllerResetTest {
         now = 3000;
         restarted.homed();
         assertEquals(7.0, restarted.levelReference(7), 1e-9, "a home: taken afresh");
-        assertEquals(9.0, run(false, false).levelReference(9), 1e-9, "homed since the reset: no boot Z after a restart");
+        assertEquals(7.0, run(false, false).levelReference(9), 1e-9, "homed since the reset: no boot Z after a "
+                + "restart, the Z taken since is on record");
     }
 
     /**
      * BR-97 x BR-93: a lost link keeps the levelling reference and the reconnect decides: a powered controller keeps
-     * it, the boot position read sets Marlin's boot Z 0, an unread reconnect (a possible reset) takes it afresh. Not
-     * checked here, a known gap filed under BR-97: after a restart the loss's row clears it, as an unread connect's does.
+     * it, the boot position read sets Marlin's boot Z 0, an unread reconnect (a possible reset) takes it afresh. The
+     * reference kept is on record after the loss's row (BR-97 follow-up), so a restart keeps it too, and a levelling
+     * call does not write it again.
      */
     @Test
     public void aLostLinkKeepsTheLevellingReferenceUntilTheReconnectDecides() {
@@ -907,7 +914,11 @@ public class ControllerResetTest {
         assertEquals(20.0, r.levelReference(20), 1e-9);
         now = 1000;
         r.linkLost(1000, "the link ended");
+        r.flush(); // the journal thread's write
+        int rows = journal.size();
         assertEquals(20.0, r.levelReference(5), 1e-9, "a lost link moves no frame by itself");
+        assertEquals(rows, journal.size(), "on record by the loss's own row: not written again");
+        assertEquals(20.0, run(false, false).levelReference(5), 1e-9, "after a restart too");
         now = 1500;
         r.connected(reply("X:0.0000 Y:0.0000 Z:5.0000 A:720.0000 B:720.0000 Count X:0 Y:0 Z:0"), 'B', null);
         assertEquals(20.0, r.levelReference(5), 1e-9, "a powered controller: kept");
@@ -915,10 +926,272 @@ public class ControllerResetTest {
         r.linkLost(2000, "the link ended");
         r.connected(reply(BOOT), 'B', null);
         assertEquals(0.0, r.levelReference(5), 1e-9, "a reset the reconnect detects: Marlin's boot Z 0");
+        assertEquals(0.0, run(false, false).levelReference(5), 1e-9, "after a restart too: the reset followed the "
+                + "loss");
         now = 3000;
         r.linkLost(3000, "the link ended");
         r.connected(null, 'B', "timeout");
         assertEquals(12.0, r.levelReference(12), 1e-9, "an unread reconnect: a possible reset, taken afresh");
+    }
+
+    /**
+     * BR-97 follow-up: a levelling reference on record (LEVEL_REF: taken afresh, or kept by a lost link) is read back
+     * at a restart unless a row that ends one follows it in the journal: a reset (then Marlin's boot Z 0), a possible
+     * reset (an unread connect, a lost link), a home's start or a home (then taken afresh). The journal's order
+     * decides, also in one ms: a lost link writes its LEVEL_REF right after its POSITION_UNREAD row, in that row's ms.
+     */
+    @Test
+    public void aLevellingReferenceOnRecordOutlivesARestartUntilARowEndsIt() {
+        ControllerReset.Event ref = new ControllerReset.Event(ControllerReset.EVENT_LEVEL_REF, 2000,
+                "levelling reference Z 20.0000 (a test)");
+        for (String code : new String[] {ControllerReset.EVENT_RESET, ControllerReset.EVENT_UNREAD,
+                ControllerReset.EVENT_HOME_STARTED, ControllerReset.EVENT_KNOWN}) {
+            double ended = ControllerReset.EVENT_RESET.equals(code) ? 0 : 12; // else taken afresh: the call's Z 12
+            assertEquals(20.0, replay(row(code, 1000), ref).levelReference(12), 1e-9, "after " + code);
+            assertEquals(20.0, replay(row(code, 2000), ref).levelReference(12), 1e-9, "after " + code + ", one ms");
+            assertEquals(ended, replay(ref, row(code, 2000)).levelReference(12), 1e-9, "before " + code + ", one ms");
+            assertEquals(ended, replay(ref, row(code, 3000)).levelReference(12), 1e-9, "before " + code);
+        }
+        assertEquals(20.0, replay(ref).levelReference(12), 1e-9, "nothing ended it");
+        // a message whose Z cannot be read counts as no reference: the next levelling call takes it afresh
+        assertEquals(12.0, replay(row(ControllerReset.EVENT_UNREAD, 1000), new ControllerReset.Event(
+                ControllerReset.EVENT_LEVEL_REF, 2000, "levelling reference Z twenty (a test)")).levelReference(12),
+                1e-9);
+    }
+
+    /** An engine that starts on this journal (the newest row of each code, oldest first). */
+    ControllerReset replay(ControllerReset.Event... history) {
+        return new ControllerReset(() -> now, false, false, Arrays.asList(history), journal::add);
+    }
+
+    static ControllerReset.Event row(String code, long atMs) {
+        return new ControllerReset.Event(code, atMs, "a test");
+    }
+
+    /**
+     * BR-97 follow-up: a reference taken afresh goes on record first: when its row cannot be written the call fails and
+     * the reference is not taken (the next call writes it). A home whose start is not on record (OpenPnP's own Home
+     * button) ends one on record too.
+     */
+    @Test
+    public void aLevellingReferenceIsTakenOnlyOnRecord() {
+        boolean[] full = {true};
+        ControllerReset r = new ControllerReset(() -> now, false, false, null, e -> {
+            if (full[0] && ControllerReset.EVENT_LEVEL_REF.equals(e.code)) {
+                throw new IllegalStateException("disk full");
+            }
+            journal.add(e);
+        });
+        now = 1000;
+        assertThrows(IllegalStateException.class, () -> r.levelReference(20));
+        full[0] = false;
+        assertEquals(5.0, r.levelReference(5), 1e-9, "not taken: the next call takes it");
+        assertEquals(5.0, run(false, false).levelReference(9), 1e-9, "on record");
+        now = 2000;
+        r.homed(); // OpenPnP's own Home button: no home's start on record, the position known all along
+        assertEquals(9.0, run(false, false).levelReference(9), 1e-9, "that home ended it, on record too");
+    }
+
+    /**
+     * BR-97 follow-up review: a lost link's LEVEL_REF that cannot be written (on the journal thread) loses no row after
+     * it, and the next levelling call writes the kept reference again before it counts; while it cannot, the call is
+     * refused, so a restart mid-walk never counts the 32 mm afresh. The row is matched as itself, not by the Z its text
+     * keeps to 4 decimals (LEVEL_REF review NIT: here a Z of 6).
+     */
+    @Test
+    public void aLostLinksReferenceThatMissedTheJournalIsWrittenAgainFirst() {
+        boolean[] full = {false};
+        ControllerReset r = new ControllerReset(() -> now, false, false, null, e -> {
+            if (full[0] && ControllerReset.EVENT_LEVEL_REF.equals(e.code)) {
+                throw new IllegalStateException("disk full");
+            }
+            journal.add(e);
+        });
+        now = 1000;
+        assertEquals(20.123456, r.levelReference(20.123456), 1e-9);
+        full[0] = true;
+        now = 2000;
+        r.linkLost(2000, "the link ended");
+        r.flush(); // the journal thread's write: its LEVEL_REF fails, nothing escapes, the rows after it go on
+        assertEquals(ControllerReset.EVENT_MOTOR_OFF, journal.get(journal.size() - 1).code, codes().toString());
+        assertThrows(IllegalStateException.class, () -> r.levelReference(5), "the kept reference is not on record");
+        full[0] = false;
+        assertEquals(20.123456, r.levelReference(5), 1e-9, "written again, then it counts");
+        int rows = journal.size();
+        assertEquals(20.123456, r.levelReference(5), 1e-9);
+        assertEquals(rows, journal.size(), "once on record it is not written again");
+        assertEquals(20.1235, run(false, false).levelReference(5), 1e-9, "a restart keeps it, to 4 decimals");
+    }
+
+    /**
+     * LEVEL_REF review NIT: a lost link's reference that missed the journal ends with the reference. After a home, a
+     * home's start or a reset (Marlin's boot Z 0, on record by the reset's row), a later reference of the same Z is not
+     * written again as kept at a lost link, also when the miss is heard after the change (its write drains the loss's
+     * rows).
+     */
+    @Test
+    public void aLostLinksMissedReferenceEndsWithTheReference() {
+        List<Consumer<ControllerReset>> ends = Arrays.asList(ControllerReset::homed, ControllerReset::homeStarted,
+                r -> r.connected(reply(BOOT), 'B', null));
+        for (Consumer<ControllerReset> end : ends) {
+            journal.clear();
+            boolean[] full = {false};
+            ControllerReset r = new ControllerReset(() -> now, false, false, null, e -> {
+                if (full[0] && ControllerReset.EVENT_LEVEL_REF.equals(e.code)) {
+                    throw new IllegalStateException("disk full");
+                }
+                journal.add(e);
+            });
+            now = 1000;
+            r.levelReference(0);
+            full[0] = true;
+            now = 2000;
+            r.linkLost(2000, "the link ended"); // its LEVEL_REF misses the journal
+            now = 3000;
+            end.accept(r);
+            full[0] = false;
+            int rows = journal.size();
+            assertEquals(0.0, r.levelReference(0), 1e-9);
+            assertEquals(0.0, r.levelReference(0), 1e-9);
+            for (ControllerReset.Event e : journal.subList(rows, journal.size())) {
+                assertFalse(e.message.contains("kept at a lost link"), e.message);
+            }
+        }
+    }
+
+    /**
+     * LEVEL_REF review MINOR (safety): a levelling call's reference and its row are one step in the journal's order.
+     * The call (an API thread) starts while the journal writer is busy with an earlier row; a connect that reads a
+     * reset, or a home's end (the machine thread), changes the reference before the call's row is written. A restart
+     * then replays the reference the engine holds, never the call's Z in a frame the reset or the home moved.
+     */
+    @Test
+    public void aResetOrAHomeDuringALevellingCallLeavesTheJournalAsTheEngine() throws Exception {
+        assertEquals(0.0, levelDuring(r -> r.connected(reply(BOOT), 'B', null)), 1e-9, "the reset's boot Z");
+        journal.clear();
+        assertEquals(20.0, levelDuring(ControllerReset::homed), 1e-9, "taken after the home");
+    }
+
+    /**
+     * A levelling call at Z 20 (the position unknown, no reference yet) while the journal writer is busy with another
+     * row; {@code change} runs on another thread once the call has read the clock, and the writer goes on once the
+     * change is made. Returns the reference the engine holds, checked against a restart's.
+     */
+    double levelDuring(Consumer<ControllerReset> change) throws Exception {
+        CountDownLatch writing = new CountDownLatch(1);
+        CountDownLatch go = new CountDownLatch(1);
+        Map<Thread, CountDownLatch> clockRead = new ConcurrentHashMap<>();
+        ControllerReset r = new ControllerReset(() -> {
+            clockRead.getOrDefault(Thread.currentThread(), new CountDownLatch(0)).countDown();
+            return now;
+        }, false, false, null, e -> {
+            if (ControllerReset.EVENT_MOTOR_OFF.equals(e.code)) {
+                writing.countDown();
+                await(go); // a slow insert
+            }
+            journal.add(e);
+        });
+        r.connected(null, 'B', "timeout");
+        List<Throwable> failed = Collections.synchronizedList(new ArrayList<>());
+        Thread writer = start(clockRead, failed, () -> r.screwMotorOff("a STOP"));
+        await(writing);
+        Thread call = start(clockRead, failed, () -> r.levelReference(20));
+        await(clockRead.get(call)); // it reads the clock as it starts, before it waits for the writer
+        Thread machine = start(clockRead, failed, () -> change.accept(r));
+        await(clockRead.get(machine));
+        synchronized (r) {
+            go.countDown(); // the change is made: it read the clock inside the engine's lock
+        }
+        for (Thread t : Arrays.asList(writer, call, machine)) {
+            t.join(5000);
+            assertFalse(t.isAlive(), t + " still runs");
+        }
+        assertTrue(failed.isEmpty(), failed.toString());
+        double replayed = run(false, false).levelReference(99);
+        double held = r.levelReference(99);
+        assertEquals(held, replayed, 1e-9, "a restart replays the reference the engine holds: " + codes());
+        return held;
+    }
+
+    /** Starts {@code body} on a thread whose first clock read counts its latch in {@code clockRead} down. */
+    static Thread start(Map<Thread, CountDownLatch> clockRead, List<Throwable> failed, Runnable body) {
+        Thread t = new Thread(() -> {
+            try {
+                body.run();
+            }
+            catch (Throwable e) {
+                failed.add(e);
+            }
+        });
+        clockRead.put(t, new CountDownLatch(1));
+        t.start();
+        return t;
+    }
+
+    static void await(CountDownLatch l) {
+        try {
+            assertTrue(l.await(5, TimeUnit.SECONDS), "timed out");
+        }
+        catch (InterruptedException e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    /**
+     * BR-97 follow-up review: a reference taken while a lost link's rows still wait for the journal thread is written
+     * after them, so the replay sees it last.
+     */
+    @Test
+    public void aReferenceTakenBeforeALostLinksRowsAreWrittenComesAfterThem() {
+        ControllerReset r = run(false, false);
+        now = 1000;
+        r.linkLost(1000, "the link ended"); // no reference yet: its rows wait for the journal thread
+        assertEquals(5.0, r.levelReference(5), 1e-9);
+        r.flush();
+        assertEquals(Arrays.asList(ControllerReset.EVENT_UNREAD, ControllerReset.EVENT_MOTOR_OFF,
+                ControllerReset.EVENT_LEVEL_REF), codes(), "the loss's rows, then the reference");
+        assertEquals(5.0, run(false, false).levelReference(9), 1e-9, "on record after the loss's rows");
+    }
+
+    /**
+     * LEVEL_REF re-review: a reference whose row fails is given up (the next call takes it afresh) only if nothing
+     * changed it while the row was written: a reset read meanwhile keeps its boot Z (here also the call's Z), and a
+     * lost link meanwhile keeps the Z, on record by its own row. The journal then agrees with the engine.
+     */
+    @Test
+    public void aFailedReferenceIsGivenUpOnlyIfNothingChangedItMeanwhile() throws Exception {
+        for (boolean reset : new boolean[] {true, false}) {
+            journal.clear();
+            Map<Thread, CountDownLatch> clockRead = new ConcurrentHashMap<>();
+            List<Throwable> failed = Collections.synchronizedList(new ArrayList<>());
+            ControllerReset[] engine = new ControllerReset[1];
+            Thread[] meanwhile = new Thread[1];
+            ControllerReset r = new ControllerReset(() -> {
+                clockRead.getOrDefault(Thread.currentThread(), new CountDownLatch(0)).countDown();
+                return now;
+            }, false, false, null, e -> {
+                if (ControllerReset.EVENT_LEVEL_REF.equals(e.code) && meanwhile[0] == null) {
+                    ControllerReset c = engine[0];
+                    meanwhile[0] = start(clockRead, failed, reset ? () -> c.connected(reply(BOOT), 'B', null)
+                            : () -> c.linkLost(now, "the link ended"));
+                    await(clockRead.get(meanwhile[0])); // read inside the engine's lock, where it makes the change
+                    synchronized (c) {
+                        throw new IllegalStateException("disk full");
+                    }
+                }
+                journal.add(e);
+            });
+            engine[0] = r;
+            now = 1000;
+            assertThrows(IllegalStateException.class, () -> r.levelReference(0));
+            meanwhile[0].join(5000);
+            assertFalse(meanwhile[0].isAlive());
+            assertTrue(failed.isEmpty(), failed.toString());
+            r.flush(); // the journal thread's write
+            double replayed = run(false, false).levelReference(99);
+            assertEquals(0.0, r.levelReference(99), 1e-9, reset ? "the reset's boot Z" : "kept by the lost link");
+            assertEquals(0.0, replayed, 1e-9, "a restart replays the same: " + codes());
+        }
     }
 
     /**

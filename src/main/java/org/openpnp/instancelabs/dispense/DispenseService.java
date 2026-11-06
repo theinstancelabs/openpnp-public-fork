@@ -725,14 +725,16 @@ public final class DispenseService {
 
     /**
      * BR-02: a controller reset journal row; lost, a restart would not know about it, so the failure is an error. A
-     * home's start that cannot be written throws: that home must not start (BR-97, {@link ControllerReset#homeStarted}).
+     * home's start that cannot be written throws: that home must not start (BR-97, {@link ControllerReset#homeStarted}),
+     * and so does a levelling reference: that call must send nothing ({@link ControllerReset#levelReference}).
      */
     private void journalReset(ControllerReset.Event e) {
         try {
             String level = ControllerReset.EVENT_KNOWN.equals(e.code) || ControllerReset.EVENT_SCREW_MOTION.equals(
                     e.code) || ControllerReset.EVENT_WATCHDOG_ARMED.equals(e.code) || ControllerReset.EVENT_IDLE_CUT
                             .equals(e.code) || ControllerReset.EVENT_IDLE_HOLD.equals(e.code)
-                    || ControllerReset.EVENT_HOME_STARTED.equals(e.code) ? "INFO" : "WARN";
+                    || ControllerReset.EVENT_HOME_STARTED.equals(e.code)
+                    || ControllerReset.EVENT_LEVEL_REF.equals(e.code) ? "INFO" : "WARN";
             db.insertEvent(null, level, e.code, e.message, e.atMs);
         }
         catch (SQLException ex) {
@@ -740,6 +742,11 @@ public final class DispenseService {
                 Logger.error(ex, "dispense: a home's start could not be journaled: the home is refused");
                 throw new IllegalStateException("its start could not be journaled (" + ex.getMessage() + "), so its "
                         + "G28 was not sent", ex);
+            }
+            if (ControllerReset.EVENT_LEVEL_REF.equals(e.code)) {
+                Logger.error(ex, "dispense: the see-saw's levelling reference could not be journaled");
+                throw new IllegalStateException("the levelling reference could not be journaled (events LEVEL_REF: "
+                        + ex.getMessage() + ")", ex);
             }
             Logger.error(ex, "dispense: the controller reset journal could not be written ({}): after a restart the "
                     + "engine will not know about it", e.code);
@@ -773,7 +780,7 @@ public final class DispenseService {
                     ControllerReset.EVENT_SCREW_MOTION, ControllerReset.EVENT_WATCHDOG_TRIP,
                     ControllerReset.EVENT_WATCHDOG_ARMED, ControllerReset.EVENT_FRAME_MOVED,
                     ControllerReset.EVENT_IDLE_CUT, ControllerReset.EVENT_IDLE_HOLD,
-                    ControllerReset.EVENT_HOME_STARTED)) {
+                    ControllerReset.EVENT_HOME_STARTED, ControllerReset.EVENT_LEVEL_REF)) {
                 h.add(new ControllerReset.Event((String) row.get("code"), ((Number) row.get("ts")).longValue(),
                         (String) row.get("message")));
             }

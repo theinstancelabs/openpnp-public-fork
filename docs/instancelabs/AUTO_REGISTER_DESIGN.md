@@ -56,7 +56,8 @@ Three more pieces use the same parts:
 
 The simulator gets two new parts, so the whole flow can be tested end to end without the machine:
 
-- a vacuum model inside the simulated G-code server, with the bench's slow release and partial seals;
+- a vacuum model inside the simulated G-code server, with the bench's slow release and a seal that builds below the
+  first touch;
 - a top camera that draws the board's fiducials and pads at a deliberately shifted, rotated and scaled seat.
 
 Neither works unless the controller identified itself as OpenPnP's `GcodeServer` (M115) over loopback TCP.
@@ -1838,7 +1839,7 @@ the board in a running session.
  "blank": {"rect": [280, 225, 365, 250], "surface": {"z0": 5.62, "slopeX": -0.0012, "slopeY": 0.0}, "dots": []},
  "bedZ": 2.5, "n1OffsetMm": [-24.178, -63.91], "tipRadiusMm": 0.35,
  "vacuum": {"openAir": -1550000, "sealDrops": [257000, 271000, 290000, 303000, 316000, 329000, 350000, 370000, 404000],
-            "partialBandMm": 0.03, "leakDrop": 15000, "offValue": 0,
+            "partialBandMm": 0, "leakDrop": 15000, "offValue": 0,
             "tauS": 0.3, "sealTauS": 0.03, "releaseTauS": 0.4, "noise": 1500, "seed": 7, "tip": "normal"},
  "camera": {"uppError": [0.0, 0.0], "noise": 4, "blurPx": 1}}
 ```
@@ -1858,7 +1859,7 @@ the board in a running session.
   −100 k from normal, the bench's ≥ 80 k for a held 0603).
 - **`dirtySpots`** (board mm) and **`blank.dots`** (machine mm): paste dots of 1.0 mm, drawn in the paste colour, for
   the camera look.
-- **The defaults** come from the bench: the open-air value, seal drops (deciles), partial seals and release from the
+- **The defaults** come from the bench: the open-air value, seal drops (deciles), the first touch and release from the
   offline parse of `runs/serial.log` (§4.4); the board surface from `BOARD_PROBES_R7`
   (src/test/sim/il_sim_acceptance.py:76); the blank from `BLANK_PROBES` (:79-80).
 
@@ -1874,8 +1875,10 @@ the board in a running session.
 
 - **Target value.**
   - Pump and valve on → `openAir`.
-  - Sealed → `openAir − sealDrop(spot)`, with the drop drawn per spot (seeded) from `sealDrops`.
-  - Within `partialBandMm` above contact → a partial seal: half the drop.
+  - Open air down to the contact; at depth d below it (INF-15) → `openAir − min(sealDrop(spot), 55 k + 25 k per
+    0.025 mm of d)`: the first touch at the contact Z, the seal building to the spot's drop, drawn per spot (seeded)
+    from `sealDrops`.
+  - Within `partialBandMm` above contact (default 0, old scenes) → half the first touch.
   - Sealed at a leaky spot → `openAir − leakDrop`.
   - Otherwise, or on a channel ≠ 1 → `offValue`.
 - **Moving to the target.** The value moves toward it with a time constant on the wall clock (an injectable
@@ -2144,7 +2147,7 @@ the board in a running session.
   - −1,508,992 ↔ `E8 F9 80`;
   - the off value;
   - settling with tau (a read at 0.3 s is still falling);
-  - seal at z ≤ contact; the partial band; **release with `releaseTauS`** (a read 0.37 s after lifting still reads
+  - the first touch at z = contact, the seal building below it (INF-15); **release with `releaseTauS`** (a read 0.37 s after lifting still reads
     sealed); a leaky spot; the edge (tip disc partly off the board);
   - tip states, including `part`;
   - seal drops drawn from the deciles; seeded determinism;

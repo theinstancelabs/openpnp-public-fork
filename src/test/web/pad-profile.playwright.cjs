@@ -303,6 +303,19 @@ async function weighCoupon(page, place) {
     await page.waitForSelector('#dlg-board-import[data-state="saved"] #board-import-profile', { timeout: 60000 });
     const saved = await page.evaluate(() => Array.from(document.querySelectorAll('#board-import-profile button[data-action]')).map((b) => [b.dataset.action, b.dataset.group, b.textContent]));
     check('(1) after the save: Use Chip 0603 and Needs a profile… per group', saved.some((b) => b[0] === 'use' && /Chip 0603/.test(b[2])) && saved.filter((b) => b[0] === 'needs').length === 3, saved);
+    // the dialog's Use: one POST, then "Uses …" and locked (IL.act's end freed it: a 2nd press posted again, #87's review);
+    // answered here, so the mapping stays unset for (3)-(5)
+    let mapPosts = 0;
+    const fakeMap = (route) => { if (route.request().method() !== 'POST') return route.fallback(); mapPosts++; return route.fulfill({ status: 200, json: { ok: true } }); };
+    await page.route('**/api/package-mappings', fakeMap);
+    const useSel = '#board-import-profile button[data-action="use"]';
+    await page.click(useSel);
+    await page.waitForFunction((sel) => /^Uses /.test((document.querySelector(sel) || {}).textContent || ''), useSel, { timeout: 10000 }).catch(() => null);
+    await page.click(useSel, { force: true, timeout: 2000 }).catch(() => null);   // a second press, as a double click
+    await sleep(800);
+    const use1 = await page.evaluate((sel) => { const b = document.querySelector(sel); return { text: b.textContent, dis: b.disabled }; }, useSel);
+    await page.unroute('**/api/package-mappings', fakeMap);
+    check('(1) the dialog\'s Use posts the mapping once, then says "Uses Chip 0603" and stays locked', mapPosts === 1 && /^Uses Chip 0603/.test(use1.text) && use1.dis, { mapPosts, use1 });
     const swBtn = await page.evaluateHandle(() => Array.from(document.querySelectorAll('#board-import-profile li')).find((li) => /SW_SPST/.test(li.textContent)).querySelector('button[data-action="needs"]'));
     await swBtn.click();
     await page.waitForFunction(() => /^#profile\/needs\/g[0-9a-f]{12}$/.test(location.hash), null, { timeout: 15000 });
@@ -332,6 +345,9 @@ async function weighCoupon(page, place) {
     // ---- (3) Profile › Needs a profile ---------------------------------------------------------------------------------
     await page.evaluate(() => IL.go('#profile/needs'));
     await page.waitForSelector('#pt-needs:not([hidden]) #pt-needs-table tbody tr[data-group]', { timeout: 15000 });
+    // the workspace shows at once what it drew in (1), the board file's list (only the workspace on screen is drawn), and
+    // draws the plan's at the next frame: read once the source line says the plan (#87's group 11-05 read it before)
+    await page.waitForFunction(() => /^From the plan of /.test((document.getElementById('pt-needs-src') || {}).textContent || ''), null, { timeout: 15000 }).catch(() => null);
     const list = await page.evaluate(() => ({
       rows: Array.from(document.querySelectorAll('#pt-needs-table tbody tr[data-group]')).map((tr) => [tr.dataset.reason, tr.querySelector('.pt-needs__n').textContent]),
       tip: Array.from(document.querySelectorAll('#pt-needs-tip tr[data-reason]')).map((tr) => tr.dataset.reason),
