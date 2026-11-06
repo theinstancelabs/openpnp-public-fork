@@ -13,7 +13,7 @@
  * one POST, a confirmation that the machine is the user's and what was stopped (the way STOP does: Connect, then
  * Home), the strip reads You; from an idle agent: its outputs off, the machine still homed; with the machine off: only
  * that (Connect, then Home), never "still connected"; connected, not homed: Home first; (4) a second window is the
- * user too; (5) Give back (two presses) frees it; (6) a write refused with 409 locked (an agent took it between two
+ * user too; (5) Give back: a click on In control asks at once, one confirm frees it (its panel keeps its words); (6) a write refused with 409 locked (an agent took it between two
  * polls) offers Take control; (7) while nobody has it, the first move makes it the user's; (8) a take whose stop is not
  * confirmed (409 stop-not-confirmed): the machine is the user's, the page says so and presses STOP itself; no
  * JavaScript errors, no native dialogs. Nothing here runs a real machine.
@@ -264,22 +264,25 @@ const waitCell = (page, re, ms) => page.waitForFunction((src) => { const c = doc
     check('(4) a second window also reads You, without Take control', c2 && /^You/.test(c2.v) && !(await takeBtn(page2)).shown, c2);
     await page2.close();
 
-    // ---- (5) Give back ----------------------------------------------------------------------------------------------------
-    await page.click('#cell-lock');
+    // ---- (5) Give back: while the user holds it a click on In control asks at once, one confirm (the user 11-05 20:1x); its
+    // panel, opened by its view, still says who the user took it from and keeps its own Give back
+    await page.evaluate(() => IL.openView('lock'));
     await page.waitForSelector('#pv-lock-act button', { state: 'attached', timeout: 5000 });
     const panel = await page.evaluate(() => document.querySelector('#panel').textContent.replace(/\s+/g, ' '));
     await page.screenshot({ path: path.join(OUT, 'lock-panel.png') });
     check('(5) the In control panel says the user took it from Process', /You took it from Process/.test(panel) && panel.includes(WHAT), panel.slice(0, 600));
-    const give = await page.$('#pv-lock-act button[data-k="release"]');
-    check('(5) the panel offers Give back', !!give, null);
-    if (give) {
-      await give.click();
-      await sleep(400);
-      check('(5) Give back asks for a second press (agents may move it right after)', stub.releases === 0 && /Press again/.test(await give.textContent()), await give.textContent());
-      await give.click();
-      await waitCell(page, /^Nobody/);
-      check('(5) the second press gives it back: one release, the strip reads Nobody', stub.releases === 1 && /^Nobody/.test((await cellText(page)).v), { releases: stub.releases, c: await cellText(page) });
-    }
+    check('(5) the panel offers Give back', !!(await page.$('#pv-lock-act button[data-k="release"]')), null);
+    await page.evaluate(() => { if (IL.panel.isPushed()) IL.panel.close(); });
+    await page.click('#cell-lock');
+    await page.waitForSelector('#dlg-give-back', { timeout: 5000 }).catch(() => null);
+    const ask = await page.evaluate(() => { const d = document.getElementById('dlg-give-back');
+      return d ? { title: (d.querySelector('h2') || {}).textContent || '', btns: Array.from(d.querySelectorAll('.dialog__foot button')).map((b) => b.textContent.trim()) } : null; });
+    check('(5) a click on In control asks at once: "Give the machine back to the agents?", Keep it / Give back, nothing sent yet', !!ask
+      && ask.title === 'Give the machine back to the agents?' && JSON.stringify(ask.btns) === JSON.stringify(['Keep it', 'Give back']) && stub.releases === 0, { ask, releases: stub.releases });
+    await page.screenshot({ path: path.join(OUT, 'lock-give-back.png') });
+    await page.click('#dlg-give-back .dialog__foot button:has-text("Give back")');
+    await waitCell(page, /^Nobody/);
+    check('(5) Give back (one confirm): one release, the strip reads Nobody', stub.releases === 1 && /^Nobody/.test((await cellText(page)).v), { releases: stub.releases, c: await cellText(page) });
 
     // ---- (6) a write refused because an agent took it between two polls ---------------------------------------------------
     stub.refuseWrites = true;
