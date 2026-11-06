@@ -32,6 +32,7 @@ import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.dispense.BoardRegistration;
 import org.openpnp.instancelabs.dispense.ControllerCommands;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.FlatVacuum;
@@ -380,21 +381,10 @@ public class RegistrationSimTest {
         assertTrue(preview.get("error").isJsonNull(), preview.toString());
         assertTrue(preview.getAsJsonObject("frame").get("ok").getAsBoolean(), preview.toString());
 
-        // BR-81: an outline stamped an hour ahead (the clock was set back since), far from everything: the registration
-        // and its checks are stamped after it all the same, so a tile is never older than a later registration
+        // BR-81: an outline ordered an hour ahead (the clock was set back since), far from everything: the registration
+        // and its checks are ordered after it all the same, so a tile is never older than a later registration
         long ahead = System.currentTimeMillis() + 3_600_000L;
-        svc.updateConfigAtomically(c -> {
-            org.openpnp.instancelabs.dispense.DispenseConfig.Tile t = new org.openpnp.instancelabs.dispense.DispenseConfig
-                    .Tile();
-            t.label = "far tile";
-            t.outline = java.util.Arrays.asList(new double[] {400, 300}, new double[] {420, 300},
-                    new double[] {420, 320}, new double[] {400, 320});
-            t.checkPoints = java.util.Arrays.asList(new double[] {405, 305}, new double[] {410, 310},
-                    new double[] {415, 315});
-            t.atMs = ahead;
-            c.tiles.put("far", t);
-            return c;
-        });
+        storeFarTile(ahead);
 
         // without wait: the live detail and the next plan show in the status
         sim.server.mark();
@@ -484,8 +474,10 @@ public class RegistrationSimTest {
         // BR-81: the registration keeps the board's outline (its 40 x 30 mm), and the run below still pastes its board
         assertEquals("[0.0,0.0,40.0,30.0]", ok(get("/api/config")).getAsJsonObject("boardRegistrations").entrySet()
                 .iterator().next().getValue().getAsJsonObject().get("boardRectMm").toString());
-        long regAt = svc.getConfig().boardRegistrations.values().iterator().next().atMs;
-        assertTrue(regAt > ahead, "the registration is stamped after the stored outline: " + regAt + " vs " + ahead);
+        BoardRegistration reg0 = svc.getConfig().boardRegistrations.values().iterator().next();
+        assertTrue(reg0.outlineAtMs != null && reg0.outlineAtMs > ahead, "the registration is ordered after the stored "
+                + "outline: " + reg0.outlineAtMs + " vs " + ahead);
+        assertTrue(reg0.atMs < ahead, "its atMs stays on the wall clock: " + reg0.atMs);
         // the run: the clean check finds copper at every dot (the dots lie on the pads), then dispenses
         sim.server.mark();
         JsonObject runRes = ok(post("/api/run", "{\"planId\":\"" + p1Id + "\",\"wait\":true}")).getAsJsonObject("result");
@@ -503,8 +495,11 @@ public class RegistrationSimTest {
         assertTrue(same.get("movedMm").getAsDouble() < 0.02, same.toString());
         assertEquals(res.get("registrationId").getAsString(), same.get("registrationId").getAsString());
         assertTrue(same.getAsJsonObject("sameSeat").get("pass").getAsBoolean(), same.toString());
-        Long checkedAt = svc.getConfig().boardRegistrations.values().iterator().next().lastCheckedAtMs;
-        assertTrue(checkedAt != null && checkedAt > regAt, "the check is stamped after the record: " + checkedAt);
+        BoardRegistration reg1 = svc.getConfig().boardRegistrations.values().iterator().next();
+        assertTrue(reg1.outlineCheckedAtMs != null && reg1.outlineCheckedAtMs > reg0.outlineAtMs, "the check is ordered "
+                + "after the record: " + reg1.outlineCheckedAtMs);
+        assertTrue(reg1.lastCheckedAtMs != null && reg1.lastCheckedAtMs < ahead, "its lastCheckedAtMs stays on the wall "
+                + "clock: " + reg1.lastCheckedAtMs);
         assertFalse(same.getAsJsonObject("probe").get("saved").getAsBoolean());
         assertEquals(3, count(commands(sim.server.sinceMark()), ControllerCommands.LEFT_VALVE_ON), "3 check touches");
         assertEquals(surfaceAt, ok(get("/api/surfaces")).getAsJsonObject("surfaces").getAsJsonObject("board")
@@ -535,6 +530,41 @@ public class RegistrationSimTest {
         }
         assertTrue(boardSurfaceAt() > surfaceAt, "a new surface");
         assertNotEquals(p1Id, changed.get("newPlanId").getAsString(), "planned again on the new surface");
+    }
+
+    /** BR-81: a tile stored far from everything, ordered at {@code outlineAtMs} (as if the clock was set back since). */
+    void storeFarTile(long outlineAtMs) throws Exception {
+        svc.updateConfigAtomically(c -> {
+            org.openpnp.instancelabs.dispense.DispenseConfig.Tile t = new org.openpnp.instancelabs.dispense.DispenseConfig
+                    .Tile();
+            t.label = "far tile";
+            t.outline = java.util.Arrays.asList(new double[] {400, 300}, new double[] {420, 300},
+                    new double[] {420, 320}, new double[] {400, 320});
+            t.checkPoints = java.util.Arrays.asList(new double[] {405, 305}, new double[] {410, 310},
+                    new double[] {415, 315});
+            t.atMs = System.currentTimeMillis();
+            t.outlineAtMs = outlineAtMs;
+            c.tiles.put("far", t);
+            return c;
+        });
+    }
+
+    /**
+     * BR-81's outline order is its own (outlineAtMs): a record ordered after an outline stored an hour ahead (the clock
+     * set back since) keeps its atMs on the wall clock, so "New seat" (the wall clock) still re-seats it.
+     */
+    @Test
+    public void aNewSeatStillWinsAfterTheClockWasSetBack() throws Exception {
+        long ahead = System.currentTimeMillis() + 3_600_000L;
+        storeFarTile(ahead);
+        JsonObject first = register(plan().get("planId").getAsString(), "{\"wait\":true}");
+        assertEquals("OK", first.get("status").getAsString(), first.toString());
+        BoardRegistration r = svc.getConfig().boardRegistrations.values().iterator().next();
+        ok(post("/api/board/new-seat", "{\"newSeat\":true}"));
+        JsonObject again = register(first.get("newPlanId").getAsString(), "{\"wait\":true}");
+        assertEquals("OK", again.get("status").getAsString(), again.toString());
+        assertEquals("reseated", again.get("seat").getAsString(), "the new seat counts: " + again);
+        assertTrue(r.atMs < ahead && r.outlineAtMs != null && r.outlineAtMs > ahead, r.atMs + " / " + r.outlineAtMs);
     }
 
     /**

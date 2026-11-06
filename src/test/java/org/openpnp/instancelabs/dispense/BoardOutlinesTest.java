@@ -338,12 +338,16 @@ public class BoardOutlinesTest {
         t.atMs = 12000;
         assertEquals(12001, c.outlineStampMs(1000), "a tile's stamp counts too");
         assertEquals(20000, c.outlineStampMs(20000), "the clock past them all: now");
+        r.outlineCheckedAtMs = 30000L; // BR-81's own order, apart from the wall-clock atMs and lastCheckedAtMs
+        assertEquals(30001, c.outlineStampMs(20000), "a check's order counts");
+        t.outlineAtMs = 40000L;
+        assertEquals(40001, c.outlineStampMs(20000), "a tile's order counts");
     }
 
     /**
      * Which outlines a board run's planned dots may lie on, from its plan: a plan made with a registration, those up to
-     * its last check; one made without, its own board's stored registration (by its key) alone; one whose registration
-     * is gone, none.
+     * its last check (in BR-81's own order); one made without, the record that applied to its board at its seat while
+     * it is stored; one whose registration is gone, none.
      */
     @Test
     public void aBoardRunsScopeCarriesTheOutlinesItsPlanCovers() {
@@ -354,14 +358,17 @@ public class BoardOutlinesTest {
         DispensePlan plan = new DispensePlan();
         plan.registrationId = reg.id;
         Interlocks.Scope sc = DispenseService.boardScope(c, plan);
-        assertEquals(Long.valueOf(3000), sc.outlinesUpToMs, "its registration's last check");
+        assertEquals(Long.valueOf(3000), sc.outlinesUpToMs, "its registration's last check (a record from before)");
+        reg.outlineAtMs = 5000L;
+        reg.outlineCheckedAtMs = 7000L;
+        assertEquals(Long.valueOf(7000), DispenseService.boardScope(c, plan).outlinesUpToMs, "in BR-81's own order");
         plan.registrationId = null;
-        plan.boardKey = reg.boardKey;
+        plan.ownRegistrationId = reg.id;
         sc = DispenseService.boardScope(c, plan);
         assertNull(sc.outlinesUpToMs);
-        assertEquals(reg.id, sc.ownOutlineId, "its own board's registration");
-        plan.boardKey = "file:/another.board.xml";
-        assertNull(DispenseService.boardScope(c, plan).ownOutlineId, "another board's: none");
+        assertEquals(reg.id, sc.ownOutlineId, "the record that applied to its board at its seat");
+        plan.ownRegistrationId = "forgotten-id";
+        assertNull(DispenseService.boardScope(c, plan).ownOutlineId, "a record stored no more: none");
         plan.registrationId = "gone";
         sc = DispenseService.boardScope(c, plan);
         assertTrue(sc.registrationGone && sc.ownOutlineId == null && sc.outlinesUpToMs == null, "gone: none");

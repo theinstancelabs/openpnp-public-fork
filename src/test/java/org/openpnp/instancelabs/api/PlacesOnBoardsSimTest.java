@@ -21,13 +21,17 @@ import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.openpnp.instancelabs.board.EdtRunner;
 import org.openpnp.instancelabs.dispense.BoardRegistration;
+import org.openpnp.instancelabs.dispense.DispenseConfig;
 import org.openpnp.instancelabs.dispense.DispenseService;
 import org.openpnp.instancelabs.dispense.DoseBlocksRequest;
 import org.openpnp.instancelabs.dispense.DoseBlocksResult;
 import org.openpnp.instancelabs.dispense.FlatVacuum;
 import org.openpnp.instancelabs.dispense.SimMachine;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.Footprint;
+import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Package;
 import org.openpnp.model.Part;
 
@@ -318,6 +322,11 @@ public class PlacesOnBoardsSimTest {
 
     /** ApiServerSimTest's board: 20 x 10 mm, three 0603 resistors. */
     File writeBoard() throws Exception {
+        return writeBoard(new double[][] {{2, 2, 0}, {8, 2, 90}, {14, 6, 0}});
+    }
+
+    /** The same board with its 0603 resistors at these {x, y, rotation} (board mm). */
+    File writeBoard(double[][] pos) throws Exception {
         Package pkg = new Package("R_0603_1608Metric");
         Configuration.get().addPackage(pkg);
         Part part = new Part("R0603-API-TEST");
@@ -325,7 +334,6 @@ public class PlacesOnBoardsSimTest {
         Configuration.get().addPart(part);
         StringBuilder sb = new StringBuilder("<openpnp-board version=\"1.1\" name=\"api-test.board.xml\">\n"
                 + "<dimensions units=\"Millimeters\" x=\"20.0\" y=\"10.0\" z=\"0.0\" rotation=\"0.0\"/>\n<placements>\n");
-        double[][] pos = {{2, 2, 0}, {8, 2, 90}, {14, 6, 0}};
         for (int i = 0; i < pos.length; i++) {
             sb.append(String.format(Locale.ROOT, "<placement version=\"1.4\" side=\"Top\" id=\"R%d\" part-id="
                     + "\"R0603-API-TEST\" type=\"Placement\" enabled=\"true\" rank=\"0\">\n<location units="
@@ -509,7 +517,9 @@ public class PlacesOnBoardsSimTest {
         String planId = planTied(f);
         ok("PUT", "/api/tiles/nano/outline", TILE_OVER_THE_BOARD);
         long regAt = svc.getConfig().boardRegistrations.get(BoardRegistration.fileKey(f)).atMs;
-        assertTrue(svc.getConfig().tiles.get("nano").atMs > regAt, "the tile is stamped after the registration");
+        DispenseConfig.Tile tile = svc.getConfig().tiles.get("nano");
+        assertTrue(tile.outlineAtMs != null && tile.outlineAtMs > regAt, "the tile is ordered after the registration");
+        assertTrue(tile.atMs < regAt, "its atMs stays on the wall clock");
         sim.server.mark();
         call("POST", "/api/run", "{\"planId\":\"" + planId + "\",\"wait\":true}");
         assertEquals(409, lastStatus, lastBody);
@@ -526,5 +536,93 @@ public class PlacesOnBoardsSimTest {
         register("w.board.xml", 60, 30, 30, 15); // the waste (80, 40) on it
         assertEquals("the needle's position is unknown: start it with a park over a place off the boards (the waste "
                 + "too lies within 8.0 mm of one)", PressureHold.zoneRefusal(svc, new PressureHold.Options(), null));
+    }
+
+    /** A 20 x 10 mm board of two parts whose package has no pad type yet (0603 pads): a "use" suggestion. */
+    File chipBoard() throws Exception {
+        StringBuilder sb = new StringBuilder("<openpnp-board version=\"1.1\" name=\"chips.board.xml\">\n"
+                + "<dimensions units=\"Millimeters\" x=\"20.0\" y=\"10.0\" z=\"0.0\" rotation=\"0.0\"/>\n<placements>\n");
+        for (int i = 0; i < 2; i++) {
+            sb.append(String.format(Locale.ROOT, "<placement version=\"1.4\" side=\"Top\" id=\"C%d\" part-id="
+                    + "\"part-TestChip_A\" type=\"Placement\" enabled=\"true\" rank=\"0\">\n<location units="
+                    + "\"Millimeters\" x=\"%d\" y=\"3\" z=\"0.0\" rotation=\"0.0\"/>\n<error-handling>Default"
+                    + "</error-handling>\n</placement>\n", i + 1, 3 + 6 * i));
+        }
+        sb.append("</placements>\n<fiducials/>\n</openpnp-board>\n");
+        File file = new File(sim.configDir, "chips.board.xml");
+        Files.write(file.toPath(), sb.toString().getBytes(StandardCharsets.UTF_8));
+        EdtRunner.call(() -> {
+            Footprint fp = new Footprint();
+            fp.setUnits(LengthUnit.Millimeters);
+            for (int k = 0; k < 2; k++) {
+                Footprint.Pad pad = new Footprint.Pad();
+                pad.setName(Integer.toString(k + 1));
+                pad.setX((k == 0 ? -1 : 1) * 1.65 / 2);
+                pad.setWidth(0.80);
+                pad.setHeight(0.95);
+                pad.setRoundness(50);
+                fp.addPad(pad);
+            }
+            Package pkg = new Package("TestChip_A");
+            pkg.setFootprint(fp);
+            Configuration.get().addPackage(pkg);
+            Part part = new Part("part-TestChip_A");
+            part.setPackage(pkg);
+            Configuration.get().addPart(part);
+            Configuration.get().getBoard(file);
+            return null;
+        }, 10_000);
+        return file;
+    }
+
+    /**
+     * A plan planned again after a pad-type suggestion is applied (PlanAgain: also the end of a pad calibration) keeps
+     * its own board's outline: planned without a registration on its registered board, the new plan runs.
+     */
+    @Test
+    public void aPlanMadeAgainAfterASuggestionKeepsItsOwnBoard() throws Exception {
+        setUpBoardRuns();
+        File f = chipBoard();
+        registerPlanned(f, 1000);
+        String planId = planTied(f, "none");
+        JsonObject g = null;
+        for (JsonElement e : ok("GET", "/api/pad-profile/check?planId=" + planId, null).getAsJsonArray("groups")) {
+            if ("TestChip_A".equals(e.getAsJsonObject().getAsJsonArray("packageIds").get(0).getAsString())) {
+                g = e.getAsJsonObject();
+            }
+        }
+        assertTrue(g != null && "use".equals(g.getAsJsonObject("suggestion").get("kind").getAsString()), lastBody);
+        String group = g.get("group").getAsString(), sid = g.getAsJsonObject("suggestion").get("id").getAsString();
+        String again = ok("POST", "/api/pad-profile/apply", "{\"planId\":\"" + planId + "\",\"groups\":[\"" + group
+                + "\"],\"choice\":\"use\",\"suggestionIds\":{\"" + group + "\":\"" + sid + "\"}}").get("newPlanId")
+                .getAsString();
+        JsonObject res = ok("POST", "/api/run", "{\"planId\":\"" + again + "\",\"wait\":true}").getAsJsonObject("result");
+        assertEquals("OK", res.get("status").getAsString(), res.toString());
+    }
+
+    /**
+     * The own-board exemption follows the board at its seat, not its file: a second copy of a registered board file,
+     * planned at its own seat ("auto" finds the record is the first copy's), has no outline of its own, so its dot
+     * within the margin of the first copy is refused.
+     */
+    @Test
+    public void aSecondCopyOfARegisteredBoardFileIsNotExemptOnTheFirst() throws Exception {
+        setUpBoardRuns();
+        File f = writeBoard(new double[][] {{0.9, 5, 0}}); // one 0603, its left pad 0.1 mm from the board's edge
+        registerPlanned(f, 1000); // copy 1 at (100, 80): x 100..120
+        String wide = "\"points\":[[98,78,5.5],[145,78,5.5],[98,95,5.5],[145,95,5.5]]";
+        ok("PUT", "/api/surfaces/board", "{" + wide + "}");
+        // copy 2 1.5 mm right of copy 1 (x 121.5..141.5): its left pad (121.6, 85) 1.6 mm from copy 1
+        String id = ok("POST", "/api/plan", "{\"source\":\"file\",\"file\":\"" + f.getAbsolutePath().replace("\\",
+                "\\\\") + "\",\"x\":121.5,\"y\":80,\"z\":5.5,\"rotation\":0}").get("planId").getAsString();
+        assertTrue(ok("GET", "/api/plan/" + id, null).get("registration").isJsonNull(), "the record is copy 1's: none");
+        ok("PUT", "/api/surfaces/board", "{" + wide + ",\"planId\":\"" + id + "\"}");
+        sim.server.mark();
+        call("POST", "/api/run", "{\"planId\":\"" + id + "\",\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains("I13: the plan's dot at (121.6, 85.0) lies on board 'api-test.board.xml' "
+                + "(registration ") && lastBody.contains(", and the plan has no board registration: register the board "
+                + "(Register board)"), lastBody);
+        assertTrue(sim.server.sinceMark().isEmpty(), "no line at all: " + sim.server.sinceMark());
     }
 }
