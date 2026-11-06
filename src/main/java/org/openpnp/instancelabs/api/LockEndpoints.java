@@ -49,7 +49,9 @@ final class LockEndpoints {
             "(PUT /api/pad-types/[^/]+/rule|POST /api/pad-types/[^/]+/copy)", "POST /api/package-mappings",
             "PUT /api/pad-calibrations/[^/]+/label", "POST /api/pad-calibrations/[^/]+/wrong-tip",
             "POST /api/coupons/[^/]+/reading", "POST /api/tip-setups", "PUT /api/tip-setups/[^/]+",
-            "POST /api/tip-setups/[^/]+/(retire|unretire)");
+            "POST /api/tip-setups/[^/]+/(retire|unretire)", "POST /api/boards/[^/]+/need");
+    /** BR-76: the web UI's Board wiped. */
+    private static final Pattern WIPED = Pattern.compile("/api/boards/[^/]+/wiped");
 
     private final ApiContext ctx;
     private final MachineEndpoints machine;
@@ -159,6 +161,10 @@ final class LockEndpoints {
         // BR-75 (the PM): never the web UI's, and refused before its request could make the user the holder
         if (PLANNED_STOP.equals(r.path) && isUi(r)) {
             throw ApiException.refused("the planned stop is for deploys; the UI's STOP is POST /api/stop");
+        }
+        // BR-76 item 8 (b): the user's wipe for an agent's run that waits for clean pads, under the agent's lock (no STOP)
+        if (isUi(r) && WIPED.matcher(r.path).matches() && ctx.ledgers.wipeWhileWaiting(r.group(1))) {
+            return null;
         }
         watch();
         MachineLock.Activity a = ctx.lock.admit(isUi(r), token(r), "using the web UI");

@@ -40,12 +40,18 @@ final class ApiContext {
     final MachineLock lock = new MachineLock(() -> System.currentTimeMillis() + lockClockSkewMs.get());
     /** BR-72: the lock holder's G-code through OpenPnP's driver. */
     final GcodePassthrough passthrough = new GcodePassthrough(this);
+    /** BR-76: the clean-pad ledger's routes, the boards' pads and the budget. */
+    final PadLedgerEndpoints ledgers = new PadLedgerEndpoints(this);
     private DispenseService listened;
 
     ApiContext(Configuration configuration) {
         this.configuration = configuration;
         this.pressure = new PressureHold(this);
         switchOff.attach(configuration.getMachine());
+        DispenseService.setActor(() -> {
+            MachineLock.Holder h = lock.current();
+            return h == null ? null : h.name();
+        });
     }
 
     Machine machine() throws ApiException {

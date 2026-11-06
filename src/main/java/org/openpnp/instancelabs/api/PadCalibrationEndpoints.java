@@ -253,6 +253,7 @@ final class PadCalibrationEndpoints {
             }
             throw e;
         }
+        requirePads(svc, r, job, Json.bool(b, "force", false), "pad calibration");
         job.save();
         ctx.padCalJobs.start(job);
         Map<String, Object> preview = job.preview();
@@ -293,6 +294,7 @@ final class PadCalibrationEndpoints {
         if (job.refusal != null) {
             throw new ApiException(409, job.refusalCode, job.refusal).with("preview", job.preview());
         }
+        requirePads(svc, r, job, Json.bool(b, "force", false), "start-angle measure");
         ctx.padCalJobs.start(job);
         Map<String, Object> accepted = Views.map("kind", "start-angle measure", "job", job.id, "started", true);
         if (!Json.bool(b, "wait", false)) {
@@ -307,6 +309,17 @@ final class PadCalibrationEndpoints {
     }
 
     /** [[x, y], …] machine mm, up to {@code n} numbers each (the ones left out are 0): a 400 otherwise. */
+    /** BR-76: the job's dots on a ledger board need its clean pads (409 clean-pads with the preview, before it starts). */
+    private void requirePads(DispenseService svc, ApiServer.Request r, PadCalibrationJob job, boolean force,
+            String what) throws ApiException {
+        try {
+            ctx.ledgers.require(svc, r, job.padTargets(), force, what);
+        }
+        catch (ApiException e) {
+            throw e.with("preview", job.preview());
+        }
+    }
+
     private static List<double[]> spots(JsonObject b, String key, int n) throws ApiException {
         JsonElement e = b.get(key);
         String shape = "'" + key + "' must be [[x, y" + (n > 2 ? ", layers?" : "") + "], …] (N2 machine mm)";

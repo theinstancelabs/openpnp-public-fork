@@ -182,6 +182,7 @@ final class DispenseEndpoints {
             return out;
         }
         DispenseConfig cfg = svc.getConfig();
+        out.put("padLedgers", ctx.ledgers.status(svc, cfg)); // BR-76
         d.put("state", "running");
         d.put("startError", null);
         d.put("running", true);
@@ -1023,6 +1024,7 @@ final class DispenseEndpoints {
         Map<String, Object> m = Views.plan(e, runPreflight(svc, e.plan, nz(e.estimatedPressurisedSeconds)),
                 svc.getConfig().newSeatAtMs);
         m.put("purgeSpotsNeeded", DoseBlocks.purgeSpotsNeeded(e.plan, svc.getConfig()));
+        m.put("padLedger", ctx.ledgers.preview(svc, PadLedgerEndpoints.targets(e.plan))); // BR-76
         m.put("pasted", ctx.paste.view(e.source));
         return m;
     }
@@ -1282,7 +1284,10 @@ final class DispenseEndpoints {
         ApiContext.refuseUnlessOk(pre, "Run");
         if (Json.bool(b, "wiped", false)) {
             ctx.paste.wiped(e.source); // the operator wiped this board: its pads have no paste now
+            ctx.ledgers.wipedRun(svc, r, PadLedgerEndpoints.targets(p));
         }
+        // BR-76: enough clean pads, before anything moves
+        ctx.ledgers.require(svc, r, PadLedgerEndpoints.targets(p), Json.bool(b, "force", false), "run");
         RunTracker.Started<RunResult> f = ctx.tracker.start("board", () -> svc.runPlan(p));
         Map<String, Object> accepted = Views.map("kind", "board", "planId", p.planId, "parentPlanId",
                 p == full ? null : full.planId, "dots", p.dots.size(), "pads", p.pads.size(), "homeFirst", home.needed,

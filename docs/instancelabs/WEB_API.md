@@ -55,6 +55,7 @@ Every error is JSON: `{"error": "<slug>", "reason": "<plain language>", ...detai
 | 404 | `art-gone` | `GET /api/board-art/{id}` of an unknown drawing |
 | 405 | `method-not-allowed` | |
 | 409 | `refused` | machine state or an interlock refuses; `interlocks: {ok, violations:[{code,message}], notes}` included when the engine's interlocks refused |
+| 409 | `clean-pads` | BR-76 (§3.9): the run needs more clean pads than its board has: `board`, `clean`, `needed`; nothing was sent |
 | 409 | `locked`, `lock-lost`, `no-lock`, `stop-not-confirmed`, `stopped` | the machine lock (§3.7): someone else holds it; your lock was taken, released or ran out (`lost: {how, by, atMs, what}`); no lock (or an unknown token); Take control's STOP not confirmed (the lock is the user's anyway); a STOP ended your G-code batch. Each carries `lock` |
 | 400 / 403 | `refused-line`, `not-ui` | a G-code line the passthrough does not send (`index`, `line`, `why`; nothing sent); Take control without `X-IL-Client: ui` |
 | 502 / 504 | `controller-error`, `controller-timeout` | a passthrough line answered with a controller error, or no `ok` in `timeoutMs`; `index`, `line`, `replies`, `results` so far; the rest not sent |
@@ -181,6 +182,7 @@ Also added for Register board and the home at run:
 | `run.detail` | Structured progress. Register board: `{stage, stepsDone, stepsPlanned, estimatedSecondsLeft, home: {needed, whyCode, why, estimateS}, fiducials: [{name, expected, found, state, iterations, frames}], seat, movedMm, probes: [{n, x, y, state, z, lastZ, alternate}]}`; the blank probe: the same without fiducials and seat; a board run: `{stage: home \| z check \| dispense, home, zCheck}`. |
 | `run.nextPlanId` | Register board: the plan made at its end (another page loads it once). |
 | `run.label` | Adds `board registration`, `blank probe`, `z check` (`runs` kinds `board-registration`, `surface-probe`, `z-check`), and `pad calibration` while a pad calibration's engine step runs (`runs` kinds `pad-ladder`, `pad-weigh`; `run.detail` `{stage, home, blocks, dots, stepsDone, stepsPlanned, estimatedSecondsLeft}`). BR-101: a label is its own run's (the route names the run before it is queued): a task refused before its run started labels no other run, and a run started without one shows its kind. |
+| `padLedgers` | BR-76 (§3.9): one entry per registered board with a pad ledger, `[]` before any: `{board, name, total, clean, wipedAtMs, sets, check (null: stage 2), need, waiting}`. |
 | `padCalibration` | The pad calibration of this session (running, waiting for the readings, or the last one that ended), else null: the job view of §3.5. Next to `run`; a second browser shows the same job. |
 
 The run view (`lastRun`, `/api/runs/last`, a run's `result`) adds `profile` (the profile used), `cleanCheck`
@@ -545,8 +547,9 @@ P0 (user, 11-03): the user controls the real machine from the UI at any time; ag
   busy, expiresAtMs}, takenFrom: null | {label, who, what, atMs, by}}`.
 - **Guarded writes:** every POST/PUT/DELETE except the stops (`/api/stop`, `/api/pressure/stop`, a pad calibration's
   cancel), `/api/lock/*` and the data writes (photos, board import, `POST /api/plan`, pad types and their rules,
-  package mappings, a calibration's label or wrong-tip, coupon readings, tip-setup add/edit/retire/unretire; see
-  `LockEndpoints.DATA`). A tip's dose anchor (`PUT /api/tip-setups/{key}/dose-anchor`, BR-85) is guarded: Calibrate
+  package mappings, a calibration's label or wrong-tip, coupon readings, tip-setup add/edit/retire/unretire, a board's
+  plan need (BR-76); see `LockEndpoints.DATA`). BR-76: the UI's Board wiped of a board an agent's refused run waits
+  for passes under the agent's lock (§3.9). A tip's dose anchor (`PUT /api/tip-setups/{key}/dose-anchor`, BR-85) is guarded: Calibrate
   reads it. Nobody holds the lock: anyone (the UI's first one makes the user the holder); else the holder
   only: the user's requests or the agent's token. Else 409 `locked`. `POST /api/stop/planned` (BR-75) is never the
   UI's: with `X-IL-Client: ui` it is refused (409 `refused`) before the lock is looked at.
@@ -626,6 +629,54 @@ came). **N1 and the needle share one Z axis (a see-saw): lowering one raises the
 - `GET /api/cameras` → `{cameras: [{id: top|bottom, name, looking, width, height}]}`;
   `GET /api/cameras/{id}/frame.jpg?w=&settleMs=0..2000` → JPEG (PNG without a JPEG writer) with `X-Frame-At` (server
   ms when taken; `/api/camera/top.jpg` too); one capture thread per camera. Read only: never locked; nothing moves.
+
+### 3.9 Clean pads: the pad ledger and the budget before a run (BR-76, stage 1)
+
+`PadLedger` and `DotWatch` (engine), `PadLedgerEndpoints`; shape in `docs/backend-requests.md` "BR-76"; the web UI's
+Calibrate › Test board (`docs/ui-flows/clean-pads-flow.md` in the project).
+- **The ledger:** per registered board: `board` is its board file's name less `.board.xml` (`ftp`; a job board has
+  none), `name` the board's name. Its pads are every footprint pad of the board file (disabled placements too) through
+  its newest registration (machine mm). Every line the engine sends (programs, single lines, the I1 shutdown) and every
+  passthrough line is watched: a forward screw turn while the needle's valve is open (`M106 P3`, S > 0) is a dot where
+  the tip is (the raw X/Y/Z the lines named last, else OpenPnP's; N2 + the landing and trim). Turns at one spot are one
+  dot until X, Y or Z moves; a turn while X/Y move is a line of paste, sampled every 0.2 mm. A dot more than 1 mm above
+  the board's top (N2's Z less the needle offset, against the registration's Z) marks nothing (air turns, the purge);
+  on a pad (its opening + 0.15 mm) it adds a layer; on the board (its outline and pads + 3 mm) but on no pad it is
+  listed in `offPad`. Kept in `<config>/instancelabs/pad-ledgers.json`, written at every change: the counts survive a
+  restart. A board's ledger starts with its first record (a dot, a wipe, a need, an import); until then every pad
+  counts clean.
+- `status.padLedgers`: `[{board, name, total, clean, wipedAtMs, sets: [{set, total, clean}], check, need, waiting}]`
+  (boards with a ledger only). `set`: the pad id's leading letters (`R`, `D`). `check`: the camera's re-check after a
+  wipe is stage 2, **null now**. `need`: `{pads, by, what, atMs}` or null. `waiting`: an agent's run refused for clean
+  pads, `{by, what, clean, needed, atMs}`, until a wipe of the board, a run on it that passes, or the lock changes hands.
+- `GET /api/boards/{board}/pads`: the entry plus `view` (`{name, file, widthMm, heightMm, side, toMachine, art}`, the
+  shape of a plan's `board`), `pads: [{id, set, state: clean|used|fixed, atMs, by, kind, run, note, layers, x, y, w, h,
+  rotation}]` (machine mm; `by` the lock holder when the dot was laid; `kind` `dot` for the engine's and the
+  passthrough's dots, Process's kinds after an import; `note` a fixed pad's reason) and `offPad: [{x, y, atMs, by,
+  kind}]`. 404 for a board that is not registered.
+- `POST /api/boards/{board}/wiped {pads?, note?}`: every pad but the fixed ones (or only `pads`) is clean again; a
+  whole wipe clears `offPad` too; a plan need it covers and the board's `waiting` end. Answers the entry with
+  `wipedAtMs` and `check: null`: stage 1 records the wipe as the user says it; stage 2 adds the camera's re-check (then
+  `check: {state: 'running', pads, etaS}`). A guarded write; 409 while an engine task, a pad calibration, a G-code batch
+  or the pressure hold runs; 400 for a pad the board does not have; 404 for an unknown board. Events `PADS`.
+- `POST /api/boards/{board}/need {pads, by?, what?}` (a data write, never locked): an agent's whole-plan need, shown
+  as `need` until it clears: `{pads: 0}`, a wipe that leaves at least that many clean, or the first run on the board
+  that passes the budget. `by` defaults to the lock holder whose token the request carries.
+- `POST /api/boards/{board}/pads/import` (the body: Process's `runs/ledger_<board>.json`): its fixed pads, its wipes and
+  its pads pasted after its last wipe (local times) become the board's; the engine's own dots stay unless that wipe
+  came after them. Again later replaces what it imported; 409 once the engine recorded a wipe of its own. A guarded
+  write. A board not registered yet is kept, and counts once a board file of that name is registered.
+- **The budget, before anything moves:** `POST /api/run` (the run's dots), `POST /api/pad-calibrations` and `POST
+  /api/screw/start-angle/measure` (the start-angle targets and throwaways, the ladder's and the landing check's dots):
+  the distinct pads its dots land on (on the board they paste most on) against the board's clean pads, and while a
+  plan need is set against that need. Short: 409 `clean-pads` `{reason: "Wipe the board first: 10 clean, this run
+  needs 24.", board, clean, needed}` (`needed` is the plan need when that is larger: `… the declared plan needs 30 (this
+  run 24).`; a pad calibration adds `preview`); nothing is sent. `force: true` runs it anyway, on record (events `PADS`
+  WARN). The plan view and the pad-calibration preview carry `padLedger: {board, needed, clean}` (the run's own need;
+  null when it pastes no ledger board). `POST /api/run {wiped: true}` also marks the run's own pads wiped.
+- **A waiting agent's wipe (item 8 (b)):** after an agent's call was refused with `clean-pads`, the web UI's `POST
+  /api/boards/{board}/wiped` of that board passes under the agent's lock (no STOP; the lock stays the agent's) while the
+  agent made no guarded call since and nothing runs (no task, batch, hold or pad calibration); otherwise 409 `locked`.
 
 ## 4. Pressure hold (Dispense tab)
 
@@ -737,6 +788,10 @@ Jargon is explained in tooltips (`title`/`abbr`).
 
 ## 6. Tests
 
+- BR-76: `PadLedgerTest` (unit: dots by X/Y on every pad, the air turn, off-pad, layers, a line of paste, wipes and
+  fixed pads, the budget, the plan need, the file across a restart, Process's file, the line watcher) and
+  `PadLedgerSimTest` (the API on the simulated controller: a run marks its pads, a short run is refused before any
+  line, passthrough dots count, the plan need, the waiting agent's wipe, the import across an engine restart).
 - `mvn -T1 test -Dtest='ApiServerSimTest,ReviewSafetySimTest,RegistrationSimTest,BoardImportSimTest'` (part of `mvn
   test`): 23 + 11 + 11 + 12 tests on the engine's simulated machine (OpenPnP GcodeDriver over localhost TCP to
   `RecordingGcodeServer`), real `DispenseService`, real `ApiServer` on an ephemeral port. `RegistrationSimTest` runs

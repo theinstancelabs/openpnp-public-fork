@@ -52,6 +52,8 @@ final class MachineLock {
         String what;
         long lastActiveMs;
         int inFlight;
+        /** BR-76: its guarded calls so far (a run refused for clean pads waits until the next one). */
+        int calls;
         /** Set when the lock is taken from it or lapses: its running batch sends nothing more. */
         volatile boolean revoked;
         /** Its work on the machine runs (a 202 task, a home, a hold), seen by the lease check (LockEndpoints). */
@@ -300,8 +302,14 @@ final class MachineLock {
             throw locked(ui);
         }
         h.inFlight++;
+        h.calls++;
         h.lastActiveMs = now;
         return new Activity(h);
+    }
+
+    /** BR-76: the holder's guarded calls so far. */
+    synchronized int calls(Holder h) {
+        return h.calls;
     }
 
     synchronized void end(Activity a) {

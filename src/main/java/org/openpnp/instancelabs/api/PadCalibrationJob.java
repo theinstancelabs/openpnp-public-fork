@@ -3035,6 +3035,27 @@ final class PadCalibrationJob {
     // ------------------------------------------------------------------------------------------
 
     /** The before-start summary (§7.9). */
+    /**
+     * BR-76: where the job's dots land (machine mm): the start-angle measure's targets and throwaways, the ladder's and
+     * the landing check's dots; the weigh coupons are no board's.
+     */
+    List<double[]> padTargets() {
+        List<double[]> l = new ArrayList<>();
+        for (DoseBlocksRequest.Block b : saBlocks) {
+            l.addAll(b.xy);
+        }
+        if (req.startAngle != null) {
+            l.addAll(req.startAngle.throwaways);
+        }
+        for (DoseBlocksRequest.Block b : layout == null ? new ArrayList<DoseBlocksRequest.Block>() : layout.blocks) {
+            l.addAll(b.xy);
+        }
+        if (landingLayout != null) {
+            l.addAll(landingLayout.row);
+        }
+        return l;
+    }
+
     Map<String, Object> preview() {
         DispenseConfig c = svc.getConfig();
         Map<String, Object> m = new LinkedHashMap<>();
@@ -3084,6 +3105,7 @@ final class PadCalibrationJob {
         m.put("notWeighed", notWeighed);
         DispenseConfig.PurgeRow row = c.purgeRow;
         m.put("purgeSpots", Views.map("need", purgeNeed, "left", row.spotsLeft()));
+        m.put("padLedger", ctx.ledgers.preview(svc, padTargets())); // BR-76
         m.put("home", Views.home(home));
         m.put("homes", homes); // under homeBeforeRun "always" one before every engine step
         m.put("zCheck", Views.map("needed", zCheck.needed, "estimateS", zCheck.needed

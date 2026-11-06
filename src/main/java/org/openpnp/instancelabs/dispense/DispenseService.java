@@ -208,7 +208,19 @@ public final class DispenseService {
                 controllerReset.screwMotorOff("the engine's stop sequence: " + line);
             }
         }
+
+        @Override
+        public void sent(String line) {
+            noteDot(line);
+        }
     };
+    /** BR-76: the pads pasted since each registered board's last wipe. */
+    private final PadLedger padLedger;
+    /** BR-76: finds the dots in the lines sent (made once the needle's axes are known); its N2 mapper. */
+    private volatile DotWatch dotWatch;
+    private volatile OpenPnpRawMapper dotMapper;
+    /** BR-76: who holds the machine (the API's lock), the "by" of a dot; null: nobody known. */
+    private static volatile java.util.function.Supplier<String> actor;
     /** BR-02: the CONNECT_COMMAND's G92 was warned about (once per engine). */
     private volatile boolean connectG92Warned;
     /** The last good open-air N1 baseline (the probe's part-on-N1 check across tasks). */
@@ -380,6 +392,7 @@ public final class DispenseService {
             }
         }
         this.photoStore = new PhotoStore(PhotoStore.folderFor(configDir), db);
+        this.padLedger = PadLedger.open(configDir);
         try {
             photoStore.sweep(System.currentTimeMillis());
         }
@@ -418,6 +431,7 @@ public final class DispenseService {
                 public void machineEnabled(Machine m) {
                     bZeroed.set(false);
                     passthroughAt.clear(); // BR-02: OpenPnP read where the axes are
+                    forgetDots(true);
                     // BR-02: every Start is a new connection, also one before this engine heard the Stop (OpenPnP's own
                     // Stop may run its last machineDisabled listeners after the next Start)
                     connectionEnded();
@@ -455,6 +469,7 @@ public final class DispenseService {
                 public void machineDisabled(Machine m, String reason) {
                     connectionEnded();
                     bZeroed.set(false);
+                    forgetDots(true); // its DISABLE_COMMAND closed the valve
                     abort("machine disabled: " + reason);
                     // BR-02: after the DISABLE_COMMAND went out (no write held back its M410); none on a link closed
                     // before (a stop that disconnects first)
@@ -925,6 +940,7 @@ public final class DispenseService {
         }
         if (advanced(motionsSeen, d.getMotionCommandsSent())) {
             passthroughAt.clear(); // the axes are no longer where the passthrough left them
+            forgetDots(false);
             controllerReset.axisMoved();
             controllerReset.journalScrewMotion();
         }
@@ -1002,6 +1018,7 @@ public final class DispenseService {
      * names the screw or no axis switches its motor off. Call it once the line was sent.
      */
     public void noteControllerLine(String line) {
+        noteDot(line); // BR-76: a bench tool's dot on a pad counts as the engine's
         Machine m = configuration.getMachine();
         ReferenceControllerAxis b = screwAxis(m);
         String letter = b == null ? null : b.getLetter(); // unknown: only an M18 of every motor counts
@@ -1039,6 +1056,91 @@ public final class DispenseService {
                 }
                 controllerReset.journalScrewMotion();
             }
+        }
+    }
+
+    /** BR-76: the pads pasted since each registered board's last wipe. */
+    public PadLedger getPadLedger() {
+        return padLedger;
+    }
+
+    /** BR-76: who holds the machine now (the API's lock), recorded with each dot. */
+    public static void setActor(java.util.function.Supplier<String> who) {
+        actor = who;
+    }
+
+    /** BR-76: OpenPnP set the axes again (a move of its own, a connect); {@code valveClosed}: a STOP or a connect too. */
+    private void forgetDots(boolean valveClosed) {
+        DotWatch w = dotWatch;
+        if (w != null) {
+            w.forget();
+            if (valveClosed) {
+                w.valveClosed();
+            }
+        }
+    }
+
+    /**
+     * BR-76: the line watcher, made once the needle's and the screw's axes are known; null until then. shortcut: made
+     * once per engine with the settings then (the needle, the screw's letter, its extrude sign); a configuration load
+     * restarts the engine and picks up a change.
+     */
+    private DotWatch dotWatch() {
+        DotWatch w = dotWatch;
+        if (w != null) {
+            return w;
+        }
+        Machine m = configuration.getMachine();
+        ReferenceControllerAxis b = screwAxis(m);
+        if (!(m instanceof ReferenceMachine) || nozzle == null || b == null || b.getLetter() == null
+                || b.getLetter().isEmpty()) {
+            return null;
+        }
+        try {
+            OpenPnpRawMapper mp = new OpenPnpRawMapper((ReferenceMachine) m, nozzle, cfg.bAxisName);
+            dotMapper = mp;
+            dotWatch = w = new DotWatch(mp.letterX().charAt(0), mp.letterY().charAt(0), mp.letterZ().charAt(0),
+                    Character.toUpperCase(b.getLetter().charAt(0)), cfg.bExtrudeSign, 0.5 / cfg.bStepsPerDeg);
+        }
+        catch (Exception e) {
+            Logger.warn("BR-76: no pad ledger dots: {}", e.getMessage());
+        }
+        return w;
+    }
+
+    /**
+     * BR-76: a line sent to the controller, the engine's or the passthrough's: the dot it lays (a forward screw turn with
+     * the valve open, {@link DotWatch}) goes into the pad ledger where its paste lands (N2 + the landing and trim), its
+     * tip's Z in the N1 frame (N2's less the needle offset). Never throws: a ledger write failure is logged.
+     */
+    private void noteDot(String line) {
+        DotWatch w = dotWatch();
+        Machine m = configuration.getMachine();
+        List<double[]> raw = w == null ? new ArrayList<>() : w.line(line, a -> openPnpAt(m, a));
+        if (raw.isEmpty()) {
+            return;
+        }
+        try {
+            ReferenceControllerAxis[] xyz = dotMapper.xyzAxes();
+            List<double[]> at = new ArrayList<>();
+            for (double[] r : raw) {
+                org.openpnp.model.AxesLocation a = new org.openpnp.model.AxesLocation(m);
+                for (int i = 0; i < 3; i++) {
+                    a = a.put(new org.openpnp.model.AxesLocation(xyz[i], r[i]));
+                }
+                org.openpnp.model.Location l = nozzle.toHeadMountableLocation(
+                        ((org.openpnp.spi.base.AbstractHeadMountable) nozzle).toTransformed(a))
+                        .convertToUnits(LengthUnit.Millimeters);
+                double[] xy = needleXY(l.getX(), l.getY());
+                at.add(new double[] {xy[0], xy[1], l.getZ() - cfg.needleZOffsetMm});
+            }
+            java.util.function.Supplier<String> who = actor;
+            RunResult run = activeRun;
+            padLedger.dot(at, System.currentTimeMillis(), who == null ? null : who.get(), "dot",
+                    run == null ? null : run.runId);
+        }
+        catch (RuntimeException e) {
+            Logger.warn(e, "BR-76: a dot was not written to the pad ledger");
         }
     }
 

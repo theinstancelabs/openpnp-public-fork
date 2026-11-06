@@ -167,6 +167,9 @@ final class GcodePassthrough {
         }
         ctx.requireNoPressureHold();
         ctx.requireMachineIdle();
+        if (svc != null) {
+            ctx.ledgers.refresh(svc, svc.getConfig()); // BR-76: the registered boards' pads, before the batch's dots
+        }
         Batch b = new Batch(holder, homed);
         synchronized (this) {
             if (running != null) {

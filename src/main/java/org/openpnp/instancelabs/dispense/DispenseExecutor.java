@@ -44,6 +44,10 @@ public class DispenseExecutor {
          * {@code acknowledged} false: its send failed, yet it may have reached the controller.
          */
         void switchedOff(String line, boolean acknowledged);
+
+        /** BR-76: every line this executor sent, its I1 shutdown's too (the pad ledger's dots). No I/O. */
+        default void sent(String line) {
+        }
     }
 
     private final DispenseConfig cfg;
@@ -82,6 +86,7 @@ public class DispenseExecutor {
         if (w == null) {
             return;
         }
+        w.sent(line);
         if (ControllerCommands.isMove(line)) {
             w.moved(ControllerCommands.turnsScrew(line, letterB));
         }
@@ -329,6 +334,10 @@ public class DispenseExecutor {
                 result.linesSent++;
                 result.streamedLines.add(l);
                 screwOffAcknowledged = screwOffAcknowledged || off;
+                ScrewWatch w = screwWatch;
+                if (w != null) {
+                    w.sent(l); // BR-76: its valve off
+                }
             }
             catch (Exception e) {
                 result.warnings.add("shutdown line '" + l + "' failed: " + e.getMessage());
