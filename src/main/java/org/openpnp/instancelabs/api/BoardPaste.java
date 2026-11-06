@@ -1,6 +1,8 @@
 package org.openpnp.instancelabs.api;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -21,13 +23,16 @@ final class BoardPaste implements DispenseListener {
     static final class Board {
         final int number;
         final long sinceMs;
+        /** Its board file (BR-76: its pad ledger's), null for a job board. */
+        final String file;
         /** Pad id -> the dots laid on it since the board was seated. */
         final Map<String, Integer> pads = new LinkedHashMap<>();
         int dots;
 
-        Board(int number, long sinceMs) {
+        Board(int number, long sinceMs, String file) {
             this.number = number;
             this.sinceMs = sinceMs;
+            this.file = file;
         }
     }
 
@@ -79,7 +84,7 @@ final class BoardPaste implements DispenseListener {
         }
         Board b = boards.get(seat);
         if (b == null) {
-            b = new Board(++count, System.currentTimeMillis());
+            b = new Board(++count, System.currentTimeMillis(), (String) e.source.get("file"));
             boards.put(seat, b);
             version++;
         }
@@ -97,6 +102,17 @@ final class BoardPaste implements DispenseListener {
         return Views.map("board", b == null ? null : b.number, "nextBoard", count + 1, "sinceMs", b == null ? null
                 : b.sinceMs, "dots", b == null ? 0 : b.dots, "pads", b == null ? new LinkedHashMap<String, Integer>()
                         : new LinkedHashMap<>(b.pads));
+    }
+
+    /** The board files of the boards on the machine (the seats with paste; a job board has none). */
+    synchronized List<String> files() {
+        List<String> l = new ArrayList<>();
+        for (Board b : boards.values()) {
+            if (b.file != null) {
+                l.add(b.file);
+            }
+        }
+        return l;
     }
 
     /** "Next board": the boards on the machine are taken off; the next dot starts a new one. Returns its number. */

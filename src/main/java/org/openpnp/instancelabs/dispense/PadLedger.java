@@ -415,6 +415,28 @@ public class PadLedger {
         return b == null ? null : entry(b);
     }
 
+    /**
+     * A fresh physical board took the board's seat (Next board): no used, fixed or off-pad pads any more (they were the
+     * old board's), recorded as a wipe noted "fresh board"; its plan need stays. False when nothing was kept for it.
+     */
+    public synchronized boolean fresh(String board, String by, long atMs) {
+        Ledger l = data.boards.get(board);
+        if (l == null) {
+            return false;
+        }
+        Wipe w = new Wipe();
+        w.atMs = atMs;
+        w.by = by;
+        w.note = "fresh board";
+        l.wipes.add(w);
+        l.pasted.clear();
+        l.fixed.clear();
+        l.offPad.clear();
+        waiting.remove(board);
+        save();
+        return true;
+    }
+
     /** An agent's whole-plan need of clean pads on the board, shown until it clears; 0 clears it. */
     public synchronized void need(String board, int pads, String by, String what, long atMs) {
         requireKnown(board);

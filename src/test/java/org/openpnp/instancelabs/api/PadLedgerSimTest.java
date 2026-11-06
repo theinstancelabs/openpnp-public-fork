@@ -412,4 +412,40 @@ public class PadLedgerSimTest {
         Res twice = post("/api/boards/ledger/wiped", "{\"pads\":[\"R9.9\"]}", null);
         assertEquals(400, twice.status, twice.toString());
     }
+
+    @Test
+    public void nextBoardStartsTheFreshBoardsLedgerClean() throws Exception {
+        pads();
+        ok(post("/api/boards/ledger/pads/import", "{\"board\":\"ledger\",\"wipes\":[],\"fixed\":{\"R3.1\":"
+                + "\"old solder\"},\"pasted\":{}}", null));
+        String id = plan();
+        JsonObject run = ok(post("/api/run", "{\"planId\":\"" + id + "\",\"wait\":true,\"force\":true}", null));
+        assertEquals("OK", run.getAsJsonObject("result").get("status").getAsString(), run.toString());
+        ok(post("/api/boards/ledger/need", "{\"pads\":4,\"by\":\"Process\",\"what\":\"set 5\"}", null));
+        svc.getPadLedger().dot(Collections.singletonList(new double[] {BX + 10, BY + 8, TOP}), System.currentTimeMillis(),
+                "test", "dot", null); // on the board, on no pad
+        JsonObject before = pads();
+        assertEquals(0, before.get("clean").getAsInt(), before.toString());
+        assertEquals(1, before.getAsJsonArray("offPad").size(), before.toString());
+        long t0 = System.currentTimeMillis();
+
+        assertEquals(2, ok(post("/api/board/next", "{}", UI)).get("nextBoard").getAsInt());
+        JsonObject p = pads();
+        assertEquals(6, p.get("clean").getAsInt(), "a fresh board: every pad clean: " + p);
+        for (JsonElement e : p.getAsJsonArray("pads")) {
+            JsonObject x = e.getAsJsonObject();
+            assertEquals("clean", x.get("state").getAsString(), "the fixed pads left with the old board: " + x);
+            assertEquals(0, x.get("layers").getAsInt());
+        }
+        assertEquals(0, p.getAsJsonArray("offPad").size());
+        assertTrue(p.get("wipedAtMs").getAsLong() >= t0, p.toString());
+        JsonObject need = ledgers().get(0).getAsJsonObject().getAsJsonObject("need");
+        assertEquals(4, need.get("pads").getAsInt(), "the plan need stays: " + need);
+        assertEquals("board ledger: fresh board: the ledger starts clean", events("PADS").get(0));
+
+        // the UI's Next board made the user the holder: the user's run
+        JsonObject again = ok(post("/api/run", "{\"planId\":\"" + id + "\",\"wait\":true}", UI));
+        assertEquals("OK", again.getAsJsonObject("result").get("status").getAsString(), "not refused: " + again);
+        assertEquals(1, pad(pads(), "R3.1").get("layers").getAsInt());
+    }
 }

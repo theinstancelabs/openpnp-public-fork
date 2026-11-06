@@ -128,7 +128,7 @@ final class DispenseEndpoints {
         s.route("POST", "/api/screw/start-angle", this::startAngle);
         s.route("POST", "/api/purge-row/reset", r -> purgeReset());
         s.route("POST", "/api/run", this::run);
-        s.route("POST", "/api/board/next", r -> nextBoard());
+        s.route("POST", "/api/board/next", this::nextBoard);
         s.route("GET", "/api/runs", r -> ctx.svc().getDb().recentRuns(r.queryInt("limit", 20, 1, 500)));
         s.route("GET", "/api/runs/last", r -> lastRun());
         s.route("GET", "/api/events", r -> ctx.svc().getDb().recentEvents(r.queryInt("limit", 50, 1, 1000)));
@@ -1298,13 +1298,19 @@ final class DispenseEndpoints {
         return ApiContext.awaitIf(Json.bool(b, "wait", false), f, rr -> Views.run(rr, false), accepted);
     }
 
-    /** "Next board": the boards on the machine are taken off ({@link BoardPaste#nextBoard}): {nextBoard}. */
-    Object nextBoard() throws Exception {
+    /**
+     * "Next board": the boards on the machine are taken off ({@link BoardPaste#nextBoard}): {nextBoard}. BR-76: fresh
+     * boards take their seats, so their pad ledgers start clean.
+     */
+    Object nextBoard(ApiServer.Request r) throws Exception {
         DispenseService svc = ctx.svc();
         if (svc.isBusy()) {
             throw ApiException.refused("the next board cannot start while a dispense task runs");
         }
-        return Views.map("nextBoard", ctx.paste.nextBoard());
+        List<String> files = ctx.paste.files();
+        int next = ctx.paste.nextBoard();
+        ctx.ledgers.freshBoards(svc, r, files);
+        return Views.map("nextBoard", next);
     }
 
     /**

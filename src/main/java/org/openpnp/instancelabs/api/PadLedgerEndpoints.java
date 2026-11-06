@@ -199,6 +199,19 @@ final class PadLedgerEndpoints {
     }
 
     /**
+     * POST /api/board/next: a fresh board took the seat of each board taken off ({@code files}, the seats with paste):
+     * its ledger starts clean (events PADS); its plan need stays.
+     */
+    void freshBoards(DispenseService svc, ApiServer.Request r, List<String> files) {
+        for (String f : files) {
+            String key = PadLedger.keyOf("file:" + f);
+            if (key != null && svc.getPadLedger().fresh(key, who(r), System.currentTimeMillis())) {
+                svc.getDb().event(null, "INFO", "PADS", "board " + key + ": fresh board: the ledger starts clean");
+            }
+        }
+    }
+
+    /**
      * BR-76 item 8 (b): the UI's Board wiped of a board an agent's refused run waits for passes under the agent's lock,
      * while the agent made no guarded call since and nothing runs (no task, batch, hold or pad calibration).
      */
