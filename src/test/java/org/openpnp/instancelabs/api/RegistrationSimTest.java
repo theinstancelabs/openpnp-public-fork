@@ -380,6 +380,22 @@ public class RegistrationSimTest {
         assertTrue(preview.get("error").isJsonNull(), preview.toString());
         assertTrue(preview.getAsJsonObject("frame").get("ok").getAsBoolean(), preview.toString());
 
+        // BR-81: an outline stamped an hour ahead (the clock was set back since), far from everything: the registration
+        // and its checks are stamped after it all the same, so a tile is never older than a later registration
+        long ahead = System.currentTimeMillis() + 3_600_000L;
+        svc.updateConfigAtomically(c -> {
+            org.openpnp.instancelabs.dispense.DispenseConfig.Tile t = new org.openpnp.instancelabs.dispense.DispenseConfig
+                    .Tile();
+            t.label = "far tile";
+            t.outline = java.util.Arrays.asList(new double[] {400, 300}, new double[] {420, 300},
+                    new double[] {420, 320}, new double[] {400, 320});
+            t.checkPoints = java.util.Arrays.asList(new double[] {405, 305}, new double[] {410, 310},
+                    new double[] {415, 315});
+            t.atMs = ahead;
+            c.tiles.put("far", t);
+            return c;
+        });
+
         // without wait: the live detail and the next plan show in the status
         sim.server.mark();
         Res started = post("/api/plan/" + p0Id + "/register", "{}");
@@ -468,6 +484,8 @@ public class RegistrationSimTest {
         // BR-81: the registration keeps the board's outline (its 40 x 30 mm), and the run below still pastes its board
         assertEquals("[0.0,0.0,40.0,30.0]", ok(get("/api/config")).getAsJsonObject("boardRegistrations").entrySet()
                 .iterator().next().getValue().getAsJsonObject().get("boardRectMm").toString());
+        long regAt = svc.getConfig().boardRegistrations.values().iterator().next().atMs;
+        assertTrue(regAt > ahead, "the registration is stamped after the stored outline: " + regAt + " vs " + ahead);
         // the run: the clean check finds copper at every dot (the dots lie on the pads), then dispenses
         sim.server.mark();
         JsonObject runRes = ok(post("/api/run", "{\"planId\":\"" + p1Id + "\",\"wait\":true}")).getAsJsonObject("result");
@@ -485,6 +503,8 @@ public class RegistrationSimTest {
         assertTrue(same.get("movedMm").getAsDouble() < 0.02, same.toString());
         assertEquals(res.get("registrationId").getAsString(), same.get("registrationId").getAsString());
         assertTrue(same.getAsJsonObject("sameSeat").get("pass").getAsBoolean(), same.toString());
+        Long checkedAt = svc.getConfig().boardRegistrations.values().iterator().next().lastCheckedAtMs;
+        assertTrue(checkedAt != null && checkedAt > regAt, "the check is stamped after the record: " + checkedAt);
         assertFalse(same.getAsJsonObject("probe").get("saved").getAsBoolean());
         assertEquals(3, count(commands(sim.server.sinceMark()), ControllerCommands.LEFT_VALVE_ON), "3 check touches");
         assertEquals(surfaceAt, ok(get("/api/surfaces")).getAsJsonObject("surfaces").getAsJsonObject("board")

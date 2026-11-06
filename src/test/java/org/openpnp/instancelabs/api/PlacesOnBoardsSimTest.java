@@ -361,8 +361,14 @@ public class PlacesOnBoardsSimTest {
 
     /** Plans the board at (100, 80), with its stored registration when it has one, and ties the board surface to it. */
     String planTied(File f) throws Exception {
+        return planTied(f, "auto");
+    }
+
+    /** As above with the plan's {@code registration}: "auto", or "none" (the UI's "Plan without fiducial correction"). */
+    String planTied(File f, String registration) throws Exception {
         String id = ok("POST", "/api/plan", "{\"source\":\"file\",\"file\":\"" + f.getAbsolutePath().replace("\\",
-                "\\\\") + "\",\"x\":100,\"y\":80,\"z\":5.5,\"rotation\":0}").get("planId").getAsString();
+                "\\\\") + "\",\"x\":100,\"y\":80,\"z\":5.5,\"rotation\":0,\"registration\":\"" + registration
+                + "\"}").get("planId").getAsString();
         ok("PUT", "/api/surfaces/board", "{" + BOARD_POINTS + ",\"planId\":\"" + id + "\"}");
         return id;
     }
@@ -454,5 +460,71 @@ public class PlacesOnBoardsSimTest {
         assertTrue(res.message.contains("I13: the coupon place 'coupon1' (110.0, 20.0) lies on " + board + ": set the "
                 + "coupon place again off the board (Machine › Places)"), res.message);
         assertFalse(switchedOn(), "nothing switched on: " + sim.server.sinceMark());
+    }
+
+    /** A tile over the planned board's dots (x 95..125, y 75..95), no boards of its own. */
+    static final String TILE_OVER_THE_BOARD = "{\"label\":\"Nano tile\",\"outline\":[[95,75],[125,75],[125,95],[95,95]],"
+            + "\"boards\":[],\"checkPoints\":[[100,80],[110,85],[120,90]]}";
+
+    /**
+     * A plan made without the fiducial correction (registration "none": the UI's fix after a failed Register board) may
+     * lay its dots on its own board's stored registration, and on no other outline: another board's registration or a
+     * tile over its dots refuses it.
+     */
+    @Test
+    public void aPlanWithoutItsRegistrationPastesOnlyItsOwnRegisteredBoard() throws Exception {
+        setUpBoardRuns();
+        File f = writeBoard();
+        registerPlanned(f, 1000); // the board is registered, but the plan is made without it
+        String planId = planTied(f, "none");
+        assertTrue(ok("GET", "/api/plan/" + planId, null).get("registration").isJsonNull(), lastBody);
+        JsonObject res = ok("POST", "/api/run", "{\"planId\":\"" + planId + "\",\"maxDots\":2,\"wait\":true}")
+                .getAsJsonObject("result");
+        assertEquals("OK", res.get("status").getAsString(), res.toString());
+
+        String other = register("y.board.xml", 98, 78, 30, 15); // another board's outline over its dots
+        sim.server.mark();
+        call("POST", "/api/run", "{\"planId\":\"" + planId + "\",\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains(") lies on " + other + ", and the plan has no board registration: register the "
+                + "board (Register board)"), lastBody);
+        ok("DELETE", "/api/board-registrations/" + registrationId("y.board.xml"), null);
+        ok("PUT", "/api/tiles/nano/outline", TILE_OVER_THE_BOARD);
+        call("POST", "/api/run", "{\"planId\":\"" + planId + "\",\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains(") lies on the Nano tile, and the plan has no board registration: register the "
+                + "board (Register board)"), lastBody);
+        assertTrue(sim.server.sinceMark().isEmpty(), "no line at all: " + sim.server.sinceMark());
+    }
+
+    /**
+     * Outline stamps survive a clock set back: a tile imported after a registration stamped while the clock ran an hour
+     * ahead is still the newer of the two, so the registered plan is refused on it.
+     */
+    @Test
+    public void aTileImportedAfterTheClockWasSetBackIsStillTheNewerOutline() throws Exception {
+        setUpBoardRuns();
+        File f = writeBoard();
+        registerPlanned(f, -3_600_000); // stamped an hour ahead of the clock now
+        String planId = planTied(f);
+        ok("PUT", "/api/tiles/nano/outline", TILE_OVER_THE_BOARD);
+        long regAt = svc.getConfig().boardRegistrations.get(BoardRegistration.fileKey(f)).atMs;
+        assertTrue(svc.getConfig().tiles.get("nano").atMs > regAt, "the tile is stamped after the registration");
+        sim.server.mark();
+        call("POST", "/api/run", "{\"planId\":\"" + planId + "\",\"wait\":true}");
+        assertEquals(409, lastStatus, lastBody);
+        assertTrue(lastBody.contains(") lies on the Nano tile, recorded after the plan's board registration (the bed "
+                + "changed since): register the board again (Register board)"), lastBody);
+        assertTrue(sim.server.sinceMark().isEmpty(), "no line at all: " + sim.server.sinceMark());
+    }
+
+    /** With the needle's position unknown, the hold points to the waste only while the waste is off the boards. */
+    @Test
+    public void theHoldPointsToTheWasteOnlyWhileItIsOffTheBoards() throws Exception {
+        assertEquals("the needle's position is unknown: start it with park: 'waste'",
+                PressureHold.zoneRefusal(svc, new PressureHold.Options(), null));
+        register("w.board.xml", 60, 30, 30, 15); // the waste (80, 40) on it
+        assertEquals("the needle's position is unknown: start it with a park over a place off the boards (the waste "
+                + "too lies within 8.0 mm of one)", PressureHold.zoneRefusal(svc, new PressureHold.Options(), null));
     }
 }

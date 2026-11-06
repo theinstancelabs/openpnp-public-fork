@@ -439,12 +439,12 @@ public class OutputZonesTest {
                 "without the plan's scope, its dot is no own dot");
         // an outline recorded after the plan's registration: the bed changed, its own dot is refused too
         plan.outlinesUpToMs = 999L;
-        assertEquals("dot 'P1' at line 9 puts paste at (310.0, 268.0), on " + board + ", recorded after this board "
-                + "run's registration (the bed changed since): register the board again", OutputZones.of(c, CAMERA,
-                        plan).lineRefusal("dot 'P1' at line 9", 310, 268));
+        assertEquals("dot 'P1' at line 9 puts paste at (310.0, 268.0), on " + board + ", recorded after the plan's "
+                + "board registration (the bed changed since): register the board again (Register board)",
+                OutputZones.of(c, CAMERA, plan).lineRefusal("dot 'P1' at line 9", 310, 268));
         plan.outlinesUpToMs = null;
-        assertEquals("dot 'P1' at line 9 puts paste at (310.0, 268.0), on " + board + ", and this board run has no "
-                + "board registration: register the board", OutputZones.of(c, CAMERA, plan).lineRefusal(
+        assertEquals("dot 'P1' at line 9 puts paste at (310.0, 268.0), on " + board + ", and the plan has no board "
+                + "registration: register the board (Register board)", OutputZones.of(c, CAMERA, plan).lineRefusal(
                         "dot 'P1' at line 9", 310, 268));
         // the hold: on the board, and within its 6 mm circle and the 2 mm margin of it, even over a sink
         assertEquals("the needle (310.0, 268.0) is on " + board + ": park first (or start it with park: 'waste')",
@@ -453,6 +453,8 @@ public class OutputZonesTest {
                 z.parkRefusal(null, 305, 256));
         assertEquals("the park over 'cup1' (323.0, 268.0) is within 8.0 mm of " + board + ", where its drool may reach "
                 + "the board: park over another place", z.parkRefusal("cup1", 323, 268));
+        assertEquals("the park over (327.5, 268.0) is within 8.0 mm of " + board + ", where its drool may reach the "
+                + "board: park over another place", z.parkRefusal(null, 327.5, 268), "7.5 mm off: inside the 8 mm");
         c.locations.put("cup1", new DispenseConfig.NamedLocation(329, 268, 5)); // 9 mm off
         assertNull(OutputZones.of(c, CAMERA).refusal(329, 268), "the hold over the cup, 9 mm off the board");
         assertEquals("board: " + board, z.zoneAt(310, 268));
@@ -472,5 +474,45 @@ public class OutputZonesTest {
         assertEquals("the needle (60.0, 120.0) is not over a place that takes paste while the pressure is held (the "
                 + "waste, the towel, a cup, the purge row, the calibration area or a coupon): park first, over a place "
                 + "off the boards (the waste too lies within 8.0 mm of one)", OutputZones.of(c, CAMERA).refusal(60, 120));
+    }
+
+    /**
+     * BR-81: a plan made without a registration lays its planned dots on its own board's stored registration alone
+     * ({@code ownOutlineId}), never on another board's or a tile; a plan whose registration is gone, on none.
+     */
+    @Test
+    public void aPlanWithoutARegistrationPastesOnlyOnItsOwnBoard() {
+        DispenseConfig c = config();
+        BoardRegistration own = new BoardRegistration(), other = new BoardRegistration();
+        own.id = "abcd-own";
+        own.boardKey = "file:/own.board.xml";
+        own.boardName = "own.board.xml";
+        own.affine = new double[] {1, 0, 0, 1, 300, 255};
+        own.boardRectMm = new double[] {0, 0, 20, 25}; // x 300..320, y 255..280
+        other.id = "efgh-other";
+        other.boardKey = "file:/other.board.xml";
+        other.boardName = "other.board.xml";
+        other.affine = new double[] {1, 0, 0, 1, 315, 270};
+        other.boardRectMm = new double[] {0, 0, 20, 20}; // x 315..335, y 270..290: over the own board's corner
+        c.putBoardRegistration(own);
+        c.putBoardRegistration(other);
+        Interlocks.Scope plan = new Interlocks.Scope();
+        plan.surfaceName = "board";
+        plan.checkPlanSurface = true;
+        plan.surfaceTargets.add(new double[] {305, 260}); // its own board alone
+        plan.surfaceTargets.add(new double[] {318, 275}); // its own board and the other's
+        plan.ownOutlineId = own.id;
+        OutputZones z = OutputZones.of(c, CAMERA, plan);
+        assertNull(z.lineRefusal("dot 'P1' at line 9", 305, 260), "on its own board's registration");
+        assertEquals("dot 'P2' at line 12 puts paste at (318.0, 275.0), on board 'other.board.xml' (registration efgh…), "
+                + "and the plan has no board registration: register the board (Register board)",
+                z.lineRefusal("dot 'P2' at line 12", 318, 275));
+        plan.ownOutlineId = null; // its board has no stored registration: every outline refuses it
+        assertTrue(OutputZones.of(c, CAMERA, plan).lineRefusal("dot 'P1' at line 9", 305, 260).contains("on board "
+                + "'own.board.xml'"), "no own outline");
+        plan.registrationGone = true; // made with a registration that was replaced or forgotten since
+        assertEquals("dot 'P1' at line 9 puts paste at (305.0, 260.0), on board 'own.board.xml' (registration abcd…), "
+                + "and the plan's board registration is gone (registered again or forgotten): plan the board again",
+                OutputZones.of(c, CAMERA, plan).lineRefusal("dot 'P1' at line 9", 305, 260));
     }
 }

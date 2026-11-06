@@ -309,5 +309,34 @@ public class BoardOutlinesTest {
         run.outlinesUpToMs = null;
         assertEquals(Arrays.asList("I13: the plan's dot at (110.0, 55.0) lies on " + board + ", and the plan has no "
                 + "board registration: register the board (Register board)"), i13(c, run, 0));
+        // a plan without a registration: its own board's stored registration alone, never a tile over it
+        run.ownOutlineId = reg.id;
+        assertEquals(new ArrayList<String>(), i13(c, run, 0), "its own board's registration");
+        c.tiles.put("nano", tile()); // x 60..120, y 30..60: over both dots
+        List<String> onTile = i13(c, run, 0);
+        assertTrue(onTile.size() == 1 && onTile.get(0).contains(") lies on the Nano tile (board ")
+                && onTile.get(0).endsWith(", and the plan has no board registration: register the board (Register "
+                        + "board)"), onTile.toString());
+        c.tiles.clear();
+        run.ownOutlineId = null;
+        run.registrationGone = true; // made with a registration that was replaced or forgotten since
+        assertEquals(Arrays.asList("I13: the plan's dot at (110.0, 55.0) lies on " + board + ", and the plan's board "
+                + "registration is gone (registered again or forgotten): plan the board again"), i13(c, run, 0));
+    }
+
+    /** An outline's or a check's stamp is never older than one stored, whatever the clock did since (a set back). */
+    @Test
+    public void anOutlineStampIsNeverOlderThanTheStoredOnes() {
+        BoardRegistration r = reg("c.board.xml", 1, 0, 0, 1, 100, 50);
+        r.atMs = 5000;
+        r.lastCheckedAtMs = 9000L;
+        DispenseConfig c = with(r);
+        DispenseConfig.Tile t = tile();
+        t.atMs = 7000;
+        c.tiles.put("nano", t);
+        assertEquals(9001, c.outlineStampMs(1000), "the clock set back: after the newest stamp");
+        t.atMs = 12000;
+        assertEquals(12001, c.outlineStampMs(1000), "a tile's stamp counts too");
+        assertEquals(20000, c.outlineStampMs(20000), "the clock past them all: now");
     }
 }
